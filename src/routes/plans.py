@@ -7,7 +7,7 @@ CRUD operations for infrastructure modification plans.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -25,7 +25,7 @@ router = APIRouter(prefix="/plans", tags=["plans"])
 
 @router.get("/", response_model=list[Plan])
 async def list_plans(
-    status: PlanStatus | None = Query(None, description="Filter by plan status"),
+    status: Optional[PlanStatus] = Query(None, description="Filter by plan status"),
     blackboard: BlackboardState = Depends(get_blackboard),
 ) -> list[Plan]:
     """

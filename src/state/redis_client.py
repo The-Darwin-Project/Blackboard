@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import redis.asyncio as redis
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Global client instance (singleton)
-_redis_client: Redis | None = None
+_redis_client: Optional["Redis"] = None
 
 
 class RedisClient:
@@ -34,16 +34,16 @@ class RedisClient:
     
     def __init__(
         self,
-        host: str | None = None,
+        host: Optional[str] = None,
         port: int = 6379,
-        password: str | None = None,
+        password: Optional[str] = None,
         db: int = 0,
     ):
         self.host = host or os.getenv("REDIS_HOST", "localhost")
         self.port = port
         self.password = password or os.getenv("REDIS_PASSWORD", "")
         self.db = db
-        self._client: Redis | None = None
+        self._client: Optional["Redis"] = None
     
     @property
     def url(self) -> str:

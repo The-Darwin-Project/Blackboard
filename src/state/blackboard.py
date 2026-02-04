@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional
 
 from ..models import (
     ArchitectureEvent,
@@ -148,7 +148,7 @@ class BlackboardState:
         })
         logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
     
-    async def get_service(self, name: str) -> Service | None:
+    async def get_service(self, name: str) -> Optional[Service]:
         """Get service metadata."""
         key = f"darwin:service:{name}"
         data = await self.redis.hgetall(key)
@@ -207,9 +207,9 @@ class BlackboardState:
         self,
         service: str,
         metric: str,
-        start_time: float | None = None,
-        end_time: float | None = None,
-    ) -> list[MetricPoint]:
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+    ) -> List[MetricPoint]:
         """Get metric history within time range."""
         key = f"darwin:metrics:{service}:{metric}"
         
@@ -282,7 +282,7 @@ class BlackboardState:
         logger.info(f"Created plan: {plan.id} - {plan.action.value} {plan.service}")
         return plan
     
-    async def get_plan(self, plan_id: str) -> Plan | None:
+    async def get_plan(self, plan_id: str) -> Optional[Plan]:
         """Get a plan by ID."""
         key = f"darwin:plan:{plan_id}"
         data = await self.redis.hgetall(key)
@@ -307,8 +307,8 @@ class BlackboardState:
         self,
         plan_id: str,
         status: PlanStatus,
-        result: str | None = None,
-    ) -> Plan | None:
+        result: Optional[str] = None,
+    ) -> Optional[Plan]:
         """Update plan status."""
         key = f"darwin:plan:{plan_id}"
         
@@ -330,7 +330,7 @@ class BlackboardState:
         logger.info(f"Updated plan {plan_id} status to {status.value}")
         return await self.get_plan(plan_id)
     
-    async def list_plans(self, status: PlanStatus | None = None) -> list[Plan]:
+    async def list_plans(self, status: Optional[PlanStatus] = None) -> List[Plan]:
         """List all plans, optionally filtered by status."""
         plan_ids = await self.redis.smembers("darwin:plans")
         plans = []
@@ -366,9 +366,9 @@ class BlackboardState:
     
     async def get_events_in_range(
         self,
-        start_time: float | None = None,
-        end_time: float | None = None,
-    ) -> list[ArchitectureEvent]:
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+    ) -> List[ArchitectureEvent]:
         """Get events within time range."""
         start = start_time if start_time else 0
         end = end_time if end_time else time.time()
@@ -408,8 +408,8 @@ class BlackboardState:
     
     async def get_chart_data(
         self,
-        services: list[str],
-        metrics: list[str] | None = None,
+        services: List[str],
+        metrics: Optional[List[str]] = None,
         range_seconds: int = 3600,
     ) -> ChartData:
         """

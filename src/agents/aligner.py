@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
@@ -35,8 +35,8 @@ class FilterRule:
         name: str,
         ignore_errors: bool = False,
         ignore_metrics: bool = False,
-        until: float | None = None,
-        service: str | None = None,
+        until: Optional[float] = None,
+        service: Optional[str] = None,
     ):
         self.name = name
         self.ignore_errors = ignore_errors
@@ -97,7 +97,7 @@ class Aligner:
         
         return self._model
     
-    async def configure_filter(self, instruction: str) -> FilterRule | None:
+    async def configure_filter(self, instruction: str) -> Optional[FilterRule]:
         """
         Configure a filter rule from natural language instruction.
         
@@ -156,7 +156,7 @@ class Aligner:
             logger.error(f"Failed to parse filter instruction: {e}")
             return None
     
-    def _parse_simple_filter(self, instruction: str) -> FilterRule | None:
+    def _parse_simple_filter(self, instruction: str) -> Optional[FilterRule]:
         """Simple fallback parsing without AI."""
         instruction_lower = instruction.lower()
         

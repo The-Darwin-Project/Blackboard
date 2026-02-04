@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ class Dependency(BaseModel):
     """A service dependency (edge in the topology graph)."""
     target: str = Field(..., description="Target service name")
     type: str = Field(..., description="Dependency type: db, http, cache, etc.")
-    env_var: str | None = Field(None, description="Environment variable name for this dependency")
+    env_var: Optional[str] = Field(None, description="Environment variable name for this dependency")
 
 
 class Metrics(BaseModel):
@@ -94,9 +94,9 @@ class Plan(BaseModel):
     reason: str = Field(..., description="Justification based on metrics/topology")
     status: PlanStatus = PlanStatus.PENDING
     created_at: float = Field(default_factory=time.time)
-    approved_at: float | None = None
-    executed_at: float | None = None
-    result: str | None = Field(None, description="Execution result or error message")
+    approved_at: Optional[float] = None
+    executed_at: Optional[float] = None
+    result: Optional[str] = Field(None, description="Execution result or error message")
 
 
 class PlanCreate(BaseModel):
@@ -193,4 +193,4 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Chat response from Architect."""
     message: str
-    plan_id: str | None = None
+    plan_id: Optional[str] = None

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # AIR GAP ENFORCEMENT: These imports are FORBIDDEN
 # import kubernetes  # FORBIDDEN
@@ -132,7 +132,7 @@ class Architect:
         
         return "\n".join(topology_lines + [""] + plan_lines)
     
-    async def _handle_function_call(self, function_call) -> dict | None:
+    async def _handle_function_call(self, function_call) -> Optional[dict]:
         """Handle a function call from the model."""
         name = function_call.name
         args = dict(function_call.args)
@@ -229,7 +229,7 @@ class Architect:
                 plan_id=None,
             )
     
-    async def analyze(self, service: str | None = None) -> dict:
+    async def analyze(self, service: Optional[str] = None) -> dict:
         """
         Analyze the current system state.
         

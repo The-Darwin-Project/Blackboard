@@ -2,7 +2,7 @@
 """FastAPI dependency injection for Darwin Blackboard."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .state.blackboard import BlackboardState
 from .state.redis_client import get_redis
@@ -13,10 +13,10 @@ if TYPE_CHECKING:
     from .agents.sysadmin import SysAdmin
 
 # Global instances (initialized in main.py lifespan)
-_blackboard: BlackboardState | None = None
-_aligner: "Aligner | None" = None
-_architect: "Architect | None" = None
-_sysadmin: "SysAdmin | None" = None
+_blackboard: Optional[BlackboardState] = None
+_aligner: Optional["Aligner"] = None
+_architect: Optional["Architect"] = None
+_sysadmin: Optional["SysAdmin"] = None
 
 
 def set_blackboard(blackboard: BlackboardState) -> None:
