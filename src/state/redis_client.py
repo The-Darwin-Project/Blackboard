@@ -86,18 +86,18 @@ class RedisClient:
                 logger.info(f"Redis connection established (attempt {attempt})")
                 return self._client
             
-            except (redis.ConnectionError, ConnectionError) as e:
+            except (redis.ConnectionError, redis.TimeoutError, ConnectionError, TimeoutError, OSError) as e:
                 last_error = e
                 if attempt < REDIS_RETRY_ATTEMPTS:
                     logger.warning(
-                        f"Redis connection attempt {attempt}/{REDIS_RETRY_ATTEMPTS} failed: {e}. "
+                        f"Redis connection attempt {attempt}/{REDIS_RETRY_ATTEMPTS} failed: {type(e).__name__}: {e}. "
                         f"Retrying in {REDIS_RETRY_DELAY}s..."
                     )
                     await asyncio.sleep(REDIS_RETRY_DELAY)
                     self._client = None  # Reset for retry
                 else:
                     logger.error(
-                        f"Redis connection failed after {REDIS_RETRY_ATTEMPTS} attempts: {e}"
+                        f"Redis connection failed after {REDIS_RETRY_ATTEMPTS} attempts: {type(e).__name__}: {e}"
                     )
         
         # All retries exhausted

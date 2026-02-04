@@ -51,14 +51,15 @@ async def lifespan(app: FastAPI):
     logger.info("Darwin Blackboard starting up...")
     
     # Initialize Redis connection
+    # Redis is REQUIRED - without it, the Brain cannot function
     redis_client = RedisClient()
     
     try:
         redis = await redis_client.connect()
         logger.info("Redis connection established")
     except Exception as e:
-        logger.error(f"Failed to connect to Redis: {e}")
-        logger.warning("Continuing without Redis - some features will be unavailable")
+        logger.error(f"CRITICAL: Failed to connect to Redis: {e}")
+        logger.error("Redis is required for Blackboard state. Startup will continue but health checks will fail.")
         redis = None
     
     # Initialize Blackboard state
@@ -190,7 +191,17 @@ async def health_check() -> HealthResponse:
     Health check endpoint for liveness/readiness probes.
     
     Returns {"status": "brain_online"} when the Brain is operational.
+    Returns 503 Service Unavailable if Blackboard is not initialized.
     """
+    from .dependencies import _blackboard
+    
+    if _blackboard is None:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="Blackboard not initialized - Redis connection may have failed"
+        )
+    
     return HealthResponse(status="brain_online")
 
 
