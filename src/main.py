@@ -88,6 +88,8 @@ async def lifespan(app: FastAPI):
                 # Build analysis prompt based on anomaly type
                 if anomaly_type == "high_cpu":
                     prompt = f"AUTOMATED ALERT: Service '{service}' has high CPU usage. Analyze the situation and recommend actions. Consider scaling, optimization, or investigating the cause."
+                elif anomaly_type == "high_memory":
+                    prompt = f"AUTOMATED ALERT: Service '{service}' has high memory usage. Analyze the situation and recommend actions. Consider scaling, memory optimization, or investigating memory leaks."
                 elif anomaly_type == "high_error_rate":
                     prompt = f"AUTOMATED ALERT: Service '{service}' has a high error rate. Analyze the situation and recommend actions. Consider rollback, failover, or investigating dependencies."
                 else:

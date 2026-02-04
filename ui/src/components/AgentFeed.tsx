@@ -22,6 +22,7 @@ const EVENT_LABELS: Record<string, string> = {
   telemetry_received: 'Telemetry processed',
   service_discovered: 'New service discovered',
   high_cpu_detected: 'HIGH CPU detected',
+  high_memory_detected: 'HIGH MEMORY detected',
   high_error_rate_detected: 'HIGH ERROR RATE detected',
   anomaly_resolved: 'Anomaly resolved',
   // Architect (strategy)

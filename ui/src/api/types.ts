@@ -28,6 +28,7 @@ export type EventType =
   | 'service_discovered'
   // Anomaly events (from Aligner)
   | 'high_cpu_detected'
+  | 'high_memory_detected'
   | 'high_error_rate_detected'
   | 'anomaly_resolved'
   // Plan lifecycle
@@ -168,6 +169,7 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     case 'telemetry_received':
     case 'service_discovered':
     case 'high_cpu_detected':
+    case 'high_memory_detected':
     case 'high_error_rate_detected':
     case 'anomaly_resolved':
       return 'aligner';

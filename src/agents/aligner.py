@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Anomaly thresholds (configurable via env)
 CPU_THRESHOLD = float(os.getenv("ALIGNER_CPU_THRESHOLD", "80.0"))
+MEMORY_THRESHOLD = float(os.getenv("ALIGNER_MEMORY_THRESHOLD", "85.0"))
 ERROR_RATE_THRESHOLD = float(os.getenv("ALIGNER_ERROR_RATE_THRESHOLD", "5.0"))
 # Cooldown between anomaly events for same service (seconds)
 ANOMALY_COOLDOWN = int(os.getenv("ALIGNER_ANOMALY_COOLDOWN", "60"))
@@ -296,7 +297,7 @@ class Aligner:
         
         # Get or create anomaly state for this service
         if service not in self._anomaly_state:
-            self._anomaly_state[service] = {"high_cpu": 0, "high_error": 0, "active": set()}
+            self._anomaly_state[service] = {"high_cpu": 0, "high_memory": 0, "high_error": 0, "active": set()}
         
         state = self._anomaly_state[service]
         
@@ -325,6 +326,31 @@ class Aligner:
                     {"service": service, "anomaly": "high_cpu", "cpu": payload.metrics.cpu}
                 )
                 logger.info(f"CPU anomaly resolved: {service} now at {payload.metrics.cpu:.1f}%")
+        
+        # Check Memory threshold
+        if payload.metrics.memory >= MEMORY_THRESHOLD:
+            if "high_memory" not in state["active"]:
+                if now - state["high_memory"] > ANOMALY_COOLDOWN:
+                    state["high_memory"] = now
+                    state["active"].add("high_memory")
+                    
+                    await self.blackboard.record_event(
+                        EventType.HIGH_MEMORY_DETECTED,
+                        {"service": service, "memory": payload.metrics.memory, "threshold": MEMORY_THRESHOLD}
+                    )
+                    logger.warning(f"HIGH MEMORY detected: {service} at {payload.metrics.memory:.1f}%")
+                    
+                    # Trigger Architect analysis
+                    await self._trigger_architect(service, "high_memory")
+        else:
+            # Memory back to normal
+            if "high_memory" in state["active"]:
+                state["active"].remove("high_memory")
+                await self.blackboard.record_event(
+                    EventType.ANOMALY_RESOLVED,
+                    {"service": service, "anomaly": "high_memory", "memory": payload.metrics.memory}
+                )
+                logger.info(f"Memory anomaly resolved: {service} now at {payload.metrics.memory:.1f}%")
         
         # Check Error Rate threshold
         if payload.metrics.error_rate >= ERROR_RATE_THRESHOLD:

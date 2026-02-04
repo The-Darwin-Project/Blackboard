@@ -134,6 +134,7 @@ class EventType(str, Enum):
     SERVICE_DISCOVERED = "service_discovered"
     # Anomaly events (Aligner observations)
     HIGH_CPU_DETECTED = "high_cpu_detected"
+    HIGH_MEMORY_DETECTED = "high_memory_detected"
     HIGH_ERROR_RATE_DETECTED = "high_error_rate_detected"
     ANOMALY_RESOLVED = "anomaly_resolved"
     # Plan lifecycle events
