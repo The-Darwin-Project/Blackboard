@@ -1,27 +1,55 @@
 // BlackBoard/ui/src/components/Dashboard.tsx
 /**
  * Main dashboard page with vertical stacked layout.
- * Top: TopologyViewer, Middle: MetricChart, Bottom: AgentFeed
+ * Top: CytoscapeGraph, Middle: MetricChart, Bottom: AgentFeed
  */
-import { useState } from 'react';
-import TopologyViewer from './TopologyViewer';
+import { useState, useCallback } from 'react';
+import CytoscapeGraph from './CytoscapeGraph';
+import GraphContextMenu from './GraphContextMenu';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
 import AgentFeed from './AgentFeed';
 
+interface ContextMenuState {
+  serviceName: string;
+  position: { x: number; y: number };
+}
+
 function Dashboard() {
   const [selectedService, setSelectedService] = useState<string | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  // Handle node click - open inspector
+  const handleNodeClick = useCallback((serviceName: string) => {
+    setSelectedService(serviceName);
+    setSelectedPlan(null);
+  }, []);
+
+  // Handle plan (ghost node) click - open inspector in plan mode
+  const handlePlanClick = useCallback((planId: string) => {
+    setSelectedPlan(planId);
+    setSelectedService(null);
+  }, []);
+
+  // Close context menu
+  const handleCloseContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
 
   return (
     <div className="h-full flex flex-col gap-4 p-4 overflow-auto">
-      {/* Top: Topology Viewer */}
+      {/* Top: Cytoscape Graph */}
       <div className="bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
         <div className="px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold text-text-primary">Architecture Graph</h2>
-          <p className="text-xs text-text-muted">Service topology with status</p>
+          <p className="text-xs text-text-muted">Service topology with health status</p>
         </div>
-        <div className="h-[280px] overflow-hidden">
-          <TopologyViewer onNodeClick={setSelectedService} />
+        <div className="h-[320px] overflow-hidden">
+          <CytoscapeGraph 
+            onNodeClick={handleNodeClick}
+            onPlanClick={handlePlanClick}
+          />
         </div>
       </div>
 
@@ -50,8 +78,21 @@ function Dashboard() {
       {/* Node Inspector Drawer */}
       <NodeInspector
         serviceName={selectedService}
-        onClose={() => setSelectedService(null)}
+        planId={selectedPlan}
+        onClose={() => {
+          setSelectedService(null);
+          setSelectedPlan(null);
+        }}
       />
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <GraphContextMenu
+          serviceName={contextMenu.serviceName}
+          position={contextMenu.position}
+          onClose={handleCloseContextMenu}
+        />
+      )}
     </div>
   );
 }

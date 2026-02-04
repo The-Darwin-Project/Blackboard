@@ -7,6 +7,7 @@ import type {
   ChatRequest,
   ChatResponse,
   ChartData,
+  GraphResponse,
   MermaidResponse,
   Plan,
   Service,
@@ -96,6 +97,10 @@ export async function getServices(): Promise<string[]> {
 
 export async function getService(name: string): Promise<Service> {
   return fetchApi<Service>(`/topology/service/${encodeURIComponent(name)}`);
+}
+
+export async function getGraphData(): Promise<GraphResponse> {
+  return fetchApi<GraphResponse>('/topology/graph');
 }
 
 // =============================================================================

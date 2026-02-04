@@ -10,6 +10,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from ..models import GraphResponse
 from ..state import BlackboardState
 from ..dependencies import get_blackboard
 
@@ -53,10 +54,25 @@ async def get_mermaid_diagram(
     Get topology as Mermaid diagram.
     
     Returns Mermaid graph TD syntax for rendering.
-    This is the Architecture Graph (Visualization #1).
+    This is the Architecture Graph (Visualization #1) - legacy format.
     """
     mermaid = await blackboard.generate_mermaid()
     return {"mermaid": mermaid}
+
+
+@router.get("/graph", response_model=GraphResponse)
+async def get_graph_data(
+    blackboard: BlackboardState = Depends(get_blackboard),
+) -> GraphResponse:
+    """
+    Get topology as rich graph data for Cytoscape.js visualization.
+    
+    Returns nodes with health status, edges with protocol metadata,
+    and pending plans as ghost nodes per GRAPH_SPEC.md.
+    
+    This is the Architecture Graph (Visualization #1) - Cytoscape format.
+    """
+    return await blackboard.get_graph_data()
 
 
 @router.get("/service/{service_name}")

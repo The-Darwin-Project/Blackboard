@@ -81,6 +81,48 @@ export interface MermaidResponse {
 }
 
 // =============================================================================
+// Graph Visualization (Cytoscape.js)
+// =============================================================================
+
+export type NodeType = 'service' | 'database' | 'cache' | 'external';
+export type HealthStatus = 'healthy' | 'warning' | 'critical' | 'unknown';
+
+export interface GraphNode {
+  id: string;
+  type: NodeType;
+  label: string;
+  metadata: {
+    version: string;
+    health: HealthStatus;
+    cpu: number;
+    memory: number;
+    error_rate: number;
+    last_seen: number;
+  };
+}
+
+export interface GraphEdge {
+  source: string;
+  target: string;
+  protocol: string;
+  type: string;  // 'hard' or 'async'
+}
+
+export interface GhostNode {
+  plan_id: string;
+  target_node: string;
+  action: string;
+  status: string;
+  params: Record<string, unknown>;
+}
+
+export interface GraphResponse {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  plans: GhostNode[];
+}
+
+// =============================================================================
 // Plans
 // =============================================================================
 

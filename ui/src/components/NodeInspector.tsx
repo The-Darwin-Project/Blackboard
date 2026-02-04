@@ -1,19 +1,138 @@
 // BlackBoard/ui/src/components/NodeInspector.tsx
 /**
- * Slide-over drawer for service details.
- * Shows metrics, dependencies, and other service info.
+ * Slide-over drawer for service details and plan actions.
+ * Shows metrics, dependencies, and plan approval buttons.
  */
-import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch } from 'lucide-react';
-import { useService } from '../hooks';
+import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch, CheckCircle, XCircle, Ghost, FileText } from 'lucide-react';
+import { useService, usePlans, useApprovePlan, useRejectPlan } from '../hooks';
+import type { Plan } from '../api/types';
 
 interface NodeInspectorProps {
   serviceName: string | null;
+  planId?: string | null;
   onClose: () => void;
 }
 
-function NodeInspector({ serviceName, onClose }: NodeInspectorProps) {
+function NodeInspector({ serviceName, planId, onClose }: NodeInspectorProps) {
   const { data: service, isLoading } = useService(serviceName);
+  const { data: plans } = usePlans();
+  const { mutate: approvePlan, isPending: isApproving } = useApprovePlan();
+  const { mutate: rejectPlan, isPending: isRejecting } = useRejectPlan();
 
+  // Find the selected plan
+  const selectedPlan = planId ? plans?.find((p: Plan) => p.id === planId) : null;
+
+  // If showing a plan, display plan details
+  if (planId && selectedPlan) {
+    return (
+      <>
+        {/* Backdrop */}
+        <div
+          className="fixed inset-0 bg-black/50 z-40"
+          onClick={onClose}
+        />
+
+        {/* Drawer */}
+        <div className="fixed right-0 top-0 h-full w-80 bg-bg-secondary border-l border-border z-50 shadow-xl overflow-hidden flex flex-col animate-in slide-in-from-right duration-200">
+          {/* Header */}
+          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Ghost className="w-5 h-5 text-purple-400" />
+              <h3 className="font-semibold text-text-primary">Plan Details</h3>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1 rounded hover:bg-bg-tertiary transition-colors"
+            >
+              <X className="w-5 h-5 text-text-muted" />
+            </button>
+          </div>
+
+          {/* Plan Content */}
+          <div className="flex-1 overflow-auto p-4 space-y-4">
+            {/* Plan ID */}
+            <div className="flex items-center gap-2 text-sm">
+              <FileText className="w-4 h-4 text-text-muted" />
+              <span className="text-text-secondary">Plan ID:</span>
+              <span className="text-text-primary font-mono text-xs">{selectedPlan.id}</span>
+            </div>
+
+            {/* Action */}
+            <div className="flex items-center gap-2 text-sm">
+              <Activity className="w-4 h-4 text-text-muted" />
+              <span className="text-text-secondary">Action:</span>
+              <span className="text-text-primary font-semibold uppercase">{selectedPlan.action}</span>
+            </div>
+
+            {/* Target Service */}
+            <div className="flex items-center gap-2 text-sm">
+              <GitBranch className="w-4 h-4 text-text-muted" />
+              <span className="text-text-secondary">Target:</span>
+              <span className="text-text-primary">{selectedPlan.service}</span>
+            </div>
+
+            {/* Status */}
+            <div className="flex items-center gap-2 text-sm">
+              <Clock className="w-4 h-4 text-text-muted" />
+              <span className="text-text-secondary">Status:</span>
+              <span className={`font-semibold ${
+                selectedPlan.status === 'pending' ? 'text-yellow-400' :
+                selectedPlan.status === 'approved' ? 'text-green-400' :
+                selectedPlan.status === 'rejected' ? 'text-red-400' :
+                'text-text-primary'
+              }`}>
+                {selectedPlan.status}
+              </span>
+            </div>
+
+            {/* Reason */}
+            <div className="space-y-2">
+              <h4 className="text-sm font-medium text-text-secondary">Reason</h4>
+              <p className="text-sm text-text-primary bg-bg-primary rounded p-3">
+                {selectedPlan.reason}
+              </p>
+            </div>
+
+            {/* Parameters */}
+            {Object.keys(selectedPlan.params).length > 0 && (
+              <div className="space-y-2">
+                <h4 className="text-sm font-medium text-text-secondary">Parameters</h4>
+                <div className="bg-bg-primary rounded p-3">
+                  <pre className="text-xs text-text-primary font-mono whitespace-pre-wrap">
+                    {JSON.stringify(selectedPlan.params, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* Approve/Reject Buttons */}
+            {selectedPlan.status === 'pending' && (
+              <div className="flex gap-2 pt-4 border-t border-border">
+                <button
+                  onClick={() => approvePlan(selectedPlan.id)}
+                  disabled={isApproving || isRejecting}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  Approve
+                </button>
+                <button
+                  onClick={() => rejectPlan({ id: selectedPlan.id })}
+                  disabled={isApproving || isRejecting}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+                >
+                  <XCircle className="w-4 h-4" />
+                  Reject
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // Otherwise show service details
   if (!serviceName) return null;
 
   return (

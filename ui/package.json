@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.90.20",
+    "cytoscape": "^3.29.3",
+    "cytoscape-cose-bilkent": "^4.1.0",
+    "cytoscape-node-html-label": "^1.2.2",
     "lucide-react": "^0.563.0",
     "mermaid": "^11.12.2",
     "react": "^19.2.0",
@@ -21,6 +24,7 @@
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@tailwindcss/vite": "^4.1.18",
+    "@types/cytoscape": "^3.21.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",

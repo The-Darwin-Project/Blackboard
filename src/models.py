@@ -125,6 +125,61 @@ class MetricSeries(BaseModel):
 
 
 # =============================================================================
+# Graph Visualization (Cytoscape.js - GRAPH_SPEC.md)
+# =============================================================================
+
+class NodeType(str, Enum):
+    """Types of nodes in the architecture graph."""
+    SERVICE = "service"
+    DATABASE = "database"
+    CACHE = "cache"
+    EXTERNAL = "external"
+
+
+class HealthStatus(str, Enum):
+    """Health status for nodes."""
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+class GraphNode(BaseModel):
+    """A node in the architecture graph."""
+    id: str = Field(..., description="Unique node identifier (service name)")
+    type: NodeType = Field(..., description="Node type determines shape/icon")
+    label: str = Field(..., description="Display label")
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional data: version, health, cpu, memory, replicas"
+    )
+
+
+class GraphEdge(BaseModel):
+    """An edge in the architecture graph."""
+    source: str = Field(..., description="Source node ID")
+    target: str = Field(..., description="Target node ID")
+    protocol: str = Field("HTTP", description="Wire protocol: HTTP, SQL, REDIS, gRPC, etc.")
+    type: str = Field("hard", description="Dependency type: 'hard' or 'async'")
+
+
+class GhostNode(BaseModel):
+    """A ghost node representing a pending plan."""
+    plan_id: str = Field(..., description="Associated plan ID")
+    target_node: str = Field(..., description="Target service this plan affects")
+    action: str = Field(..., description="Plan action (scale, rollback, etc.)")
+    status: str = Field(..., description="Plan status")
+    params: dict[str, Any] = Field(default_factory=dict, description="Plan parameters")
+
+
+class GraphResponse(BaseModel):
+    """Response for /topology/graph endpoint."""
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+    plans: list[GhostNode] = Field(default_factory=list, description="Pending plans as ghost nodes")
+
+
+# =============================================================================
 # Architecture Events (for correlating metrics with changes)
 # =============================================================================
 

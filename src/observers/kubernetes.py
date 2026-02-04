@@ -229,6 +229,20 @@ class KubernetesObserver:
                 f"K8s metrics: {service_name} cpu={cpu_percent:.1f}% mem={memory_percent:.1f}%"
             )
             
+            # Ensure service is registered in topology (so it appears in UI)
+            # This enables K8s-only services (postgres, redis) to show up
+            await self.blackboard.redis.sadd("darwin:services", service_name)
+            
+            # Update service metadata with version (if available)
+            version = getattr(self, '_service_versions', {}).get(service_name, "k8s")
+            await self.blackboard.update_service_metadata(
+                name=service_name,
+                version=version,
+                cpu=cpu_percent,
+                memory=memory_percent,
+                error_rate=0.0,  # K8s observer doesn't track error rate
+            )
+            
             # Update Blackboard with K8s-observed metrics
             await self.blackboard.record_metric(
                 service_name, "cpu", cpu_percent, source="kubernetes"
@@ -251,6 +265,7 @@ class KubernetesObserver:
         Get service name from pod labels.
         
         Uses the 'app' label as the service name.
+        Also caches version info for service metadata.
         """
         try:
             pod = await asyncio.get_event_loop().run_in_executor(
@@ -262,20 +277,49 @@ class KubernetesObserver:
             
             # Use 'app' label as service name (matches Darwin client naming)
             service_name = labels.get("app")
+            if not service_name:
+                # Fallback: use app.kubernetes.io/name
+                service_name = labels.get("app.kubernetes.io/name")
+            
             if service_name:
+                # Extract version from container image tag
+                version = self._extract_version_from_pod(pod)
+                if version:
+                    # Cache version for this service
+                    if not hasattr(self, '_service_versions'):
+                        self._service_versions: dict[str, str] = {}
+                    self._service_versions[service_name] = version
+                    
                 return service_name
             
-            # Fallback: use app.kubernetes.io/name
-            service_name = labels.get("app.kubernetes.io/name")
-            if service_name:
-                return service_name
-            
-            # Last resort: use pod name prefix (before first dash-hash)
-            # e.g., "darwin-store-store-abc123" -> "darwin-store-store"
             return None
             
         except Exception as e:
             logger.debug(f"Failed to get labels for pod {pod_name}: {e}")
+            return None
+    
+    def _extract_version_from_pod(self, pod) -> Optional[str]:
+        """Extract version from pod's container image tag."""
+        try:
+            containers = pod.spec.containers or []
+            if not containers:
+                return None
+            
+            # Use first container's image
+            image = containers[0].image
+            if not image:
+                return None
+            
+            # Extract tag from image (format: registry/image:tag)
+            if ':' in image:
+                tag = image.split(':')[-1]
+                # If tag looks like a commit hash (7+ hex chars), truncate
+                if len(tag) >= 7 and all(c in '0123456789abcdef' for c in tag.lower()):
+                    return tag[:7]
+                return tag
+            
+            return "latest"
+        except Exception:
             return None
     
     async def _get_pod_limits(self, pod_name: str) -> dict:
