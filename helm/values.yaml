@@ -40,8 +40,8 @@ gcp:
   project: "" # Required: GCP project ID
   location: "us-central1"
   models:
-    pro: "gemini-1.5-pro"
-    flash: "gemini-1.5-flash"
+    pro: "gemini-3-pro-preview"
+    flash: "gemini-3-flash-preview"
   # Service account JSON can be mounted via secret
   # Set existingSecret to use a pre-created secret
   existingSecret: ""

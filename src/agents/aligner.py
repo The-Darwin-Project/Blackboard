@@ -85,7 +85,7 @@ class Aligner:
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-1.5-flash")
+                model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
                 
                 vertexai.init(project=project, location=location)
                 self._model = GenerativeModel(model_name)

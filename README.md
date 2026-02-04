@@ -186,8 +186,8 @@ Returns:
 | `REDIS_PASSWORD` | Redis password | (empty) |
 | `GCP_PROJECT` | GCP project ID | (required) |
 | `GCP_LOCATION` | Vertex AI location | `us-central1` |
-| `VERTEX_MODEL_PRO` | Architect model | `gemini-1.5-pro` |
-| `VERTEX_MODEL_FLASH` | Aligner model | `gemini-1.5-flash` |
+| `VERTEX_MODEL_PRO` | Architect model | `gemini-3-pro-preview` |
+| `VERTEX_MODEL_FLASH` | Aligner model | `gemini-3-flash-preview` |
 | `SYSADMIN_DRY_RUN` | Dry run mode | `true` |
 | `SYSADMIN_AUTO_APPROVE` | Auto-approve CLI actions | `false` |
 | `DEBUG` | Enable debug logging | `false` |

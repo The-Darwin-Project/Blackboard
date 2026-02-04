@@ -76,7 +76,7 @@ class Architect:
         # Configuration
         self.project = os.getenv("GCP_PROJECT")
         self.location = os.getenv("GCP_LOCATION", "us-central1")
-        self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-1.5-pro")
+        self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
     
     async def _get_model(self):
         """Lazy-load Vertex AI Pro model with tools."""
