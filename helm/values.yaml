@@ -141,10 +141,10 @@ readinessProbe:
 # =============================================================================
 
 observer:
-  enabled: true                  # Enable K8s metrics observer
-  namespace: "darwin"            # Namespace to watch for pods
-  interval: 30                   # Poll interval in seconds
-  labelSelector: ""              # Optional: filter pods by label (e.g., "app=darwin-store")
+  enabled: true # Enable K8s metrics observer
+  namespace: "darwin" # Namespace to watch for pods
+  interval: 30 # Poll interval in seconds
+  labelSelector: "" # Optional: filter pods by label (e.g., "app=darwin-store")
 
 # =============================================================================
 # Node Selection (optional)
