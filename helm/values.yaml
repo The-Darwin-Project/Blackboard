@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "19e56d8" # Updated by CI to commit SHA
+  tag: "744fd79" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 
 replicaCount: 1
@@ -39,8 +39,8 @@ redis:
 # =============================================================================
 
 gcp:
-  project: "" # Required: GCP project ID
-  location: "us-central1"
+  project: "cnv-ai-insights" # Required: GCP project ID
+  location: "global"
   models:
     pro: "gemini-3-pro-preview"
     flash: "gemini-3-flash-preview"
@@ -83,8 +83,8 @@ app:
 # =============================================================================
 
 sysadmin:
-  dryRun: true # Set to false in production
-  autoApprove: false # DANGEROUS: Set to true only in trusted environments
+  dryRun: false # Set to true for testing (no real changes)
+  autoApprove: true # Enable closed-loop automation (only values-only changes are auto-approved)
   gitRepoPath: "/tmp/darwin-gitops"
 
 # =============================================================================

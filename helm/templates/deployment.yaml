@@ -86,10 +86,12 @@ spec:
             - name: K8S_OBSERVER_LABEL_SELECTOR
               value: "{{ .Values.observer.labelSelector }}"
             {{- end }}
-          {{- if .Values.gcp.existingSecret }}
+            {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
+            {{- end }}
+          {{- if .Values.gcp.existingSecret }}
           volumeMounts:
             - name: gcp-sa-key
               mountPath: /var/secrets/google

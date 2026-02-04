@@ -78,6 +78,16 @@ class Architect:
         self.location = os.getenv("GCP_LOCATION", "us-central1")
         self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
         
+        # Validate GCP configuration at init time
+        if not self.project:
+            logger.error(
+                "ARCHITECT DISABLED: GCP_PROJECT environment variable is not set. "
+                "The Architect cannot create plans without Vertex AI. "
+                "Set gcp.project in Helm values or export GCP_PROJECT."
+            )
+        else:
+            logger.info(f"Architect configured with GCP project: {self.project}")
+        
         # Callback for auto-approval check after plan creation
         self._plan_created_callback: Optional[Callable[["Plan"], Awaitable[None]]] = None
     
@@ -217,6 +227,15 @@ class Architect:
         The Architect will analyze the request, check current state,
         and potentially create a plan using Function Calling.
         """
+        # Fail fast if Vertex AI is not configured
+        if not self.project:
+            logger.error("Architect.chat() called but GCP_PROJECT is not set")
+            return ChatResponse(
+                message="Architect is disabled: GCP_PROJECT environment variable is not configured. "
+                        "Set gcp.project in Helm values to enable AI-powered analysis.",
+                plan_id=None,
+            )
+        
         model = await self._get_model()
         
         # Build context

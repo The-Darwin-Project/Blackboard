@@ -204,6 +204,8 @@ class EventType(str, Enum):
     PLAN_FAILED = "plan_failed"
     # Architect autonomous analysis
     ARCHITECT_ANALYZING = "architect_analyzing"
+    # SysAdmin execution
+    SYSADMIN_EXECUTING = "sysadmin_executing"
 
 
 class ArchitectureEvent(BaseModel):

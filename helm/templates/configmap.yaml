@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
 data:
   # GCP Configuration
-  GCP_PROJECT: "{{ .Values.gcp.project }}"
+  GCP_PROJECT: {{ required "gcp.project is required" .Values.gcp.project | quote }}
   GCP_LOCATION: "{{ .Values.gcp.location }}"
   
   # Vertex AI Models

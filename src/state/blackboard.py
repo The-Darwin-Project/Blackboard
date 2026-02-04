@@ -588,8 +588,14 @@ class BlackboardState:
             "result": "",
         })
         
-        # Record event
-        await self.record_event(EventType.PLAN_CREATED, {"plan_id": plan.id})
+        # Record event with full plan details for UI visibility
+        await self.record_event(EventType.PLAN_CREATED, {
+            "plan_id": plan.id,
+            "action": plan.action.value,
+            "service": plan.service,
+            "reason": plan.reason[:200] if plan.reason else "",
+            "params": plan.params,
+        })
         
         logger.info(f"Created plan: {plan.id} - {plan.action.value} {plan.service}")
         return plan
