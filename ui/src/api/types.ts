@@ -26,6 +26,8 @@ export type PlanAction =
 export type EventType =
   | 'telemetry_received'
   | 'service_discovered'
+  // Drift detection
+  | 'deployment_detected'
   // Anomaly events (from Aligner)
   | 'high_cpu_detected'
   | 'high_memory_detected'
@@ -168,6 +170,7 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     // Aligner events (observation)
     case 'telemetry_received':
     case 'service_discovered':
+    case 'deployment_detected':
     case 'high_cpu_detected':
     case 'high_memory_detected':
     case 'high_error_rate_detected':

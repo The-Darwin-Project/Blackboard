@@ -310,3 +310,49 @@ class SysAdmin:
         # (This would require async, so we skip for sync validation)
         
         return True, "Plan validated successfully"
+    
+    def can_auto_approve(self, plan: "Plan") -> tuple[bool, str]:
+        """
+        Determine if a plan can be auto-approved.
+        
+        Auto-approval policy (per Agent Definitions document):
+        - Values-only changes (scaling, toggles, config values) → AUTO-APPROVE
+        - Structural changes (templates, source code) → Require human approval
+        
+        Returns (can_approve, reason).
+        """
+        if not self.auto_approve:
+            return False, "Auto-approval disabled (SYSADMIN_AUTO_APPROVE=false)"
+        
+        # Actions that are always values-only (safe for auto-approval)
+        values_only_actions = {"scale", "reconfig"}
+        
+        # Actions that may require structural changes (need human review)
+        structural_actions = {"failover", "optimize"}
+        
+        # Rollback is conditionally values-only
+        # - If just changing image tag → values-only
+        # - If rolling back templates → structural
+        
+        action = plan.action.value
+        
+        if action in values_only_actions:
+            return True, f"Auto-approved: '{action}' is a values-only change"
+        
+        elif action == "rollback":
+            # Check if it's just a version/tag change (safe) or structural
+            params = plan.params or {}
+            if params.get("template_rollback") or params.get("structural"):
+                return False, "Rollback requires structural changes - human approval needed"
+            return True, "Auto-approved: rollback is version-only change"
+        
+        elif action in structural_actions:
+            # Check if explicitly marked as safe
+            params = plan.params or {}
+            if params.get("values_only"):
+                return True, f"Auto-approved: '{action}' marked as values_only"
+            return False, f"'{action}' may require structural changes - human approval needed"
+        
+        else:
+            # Unknown action - require human approval
+            return False, f"Unknown action '{action}' - human approval required"

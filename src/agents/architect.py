@@ -18,14 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 
 # AIR GAP ENFORCEMENT: These imports are FORBIDDEN
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
 # import subprocess  # FORBIDDEN
 
-from ..models import ChatResponse, PlanAction, PlanCreate
+from ..models import ChatResponse, PlanAction, PlanCreate, Plan
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -77,6 +77,22 @@ class Architect:
         self.project = os.getenv("GCP_PROJECT")
         self.location = os.getenv("GCP_LOCATION", "us-central1")
         self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
+        
+        # Callback for auto-approval check after plan creation
+        self._plan_created_callback: Optional[Callable[["Plan"], Awaitable[None]]] = None
+    
+    def set_plan_created_callback(
+        self, callback: Callable[["Plan"], Awaitable[None]]
+    ) -> None:
+        """
+        Set callback for auto-approval check after plan creation.
+        
+        Callback signature: async def callback(plan: Plan) -> None
+        This is called after each plan is created, allowing SysAdmin to
+        check if the plan can be auto-approved.
+        """
+        self._plan_created_callback = callback
+        logger.info("Plan created callback registered for auto-approval")
     
     async def _get_model(self):
         """Lazy-load Vertex AI Pro model with tools."""
@@ -150,11 +166,23 @@ class Architect:
             
             plan = await self.blackboard.create_plan(plan_data)
             
+            # Check for auto-approval (if callback registered)
+            auto_approved = False
+            if self._plan_created_callback:
+                try:
+                    await self._plan_created_callback(plan)
+                    # Re-fetch plan to get updated status
+                    updated_plan = await self.blackboard.get_plan(plan.id)
+                    if updated_plan and updated_plan.status.value == "approved":
+                        auto_approved = True
+                except Exception as e:
+                    logger.warning(f"Auto-approval check failed: {e}")
+            
             return {
                 "plan_id": plan.id,
                 "action": plan.action.value,
                 "service": plan.service,
-                "status": "created",
+                "status": "auto_approved" if auto_approved else "created",
             }
         
         elif name == "analyze_topology":

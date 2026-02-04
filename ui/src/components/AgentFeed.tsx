@@ -21,6 +21,7 @@ const EVENT_LABELS: Record<string, string> = {
   // Aligner (observation)
   telemetry_received: 'Telemetry processed',
   service_discovered: 'New service discovered',
+  deployment_detected: 'DEPLOYMENT detected',
   high_cpu_detected: 'HIGH CPU detected',
   high_memory_detected: 'HIGH MEMORY detected',
   high_error_rate_detected: 'HIGH ERROR RATE detected',
@@ -119,6 +120,8 @@ function EventItem({ event }: EventItemProps) {
   const serviceName = event.details.service as string | undefined;
   const cpuValue = event.details.cpu as number | undefined;
   const memoryValue = event.details.memory as number | undefined;
+  const oldVersion = event.details.old_version as string | undefined;
+  const newVersion = event.details.new_version as string | undefined;
 
   return (
     <div className="flex gap-2 p-2 rounded-lg bg-bg-primary">
@@ -133,11 +136,12 @@ function EventItem({ event }: EventItemProps) {
           </span>
         </div>
         <p className="text-sm text-text-secondary truncate">{label}</p>
-        {(planId || serviceName || cpuValue !== undefined || memoryValue !== undefined) && (
+        {(planId || serviceName || cpuValue !== undefined || memoryValue !== undefined || oldVersion) && (
           <p className="text-xs text-text-muted truncate">
             {planId && `Plan: ${planId}`}
             {planId && serviceName && ' • '}
             {serviceName && `Service: ${serviceName}`}
+            {oldVersion && newVersion && ` • v${oldVersion} → v${newVersion}`}
             {cpuValue !== undefined && ` • CPU: ${cpuValue.toFixed(1)}%`}
             {memoryValue !== undefined && ` • Mem: ${memoryValue.toFixed(1)}%`}
           </p>

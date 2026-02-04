@@ -112,6 +112,29 @@ async def lifespan(app: FastAPI):
         aligner.set_architect_callback(architect_anomaly_callback)
         logger.info("Closed-loop wiring complete: Aligner → Architect")
         
+        # === AUTO-APPROVAL WIRING ===
+        # Connect Architect → SysAdmin for intelligent auto-approval
+        from .models import Plan, PlanStatus
+        
+        async def plan_auto_approval_callback(plan: Plan) -> None:
+            """
+            Called by Architect after creating a plan.
+            
+            Checks if the plan can be auto-approved based on SysAdmin policy:
+            - Values-only changes (scale, reconfig) → Auto-approve
+            - Structural changes (failover, optimize) → Require human approval
+            """
+            can_approve, reason = sysadmin.can_auto_approve(plan)
+            
+            if can_approve:
+                await blackboard.update_plan_status(plan.id, PlanStatus.APPROVED)
+                logger.info(f"Plan {plan.id} auto-approved: {reason}")
+            else:
+                logger.info(f"Plan {plan.id} requires human approval: {reason}")
+        
+        architect.set_plan_created_callback(plan_auto_approval_callback)
+        logger.info("Auto-approval wiring complete: Architect → SysAdmin")
+        
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
         k8s_observer = None

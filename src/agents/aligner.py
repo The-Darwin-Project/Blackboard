@@ -92,6 +92,7 @@ class Aligner:
         
         # Closed-loop state tracking
         self._known_services: set[str] = set()
+        self._service_versions: dict[str, str] = {}  # service -> last known version
         self._anomaly_state: dict[str, dict] = {}  # service -> {type, timestamp}
         self._architect_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
     
@@ -272,11 +273,29 @@ class Aligner:
         # === CLOSED-LOOP: Service Discovery ===
         if payload.service not in self._known_services:
             self._known_services.add(payload.service)
+            self._service_versions[payload.service] = payload.version
             await self.blackboard.record_event(
                 EventType.SERVICE_DISCOVERED,
                 {"service": payload.service, "version": payload.version}
             )
             logger.info(f"New service discovered: {payload.service} v{payload.version}")
+        
+        # === CLOSED-LOOP: Version Drift Detection ===
+        last_version = self._service_versions.get(payload.service)
+        if last_version and last_version != payload.version:
+            await self.blackboard.record_event(
+                EventType.DEPLOYMENT_DETECTED,
+                {
+                    "service": payload.service,
+                    "old_version": last_version,
+                    "new_version": payload.version,
+                }
+            )
+            logger.info(
+                f"DEPLOYMENT DETECTED: {payload.service} "
+                f"v{last_version} → v{payload.version}"
+            )
+            self._service_versions[payload.service] = payload.version
         
         # Delegate to Blackboard for storage
         await self.blackboard.process_telemetry(payload)

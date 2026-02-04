@@ -132,6 +132,8 @@ class EventType(str, Enum):
     """Types of architecture events."""
     TELEMETRY_RECEIVED = "telemetry_received"
     SERVICE_DISCOVERED = "service_discovered"
+    # Drift detection (version changes)
+    DEPLOYMENT_DETECTED = "deployment_detected"
     # Anomaly events (Aligner observations)
     HIGH_CPU_DETECTED = "high_cpu_detected"
     HIGH_MEMORY_DETECTED = "high_memory_detected"
