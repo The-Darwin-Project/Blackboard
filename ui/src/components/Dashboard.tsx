@@ -15,23 +15,23 @@ function Dashboard() {
   return (
     <div className="h-full flex flex-col gap-4 p-4 overflow-auto">
       {/* Top: Topology Viewer */}
-      <div className="bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col min-h-[280px]">
+      <div className="bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
         <div className="px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold text-text-primary">Architecture Graph</h2>
           <p className="text-xs text-text-muted">Service topology with status</p>
         </div>
-        <div className="flex-1 overflow-hidden">
+        <div className="h-[280px] overflow-hidden">
           <TopologyViewer onNodeClick={setSelectedService} />
         </div>
       </div>
 
       {/* Middle: Metrics Chart */}
-      <div className="bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col min-h-[240px]">
+      <div className="bg-bg-secondary rounded-lg border border-border overflow-hidden">
         <div className="px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold text-text-primary">Resource Consumption</h2>
           <p className="text-xs text-text-muted">CPU, Memory, Error Rate over time</p>
         </div>
-        <div className="flex-1 overflow-hidden p-4">
+        <div className="p-4">
           <MetricChart />
         </div>
       </div>
