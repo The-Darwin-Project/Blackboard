@@ -20,6 +20,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 
+# IMPORTANT: Static routes MUST be defined BEFORE parameterized routes
+# Otherwise FastAPI matches /chart as /{service} with service="chart"
+
+@router.get("/chart")
+async def get_chart_data(
+    services: List[str] = Query(..., description="Service names to include"),
+    metrics: List[str] = Query(
+        ["cpu", "memory", "error_rate"],
+        description="Metrics to include"
+    ),
+    range_seconds: int = Query(3600, description="Time range in seconds"),
+    blackboard: BlackboardState = Depends(get_blackboard),
+) -> ChartData:
+    """
+    Get aggregated data for the Resources Consumption Chart.
+    
+    This is Visualization #2 - combines metric series with architecture events
+    for correlation analysis.
+    
+    Example:
+        GET /metrics/chart?services=inventory-api&services=postgres&range_seconds=3600
+    """
+    return await blackboard.get_chart_data(
+        services=services,
+        metrics=metrics,
+        range_seconds=range_seconds,
+    )
+
+
 @router.get("/{service}")
 async def get_current_metrics(
     service: str,
@@ -66,29 +95,3 @@ async def get_metric_history(
         "data_points": len(points),
         "data": [{"timestamp": p.timestamp, "value": p.value} for p in points],
     }
-
-
-@router.get("/chart")
-async def get_chart_data(
-    services: List[str] = Query(..., description="Service names to include"),
-    metrics: List[str] = Query(
-        ["cpu", "memory", "error_rate"],
-        description="Metrics to include"
-    ),
-    range_seconds: int = Query(3600, description="Time range in seconds"),
-    blackboard: BlackboardState = Depends(get_blackboard),
-) -> ChartData:
-    """
-    Get aggregated data for the Resources Consumption Chart.
-    
-    This is Visualization #2 - combines metric series with architecture events
-    for correlation analysis.
-    
-    Example:
-        GET /metrics/chart?services=inventory-api&services=postgres&range_seconds=3600
-    """
-    return await blackboard.get_chart_data(
-        services=services,
-        metrics=metrics,
-        range_seconds=range_seconds,
-    )
