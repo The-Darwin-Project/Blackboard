@@ -306,17 +306,26 @@ class BlackboardState:
                     type=edge_meta.get("type", "hard"),
                 ))
         
-        # Build ghost nodes from pending plans
+        # Build ghost nodes from pending plans (only if target exists in graph)
         plans = await self.get_pending_plans()
         ghost_nodes: list[GhostNode] = []
+        known_services = {n.id for n in nodes}  # Set of known service IDs
+        
         for plan in plans:
-            ghost_nodes.append(GhostNode(
-                plan_id=plan.id,
-                target_node=plan.service,
-                action=plan.action.value,
-                status=plan.status.value,
-                params=plan.params,
-            ))
+            # Only include ghost nodes if target service exists in the graph
+            if plan.service in known_services:
+                ghost_nodes.append(GhostNode(
+                    plan_id=plan.id,
+                    target_node=plan.service,
+                    action=plan.action.value,
+                    status=plan.status.value,
+                    params=plan.params,
+                ))
+            else:
+                logger.warning(
+                    f"Skipping ghost node for plan {plan.id}: "
+                    f"target service '{plan.service}' not in graph"
+                )
         
         return GraphResponse(nodes=nodes, edges=edges, plans=ghost_nodes)
     

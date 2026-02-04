@@ -187,10 +187,22 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     setIsInitialized(true);
 
     return () => {
+      // Clean up HTML labels before destroying Cytoscape
+      cleanupHtmlLabels();
       cy.destroy();
       cyRef.current = null;
       setIsInitialized(false);
     };
+  }, []);
+
+  // Helper to clean up HTML labels (prevents memory leaks)
+  const cleanupHtmlLabels = useCallback(() => {
+    // Remove all cytoscape-node-html-label DOM elements
+    const container = containerRef.current;
+    if (container) {
+      const labelContainers = container.querySelectorAll('.cytoscape-node-html-label');
+      labelContainers.forEach((el) => el.remove());
+    }
   }, []);
 
   // Handle node clicks
@@ -278,6 +290,9 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       });
     });
 
+    // Clean up existing HTML labels before removing elements (prevents memory leaks)
+    cleanupHtmlLabels();
+    
     // Update graph
     cy.elements().remove();
     cy.add(elements);
@@ -332,7 +347,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     // Fit to viewport with padding
     cy.fit(undefined, 30);
 
-  }, [data, isInitialized, buildNodeLabel, buildGhostLabel]);
+  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, cleanupHtmlLabels]);
 
   if (isLoading) {
     return (
