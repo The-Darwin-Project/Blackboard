@@ -6,8 +6,8 @@
 # =============================================================================
 
 image:
-  repository: darwin-brain
-  tag: "latest"
+  repository: ghcr.io/the-darwin-project/blackboard
+  tag: "latest" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 
 replicaCount: 1

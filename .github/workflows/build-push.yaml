@@ -1,12 +1,13 @@
 # BlackBoard/.github/workflows/build-push.yaml
 # Build and push Docker image to GitHub Container Registry on every push
+# After push, updates helm/values.yaml with the new image tag (commit SHA)
 #
 # Authentication Options:
 #   1. GITHUB_TOKEN (default) - No setup required
 #   2. GitHub App - Set USE_GITHUB_APP=true variable and add secrets
 #
 # To use GitHub App (Darwin CI):
-#   1. Create a GitHub App with "packages:write" permission
+#   1. Create a GitHub App with "packages:write" and "contents:write" permissions
 #   2. Install it on the org/repo
 #   3. Add secrets: DARWIN_APP_ID, DARWIN_APP_PRIVATE_KEY
 #   4. Add variable: USE_GITHUB_APP=true
@@ -38,12 +39,14 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: write # Needed to push helm values update
       packages: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
       # GitHub App authentication (optional)
       # Only runs if USE_GITHUB_APP variable is set to 'true'
@@ -55,6 +58,17 @@ jobs:
           app-id: ${{ secrets.DARWIN_APP_ID }}
           private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+
+      # Re-checkout with app token if using GitHub App
+      - name: Re-checkout with App Token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -74,8 +88,6 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix=
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
@@ -91,6 +103,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Update helm/values.yaml with the new image tag
+      - name: Update Helm values with new image tag
+        if: github.event_name != 'pull_request'
+        run: |
+          # Update image.tag in values.yaml
+          sed -i 's/^  tag: ".*"/  tag: "${{ steps.sha.outputs.short }}"/' helm/values.yaml
+
+          # Verify the change
+          echo "Updated helm/values.yaml:"
+          grep -A1 "^image:" helm/values.yaml
+
+      - name: Commit and push Helm values update
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Check if there are changes to commit
+          if git diff --quiet helm/values.yaml; then
+            echo "No changes to helm/values.yaml"
+          else
+            git add helm/values.yaml
+            git commit -m "ci: update image tag to ${{ steps.sha.outputs.short }} [skip ci]"
+            git push
+            echo "Pushed helm/values.yaml update"
+          fi
+
       - name: Output image info
         if: github.event_name != 'pull_request'
         run: |
@@ -98,9 +137,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Registry:** ${{ env.REGISTRY }}" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.sha.outputs.short }}" >> $GITHUB_STEP_SUMMARY
           echo "**Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Tags" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "### Helm Values Updated" >> $GITHUB_STEP_SUMMARY
+          echo "- \`image.tag\` set to \`${{ steps.sha.outputs.short }}\`" >> $GITHUB_STEP_SUMMARY
