@@ -1,0 +1,21 @@
+# BlackBoard/helm/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  # GCP Configuration
+  GCP_PROJECT: "{{ .Values.gcp.project }}"
+  GCP_LOCATION: "{{ .Values.gcp.location }}"
+  
+  # Vertex AI Models
+  VERTEX_MODEL_PRO: "{{ .Values.gcp.models.pro }}"
+  VERTEX_MODEL_FLASH: "{{ .Values.gcp.models.flash }}"
+  
+  # Application Info
+  APP_NAME: "{{ .Values.app.name }}"
+  APP_VERSION: "{{ .Values.app.version }}"

@@ -1,0 +1,106 @@
+# BlackBoard/.github/workflows/build-push.yaml
+# Build and push Docker image to GitHub Container Registry on every push
+#
+# Authentication Options:
+#   1. GITHUB_TOKEN (default) - No setup required
+#   2. GitHub App - Set USE_GITHUB_APP=true variable and add secrets
+#
+# To use GitHub App (Darwin CI):
+#   1. Create a GitHub App with "packages:write" permission
+#   2. Install it on the org/repo
+#   3. Add secrets: DARWIN_APP_ID, DARWIN_APP_PRIVATE_KEY
+#   4. Add variable: USE_GITHUB_APP=true
+
+name: Build and Push Image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".github/workflows/build-push.yaml"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # GitHub App authentication (optional)
+      # Only runs if USE_GITHUB_APP variable is set to 'true'
+      - name: Generate GitHub App Token
+        id: app-token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DARWIN_APP_ID }}
+          private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Login with GitHub App token if configured, otherwise GITHUB_TOKEN
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.USE_GITHUB_APP == 'true' && 'x-access-token' || github.actor }}
+          password: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image info
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ env.REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

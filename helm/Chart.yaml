@@ -1,0 +1,15 @@
+# BlackBoard/helm/Chart.yaml
+apiVersion: v2
+name: darwin-brain
+description: Darwin Blackboard (Brain) - The central nervous system for autonomous infrastructure management
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - darwin
+  - ai
+  - infrastructure
+  - automation
+  - gitops
+maintainers:
+  - name: Tal Hason

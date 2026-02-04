@@ -1,0 +1,196 @@
+# BlackBoard/src/models.py
+"""Pydantic schemas for Darwin Blackboard state layers."""
+from __future__ import annotations
+
+import time
+import uuid
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# Telemetry Protocol (matches DESIGN.md lines 94-107)
+# =============================================================================
+
+class Dependency(BaseModel):
+    """A service dependency (edge in the topology graph)."""
+    target: str = Field(..., description="Target service name")
+    type: str = Field(..., description="Dependency type: db, http, cache, etc.")
+    env_var: str | None = Field(None, description="Environment variable name for this dependency")
+
+
+class Metrics(BaseModel):
+    """Runtime metrics for a service."""
+    cpu: float = Field(0.0, ge=0.0, le=100.0, description="CPU usage percentage")
+    memory: float = Field(0.0, ge=0.0, le=100.0, description="Memory usage percentage")
+    error_rate: float = Field(0.0, ge=0.0, description="Error rate percentage")
+
+
+class Topology(BaseModel):
+    """Service topology information."""
+    dependencies: list[Dependency] = Field(default_factory=list)
+
+
+class TelemetryPayload(BaseModel):
+    """
+    Telemetry payload from self-aware applications.
+    
+    Schema defined in DESIGN.md section 4.1.
+    """
+    service: str = Field(..., description="Service name (e.g., inventory-api)")
+    version: str = Field("unknown", description="Service version (e.g., v2.0)")
+    metrics: Metrics = Field(default_factory=Metrics)
+    topology: Topology = Field(default_factory=Topology)
+
+
+# =============================================================================
+# Service State (Metadata Layer)
+# =============================================================================
+
+class Service(BaseModel):
+    """A service in the Blackboard state."""
+    name: str
+    version: str = "unknown"
+    metrics: Metrics = Field(default_factory=Metrics)
+    dependencies: list[str] = Field(default_factory=list, description="List of dependency target names")
+    last_seen: float = Field(default_factory=time.time, description="Unix timestamp of last telemetry")
+
+
+# =============================================================================
+# Plan Layer
+# =============================================================================
+
+class PlanStatus(str, Enum):
+    """Plan lifecycle states."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class PlanAction(str, Enum):
+    """Supported plan actions (from Architect tools)."""
+    SCALE = "scale"
+    ROLLBACK = "rollback"
+    RECONFIG = "reconfig"
+    FAILOVER = "failover"
+    OPTIMIZE = "optimize"
+
+
+class Plan(BaseModel):
+    """
+    An infrastructure modification plan created by the Architect.
+    
+    Plans live forever in the Blackboard (no TTL).
+    """
+    id: str = Field(default_factory=lambda: f"plan-{uuid.uuid4().hex[:8]}")
+    action: PlanAction
+    service: str = Field(..., description="Target service name from topology")
+    params: dict[str, Any] = Field(default_factory=dict, description="Action-specific parameters")
+    reason: str = Field(..., description="Justification based on metrics/topology")
+    status: PlanStatus = PlanStatus.PENDING
+    created_at: float = Field(default_factory=time.time)
+    approved_at: float | None = None
+    executed_at: float | None = None
+    result: str | None = Field(None, description="Execution result or error message")
+
+
+class PlanCreate(BaseModel):
+    """Schema for creating a new plan (from Architect function call)."""
+    action: PlanAction
+    service: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    reason: str
+
+
+# =============================================================================
+# Metrics History (Time-Series Layer)
+# =============================================================================
+
+class MetricPoint(BaseModel):
+    """A single metric data point."""
+    timestamp: float
+    value: float
+
+
+class MetricSeries(BaseModel):
+    """Time-series data for a metric."""
+    service: str
+    metric: str  # cpu, memory, error_rate
+    data: list[MetricPoint] = Field(default_factory=list)
+
+
+# =============================================================================
+# Architecture Events (for correlating metrics with changes)
+# =============================================================================
+
+class EventType(str, Enum):
+    """Types of architecture events."""
+    TELEMETRY_RECEIVED = "telemetry_received"
+    SERVICE_DISCOVERED = "service_discovered"
+    PLAN_CREATED = "plan_created"
+    PLAN_APPROVED = "plan_approved"
+    PLAN_EXECUTED = "plan_executed"
+    PLAN_FAILED = "plan_failed"
+
+
+class ArchitectureEvent(BaseModel):
+    """An architecture event for correlation with metrics."""
+    type: EventType
+    timestamp: float = Field(default_factory=time.time)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+# =============================================================================
+# Snapshot (Context for Architect)
+# =============================================================================
+
+class TopologySnapshot(BaseModel):
+    """Current topology state (for Mermaid generation)."""
+    services: list[str] = Field(default_factory=list)
+    edges: dict[str, list[str]] = Field(default_factory=dict, description="service -> [dependencies]")
+
+
+class Snapshot(BaseModel):
+    """
+    Complete Blackboard snapshot for Architect context.
+    
+    Combines Structure + Metadata + Plans for AI reasoning.
+    """
+    topology: TopologySnapshot = Field(default_factory=TopologySnapshot)
+    services: dict[str, Service] = Field(default_factory=dict, description="service_name -> Service")
+    pending_plans: list[Plan] = Field(default_factory=list)
+
+
+# =============================================================================
+# Chart Data (for Resources Consumption visualization)
+# =============================================================================
+
+class ChartData(BaseModel):
+    """Aggregated data for resources consumption chart."""
+    series: list[MetricSeries] = Field(default_factory=list)
+    events: list[ArchitectureEvent] = Field(default_factory=list)
+
+
+# =============================================================================
+# API Response Models
+# =============================================================================
+
+class HealthResponse(BaseModel):
+    """Health check response."""
+    status: str = "brain_online"
+
+
+class ChatRequest(BaseModel):
+    """Chat request to Architect."""
+    message: str = Field(..., description="User intent (e.g., 'Scale inventory-api to 3 replicas')")
+
+
+class ChatResponse(BaseModel):
+    """Chat response from Architect."""
+    message: str
+    plan_id: str | None = None

@@ -1,8 +1,24 @@
+# BlackBoard/requirements.txt
+# Darwin Blackboard (Brain) dependencies
+
+# Web framework
 fastapi
 uvicorn[standard]
+
+# CLI framework (for darwin CLI tool)
 typer
+
+# Data validation
 pydantic
+
+# Redis (with hiredis for async performance)
+redis[hiredis]
+
+# Google Cloud AI Platform (Vertex AI)
 google-cloud-aiplatform
+
+# Git operations (for SysAdmin verification)
 gitpython
-redis
+
+# YAML parsing (for Helm values)
 pyyaml

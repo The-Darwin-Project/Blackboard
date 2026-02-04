@@ -1,0 +1,135 @@
+# BlackBoard/helm/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-brain
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: darwin-brain
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: darwin-brain
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        # =================================================================
+        # Brain Container (FastAPI)
+        # =================================================================
+        - name: brain
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # Redis connection (localhost sidecar)
+            - name: REDIS_HOST
+              value: "localhost"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+            # GCP configuration
+            - name: GCP_PROJECT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: GCP_PROJECT
+            - name: GCP_LOCATION
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: GCP_LOCATION
+            - name: VERTEX_MODEL_PRO
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: VERTEX_MODEL_PRO
+            - name: VERTEX_MODEL_FLASH
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: VERTEX_MODEL_FLASH
+            # SysAdmin configuration
+            - name: SYSADMIN_DRY_RUN
+              value: "{{ .Values.sysadmin.dryRun }}"
+            - name: SYSADMIN_AUTO_APPROVE
+              value: "{{ .Values.sysadmin.autoApprove }}"
+            - name: GIT_REPO_PATH
+              value: "{{ .Values.sysadmin.gitRepoPath }}"
+            # Debug mode
+            - name: DEBUG
+              value: "{{ .Values.app.debug }}"
+          {{- if .Values.gcp.existingSecret }}
+          volumeMounts:
+            - name: gcp-sa-key
+              mountPath: /var/secrets/google
+              readOnly: true
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+        
+        # =================================================================
+        # Redis Sidecar
+        # =================================================================
+        {{- if .Values.redis.enabled }}
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+      
+      {{- if .Values.gcp.existingSecret }}
+      volumes:
+        - name: gcp-sa-key
+          secret:
+            secretName: {{ .Values.gcp.existingSecret }}
+      {{- end }}
+      
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

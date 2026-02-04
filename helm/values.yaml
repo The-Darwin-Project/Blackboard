@@ -1,0 +1,130 @@
+# BlackBoard/helm/values.yaml
+# Darwin Blackboard (Brain) Helm values
+
+# =============================================================================
+# Brain Container Configuration
+# =============================================================================
+
+image:
+  repository: darwin-brain
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# =============================================================================
+# Redis Sidecar Configuration (registry.redhat.io/rhel9/redis-7)
+# =============================================================================
+
+redis:
+  enabled: true
+  image:
+    repository: registry.redhat.io/rhel9/redis-7
+    tag: "latest"
+  password: "darwin-brain" # Override via secret in production
+  persistence:
+    enabled: false # PoC - no persistence needed
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m
+
+# =============================================================================
+# GCP / Vertex AI Configuration
+# =============================================================================
+
+gcp:
+  project: "" # Required: GCP project ID
+  location: "us-central1"
+  models:
+    pro: "gemini-1.5-pro"
+    flash: "gemini-1.5-flash"
+  # Service account JSON can be mounted via secret
+  # Set existingSecret to use a pre-created secret
+  existingSecret: ""
+
+# =============================================================================
+# Service Configuration
+# =============================================================================
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# =============================================================================
+# Application Metadata
+# =============================================================================
+
+app:
+  name: "darwin-brain"
+  version: "1.0.0"
+  debug: false
+
+# =============================================================================
+# SysAdmin Agent Configuration
+# =============================================================================
+
+sysadmin:
+  dryRun: true # Set to false in production
+  autoApprove: false # DANGEROUS: Set to true only in trusted environments
+  gitRepoPath: "/tmp/darwin-gitops"
+
+# =============================================================================
+# Resource Limits
+# =============================================================================
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 100m
+  limits:
+    memory: 512Mi
+    cpu: 500m
+
+# =============================================================================
+# Security Context (OpenShift compatible)
+# =============================================================================
+
+podSecurityContext:
+  fsGroup: 1001
+
+securityContext:
+  runAsNonRoot: true
+  # OpenShift assigns arbitrary UID from namespace range
+  # Do NOT set runAsUser - let OpenShift assign it
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false # App needs /tmp
+  capabilities:
+    drop:
+      - ALL
+
+# =============================================================================
+# Probes
+# =============================================================================
+
+livenessProbe:
+  httpGet:
+    path: /
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+# =============================================================================
+# Node Selection (optional)
+# =============================================================================
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
