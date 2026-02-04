@@ -5,7 +5,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-redis-data
   labels:
-    {{- include "darwin-brain.labels" . | nindent 4 }}
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: redis
 spec:
   accessModes:
