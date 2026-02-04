@@ -6,6 +6,8 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // Base path must match FastAPI static mount path
+  base: '/ui/',
   server: {
     proxy: {
       '/topology': {
