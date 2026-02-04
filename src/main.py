@@ -17,7 +17,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
 
 from .dependencies import set_agents, set_blackboard
 from .models import HealthResponse
@@ -95,37 +94,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Mount static files for the dashboard UI (React SPA)
-# Path resolves to /app/ui/dist from /app/src/main.py
-static_dir = Path(__file__).parent.parent / "ui" / "dist"
-if static_dir.exists():
-    app.mount("/ui", StaticFiles(directory=str(static_dir), html=True), name="static")
-
 
 # =============================================================================
 # Health Endpoint
 # =============================================================================
 
-@app.get("/", response_model=HealthResponse, tags=["health"])
-async def health() -> HealthResponse:
+@app.get("/health", response_model=HealthResponse, tags=["health"])
+async def health_check() -> HealthResponse:
     """
-    Health check endpoint.
+    Health check endpoint for liveness/readiness probes.
     
     Returns {"status": "brain_online"} when the Brain is operational.
     """
     return HealthResponse(status="brain_online")
-
-
-@app.get("/health", response_model=HealthResponse, tags=["health"])
-async def health_check() -> HealthResponse:
-    """Alternative health check endpoint."""
-    return HealthResponse(status="brain_online")
-
-
-@app.get("/dashboard", tags=["ui"])
-async def dashboard_redirect():
-    """Redirect to the dashboard UI."""
-    return RedirectResponse(url="/ui/")
 
 
 # =============================================================================
@@ -152,7 +133,7 @@ async def api_info() -> dict:
         "version": "1.0.0",
         "description": "Central nervous system for autonomous infrastructure management",
         "endpoints": {
-            "health": "GET /",
+            "health": "GET /health",
             "telemetry": "POST /telemetry/",
             "topology": {
                 "list": "GET /topology/",
@@ -178,4 +159,14 @@ async def api_info() -> dict:
             "architecture_graph": "GET /topology/mermaid",
             "resources_chart": "GET /metrics/chart",
         },
+        "ui": "GET / (React Dashboard)",
     }
+
+
+# =============================================================================
+# Static Files (React SPA) - MUST be mounted LAST
+# =============================================================================
+# Mount at root so UI is served at / while API routes take precedence
+static_dir = Path(__file__).parent.parent / "ui" / "dist"
+if static_dir.exists():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
