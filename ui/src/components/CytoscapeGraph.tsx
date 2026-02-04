@@ -16,11 +16,20 @@ import { Loader2, Network } from 'lucide-react';
 import { useGraph } from '../hooks';
 import type { GraphNode, GhostNode, HealthStatus, NodeType } from '../api/types';
 
-// Register extensions (use default export)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(cytoscape as any).use(coseBilkent);
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(cytoscape as any).use(nodeHtmlLabel);
+// Register extensions safely (only once, with error handling)
+let extensionsRegistered = false;
+try {
+  if (!extensionsRegistered) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (cytoscape as any).use(coseBilkent);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (cytoscape as any).use(nodeHtmlLabel);
+    extensionsRegistered = true;
+    console.log('[CytoscapeGraph] Extensions registered successfully');
+  }
+} catch (err) {
+  console.warn('[CytoscapeGraph] Failed to register extensions:', err);
+}
 
 // Health colors matching GRAPH_SPEC
 const HEALTH_COLORS: Record<HealthStatus, string> = {
@@ -38,17 +47,27 @@ const NODE_ICONS: Record<NodeType, string> = {
   external: '☁️',
 };
 
-// Layout configuration
-const LAYOUT_OPTIONS = {
-  name: 'cose-bilkent',
-  animate: false,
-  nodeDimensionsIncludeLabels: true,
-  idealEdgeLength: 120,
-  nodeRepulsion: 5000,
-  gravity: 0.3,
-  numIter: 2500,
-  tile: true,
-};
+// Layout configuration (cose-bilkent with fallback to built-in cose)
+const LAYOUT_OPTIONS = extensionsRegistered
+  ? {
+      name: 'cose-bilkent',
+      animate: false,
+      nodeDimensionsIncludeLabels: true,
+      idealEdgeLength: 120,
+      nodeRepulsion: 5000,
+      gravity: 0.3,
+      numIter: 2500,
+      tile: true,
+    }
+  : {
+      // Fallback to built-in cose layout
+      name: 'cose',
+      animate: false,
+      nodeDimensionsIncludeLabels: true,
+      idealEdgeLength: 120,
+      nodeRepulsion: 5000,
+      gravity: 0.3,
+    };
 
 interface CytoscapeGraphProps {
   onNodeClick?: (serviceName: string) => void;

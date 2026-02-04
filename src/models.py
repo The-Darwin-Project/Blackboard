@@ -23,8 +23,10 @@ class Dependency(BaseModel):
 
 class Metrics(BaseModel):
     """Runtime metrics for a service."""
-    cpu: float = Field(0.0, ge=0.0, le=100.0, description="CPU usage percentage")
-    memory: float = Field(0.0, ge=0.0, le=100.0, description="Memory usage percentage")
+    # Note: CPU can exceed 100% on multi-core systems or due to K8s metrics timing
+    # Memory can briefly exceed 100% with swap. No upper bound enforced.
+    cpu: float = Field(0.0, ge=0.0, description="CPU usage percentage")
+    memory: float = Field(0.0, ge=0.0, description="Memory usage percentage")
     error_rate: float = Field(0.0, ge=0.0, description="Error rate percentage")
 
 
