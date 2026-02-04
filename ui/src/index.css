@@ -1,0 +1,60 @@
+/* BlackBoard/ui/src/index.css */
+@import "tailwindcss";
+
+/* Darwin Brain - Cyberpunk/Ops dark theme */
+@theme {
+  /* Background colors */
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+  
+  /* Text colors */
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  
+  /* Status colors */
+  --color-status-healthy: #22c55e;
+  --color-status-warning: #eab308;
+  --color-status-critical: #ef4444;
+  --color-status-pending: #f59e0b;
+  --color-status-approved: #22c55e;
+  --color-status-rejected: #ef4444;
+  
+  /* Agent colors */
+  --color-agent-aligner: #8b5cf6;
+  --color-agent-architect: #3b82f6;
+  --color-agent-sysadmin: #10b981;
+  
+  /* Accent */
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  
+  /* Border */
+  --color-border: #334155;
+  --color-border-focus: #6366f1;
+}
+
+/* Base styles */
+body {
+  @apply bg-bg-primary text-text-primary antialiased;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-bg-secondary;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-bg-tertiary rounded;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-text-muted;
+}

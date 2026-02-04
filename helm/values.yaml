@@ -57,6 +57,19 @@ service:
   port: 8000
 
 # =============================================================================
+# Route Configuration (OpenShift)
+# =============================================================================
+
+route:
+  enabled: true
+  # host: darwin-brain.apps.example.com  # Leave empty for auto-generated
+  annotations: {}
+  tls:
+    enabled: true
+    termination: edge # edge, passthrough, or reencrypt
+    insecureEdgeTerminationPolicy: Redirect # Allow, Redirect, or None
+
+# =============================================================================
 # Application Metadata
 # =============================================================================
 

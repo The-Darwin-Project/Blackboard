@@ -1,0 +1,33 @@
+# BlackBoard/helm/templates/route.yaml
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Release.Name }}-brain
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- with .Values.route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host }}
+  {{- end }}
+  port:
+    targetPort: http
+  to:
+    kind: Service
+    name: {{ .Release.Name }}-brain
+    weight: 100
+  {{- if .Values.route.tls.enabled }}
+  tls:
+    termination: {{ .Values.route.tls.termination }}
+    {{- if eq .Values.route.tls.termination "edge" }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy }}
+    {{- end }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

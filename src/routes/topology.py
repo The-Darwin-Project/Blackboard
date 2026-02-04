@@ -9,9 +9,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import PlainTextResponse
 
-from ..models import TopologySnapshot
 from ..state import BlackboardState
 from ..dependencies import get_blackboard
 
@@ -20,16 +18,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/topology", tags=["topology"])
 
 
-@router.get("/", response_model=TopologySnapshot)
+@router.get("/")
 async def get_topology(
     blackboard: BlackboardState = Depends(get_blackboard),
-) -> TopologySnapshot:
+) -> dict:
     """
-    Get current topology as JSON.
+    Get current topology with full service details.
     
-    Returns services list and edges dict.
+    Returns services (with metrics), edges, and topology info.
     """
-    return await blackboard.get_topology()
+    topology = await blackboard.get_topology()
+    services = await blackboard.get_all_services()
+    
+    return {
+        "services": {name: svc.model_dump() for name, svc in services.items()},
+        "edges": topology.edges,
+        "service_names": topology.services,
+    }
 
 
 @router.get("/services")
@@ -40,17 +45,18 @@ async def list_services(
     return await blackboard.get_services()
 
 
-@router.get("/mermaid", response_class=PlainTextResponse)
+@router.get("/mermaid")
 async def get_mermaid_diagram(
     blackboard: BlackboardState = Depends(get_blackboard),
-) -> str:
+) -> dict:
     """
     Get topology as Mermaid diagram.
     
     Returns Mermaid graph TD syntax for rendering.
     This is the Architecture Graph (Visualization #1).
     """
-    return await blackboard.generate_mermaid()
+    mermaid = await blackboard.generate_mermaid()
+    return {"mermaid": mermaid}
 
 
 @router.get("/service/{service_name}")

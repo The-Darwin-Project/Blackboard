@@ -13,12 +13,17 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
 from .dependencies import set_agents, set_blackboard
 from .models import HealthResponse
 from .routes import (
     chat_router,
+    events_router,
     metrics_router,
     plans_router,
     telemetry_router,
@@ -90,6 +95,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Mount static files for the dashboard UI (React SPA)
+# Path resolves to /app/ui/dist from /app/src/main.py
+static_dir = Path(__file__).parent.parent / "ui" / "dist"
+if static_dir.exists():
+    app.mount("/ui", StaticFiles(directory=str(static_dir), html=True), name="static")
+
 
 # =============================================================================
 # Health Endpoint
@@ -111,6 +122,12 @@ async def health_check() -> HealthResponse:
     return HealthResponse(status="brain_online")
 
 
+@app.get("/dashboard", tags=["ui"])
+async def dashboard_redirect():
+    """Redirect to the dashboard UI."""
+    return RedirectResponse(url="/ui/")
+
+
 # =============================================================================
 # Mount Routers
 # =============================================================================
@@ -120,6 +137,7 @@ app.include_router(topology_router)
 app.include_router(plans_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)
+app.include_router(events_router)
 
 
 # =============================================================================
@@ -154,6 +172,7 @@ async def api_info() -> dict:
                 "chart": "GET /metrics/chart",
             },
             "chat": "POST /chat/",
+            "events": "GET /events/",
         },
         "visualizations": {
             "architecture_graph": "GET /topology/mermaid",
