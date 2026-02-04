@@ -26,11 +26,18 @@ export type PlanAction =
 export type EventType =
   | 'telemetry_received'
   | 'service_discovered'
+  // Anomaly events (from Aligner)
+  | 'high_cpu_detected'
+  | 'high_error_rate_detected'
+  | 'anomaly_resolved'
+  // Plan lifecycle
   | 'plan_created'
   | 'plan_approved'
   | 'plan_rejected'
   | 'plan_executed'
-  | 'plan_failed';
+  | 'plan_failed'
+  // Architect autonomous
+  | 'architect_analyzing';
 
 // =============================================================================
 // Service & Topology
@@ -157,13 +164,20 @@ export type Agent = 'aligner' | 'architect' | 'sysadmin';
 
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {
+    // Aligner events (observation)
     case 'telemetry_received':
     case 'service_discovered':
+    case 'high_cpu_detected':
+    case 'high_error_rate_detected':
+    case 'anomaly_resolved':
       return 'aligner';
+    // Architect events (strategy)
     case 'plan_created':
     case 'plan_approved':
     case 'plan_rejected':
+    case 'architect_analyzing':
       return 'architect';
+    // SysAdmin events (execution)
     case 'plan_executed':
     case 'plan_failed':
       return 'sysadmin';

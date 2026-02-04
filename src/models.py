@@ -132,10 +132,18 @@ class EventType(str, Enum):
     """Types of architecture events."""
     TELEMETRY_RECEIVED = "telemetry_received"
     SERVICE_DISCOVERED = "service_discovered"
+    # Anomaly events (Aligner observations)
+    HIGH_CPU_DETECTED = "high_cpu_detected"
+    HIGH_ERROR_RATE_DETECTED = "high_error_rate_detected"
+    ANOMALY_RESOLVED = "anomaly_resolved"
+    # Plan lifecycle events
     PLAN_CREATED = "plan_created"
     PLAN_APPROVED = "plan_approved"
+    PLAN_REJECTED = "plan_rejected"
     PLAN_EXECUTED = "plan_executed"
     PLAN_FAILED = "plan_failed"
+    # Architect autonomous analysis
+    ARCHITECT_ANALYZING = "architect_analyzing"
 
 
 class ArchitectureEvent(BaseModel):

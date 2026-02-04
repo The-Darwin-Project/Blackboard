@@ -18,11 +18,18 @@ const AGENT_STYLES: Record<Agent, { icon: typeof User; color: string; name: stri
 
 // Event type display names
 const EVENT_LABELS: Record<string, string> = {
+  // Aligner (observation)
   telemetry_received: 'Telemetry processed',
   service_discovered: 'New service discovered',
+  high_cpu_detected: 'HIGH CPU detected',
+  high_error_rate_detected: 'HIGH ERROR RATE detected',
+  anomaly_resolved: 'Anomaly resolved',
+  // Architect (strategy)
+  architect_analyzing: 'Analyzing anomaly...',
   plan_created: 'Plan created',
   plan_approved: 'Plan approved',
   plan_rejected: 'Plan rejected',
+  // SysAdmin (execution)
   plan_executed: 'Plan executed',
   plan_failed: 'Plan execution failed',
 };

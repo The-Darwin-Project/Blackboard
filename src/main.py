@@ -75,6 +75,39 @@ async def lifespan(app: FastAPI):
         
         set_agents(aligner, architect, sysadmin)
         logger.info("Trinity agents initialized (Aligner, Architect, SysAdmin)")
+        
+        # === CLOSED-LOOP WIRING ===
+        # Connect Aligner → Architect for autonomous analysis
+        async def architect_anomaly_callback(service: str, anomaly_type: str) -> None:
+            """
+            Called by Aligner when anomalies are detected.
+            
+            Triggers Architect to analyze the situation and potentially create a plan.
+            """
+            try:
+                # Build analysis prompt based on anomaly type
+                if anomaly_type == "high_cpu":
+                    prompt = f"AUTOMATED ALERT: Service '{service}' has high CPU usage. Analyze the situation and recommend actions. Consider scaling, optimization, or investigating the cause."
+                elif anomaly_type == "high_error_rate":
+                    prompt = f"AUTOMATED ALERT: Service '{service}' has a high error rate. Analyze the situation and recommend actions. Consider rollback, failover, or investigating dependencies."
+                else:
+                    prompt = f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}). Analyze and recommend actions."
+                
+                logger.info(f"Architect analyzing anomaly: {service} ({anomaly_type})")
+                
+                # Call Architect's chat method
+                response = await architect.chat(prompt)
+                
+                if response.plan_id:
+                    logger.info(f"Architect created plan {response.plan_id} for {service}")
+                else:
+                    logger.info(f"Architect analysis complete for {service}: {response.message[:100]}...")
+                    
+            except Exception as e:
+                logger.error(f"Architect anomaly analysis failed: {e}")
+        
+        aligner.set_architect_callback(architect_anomaly_callback)
+        logger.info("Closed-loop wiring complete: Aligner → Architect")
     
     logger.info("Darwin Blackboard ready")
     
