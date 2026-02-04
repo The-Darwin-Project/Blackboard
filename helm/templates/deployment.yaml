@@ -73,6 +73,9 @@ spec:
             - name: DEBUG
               value: "{{ .Values.app.debug }}"
           {{- if .Values.gcp.existingSecret }}
+            # GCP Service Account credentials
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/service-account.json"
           volumeMounts:
             - name: gcp-sa-key
               mountPath: /var/secrets/google
