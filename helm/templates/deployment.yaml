@@ -106,6 +106,11 @@ spec:
                   key: password
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
+          {{- if .Values.redis.persistence.enabled }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /var/lib/redis/data
+          {{- end }}
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
@@ -114,12 +119,17 @@ spec:
                 - ALL
         {{- end }}
       
-      {{- if .Values.gcp.existingSecret }}
       volumes:
+        {{- if .Values.gcp.existingSecret }}
         - name: gcp-sa-key
           secret:
             secretName: {{ .Values.gcp.existingSecret }}
-      {{- end }}
+        {{- end }}
+        {{- if and .Values.redis.enabled .Values.redis.persistence.enabled }}
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-redis-data
+        {{- end }}
       
       {{- with .Values.nodeSelector }}
       nodeSelector:

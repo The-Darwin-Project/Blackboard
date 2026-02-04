@@ -23,7 +23,9 @@ redis:
     tag: "latest"
   password: "darwin-brain" # Override via secret in production
   persistence:
-    enabled: false # PoC - no persistence needed
+    enabled: false # Set to true for production
+    storageClassName: "" # e.g., ocs-storagecluster-cephfs
+    size: 1Gi
   resources:
     requests:
       memory: 128Mi
