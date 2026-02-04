@@ -34,17 +34,35 @@ function TopologyViewer({ onNodeClick }: TopologyViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const { data, isLoading, isError } = useTopologyMermaid();
 
-  // Handle node clicks
+  // Handle node clicks - uses multiple fallback strategies for robustness
   const handleClick = useCallback(
     (event: Event) => {
       const target = event.target as Element;
-      // Mermaid nodes have class "node" or are children of nodes
-      const node = target.closest('.node');
-      if (node && onNodeClick) {
-        // Extract service name from node label
-        const labelElement = node.querySelector('.nodeLabel');
-        if (labelElement?.textContent) {
-          onNodeClick(labelElement.textContent.trim());
+      
+      // Strategy 1: Find closest node group (most reliable)
+      const nodeGroup = target.closest('.node, .nodeGroup, [class*="node"]');
+      if (!nodeGroup || !onNodeClick) return;
+
+      // Strategy 2: Try to extract from node ID (format: flowchart-nodeName-123)
+      const nodeId = nodeGroup.id || nodeGroup.getAttribute('data-id');
+      if (nodeId) {
+        const match = nodeId.match(/flowchart-([^-]+)-/);
+        if (match) {
+          // Convert back from sanitized name (underscores to hyphens)
+          const serviceName = match[1].replace(/_/g, '-');
+          onNodeClick(serviceName);
+          return;
+        }
+      }
+
+      // Strategy 3: Fallback to text content with multiple selectors
+      const labelSelectors = ['.nodeLabel', '.label', 'text', 'tspan', '[class*="label"]'];
+      for (const selector of labelSelectors) {
+        const labelElement = nodeGroup.querySelector(selector);
+        const text = labelElement?.textContent?.trim();
+        if (text && text.length > 0 && !text.includes('→')) {
+          onNodeClick(text);
+          return;
         }
       }
     },

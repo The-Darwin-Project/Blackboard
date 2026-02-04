@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from ..state import BlackboardState
 from ..dependencies import get_blackboard
@@ -68,6 +68,6 @@ async def get_service_details(
     service = await blackboard.get_service(service_name)
     
     if service is None:
-        return {"error": f"Service '{service_name}' not found"}
+        raise HTTPException(status_code=404, detail=f"Service '{service_name}' not found")
     
     return service.model_dump()

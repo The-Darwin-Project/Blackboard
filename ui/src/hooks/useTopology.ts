@@ -4,7 +4,7 @@
  * Polls /topology/mermaid for diagram, /topology/ for details.
  */
 import { useQuery } from '@tanstack/react-query';
-import { getTopology, getTopologyMermaid, getService } from '../api/client';
+import { ApiError, getTopology, getTopologyMermaid, getService } from '../api/client';
 import type { MermaidResponse, Service, TopologyResponse } from '../api/types';
 
 // Polling interval: 2 seconds
@@ -36,11 +36,29 @@ export function useTopology() {
 
 /**
  * Hook for fetching a single service's details.
+ * Returns null data (not error) for 404s to handle gracefully.
  */
 export function useService(name: string | null) {
-  return useQuery<Service>({
+  return useQuery<Service | null>({
     queryKey: ['service', name],
-    queryFn: () => getService(name!),
+    queryFn: async () => {
+      try {
+        return await getService(name!);
+      } catch (error) {
+        // Treat 404 as "not found" rather than error
+        if (error instanceof ApiError && error.isNotFound) {
+          return null;
+        }
+        throw error;
+      }
+    },
     enabled: !!name,
+    retry: (failureCount, error) => {
+      // Don't retry 404s
+      if (error instanceof ApiError && error.isNotFound) {
+        return false;
+      }
+      return failureCount < 2;
+    },
   });
 }

@@ -17,6 +17,38 @@ import type {
 const BASE_URL = '';
 
 /**
+ * Custom API error with detailed context.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly statusText: string;
+  readonly endpoint: string;
+  readonly detail?: string;
+
+  constructor(
+    status: number,
+    statusText: string,
+    endpoint: string,
+    detail?: string
+  ) {
+    super(`API Error [${status}] ${endpoint}: ${detail || statusText}`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.statusText = statusText;
+    this.endpoint = endpoint;
+    this.detail = detail;
+  }
+
+  get isNotFound(): boolean {
+    return this.status === 404;
+  }
+
+  get isServerError(): boolean {
+    return this.status >= 500;
+  }
+}
+
+/**
  * Generic fetch wrapper with error handling.
  */
 async function fetchApi<T>(
@@ -32,7 +64,15 @@ async function fetchApi<T>(
   });
 
   if (!response.ok) {
-    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+    // Try to extract error detail from response body
+    let detail: string | undefined;
+    try {
+      const errorBody = await response.json();
+      detail = errorBody.detail || errorBody.message || errorBody.error;
+    } catch {
+      // Response body is not JSON or empty
+    }
+    throw new ApiError(response.status, response.statusText, endpoint, detail);
   }
 
   return response.json();
