@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+typer
+pydantic
+google-cloud-aiplatform
+gitpython
+redis
+pyyaml
