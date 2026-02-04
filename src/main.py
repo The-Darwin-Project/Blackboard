@@ -30,6 +30,7 @@ from .routes import (
 )
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
+from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
 
 # Configure logging
 logging.basicConfig(
@@ -110,6 +111,26 @@ async def lifespan(app: FastAPI):
         
         aligner.set_architect_callback(architect_anomaly_callback)
         logger.info("Closed-loop wiring complete: Aligner → Architect")
+        
+        # === KUBERNETES OBSERVER ===
+        # External observation for CPU/memory metrics
+        k8s_observer = None
+        if K8S_OBSERVER_ENABLED:
+            # Create anomaly callback that calls Aligner's threshold check
+            async def k8s_anomaly_callback(
+                service: str, cpu: float, memory: float, source: str
+            ) -> None:
+                """Called by K8sObserver with metrics from metrics-server."""
+                await aligner.check_anomalies_for_service(service, cpu, memory, source)
+            
+            k8s_observer = KubernetesObserver(
+                blackboard=blackboard,
+                anomaly_callback=k8s_anomaly_callback,
+            )
+            await k8s_observer.start()
+            logger.info("KubernetesObserver started for external metrics observation")
+        else:
+            logger.info("KubernetesObserver disabled (K8S_OBSERVER_ENABLED=false)")
     
     logger.info("Darwin Blackboard ready")
     
@@ -117,6 +138,12 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     logger.info("Darwin Blackboard shutting down...")
+    
+    # Stop K8s observer
+    if redis and K8S_OBSERVER_ENABLED and k8s_observer:
+        await k8s_observer.stop()
+        logger.info("KubernetesObserver stopped")
+    
     await close_redis()
     logger.info("Redis connection closed")
 

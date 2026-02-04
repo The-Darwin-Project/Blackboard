@@ -104,11 +104,21 @@ function EventItem({ event }: EventItemProps) {
   const agent = getAgentFromEventType(event.type);
   const style = AGENT_STYLES[agent];
   const Icon = style.icon;
-  const label = EVENT_LABELS[event.type] || event.type;
+  
+  // Get base label
+  let label = EVENT_LABELS[event.type] || event.type;
+  
+  // Add source indicator for K8s-observed events
+  const source = event.details.source as string | undefined;
+  if (source === 'kubernetes') {
+    label = `${label} (K8s)`;
+  }
 
   // Extract relevant details
   const planId = event.details.plan_id as string | undefined;
   const serviceName = event.details.service as string | undefined;
+  const cpuValue = event.details.cpu as number | undefined;
+  const memoryValue = event.details.memory as number | undefined;
 
   return (
     <div className="flex gap-2 p-2 rounded-lg bg-bg-primary">
@@ -123,11 +133,13 @@ function EventItem({ event }: EventItemProps) {
           </span>
         </div>
         <p className="text-sm text-text-secondary truncate">{label}</p>
-        {(planId || serviceName) && (
+        {(planId || serviceName || cpuValue !== undefined || memoryValue !== undefined) && (
           <p className="text-xs text-text-muted truncate">
             {planId && `Plan: ${planId}`}
             {planId && serviceName && ' • '}
             {serviceName && `Service: ${serviceName}`}
+            {cpuValue !== undefined && ` • CPU: ${cpuValue.toFixed(1)}%`}
+            {memoryValue !== undefined && ` • Mem: ${memoryValue.toFixed(1)}%`}
           </p>
         )}
       </div>

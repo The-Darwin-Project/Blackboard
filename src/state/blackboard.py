@@ -186,18 +186,30 @@ class BlackboardState:
     # Metrics History Layer (Time-Series)
     # =========================================================================
     
-    async def record_metric(self, service: str, metric: str, value: float) -> None:
+    async def record_metric(
+        self,
+        service: str,
+        metric: str,
+        value: float,
+        source: str = "self-reported",
+    ) -> None:
         """
         Record a metric value with automatic retention trimming.
         
         Uses ZSET with timestamp as score for time-series queries.
+        
+        Args:
+            service: Service name
+            metric: Metric name (cpu, memory, error_rate)
+            value: Metric value
+            source: Data source ("self-reported" or "kubernetes")
         """
         key = f"darwin:metrics:{service}:{metric}"
         now = time.time()
         
-        # Add new value (score=timestamp, member=value as string)
-        # Using timestamp as member too to ensure uniqueness
-        await self.redis.zadd(key, {f"{now}:{value}": now})
+        # Add new value (score=timestamp, member="{timestamp}:{value}:{source}")
+        # Using timestamp in member to ensure uniqueness
+        await self.redis.zadd(key, {f"{now}:{value}:{source}": now})
         
         # Trim old values (older than retention window)
         cutoff = now - METRICS_RETENTION_SECONDS
@@ -223,9 +235,12 @@ class BlackboardState:
         
         points = []
         for member, score in results:
-            # Parse value from member (format: "timestamp:value")
-            _, value_str = member.split(":", 1)
-            points.append(MetricPoint(timestamp=score, value=float(value_str)))
+            # Parse value from member
+            # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
+            parts = member.split(":")
+            if len(parts) >= 2:
+                value_str = parts[1]
+                points.append(MetricPoint(timestamp=score, value=float(value_str)))
         
         return points
     
@@ -239,8 +254,13 @@ class BlackboardState:
             results = await self.redis.zrevrange(key, 0, 0, withscores=True)
             if results:
                 member, _ = results[0]
-                _, value_str = member.split(":", 1)
-                metrics[metric_name] = float(value_str)
+                # Parse value from member
+                # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
+                parts = member.split(":")
+                if len(parts) >= 2:
+                    metrics[metric_name] = float(parts[1])
+                else:
+                    metrics[metric_name] = 0.0
             else:
                 metrics[metric_name] = 0.0
         

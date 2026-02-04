@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "1b90c73" # Updated by CI to commit SHA
+  tag: "744fd79" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 
 replicaCount: 1
@@ -135,6 +135,16 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
   failureThreshold: 3
+
+# =============================================================================
+# Kubernetes Observer Configuration
+# =============================================================================
+
+observer:
+  enabled: true                  # Enable K8s metrics observer
+  namespace: "darwin"            # Namespace to watch for pods
+  interval: 30                   # Poll interval in seconds
+  labelSelector: ""              # Optional: filter pods by label (e.g., "app=darwin-store")
 
 # =============================================================================
 # Node Selection (optional)

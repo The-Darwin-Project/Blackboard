@@ -395,6 +395,79 @@ class Aligner:
         else:
             logger.debug(f"No Architect callback registered, skipping auto-analysis")
     
+    async def check_anomalies_for_service(
+        self,
+        service: str,
+        cpu: float,
+        memory: float,
+        source: str = "kubernetes",
+    ) -> None:
+        """
+        Check for anomalies from external metrics (e.g., Kubernetes observer).
+        
+        This is called by the KubernetesObserver with metrics from metrics-server.
+        Reuses the same threshold logic as _check_anomalies but for external sources.
+        
+        Args:
+            service: Service name
+            cpu: CPU usage percentage
+            memory: Memory usage percentage
+            source: Metrics source (for event metadata)
+        """
+        now = time.time()
+        
+        # Get or create anomaly state for this service
+        if service not in self._anomaly_state:
+            self._anomaly_state[service] = {"high_cpu": 0, "high_memory": 0, "high_error": 0, "active": set()}
+        
+        state = self._anomaly_state[service]
+        
+        # Check CPU threshold
+        if cpu >= CPU_THRESHOLD:
+            if "high_cpu" not in state["active"]:
+                if now - state["high_cpu"] > ANOMALY_COOLDOWN:
+                    state["high_cpu"] = now
+                    state["active"].add("high_cpu")
+                    
+                    await self.blackboard.record_event(
+                        EventType.HIGH_CPU_DETECTED,
+                        {"service": service, "cpu": cpu, "threshold": CPU_THRESHOLD, "source": source}
+                    )
+                    logger.warning(f"HIGH CPU detected ({source}): {service} at {cpu:.1f}%")
+                    
+                    await self._trigger_architect(service, "high_cpu")
+        else:
+            if "high_cpu" in state["active"]:
+                state["active"].remove("high_cpu")
+                await self.blackboard.record_event(
+                    EventType.ANOMALY_RESOLVED,
+                    {"service": service, "anomaly": "high_cpu", "cpu": cpu, "source": source}
+                )
+                logger.info(f"CPU anomaly resolved ({source}): {service} now at {cpu:.1f}%")
+        
+        # Check Memory threshold
+        if memory >= MEMORY_THRESHOLD:
+            if "high_memory" not in state["active"]:
+                if now - state["high_memory"] > ANOMALY_COOLDOWN:
+                    state["high_memory"] = now
+                    state["active"].add("high_memory")
+                    
+                    await self.blackboard.record_event(
+                        EventType.HIGH_MEMORY_DETECTED,
+                        {"service": service, "memory": memory, "threshold": MEMORY_THRESHOLD, "source": source}
+                    )
+                    logger.warning(f"HIGH MEMORY detected ({source}): {service} at {memory:.1f}%")
+                    
+                    await self._trigger_architect(service, "high_memory")
+        else:
+            if "high_memory" in state["active"]:
+                state["active"].remove("high_memory")
+                await self.blackboard.record_event(
+                    EventType.ANOMALY_RESOLVED,
+                    {"service": service, "anomaly": "high_memory", "memory": memory, "source": source}
+                )
+                logger.info(f"Memory anomaly resolved ({source}): {service} now at {memory:.1f}%")
+    
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""
         self.clear_expired_rules()

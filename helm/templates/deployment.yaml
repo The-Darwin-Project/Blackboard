@@ -19,6 +19,9 @@ spec:
         app: darwin-brain
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      {{- if .Values.observer.enabled }}
+      serviceAccountName: {{ .Release.Name }}-brain
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -72,6 +75,17 @@ spec:
             # Debug mode
             - name: DEBUG
               value: "{{ .Values.app.debug }}"
+            # Kubernetes Observer configuration
+            {{- if .Values.observer.enabled }}
+            - name: K8S_OBSERVER_ENABLED
+              value: "true"
+            - name: K8S_OBSERVER_NAMESPACE
+              value: "{{ .Values.observer.namespace }}"
+            - name: K8S_OBSERVER_INTERVAL
+              value: "{{ .Values.observer.interval }}"
+            - name: K8S_OBSERVER_LABEL_SELECTOR
+              value: "{{ .Values.observer.labelSelector }}"
+            {{- end }}
           {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS

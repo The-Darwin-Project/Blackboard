@@ -22,3 +22,6 @@ gitpython
 
 # YAML parsing (for Helm values)
 pyyaml
+
+# Kubernetes client (for K8s metrics observer)
+kubernetes

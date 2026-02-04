@@ -1,0 +1,21 @@
+# BlackBoard/helm/templates/rolebinding.yaml
+# Bind metrics-reader Role to brain ServiceAccount
+{{- if .Values.observer.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-metrics-reader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-metrics-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
