@@ -94,7 +94,7 @@ sysadmin:
     storageClassName: ""
     size: 1Gi
     accessModes:
-      - ReadWriteOnce
+      - ReadWriteMany
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
