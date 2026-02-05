@@ -9,13 +9,10 @@ image:
   repository: ghcr.io/the-darwin-project/blackboard
   tag: "193e664" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
-
 replicaCount: 1
-
 # =============================================================================
 # Redis Sidecar Configuration (registry.redhat.io/rhel9/redis-7)
 # =============================================================================
-
 redis:
   enabled: true
   image:
@@ -33,16 +30,14 @@ redis:
     limits:
       memory: 256Mi
       cpu: 200m
-
 # =============================================================================
 # Gemini CLI Sidecar Configuration
 # =============================================================================
-
 gemini:
   enabled: true
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "15e9574" # Updated by CI to commit SHA
+    tag: "22df431" # Updated by CI to commit SHA
   port: 9090
   resources:
     requests:
@@ -51,11 +46,9 @@ gemini:
     limits:
       memory: 512Mi
       cpu: 500m
-
 # =============================================================================
 # GCP / Vertex AI Configuration
 # =============================================================================
-
 gcp:
   project: "cnv-ai-insights" # Required: GCP project ID
   location: "global"
@@ -65,19 +58,15 @@ gcp:
   # Service account JSON can be mounted via secret
   # Set existingSecret to use a pre-created secret
   existingSecret: ""
-
 # =============================================================================
 # Service Configuration
 # =============================================================================
-
 service:
   type: ClusterIP
   port: 8000
-
 # =============================================================================
 # Route Configuration (OpenShift)
 # =============================================================================
-
 route:
   enabled: true
   # host: darwin-brain.apps.example.com  # Leave empty for auto-generated
@@ -86,20 +75,16 @@ route:
     enabled: true
     termination: edge # edge, passthrough, or reencrypt
     insecureEdgeTerminationPolicy: Redirect # Allow, Redirect, or None
-
 # =============================================================================
 # Application Metadata
 # =============================================================================
-
 app:
   name: "darwin-brain"
   version: "1.0.0"
   debug: false
-
 # =============================================================================
 # SysAdmin Agent Configuration
 # =============================================================================
-
 sysadmin:
   dryRun: false # Set to true for testing (no real changes)
   autoApprove: true # Enable closed-loop automation (only values-only changes are auto-approved)
@@ -110,11 +95,9 @@ sysadmin:
     size: 1Gi
     accessModes:
       - ReadWriteOnce
-
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
-
 github:
   # The GitHub App secret containing:
   # - app-id: GitHub App ID
@@ -125,11 +108,9 @@ github:
   repository: "The-Darwin-Project/gitops"
   # Branch to use
   branch: "main"
-
 # =============================================================================
 # Resource Limits
 # =============================================================================
-
 resources:
   requests:
     memory: 256Mi
@@ -137,14 +118,11 @@ resources:
   limits:
     memory: 512Mi
     cpu: 500m
-
 # =============================================================================
 # Security Context (OpenShift compatible)
 # =============================================================================
-
 podSecurityContext:
   fsGroup: 1001
-
 securityContext:
   runAsNonRoot: true
   # OpenShift assigns arbitrary UID from namespace range
@@ -154,11 +132,9 @@ securityContext:
   capabilities:
     drop:
       - ALL
-
 # =============================================================================
 # Probes
 # =============================================================================
-
 livenessProbe:
   httpGet:
     path: /health
@@ -166,7 +142,6 @@ livenessProbe:
   initialDelaySeconds: 10
   periodSeconds: 30
   failureThreshold: 3
-
 readinessProbe:
   httpGet:
     path: /health
@@ -174,21 +149,17 @@ readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
   failureThreshold: 3
-
 # =============================================================================
 # Kubernetes Observer Configuration
 # =============================================================================
-
 observer:
   enabled: true # Enable K8s metrics observer
   namespace: "darwin" # Namespace to watch for pods
   interval: 30 # Poll interval in seconds
   labelSelector: "" # Optional: filter pods by label (e.g., "app=darwin-store")
-
 # =============================================================================
 # Node Selection (optional)
 # =============================================================================
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
