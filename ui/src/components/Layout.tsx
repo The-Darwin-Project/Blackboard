@@ -18,9 +18,9 @@ function Layout() {
   const ConnectionIcon = isOnline ? Wifi : WifiOff;
 
   return (
-    <div className="min-h-screen bg-bg-primary flex flex-col">
+    <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="bg-bg-secondary border-b border-border px-6 py-3 flex items-center justify-between">
+      <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
             <Activity className="w-5 h-5 text-white" />
@@ -47,7 +47,7 @@ function Layout() {
       </main>
 
       {/* Footer */}
-      <footer className="bg-bg-secondary border-t border-border px-6 py-2">
+      <footer className="flex-shrink-0 bg-bg-secondary border-t border-border px-6 py-2">
         <p className="text-xs text-text-muted text-center">
           Darwin Brain v1.0.0 • Trinity Agents: Aligner, Architect, SysAdmin
         </p>

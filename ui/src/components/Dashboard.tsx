@@ -83,10 +83,10 @@ function Dashboard() {
     <div ref={containerRef} className="h-full flex p-4 overflow-hidden">
       {/* Left Column: Agent Activity (Sidebar) - Resizable */}
       <div 
-        className="flex-shrink-0 bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col"
+        className="flex-shrink-0 h-full bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col"
         style={{ width: sidebarWidth }}
       >
-        <div className="px-4 py-3 border-b border-border">
+        <div className="flex-shrink-0 px-4 py-3 border-b border-border">
           <h2 className="text-sm font-semibold text-text-primary">Agent Activity</h2>
           <p className="text-xs text-text-muted">Thought stream & plan management</p>
         </div>
