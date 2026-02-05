@@ -308,6 +308,9 @@ class BlackboardState:
         """
         topology = await self.get_topology()
         
+        # Debug: Log all services being processed
+        logger.debug(f"Building graph with {len(topology.services)} services: {sorted(topology.services)}")
+        
         # Build nodes with health status
         nodes: list[GraphNode] = []
         for service_name in topology.services:
@@ -322,6 +325,13 @@ class BlackboardState:
             
             health = calculate_health_status(cpu, memory, error_rate, last_seen)
             node_type = infer_node_type(service_name)
+            
+            # Debug: Log postgres specifically
+            if "postgres" in service_name.lower():
+                logger.debug(
+                    f"Adding postgres node: name={service_name}, type={node_type}, "
+                    f"cpu={cpu}, memory={memory}, health={health}"
+                )
             
             nodes.append(GraphNode(
                 id=service_name,
@@ -369,6 +379,12 @@ class BlackboardState:
                     f"Skipping ghost node for plan {plan.id}: "
                     f"target service '{plan.service}' not in graph"
                 )
+        
+        # Debug: Log final graph state
+        logger.debug(
+            f"Graph response: {len(nodes)} nodes, {len(edges)} edges, {len(ghost_nodes)} ghost nodes. "
+            f"Node IDs: {[n.id for n in nodes]}"
+        )
         
         return GraphResponse(nodes=nodes, edges=edges, plans=ghost_nodes)
     

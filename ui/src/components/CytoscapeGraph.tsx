@@ -7,12 +7,14 @@
  * - Node type icons (service/database/cache/external)
  * - Ghost nodes for pending plans
  * - cose-bilkent auto-layout
+ * - Navigation controls (zoom in/out/reset, pan)
+ * - View state persistence in localStorage
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
 import cytoscape from 'cytoscape';
 import coseBilkent from 'cytoscape-cose-bilkent';
 import nodeHtmlLabel from 'cytoscape-node-html-label';
-import { Loader2, Network } from 'lucide-react';
+import { Loader2, Network, ZoomIn, ZoomOut, RotateCcw, Maximize2 } from 'lucide-react';
 import { useGraph } from '../hooks';
 import type { GraphNode, GhostNode, HealthStatus, NodeType } from '../api/types';
 
@@ -69,6 +71,14 @@ const LAYOUT_OPTIONS = extensionsRegistered
       gravity: 0.3,
     };
 
+// LocalStorage key for view state persistence
+const VIEW_STATE_KEY = 'darwin:graph:view';
+
+interface ViewState {
+  zoom: number;
+  pan: { x: number; y: number };
+}
+
 interface CytoscapeGraphProps {
   onNodeClick?: (serviceName: string) => void;
   onPlanClick?: (planId: string) => void;
@@ -79,6 +89,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cyRef = useRef<any>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [hasUserInteracted, setHasUserInteracted] = useState(false);
   const { data, isLoading, isError } = useGraph();
 
   // Debug: Log render state
@@ -138,6 +149,64 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       </div>
     `;
   }, []);
+
+  // Load view state from localStorage
+  const loadViewState = useCallback((): ViewState | null => {
+    try {
+      const stored = localStorage.getItem(VIEW_STATE_KEY);
+      if (stored) {
+        return JSON.parse(stored) as ViewState;
+      }
+    } catch (err) {
+      console.warn('[CytoscapeGraph] Failed to load view state:', err);
+    }
+    return null;
+  }, []);
+
+  // Save view state to localStorage
+  const saveViewState = useCallback((cy: any) => {
+    try {
+      const zoom = cy.zoom();
+      const pan = cy.pan();
+      const viewState: ViewState = { zoom, pan };
+      localStorage.setItem(VIEW_STATE_KEY, JSON.stringify(viewState));
+    } catch (err) {
+      console.warn('[CytoscapeGraph] Failed to save view state:', err);
+    }
+  }, []);
+
+  // Navigation controls
+  const handleZoomIn = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.zoom({ level: cy.zoom() * 1.2, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+    saveViewState(cy);
+    setHasUserInteracted(true);
+  }, [saveViewState]);
+
+  const handleZoomOut = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.zoom({ level: cy.zoom() * 0.8, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
+    saveViewState(cy);
+    setHasUserInteracted(true);
+  }, [saveViewState]);
+
+  const handleReset = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.fit(undefined, 30);
+    saveViewState(cy);
+    setHasUserInteracted(true);
+  }, [saveViewState]);
+
+  const handleFit = useCallback(() => {
+    const cy = cyRef.current;
+    if (!cy) return;
+    cy.fit(undefined, 30);
+    saveViewState(cy);
+    setHasUserInteracted(true);
+  }, [saveViewState]);
 
   // Initialize Cytoscape (when we have data and container is mounted)
   // This effect runs when data changes - container is only rendered when data.nodes.length > 0
@@ -259,15 +328,26 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     setIsInitialized(true);
     console.log('[CytoscapeGraph] Cytoscape initialized successfully');
 
+    // Save view state on pan/zoom
+    const handlePanZoom = () => {
+      saveViewState(cy);
+      setHasUserInteracted(true);
+    };
+    cy.on('pan', handlePanZoom);
+    cy.on('zoom', handlePanZoom);
+
     return () => {
+      cy.off('pan', handlePanZoom);
+      cy.off('zoom', handlePanZoom);
       // Clean up HTML labels before destroying Cytoscape
       cleanupHtmlLabels();
       cy.destroy();
       cyRef.current = null;
       setIsInitialized(false);
+      setHasUserInteracted(false);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.nodes?.length]);
+  }, [data?.nodes?.length, saveViewState]);
 
   // Helper to clean up HTML labels (prevents memory leaks)
   const cleanupHtmlLabels = useCallback(() => {
@@ -309,6 +389,12 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     if (!cy || !data || !isInitialized) return;
 
     console.log('[CytoscapeGraph] Updating graph with data:', data);
+
+    // Save current view state before update (if user has interacted)
+    const previousViewState = hasUserInteracted ? {
+      zoom: cy.zoom(),
+      pan: cy.pan(),
+    } : null;
 
     // Build elements
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -466,8 +552,24 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       cy.layout({ name: 'grid' }).run();
     }
 
-    // Fit to viewport with padding
-    cy.fit(undefined, 30);
+    // Restore view state: preserve user's view if they've interacted, otherwise fit to viewport
+    const savedViewState = loadViewState();
+    if (previousViewState) {
+      // User has interacted: restore their previous view state
+      cy.zoom(previousViewState.zoom);
+      cy.pan(previousViewState.pan);
+      console.log('[CytoscapeGraph] Restored previous view state (zoom:', previousViewState.zoom, ')');
+    } else if (savedViewState) {
+      // No current interaction but we have saved state: restore from localStorage
+      cy.zoom(savedViewState.zoom);
+      cy.pan(savedViewState.pan);
+      console.log('[CytoscapeGraph] Restored saved view state from localStorage');
+    } else {
+      // First load: fit to viewport with padding
+      cy.fit(undefined, 30);
+      saveViewState(cy);
+      console.log('[CytoscapeGraph] Fitted to viewport (initial load)');
+    }
 
     // Debug: Log final state
     console.log('[CytoscapeGraph] Graph updated. Nodes:', cy.nodes().length, 'Edges:', cy.edges().length);
@@ -476,7 +578,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       console.log('[CytoscapeGraph] Node position:', node.id(), pos);
     });
 
-  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, cleanupHtmlLabels]);
+  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, cleanupHtmlLabels, hasUserInteracted, loadViewState, saveViewState]);
 
   if (isLoading) {
     console.log('[CytoscapeGraph] Rendering: LOADING');
@@ -511,11 +613,50 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
 
   console.log('[CytoscapeGraph] Rendering: CONTAINER (nodes:', data.nodes.length, ')');
   return (
-    <div
-      ref={containerRef}
-      className="w-full h-full"
-      style={{ minHeight: '300px', height: '100%' }}
-    />
+    <div className="relative w-full h-full" style={{ minHeight: '300px', height: '100%' }}>
+      {/* Graph Container */}
+      <div
+        ref={containerRef}
+        className="w-full h-full"
+      />
+      
+      {/* Navigation Controls */}
+      <div className="absolute top-4 right-4 flex flex-col gap-2 bg-bg-secondary/90 backdrop-blur-sm border border-border rounded-lg p-2 shadow-lg">
+        <button
+          onClick={handleZoomIn}
+          className="p-2 hover:bg-bg-hover rounded transition-colors"
+          title="Zoom In"
+          aria-label="Zoom In"
+        >
+          <ZoomIn className="w-4 h-4 text-text-primary" />
+        </button>
+        <button
+          onClick={handleZoomOut}
+          className="p-2 hover:bg-bg-hover rounded transition-colors"
+          title="Zoom Out"
+          aria-label="Zoom Out"
+        >
+          <ZoomOut className="w-4 h-4 text-text-primary" />
+        </button>
+        <div className="h-px bg-border my-1" />
+        <button
+          onClick={handleFit}
+          className="p-2 hover:bg-bg-hover rounded transition-colors"
+          title="Fit to View"
+          aria-label="Fit to View"
+        >
+          <Maximize2 className="w-4 h-4 text-text-primary" />
+        </button>
+        <button
+          onClick={handleReset}
+          className="p-2 hover:bg-bg-hover rounded transition-colors"
+          title="Reset View"
+          aria-label="Reset View"
+        >
+          <RotateCcw className="w-4 h-4 text-text-primary" />
+        </button>
+      </div>
+    </div>
   );
 }
 

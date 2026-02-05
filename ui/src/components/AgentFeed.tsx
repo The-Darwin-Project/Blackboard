@@ -52,9 +52,9 @@ function AgentFeed() {
   const isLoading = eventsLoading || plansLoading;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Scrollable Feed */}
-      <div className="flex-1 overflow-auto p-3 space-y-3">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3 min-h-0">
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="w-6 h-6 text-accent animate-spin" />
@@ -92,8 +92,10 @@ function AgentFeed() {
         )}
       </div>
 
-      {/* Chat Input */}
-      <ChatInput />
+      {/* Chat Input - Fixed at bottom */}
+      <div className="flex-shrink-0">
+        <ChatInput />
+      </div>
     </div>
   );
 }
