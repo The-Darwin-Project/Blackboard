@@ -37,7 +37,7 @@ gemini:
   enabled: true
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "46a641a" # Updated by CI to commit SHA
+    tag: "7b07ed3" # Updated by CI to commit SHA
   port: 9090
   resources:
     requests:
