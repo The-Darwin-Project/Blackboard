@@ -18,3 +18,23 @@ spec:
     requests:
       storage: {{ .Values.redis.persistence.size }}
 {{- end }}
+{{- if .Values.sysadmin.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-gitops-data
+  labels:
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: gitops
+spec:
+  accessModes:
+{{ toYaml .Values.sysadmin.persistence.accessModes | indent 4 }}
+  {{- if .Values.sysadmin.persistence.storageClassName }}
+  storageClassName: {{ .Values.sysadmin.persistence.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.sysadmin.persistence.size }}
+{{- end }}

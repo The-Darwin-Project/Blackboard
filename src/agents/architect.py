@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 # import git  # FORBIDDEN
 # import subprocess  # FORBIDDEN
 
-from ..models import ChatResponse, PlanAction, PlanCreate, Plan
+from ..models import ChatResponse, ConversationMessage, PlanAction, PlanCreate, Plan
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -220,12 +220,24 @@ class Architect:
         
         return None
     
-    async def chat(self, message: str) -> ChatResponse:
+    async def chat(
+        self,
+        message: str,
+        conversation_id: Optional[str] = None,
+    ) -> ChatResponse:
         """
-        Process a chat message from the operator.
+        Process a chat message from the operator with conversation history.
         
         The Architect will analyze the request, check current state,
         and potentially create a plan using Function Calling.
+        
+        Args:
+            message: User's message
+            conversation_id: Optional conversation ID for multi-turn context.
+                           If not provided, a new conversation is created.
+        
+        Returns:
+            ChatResponse with message, plan_id, and conversation_id
         """
         # Fail fast if Vertex AI is not configured
         if not self.project:
@@ -234,7 +246,16 @@ class Architect:
                 message="Architect is disabled: GCP_PROJECT environment variable is not configured. "
                         "Set gcp.project in Helm values to enable AI-powered analysis.",
                 plan_id=None,
+                conversation_id=None,
             )
+        
+        # Create or validate conversation
+        if not conversation_id:
+            conversation_id = await self.blackboard.create_conversation()
+            logger.info(f"Created new conversation: {conversation_id}")
+        
+        # Load conversation history
+        history = await self.blackboard.get_conversation(conversation_id)
         
         model = await self._get_model()
         
@@ -242,11 +263,16 @@ class Architect:
         context = await self._build_context()
         system_prompt = ARCHITECT_SYSTEM_PROMPT.format(context=context)
         
+        # Build messages list including history
+        messages = [system_prompt]
+        for msg in history:
+            role_prefix = "User" if msg.role == "user" else "Assistant"
+            messages.append(f"\n{role_prefix}: {msg.content}")
+        messages.append(f"\nUser request: {message}")
+        
         try:
             # Generate response with potential function calls
-            response = await model.generate_content_async(
-                [system_prompt, f"\nUser request: {message}"],
-            )
+            response = await model.generate_content_async(messages)
             
             plan_id = None
             
@@ -267,13 +293,28 @@ class Architect:
             else:
                 text_response = "I've analyzed your request but couldn't generate a specific action. Please provide more details."
             
-            return ChatResponse(message=text_response, plan_id=plan_id)
+            # Save messages to conversation history
+            await self.blackboard.append_to_conversation(
+                conversation_id,
+                ConversationMessage(role="user", content=message)
+            )
+            await self.blackboard.append_to_conversation(
+                conversation_id,
+                ConversationMessage(role="assistant", content=text_response)
+            )
+            
+            return ChatResponse(
+                message=text_response,
+                plan_id=plan_id,
+                conversation_id=conversation_id,
+            )
         
         except Exception as e:
             logger.error(f"Architect chat error: {e}")
             return ChatResponse(
                 message=f"I encountered an error processing your request: {e}",
                 plan_id=None,
+                conversation_id=conversation_id,
             )
     
     async def analyze(self, service: Optional[str] = None) -> dict:

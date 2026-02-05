@@ -91,12 +91,16 @@ spec:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
             {{- end }}
-          {{- if .Values.gcp.existingSecret }}
           volumeMounts:
+            {{- if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
-          {{- end }}
+            {{- end }}
+            {{- if .Values.sysadmin.persistence.enabled }}
+            - name: gitops-data
+              mountPath: {{ .Values.sysadmin.gitRepoPath }}
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
@@ -148,6 +152,11 @@ spec:
         - name: redis-data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
+        {{- end }}
+        {{- if .Values.sysadmin.persistence.enabled }}
+        - name: gitops-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-gitops-data
         {{- end }}
       
       {{- with .Values.nodeSelector }}

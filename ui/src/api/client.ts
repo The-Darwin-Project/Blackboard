@@ -155,12 +155,14 @@ export async function rejectPlan(id: string, reason = ''): Promise<Plan> {
 export async function getEvents(
   limit = 100,
   startTime?: number,
-  endTime?: number
+  endTime?: number,
+  service?: string
 ): Promise<ArchitectureEvent[]> {
   const params = new URLSearchParams();
   params.append('limit', limit.toString());
   if (startTime !== undefined) params.append('start_time', startTime.toString());
   if (endTime !== undefined) params.append('end_time', endTime.toString());
+  if (service !== undefined) params.append('service', service);
   
   return fetchApi<ArchitectureEvent[]>(`/events/?${params.toString()}`);
 }
@@ -169,8 +171,14 @@ export async function getEvents(
 // Chat API
 // =============================================================================
 
-export async function sendChatMessage(message: string): Promise<ChatResponse> {
-  const request: ChatRequest = { message };
+export async function sendChatMessage(
+  message: string,
+  conversationId?: string | null
+): Promise<ChatResponse> {
+  const request: ChatRequest = {
+    message,
+    conversation_id: conversationId ?? undefined,
+  };
   return fetchApi<ChatResponse>('/chat/', {
     method: 'POST',
     body: JSON.stringify(request),

@@ -143,7 +143,8 @@ async def lifespan(app: FastAPI):
                             "trigger": anomaly_type,
                             "response": response.message[:500],
                             "plan_created": False,
-                        }
+                        },
+                        narrative=f"Analyzing the {anomaly_type.replace('_', ' ')} anomaly on {service}. {response.message[:150]}",
                     )
                     logger.warning(
                         f"Architect did NOT create a plan for {service} ({anomaly_type}). "
@@ -160,7 +161,8 @@ async def lifespan(app: FastAPI):
                         "trigger": anomaly_type,
                         "error": str(e),
                         "plan_created": False,
-                    }
+                    },
+                    narrative=f"Analysis of {anomaly_type.replace('_', ' ')} on {service} encountered an error: {str(e)[:100]}",
                 )
         
         aligner.set_architect_callback(architect_anomaly_callback)
@@ -197,7 +199,8 @@ async def lifespan(app: FastAPI):
                     # Record SysAdmin executing event
                     await blackboard.record_event(
                         EventType.SYSADMIN_EXECUTING,
-                        {"plan_id": plan.id, "service": plan.service, "action": plan.action.value}
+                        {"plan_id": plan.id, "service": plan.service, "action": plan.action.value},
+                        narrative=f"Executing approved plan: {plan.action.value} on {plan.service}...",
                     )
                     logger.info(f"SysAdmin auto-executing plan {plan.id}")
                     
@@ -207,10 +210,18 @@ async def lifespan(app: FastAPI):
                     # Mark as completed
                     await blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
                     
-                    # Record completion event
+                    # Record completion event with enhanced details
                     await blackboard.record_event(
                         EventType.PLAN_EXECUTED,
-                        {"plan_id": plan.id, "service": plan.service, "result": result[:200] if result else ""}
+                        {
+                            "plan_id": plan.id,
+                            "service": plan.service,
+                            "action": plan.action.value,
+                            "status": "success",
+                            "summary": f"{plan.action.value} {plan.service}",
+                            "result": result[:500] if result else "",
+                        },
+                        narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
                     )
                     logger.info(f"Plan {plan.id} auto-executed successfully")
                     
@@ -218,10 +229,17 @@ async def lifespan(app: FastAPI):
                     # Mark as failed
                     await blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=str(e))
                     
-                    # Record failure event
+                    # Record failure event with enhanced details
                     await blackboard.record_event(
                         EventType.PLAN_FAILED,
-                        {"plan_id": plan.id, "service": plan.service, "error": str(e)}
+                        {
+                            "plan_id": plan.id,
+                            "service": plan.service,
+                            "action": plan.action.value,
+                            "status": "failed",
+                            "error": str(e)[:500],
+                        },
+                        narrative=f"Failed to execute plan for {plan.service}: {str(e)[:100]}",
                     )
                     logger.error(f"Plan {plan.id} auto-execution failed: {e}")
             else:

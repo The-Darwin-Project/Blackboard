@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -213,6 +213,7 @@ class ArchitectureEvent(BaseModel):
     type: EventType
     timestamp: float = Field(default_factory=time.time)
     details: dict[str, Any] = Field(default_factory=dict)
+    narrative: Optional[str] = None  # Human-readable explanation of the event
 
 
 # =============================================================================
@@ -247,6 +248,17 @@ class ChartData(BaseModel):
 
 
 # =============================================================================
+# Conversation History
+# =============================================================================
+
+class ConversationMessage(BaseModel):
+    """A single message in a conversation."""
+    role: Literal["user", "assistant"]
+    content: str
+    timestamp: float = Field(default_factory=time.time)
+
+
+# =============================================================================
 # API Response Models
 # =============================================================================
 
@@ -258,9 +270,11 @@ class HealthResponse(BaseModel):
 class ChatRequest(BaseModel):
     """Chat request to Architect."""
     message: str = Field(..., description="User intent (e.g., 'Scale inventory-api to 3 replicas')")
+    conversation_id: Optional[str] = Field(None, description="Conversation ID for multi-turn context")
 
 
 class ChatResponse(BaseModel):
     """Chat response from Architect."""
     message: str
     plan_id: Optional[str] = None
+    conversation_id: Optional[str] = Field(None, description="Conversation ID for follow-up messages")

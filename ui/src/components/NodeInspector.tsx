@@ -1,11 +1,27 @@
 // BlackBoard/ui/src/components/NodeInspector.tsx
 /**
  * Slide-over drawer for service details and plan actions.
- * Shows metrics, dependencies, and plan approval buttons.
+ * Shows metrics, dependencies, recent events, and plan approval buttons.
  */
-import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch, CheckCircle, XCircle, Ghost, FileText } from 'lucide-react';
-import { useService, usePlans, useApprovePlan, useRejectPlan } from '../hooks';
-import type { Plan } from '../api/types';
+import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch, CheckCircle, XCircle, Ghost, FileText, Zap } from 'lucide-react';
+import { useService, usePlans, useApprovePlan, useRejectPlan, useEvents } from '../hooks';
+import type { Plan, ArchitectureEvent } from '../api/types';
+
+// Event type to human-readable label mapping
+const EVENT_LABELS: Record<string, string> = {
+  service_discovered: 'Discovered',
+  high_cpu_detected: 'High CPU',
+  high_memory_detected: 'High Memory',
+  high_error_rate_detected: 'High Error Rate',
+  deployment_detected: 'Deployment',
+  anomaly_resolved: 'Resolved',
+  architect_analyzing: 'Analyzing',
+  plan_created: 'Plan Created',
+  plan_approved: 'Plan Approved',
+  plan_executed: 'Plan Executed',
+  plan_failed: 'Plan Failed',
+  sysadmin_executing: 'Executing',
+};
 
 interface NodeInspectorProps {
   serviceName: string | null;
@@ -16,6 +32,7 @@ interface NodeInspectorProps {
 function NodeInspector({ serviceName, planId, onClose }: NodeInspectorProps) {
   const { data: service, isLoading } = useService(serviceName);
   const { data: plans } = usePlans();
+  const { data: events } = useEvents(50, serviceName ?? undefined);  // Filter events by service
   const { mutate: approvePlan, isPending: isApproving } = useApprovePlan();
   const { mutate: rejectPlan, isPending: isRejecting } = useRejectPlan();
 
@@ -228,6 +245,21 @@ function NodeInspector({ serviceName, planId, onClose }: NodeInspectorProps) {
                   </div>
                 </div>
               )}
+
+              {/* Recent Events */}
+              {events && events.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-medium text-text-secondary flex items-center gap-2">
+                    <Zap className="w-4 h-4" />
+                    Recent Events
+                  </h4>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {events.slice(0, 10).map((event) => (
+                      <EventItem key={`${event.type}-${event.timestamp}`} event={event} />
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div className="text-center text-text-muted py-8">
@@ -269,6 +301,37 @@ function MetricBar({ icon, label, value, color, threshold }: MetricBarProps) {
           style={{ width: `${Math.min(value, 100)}%` }}
         />
       </div>
+    </div>
+  );
+}
+
+interface EventItemProps {
+  event: ArchitectureEvent;
+}
+
+function EventItem({ event }: EventItemProps) {
+  const label = EVENT_LABELS[event.type] || event.type;
+  const time = new Date(event.timestamp * 1000).toLocaleTimeString();
+  const isCritical = event.type.includes('failed') || event.type.includes('high_error');
+  const isWarning = event.type.includes('high_cpu') || event.type.includes('high_memory');
+  const isSuccess = event.type.includes('resolved') || event.type.includes('executed');
+
+  return (
+    <div className="bg-bg-primary rounded p-2 text-xs">
+      <div className="flex items-center justify-between">
+        <span className={`font-medium ${
+          isCritical ? 'text-status-critical' :
+          isWarning ? 'text-status-warning' :
+          isSuccess ? 'text-status-healthy' :
+          'text-text-primary'
+        }`}>
+          {label}
+        </span>
+        <span className="text-text-muted">{time}</span>
+      </div>
+      {event.narrative && (
+        <p className="text-text-secondary mt-1 line-clamp-2">{event.narrative}</p>
+      )}
     </div>
   );
 }

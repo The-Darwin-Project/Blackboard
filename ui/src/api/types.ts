@@ -40,7 +40,9 @@ export type EventType =
   | 'plan_executed'
   | 'plan_failed'
   // Architect autonomous
-  | 'architect_analyzing';
+  | 'architect_analyzing'
+  // SysAdmin execution
+  | 'sysadmin_executing';
 
 // =============================================================================
 // Service & Topology
@@ -169,6 +171,7 @@ export interface ArchitectureEvent {
   type: EventType;
   timestamp: number;
   details: Record<string, unknown>;
+  narrative?: string;  // Human-readable explanation of the event
 }
 
 // =============================================================================
@@ -186,11 +189,13 @@ export interface ChartData {
 
 export interface ChatRequest {
   message: string;
+  conversation_id?: string | null;
 }
 
 export interface ChatResponse {
   message: string;
   plan_id: string | null;
+  conversation_id: string | null;
 }
 
 // =============================================================================
@@ -225,6 +230,7 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     case 'architect_analyzing':
       return 'architect';
     // SysAdmin events (execution)
+    case 'sysadmin_executing':
     case 'plan_executed':
     case 'plan_failed':
       return 'sysadmin';

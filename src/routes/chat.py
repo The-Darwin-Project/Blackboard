@@ -33,17 +33,25 @@ async def chat_with_architect(
     The Architect analyzes the current topology and metrics,
     then generates a structured plan if appropriate.
     
+    Supports multi-turn conversations via conversation_id:
+    - First message: omit conversation_id, server generates one
+    - Follow-up messages: include conversation_id from previous response
+    
     Examples:
         - "Scale inventory-api to 3 replicas"
         - "What's the current state of the system?"
         - "Optimize postgres for high traffic"
     """
     try:
-        response = await architect.chat(request.message)
+        response = await architect.chat(
+            request.message,
+            conversation_id=request.conversation_id,
+        )
         
         logger.info(
             f"Architect response: {response.message[:100]}..."
             f" plan_id={response.plan_id}"
+            f" conversation_id={response.conversation_id}"
         )
         
         return response

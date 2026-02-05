@@ -2,6 +2,7 @@
 /**
  * TanStack Query hook for events data.
  * Fetches /events/ for agent activity stream.
+ * Supports optional service filtering.
  */
 import { useQuery } from '@tanstack/react-query';
 import { getEvents } from '../api/client';
@@ -12,11 +13,13 @@ const EVENTS_POLL_INTERVAL = 5000;
 
 /**
  * Hook for fetching architecture events.
+ * @param limit - Maximum number of events to fetch (default: 100)
+ * @param service - Optional service name to filter events by
  */
-export function useEvents(limit = 100) {
+export function useEvents(limit = 100, service?: string) {
   return useQuery<ArchitectureEvent[]>({
-    queryKey: ['events', limit],
-    queryFn: () => getEvents(limit),
+    queryKey: ['events', limit, service],  // Include service in cache key
+    queryFn: () => getEvents(limit, undefined, undefined, service),
     refetchInterval: EVENTS_POLL_INTERVAL,
     staleTime: EVENTS_POLL_INTERVAL,
   });

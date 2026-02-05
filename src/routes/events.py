@@ -21,6 +21,7 @@ router = APIRouter(prefix="/events", tags=["events"])
 async def list_events(
     start_time: Optional[float] = Query(None, description="Filter events after this timestamp"),
     end_time: Optional[float] = Query(None, description="Filter events before this timestamp"),
+    service: Optional[str] = Query(None, description="Filter by service name"),
     limit: int = Query(100, ge=1, le=1000, description="Max events to return"),
     blackboard: BlackboardState = Depends(get_blackboard),
 ) -> List[ArchitectureEvent]:
@@ -29,7 +30,10 @@ async def list_events(
     
     Events are sorted by timestamp descending (most recent first).
     """
-    events = await blackboard.get_events_in_range(start_time, end_time)
+    if service:
+        events = await blackboard.get_events_for_service(service, start_time, end_time)
+    else:
+        events = await blackboard.get_events_in_range(start_time, end_time)
     
     # Sort by timestamp descending (most recent first)
     events.sort(key=lambda e: e.timestamp, reverse=True)

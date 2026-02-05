@@ -276,7 +276,8 @@ class Aligner:
             self._service_versions[payload.service] = payload.version
             await self.blackboard.record_event(
                 EventType.SERVICE_DISCOVERED,
-                {"service": payload.service, "version": payload.version}
+                {"service": payload.service, "version": payload.version},
+                narrative=f"I discovered a new service '{payload.service}' (v{payload.version}) reporting telemetry.",
             )
             logger.info(f"New service discovered: {payload.service} v{payload.version}")
         
@@ -289,7 +290,8 @@ class Aligner:
                     "service": payload.service,
                     "old_version": last_version,
                     "new_version": payload.version,
-                }
+                },
+                narrative=f"Detected deployment: {payload.service} updated from v{last_version} to v{payload.version}.",
             )
             logger.info(
                 f"DEPLOYMENT DETECTED: {payload.service} "
@@ -330,7 +332,8 @@ class Aligner:
                     
                     await self.blackboard.record_event(
                         EventType.HIGH_CPU_DETECTED,
-                        {"service": service, "cpu": payload.metrics.cpu, "threshold": CPU_THRESHOLD}
+                        {"service": service, "cpu": payload.metrics.cpu, "threshold": CPU_THRESHOLD},
+                        narrative=f"Warning: {service} CPU usage ({payload.metrics.cpu:.1f}%) exceeds the {CPU_THRESHOLD:.0f}% threshold. Escalating to Architect for analysis.",
                     )
                     logger.warning(f"HIGH CPU detected: {service} at {payload.metrics.cpu:.1f}%")
                     
@@ -342,7 +345,8 @@ class Aligner:
                 state["active"].remove("high_cpu")
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_cpu", "cpu": payload.metrics.cpu}
+                    {"service": service, "anomaly": "high_cpu", "cpu": payload.metrics.cpu},
+                    narrative=f"Good news: The high CPU issue on {service} has returned to normal levels ({payload.metrics.cpu:.1f}%).",
                 )
                 logger.info(f"CPU anomaly resolved: {service} now at {payload.metrics.cpu:.1f}%")
         
@@ -355,7 +359,8 @@ class Aligner:
                     
                     await self.blackboard.record_event(
                         EventType.HIGH_MEMORY_DETECTED,
-                        {"service": service, "memory": payload.metrics.memory, "threshold": MEMORY_THRESHOLD}
+                        {"service": service, "memory": payload.metrics.memory, "threshold": MEMORY_THRESHOLD},
+                        narrative=f"Warning: {service} memory usage ({payload.metrics.memory:.1f}%) exceeds the {MEMORY_THRESHOLD:.0f}% threshold.",
                     )
                     logger.warning(f"HIGH MEMORY detected: {service} at {payload.metrics.memory:.1f}%")
                     
@@ -367,7 +372,8 @@ class Aligner:
                 state["active"].remove("high_memory")
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_memory", "memory": payload.metrics.memory}
+                    {"service": service, "anomaly": "high_memory", "memory": payload.metrics.memory},
+                    narrative=f"Good news: The high memory issue on {service} has returned to normal levels ({payload.metrics.memory:.1f}%).",
                 )
                 logger.info(f"Memory anomaly resolved: {service} now at {payload.metrics.memory:.1f}%")
         
@@ -380,7 +386,8 @@ class Aligner:
                     
                     await self.blackboard.record_event(
                         EventType.HIGH_ERROR_RATE_DETECTED,
-                        {"service": service, "error_rate": payload.metrics.error_rate, "threshold": ERROR_RATE_THRESHOLD}
+                        {"service": service, "error_rate": payload.metrics.error_rate, "threshold": ERROR_RATE_THRESHOLD},
+                        narrative=f"Alert: {service} error rate ({payload.metrics.error_rate:.2f}%) is critically high! Immediate attention required.",
                     )
                     logger.warning(f"HIGH ERROR RATE detected: {service} at {payload.metrics.error_rate:.2f}%")
                     
@@ -392,7 +399,8 @@ class Aligner:
                 state["active"].remove("high_error")
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_error_rate", "error_rate": payload.metrics.error_rate}
+                    {"service": service, "anomaly": "high_error_rate", "error_rate": payload.metrics.error_rate},
+                    narrative=f"Good news: The high error rate issue on {service} has returned to normal levels ({payload.metrics.error_rate:.2f}%).",
                 )
                 logger.info(f"Error rate anomaly resolved: {service} now at {payload.metrics.error_rate:.2f}%")
     
@@ -403,7 +411,8 @@ class Aligner:
                 # Record that Architect is analyzing
                 await self.blackboard.record_event(
                     EventType.ARCHITECT_ANALYZING,
-                    {"service": service, "trigger": anomaly_type}
+                    {"service": service, "trigger": anomaly_type},
+                    narrative=f"I'm escalating the {anomaly_type.replace('_', ' ')} issue on {service} to the Architect for root cause analysis.",
                 )
                 
                 # Fire and forget - don't block telemetry processing
@@ -450,7 +459,8 @@ class Aligner:
                     
                     await self.blackboard.record_event(
                         EventType.HIGH_CPU_DETECTED,
-                        {"service": service, "cpu": cpu, "threshold": CPU_THRESHOLD, "source": source}
+                        {"service": service, "cpu": cpu, "threshold": CPU_THRESHOLD, "source": source},
+                        narrative=f"Warning: {service} CPU usage ({cpu:.1f}%) exceeds the {CPU_THRESHOLD:.0f}% threshold. Escalating to Architect for analysis.",
                     )
                     logger.warning(f"HIGH CPU detected ({source}): {service} at {cpu:.1f}%")
                     
@@ -460,7 +470,8 @@ class Aligner:
                 state["active"].remove("high_cpu")
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_cpu", "cpu": cpu, "source": source}
+                    {"service": service, "anomaly": "high_cpu", "cpu": cpu, "source": source},
+                    narrative=f"Good news: The high CPU issue on {service} has returned to normal levels ({cpu:.1f}%).",
                 )
                 logger.info(f"CPU anomaly resolved ({source}): {service} now at {cpu:.1f}%")
         
@@ -473,7 +484,8 @@ class Aligner:
                     
                     await self.blackboard.record_event(
                         EventType.HIGH_MEMORY_DETECTED,
-                        {"service": service, "memory": memory, "threshold": MEMORY_THRESHOLD, "source": source}
+                        {"service": service, "memory": memory, "threshold": MEMORY_THRESHOLD, "source": source},
+                        narrative=f"Warning: {service} memory usage ({memory:.1f}%) exceeds the {MEMORY_THRESHOLD:.0f}% threshold.",
                     )
                     logger.warning(f"HIGH MEMORY detected ({source}): {service} at {memory:.1f}%")
                     
@@ -483,7 +495,8 @@ class Aligner:
                 state["active"].remove("high_memory")
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_memory", "memory": memory, "source": source}
+                    {"service": service, "anomaly": "high_memory", "memory": memory, "source": source},
+                    narrative=f"Good news: The high memory issue on {service} has returned to normal levels ({memory:.1f}%).",
                 )
                 logger.info(f"Memory anomaly resolved ({source}): {service} now at {memory:.1f}%")
     

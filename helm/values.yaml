@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "79f4a17" # Updated by CI to commit SHA
+  tag: "744fd79" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 
 replicaCount: 1
@@ -85,7 +85,13 @@ app:
 sysadmin:
   dryRun: false # Set to true for testing (no real changes)
   autoApprove: true # Enable closed-loop automation (only values-only changes are auto-approved)
-  gitRepoPath: "/tmp/darwin-gitops"
+  gitRepoPath: "/data/gitops"
+  persistence:
+    enabled: false # Set true for production
+    storageClassName: ""
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
 
 # =============================================================================
 # Resource Limits

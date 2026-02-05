@@ -22,9 +22,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING, List, Optional
 
 from ..models import (
+    ConversationMessage,
     ArchitectureEvent,
     ChartData,
     EventType,
@@ -52,6 +54,9 @@ logger = logging.getLogger(__name__)
 
 # Retention period for metrics history (1 hour for PoC)
 METRICS_RETENTION_SECONDS = 3600
+
+# Conversation TTL (24 hours)
+CONVERSATION_TTL_SECONDS = 86400
 
 # Health thresholds
 CPU_WARNING = 60.0
@@ -589,13 +594,18 @@ class BlackboardState:
         })
         
         # Record event with full plan details for UI visibility
-        await self.record_event(EventType.PLAN_CREATED, {
-            "plan_id": plan.id,
-            "action": plan.action.value,
-            "service": plan.service,
-            "reason": plan.reason[:200] if plan.reason else "",
-            "params": plan.params,
-        })
+        reason_preview = plan.reason[:100] if plan.reason else "No reason provided"
+        await self.record_event(
+            EventType.PLAN_CREATED,
+            {
+                "plan_id": plan.id,
+                "action": plan.action.value,
+                "service": plan.service,
+                "reason": plan.reason[:200] if plan.reason else "",
+                "params": plan.params,
+            },
+            narrative=f"Based on my analysis, I recommend: {plan.action.value} {plan.service}. Reason: {reason_preview}",
+        )
         
         logger.info(f"Created plan: {plan.id} - {plan.action.value} {plan.service}")
         return plan
@@ -634,11 +644,46 @@ class BlackboardState:
         
         if status == PlanStatus.APPROVED:
             updates["approved_at"] = str(time.time())
-            await self.record_event(EventType.PLAN_APPROVED, {"plan_id": plan_id})
+            # Get plan to include service and action in event
+            plan = await self.get_plan(plan_id)
+            await self.record_event(
+                EventType.PLAN_APPROVED,
+                {
+                    "plan_id": plan_id,
+                    "service": plan.service if plan else None,
+                    "action": plan.action.value if plan else None,
+                },
+                narrative=f"Plan approved: {plan.action.value} on {plan.service}" if plan else f"Plan {plan_id} approved",
+            )
         elif status in (PlanStatus.COMPLETED, PlanStatus.FAILED):
             updates["executed_at"] = str(time.time())
-            event_type = EventType.PLAN_EXECUTED if status == PlanStatus.COMPLETED else EventType.PLAN_FAILED
-            await self.record_event(event_type, {"plan_id": plan_id, "result": result})
+            plan = await self.get_plan(plan_id)
+            
+            if status == PlanStatus.COMPLETED:
+                await self.record_event(
+                    EventType.PLAN_EXECUTED,
+                    {
+                        "plan_id": plan_id,
+                        "service": plan.service if plan else None,
+                        "action": plan.action.value if plan else None,
+                        "status": "success",
+                        "summary": f"{plan.action.value} {plan.service}" if plan else None,
+                        "result": result[:500] if result else "",
+                    },
+                    narrative=f"Successfully executed {plan.action.value} on {plan.service}." if plan else None,
+                )
+            else:  # FAILED
+                await self.record_event(
+                    EventType.PLAN_FAILED,
+                    {
+                        "plan_id": plan_id,
+                        "service": plan.service if plan else None,
+                        "action": plan.action.value if plan else None,
+                        "status": "failed",
+                        "error": result[:500] if result else "",
+                    },
+                    narrative=f"Failed to execute plan for {plan.service}: {result[:100]}" if plan and result else None,
+                )
         
         if result:
             updates["result"] = result
@@ -671,9 +716,18 @@ class BlackboardState:
     # Architecture Events (for correlation)
     # =========================================================================
     
-    async def record_event(self, event_type: EventType, details: dict) -> None:
-        """Record an architecture event."""
-        event = ArchitectureEvent(type=event_type, details=details)
+    async def record_event(
+        self,
+        event_type: EventType,
+        details: dict,
+        narrative: Optional[str] = None,
+    ) -> None:
+        """Record an architecture event with optional narrative."""
+        event = ArchitectureEvent(
+            type=event_type,
+            details=details,
+            narrative=narrative,
+        )
         
         # Store as JSON in sorted set (score = timestamp)
         await self.redis.zadd(
@@ -699,6 +753,19 @@ class BlackboardState:
             events.append(ArchitectureEvent(**data))
         
         return events
+
+    async def get_events_for_service(
+        self,
+        service: str,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+    ) -> List[ArchitectureEvent]:
+        """Get events filtered by service name in details."""
+        all_events = await self.get_events_in_range(start_time, end_time)
+        return [
+            e for e in all_events 
+            if e.details.get("service") == service
+        ]
     
     # =========================================================================
     # Snapshot (Context for Architect)
@@ -800,3 +867,75 @@ class BlackboardState:
         # Skip for now to avoid event spam
         
         logger.debug(f"Processed telemetry from {payload.service}")
+    
+    # =========================================================================
+    # Conversation History Layer
+    # =========================================================================
+    
+    async def create_conversation(self) -> str:
+        """
+        Create a new conversation and return its ID.
+        
+        Conversations use Redis HASH with 24-hour TTL.
+        """
+        conversation_id = str(uuid.uuid4())
+        key = f"darwin:conversation:{conversation_id}"
+        
+        # Initialize with creation timestamp
+        await self.redis.hset(key, "created", str(time.time()))
+        await self.redis.expire(key, CONVERSATION_TTL_SECONDS)
+        
+        logger.debug(f"Created conversation: {conversation_id}")
+        return conversation_id
+    
+    async def get_conversation(self, conversation_id: str) -> List[ConversationMessage]:
+        """
+        Get all messages in a conversation.
+        
+        Messages are stored as numbered fields (msg:0, msg:1, etc.)
+        """
+        key = f"darwin:conversation:{conversation_id}"
+        data = await self.redis.hgetall(key)
+        
+        messages = []
+        # Extract numbered message fields and sort by index
+        msg_keys = sorted(
+            [k for k in data.keys() if k.startswith("msg:")],
+            key=lambda k: int(k.split(":")[1])
+        )
+        
+        for msg_key in msg_keys:
+            msg_data = json.loads(data[msg_key])
+            messages.append(ConversationMessage(**msg_data))
+        
+        return messages
+    
+    async def append_to_conversation(
+        self,
+        conversation_id: str,
+        message: ConversationMessage,
+    ) -> None:
+        """
+        Append a message to a conversation.
+        
+        Messages are stored with incrementing indices (msg:0, msg:1, etc.)
+        """
+        key = f"darwin:conversation:{conversation_id}"
+        
+        # Get current message count
+        data = await self.redis.hgetall(key)
+        msg_count = len([k for k in data.keys() if k.startswith("msg:")])
+        
+        # Add new message
+        await self.redis.hset(
+            key,
+            f"msg:{msg_count}",
+            json.dumps(message.model_dump())
+        )
+        
+        # Refresh TTL on each message
+        await self.redis.expire(key, CONVERSATION_TTL_SECONDS)
+        
+        logger.debug(
+            f"Appended {message.role} message to conversation {conversation_id}"
+        )

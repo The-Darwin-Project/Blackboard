@@ -9,6 +9,7 @@ export { default as Dashboard } from './Dashboard';
 export { default as GraphContextMenu } from './GraphContextMenu';
 export { default as Layout } from './Layout';
 export { default as MetricChart } from './MetricChart';
+export { ServiceMetricChart } from './ServiceMetricChart';
 export { default as NodeInspector } from './NodeInspector';
 export { default as PlanCard } from './PlanCard';
 export { default as TopologyViewer } from './TopologyViewer';

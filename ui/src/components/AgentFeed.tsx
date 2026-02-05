@@ -32,8 +32,9 @@ const EVENT_LABELS: Record<string, string> = {
   plan_approved: 'Plan approved',
   plan_rejected: 'Plan rejected',
   // SysAdmin (execution)
-  plan_executed: 'Plan executed',
-  plan_failed: 'Plan execution failed',
+  sysadmin_executing: 'Executing plan...',
+  plan_executed: 'Plan executed successfully',
+  plan_failed: 'Plan execution FAILED',
 };
 
 function AgentFeed() {
@@ -106,7 +107,10 @@ function EventItem({ event }: EventItemProps) {
   const style = AGENT_STYLES[agent];
   const Icon = style.icon;
   
-  // Get base label
+  // Extract narrative for primary display
+  const narrative = event.narrative as string | undefined;
+  
+  // Get base label as fallback
   let label = EVENT_LABELS[event.type] || event.type;
   
   // Add source indicator for K8s-observed events
@@ -115,13 +119,9 @@ function EventItem({ event }: EventItemProps) {
     label = `${label} (K8s)`;
   }
 
-  // Extract relevant details
+  // Extract relevant details for secondary info
   const planId = event.details.plan_id as string | undefined;
   const serviceName = event.details.service as string | undefined;
-  const cpuValue = event.details.cpu as number | undefined;
-  const memoryValue = event.details.memory as number | undefined;
-  const oldVersion = event.details.old_version as string | undefined;
-  const newVersion = event.details.new_version as string | undefined;
 
   return (
     <div className="flex gap-2 p-2 rounded-lg bg-bg-primary">
@@ -135,15 +135,16 @@ function EventItem({ event }: EventItemProps) {
             {new Date(event.timestamp * 1000).toLocaleTimeString()}
           </span>
         </div>
-        <p className="text-sm text-text-secondary truncate">{label}</p>
-        {(planId || serviceName || cpuValue !== undefined || memoryValue !== undefined || oldVersion) && (
-          <p className="text-xs text-text-muted truncate">
-            {planId && `Plan: ${planId}`}
-            {planId && serviceName && ' • '}
+        {/* Show narrative as main text if available, fallback to label */}
+        <p className="text-sm text-text-primary">
+          {narrative || label}
+        </p>
+        {/* Show technical details as secondary info */}
+        {(serviceName || planId) && (
+          <p className="text-xs text-text-secondary truncate">
             {serviceName && `Service: ${serviceName}`}
-            {oldVersion && newVersion && ` • v${oldVersion} → v${newVersion}`}
-            {cpuValue !== undefined && ` • CPU: ${cpuValue.toFixed(1)}%`}
-            {memoryValue !== undefined && ` • Mem: ${memoryValue.toFixed(1)}%`}
+            {serviceName && planId && ' • '}
+            {planId && `Plan: ${planId.substring(0, 12)}`}
           </p>
         )}
       </div>
