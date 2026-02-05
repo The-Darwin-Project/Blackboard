@@ -96,6 +96,11 @@ export interface GraphNode {
     memory: number;
     error_rate: number;
     last_seen: number;
+    gitops_repo?: string;
+    gitops_repo_url?: string;
+    gitops_helm_path?: string;
+    replicas_ready?: number;
+    replicas_desired?: number;
   };
 }
 

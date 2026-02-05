@@ -104,7 +104,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   });
 
   // Build node HTML label
-  const buildNodeLabel = useCallback((node: GraphNode & { metadata: GraphNode['metadata'] & { gitops_repo?: string; gitops_repo_url?: string; gitops_helm_path?: string } }) => {
+  const buildNodeLabel = useCallback((node: GraphNode & { metadata: GraphNode['metadata'] & { gitops_repo?: string; gitops_repo_url?: string; gitops_helm_path?: string; replicas_ready?: number; replicas_desired?: number } }) => {
     const icon = NODE_ICONS[node.type] || '📦';
     const health = node.metadata.health || 'unknown';
     const version = node.metadata.version || '?';
@@ -128,6 +128,25 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         >🔗</span>`
       : '';
     
+    // Replica count badge (only show if > 1 or data is available)
+    const ready = node.metadata.replicas_ready;
+    const desired = node.metadata.replicas_desired;
+    const replicaBadge = (desired && desired > 0)
+      ? `<span 
+          style="
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            font-size: 9px;
+            background: rgba(0,0,0,0.4);
+            padding: 1px 5px;
+            border-radius: 4px;
+            cursor: help;
+          "
+          title="Replicas: ${ready ?? 0} ready / ${desired} desired"
+        >${ready ?? 0}/${desired}</span>`
+      : '';
+    
     return `
       <div class="cyto-node-label" style="
         position: relative;
@@ -141,6 +160,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         box-shadow: 0 2px 4px rgba(0,0,0,0.3);
       ">
         ${gitIcon}
+        ${replicaBadge}
         <div style="font-size: 16px; margin-bottom: 2px;">${icon}</div>
         <div style="font-weight: 600; margin-bottom: 2px;">${node.label}</div>
         <div style="font-size: 9px; opacity: 0.9;">v${version}</div>
@@ -503,6 +523,8 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
                 gitops_repo?: string;
                 gitops_repo_url?: string;
                 gitops_helm_path?: string;
+                replicas_ready?: number;
+                replicas_desired?: number;
               };
               return buildNodeLabel({
                 id: d.id,
@@ -518,6 +540,8 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
                   gitops_repo: d.gitops_repo,
                   gitops_repo_url: d.gitops_repo_url,
                   gitops_helm_path: d.gitops_helm_path,
+                  replicas_ready: d.replicas_ready,
+                  replicas_desired: d.replicas_desired,
                 },
               });
             },
