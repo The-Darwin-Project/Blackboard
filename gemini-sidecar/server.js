@@ -13,17 +13,19 @@ const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
  */
 async function executeGemini(prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    const args = ['--non-interactive', '--output-format', 'json'];
+    // Using -p/--prompt triggers non-interactive (headless) mode
+    // No separate --non-interactive flag exists
+    const args = [];
     
     // Add auto-approve (yolo) flag if requested
     if (options.autoApprove) {
       args.push('--yolo');
     }
     
-    // Add the prompt
-    args.push('--prompt', prompt);
+    // Add the prompt (this makes it non-interactive)
+    args.push('-p', prompt);
     
-    console.log(`[${new Date().toISOString()}] Executing: gemini ${args.slice(0, 4).join(' ')}...`);
+    console.log(`[${new Date().toISOString()}] Executing: gemini ${args[0]} ${args.length > 2 ? '...' : ''} (prompt length: ${prompt.length})`);
     
     const child = spawn('gemini', args, {
       env: {
