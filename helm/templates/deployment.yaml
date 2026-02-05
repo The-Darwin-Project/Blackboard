@@ -171,6 +171,11 @@ spec:
               value: "{{ .Values.sysadmin.autoApprove }}"
             - name: GIT_REPO_PATH
               value: "{{ .Values.sysadmin.gitRepoPath }}"
+            {{- if .Values.gemini.enabled }}
+            # Gemini sidecar configuration
+            - name: GEMINI_SIDECAR_URL
+              value: "http://localhost:{{ .Values.gemini.port }}"
+            {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
             - name: GITHUB_APP_ID
@@ -270,6 +275,61 @@ spec:
             - name: redis-data
               mountPath: /var/lib/redis/data
           {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        
+        # =================================================================
+        # Gemini CLI Sidecar
+        # =================================================================
+        {{- if .Values.gemini.enabled }}
+        - name: gemini
+          image: "{{ .Values.gemini.image.repository }}:{{ .Values.gemini.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: gemini
+              containerPort: {{ .Values.gemini.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.gemini.port }}"
+            {{- if .Values.gcp.existingSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/service-account.json"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.gemini.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+            {{- if .Values.sysadmin.persistence.enabled }}
+            - name: gitops-data
+              mountPath: /data/gitops
+            {{- end }}
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.gemini.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.gemini.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false

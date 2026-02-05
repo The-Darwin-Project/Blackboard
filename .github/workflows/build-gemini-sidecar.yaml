@@ -1,0 +1,127 @@
+# BlackBoard/.github/workflows/build-gemini-sidecar.yaml
+# Build and push Gemini sidecar image to GitHub Container Registry
+# Updates helm/values.yaml with the new sidecar image tag
+
+name: Build Gemini Sidecar
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "gemini-sidecar/**"
+      - ".github/workflows/build-gemini-sidecar.yaml"
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "gemini-sidecar/**"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: the-darwin-project/gemini-sidecar
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      # GitHub App authentication (optional)
+      - name: Generate GitHub App Token
+        id: app-token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DARWIN_APP_ID }}
+          private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Re-checkout with App Token
+        if: vars.USE_GITHUB_APP == 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Get short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.USE_GITHUB_APP == 'true' && 'x-access-token' || github.actor }}
+          password: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build and push Gemini sidecar image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./gemini-sidecar
+          file: ./gemini-sidecar/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Update helm/values.yaml with the new sidecar image tag
+      - name: Update Helm values with new sidecar image tag
+        if: github.event_name != 'pull_request'
+        run: |
+          # Update gemini.image.tag in values.yaml
+          sed -i '/^gemini:/,/^[a-z]/{s/^  tag: ".*"/  tag: "${{ steps.sha.outputs.short }}"/}' helm/values.yaml
+
+          # Verify the change
+          echo "Updated helm/values.yaml (gemini section):"
+          grep -A5 "^gemini:" helm/values.yaml
+
+      - name: Commit and push Helm values update
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet helm/values.yaml; then
+            echo "No changes to helm/values.yaml"
+          else
+            git add helm/values.yaml
+            git commit -m "ci: update gemini-sidecar tag to ${{ steps.sha.outputs.short }} [skip ci]"
+            git push
+            echo "Pushed helm/values.yaml update"
+          fi
+
+      - name: Output image info
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## Gemini Sidecar Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ env.REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.sha.outputs.short }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY

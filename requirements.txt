@@ -27,5 +27,8 @@ pyyaml
 pyjwt[crypto]
 requests
 
+# Async HTTP client (for sidecar communication)
+httpx
+
 # Kubernetes client (for K8s metrics observer)
 kubernetes

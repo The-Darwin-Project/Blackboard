@@ -3,13 +3,13 @@
 Agent 3: The SysAdmin (The Executor)
 
 Role: Safety & Execution
-Nature: Hybrid (Python Wrapper around @google/gemini-cli)
+Nature: Hybrid (Python orchestrator calling Gemini CLI sidecar)
 
 The SysAdmin reads approved plans and executes them via the Gemini CLI
-in headless mode, which performs Git operations agentically.
+sidecar container, which performs Git operations agentically.
 
 AIR GAP ENFORCEMENT:
-- This module may import subprocess (for CLI execution)
+- This module may import httpx (for sidecar communication)
 - This module may import redis (for Blackboard access)
 - This module CANNOT import vertexai
 """
@@ -20,8 +20,9 @@ import json
 import logging
 import os
 import re
-import subprocess
 from typing import TYPE_CHECKING, Optional
+
+import httpx
 
 # AIR GAP ENFORCEMENT: These imports are FORBIDDEN
 # import vertexai  # FORBIDDEN
@@ -109,6 +110,9 @@ class SysAdmin:
         self.git_repo_path = os.getenv("GIT_REPO_PATH", "/tmp/darwin-gitops")
         self.dry_run = os.getenv("SYSADMIN_DRY_RUN", "false").lower() == "true"
         self.auto_approve = os.getenv("SYSADMIN_AUTO_APPROVE", "false").lower() == "true"
+        
+        # Gemini sidecar configuration (runs as localhost sidecar container)
+        self.gemini_sidecar_url = os.getenv("GEMINI_SIDECAR_URL", "http://localhost:9090")
         
         # GitHub App auth (optional - for token refresh)
         self._github_auth: Optional["GitHubAppAuth"] = None
@@ -295,94 +299,69 @@ class SysAdmin:
         return "\n".join(prompt_parts)
     
     @safe_execution
-    def _execute_with_cli(self, plan_context: str) -> dict:
+    async def _execute_with_sidecar(self, plan_context: str) -> dict:
         """
-        Execute the plan via Gemini CLI.
+        Execute the plan via Gemini CLI sidecar.
         
-        Uses validated CLI pattern with --non-interactive.
+        Calls the gemini sidecar HTTP endpoint which runs the CLI.
         Refreshes GitHub App credentials before execution to ensure valid token.
         """
         # Refresh git credentials (token may have expired)
         if self._refresh_git_credentials():
             logger.info("Git credentials refreshed successfully")
         
-        cmd = [
-            "gemini",
-            "--non-interactive",
-            "--output-format", "json",
-        ]
-        
-        # Add auto-approve flag if enabled (for trusted environments)
-        if self.auto_approve:
-            cmd.append("--yolo")
-        
-        cmd.extend(["--prompt", plan_context])
-        
-        # Environment for Vertex AI mode
-        env = {
-            **os.environ,
-            "GOOGLE_GENAI_USE_VERTEXAI": "true",
-        }
-        
-        logger.info(f"Executing Gemini CLI: {' '.join(cmd[:4])}...")
+        logger.info(f"Executing via Gemini sidecar at {self.gemini_sidecar_url}...")
         
         if self.dry_run:
-            logger.info("DRY RUN: Would execute CLI command")
+            logger.info("DRY RUN: Would call Gemini sidecar")
             return {
                 "status": "dry_run",
-                "command": cmd,
                 "message": "Dry run - no actual execution",
             }
         
         try:
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
-                cwd=self.git_repo_path,
-            )
-            
-            if result.returncode != 0:
-                logger.error(f"CLI failed with code {result.returncode}: {result.stderr}")
-                return {
-                    "status": "failed",
-                    "exit_code": result.returncode,
-                    "stderr": result.stderr,
-                    "stdout": result.stdout,
-                }
-            
-            # Parse JSON output
-            try:
-                output = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                output = {"raw_output": result.stdout}
-            
-            logger.info("CLI execution completed successfully")
-            
-            return {
-                "status": "success",
-                "exit_code": result.returncode,
-                "output": output,
-            }
+            async with httpx.AsyncClient(timeout=310.0) as client:  # Slightly longer than sidecar timeout
+                response = await client.post(
+                    f"{self.gemini_sidecar_url}/execute",
+                    json={
+                        "prompt": plan_context,
+                        "autoApprove": self.auto_approve,
+                        "cwd": self.git_repo_path,
+                    },
+                )
+                
+                result = response.json()
+                
+                if response.status_code != 200:
+                    logger.error(f"Sidecar returned error: {result}")
+                    return {
+                        "status": "error",
+                        "message": result.get("error", "Unknown sidecar error"),
+                    }
+                
+                if result.get("status") == "success":
+                    logger.info("Gemini sidecar execution completed successfully")
+                else:
+                    logger.warning(f"Sidecar returned status: {result.get('status')}")
+                
+                return result
         
-        except subprocess.TimeoutExpired:
-            logger.error("CLI execution timed out")
+        except httpx.TimeoutException:
+            logger.error("Gemini sidecar execution timed out")
             return {
                 "status": "timeout",
                 "message": "Execution timed out after 5 minutes",
             }
         
-        except FileNotFoundError:
-            logger.error("Gemini CLI not found. Is @google/gemini-cli installed?")
+        except httpx.ConnectError:
+            logger.error(f"Cannot connect to Gemini sidecar at {self.gemini_sidecar_url}")
             return {
                 "status": "error",
-                "message": "Gemini CLI not found. Install with: npm install -g @google/gemini-cli",
+                "message": f"Gemini sidecar not available at {self.gemini_sidecar_url}. Is the sidecar container running?",
             }
         
         except Exception as e:
-            logger.error(f"CLI execution error: {e}")
+            logger.error(f"Sidecar execution error: {e}")
             return {
                 "status": "error",
                 "message": str(e),
@@ -405,9 +384,9 @@ class SysAdmin:
         # Build the prompt with GitOps info
         prompt = self._build_prompt(plan, gitops_repo, helm_path)
         
-        # Execute via CLI (with safety check)
+        # Execute via sidecar (with safety check)
         try:
-            result = self._execute_with_cli(prompt)
+            result = await self._execute_with_sidecar(prompt)
             
             if result["status"] == "success":
                 return f"Plan executed successfully. Output: {json.dumps(result.get('output', {}))}"

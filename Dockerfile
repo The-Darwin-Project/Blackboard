@@ -1,9 +1,9 @@
 # BlackBoard/Dockerfile
 # Darwin Blackboard (Brain) - Central nervous system
-# Multi-stage build: React UI + Python FastAPI + Gemini CLI
+# Multi-stage build: React UI + Python FastAPI
 
 # =============================================================================
-# Stage 1: Build React UI + Install Gemini CLI (Node.js 22 required)
+# Stage 1: Build React UI
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest AS react-builder
 
@@ -21,31 +21,14 @@ RUN npm run build && \
     # Validate build output exists
     test -f /build/dist/index.html || (echo "ERROR: React build failed - index.html not found" && exit 1)
 
-# Install Gemini CLI to a known prefix (requires Node.js 20+)
-# Switch to root to write to /opt, then back to default user
-USER 0
-RUN mkdir -p /opt/gemini-cli && \
-    npm install -g --prefix /opt/gemini-cli @google/gemini-cli@latest && \
-    ls -la /opt/gemini-cli/bin/ && \
-    test -f /opt/gemini-cli/bin/gemini && echo "Gemini CLI installed successfully"
-USER 1001
-
 # =============================================================================
 # Stage 2: Python Application
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/ubi:latest
 
 # Install system packages as root
-# Use Node.js 22 module stream (required by Gemini CLI which needs Node.js 20+)
 USER 0
-RUN dnf module enable nodejs:22 -y && \
-    dnf install -y python3 python3-pip git nodejs npm && \
-    dnf clean all && \
-    node --version
-
-# Copy Gemini CLI from nodejs-22 stage
-COPY --from=react-builder /opt/gemini-cli /opt/gemini-cli
-ENV PATH="/opt/gemini-cli/bin:${PATH}"
+RUN dnf install -y python3 python3-pip git && dnf clean all
 
 # Set up working directory
 WORKDIR /app
