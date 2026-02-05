@@ -1,9 +1,9 @@
 # BlackBoard/Dockerfile
 # Darwin Blackboard (Brain) - Central nervous system
-# Multi-stage build: React UI + Python FastAPI
+# Multi-stage build: React UI + Python FastAPI + Gemini CLI
 
 # =============================================================================
-# Stage 1: Build React UI
+# Stage 1: Build React UI + Install Gemini CLI (Node.js 22 required)
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest AS react-builder
 
@@ -21,6 +21,13 @@ RUN npm run build && \
     # Validate build output exists
     test -f /build/dist/index.html || (echo "ERROR: React build failed - index.html not found" && exit 1)
 
+# Install Gemini CLI to a known prefix (requires Node.js 20+)
+# This will be copied to the final stage
+RUN mkdir -p /opt/gemini-cli && \
+    npm install -g --prefix /opt/gemini-cli @google/gemini-cli@latest && \
+    ls -la /opt/gemini-cli/bin/ && \
+    test -f /opt/gemini-cli/bin/gemini && echo "Gemini CLI installed successfully"
+
 # =============================================================================
 # Stage 2: Python Application
 # =============================================================================
@@ -30,18 +37,9 @@ FROM registry.access.redhat.com/ubi9/ubi:latest
 USER 0
 RUN dnf install -y python3 python3-pip git nodejs npm && dnf clean all
 
-# Install Gemini CLI (Latest) - required for SysAdmin agent
-RUN npm install -g @google/gemini-cli@latest && \
-    # Debug: show where npm installed global packages
-    echo "npm global prefix: $(npm prefix -g)" && \
-    ls -la "$(npm prefix -g)/bin/" | head -20 && \
-    # Create symlink to /usr/local/bin (standard PATH location)
-    ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
-    # Verify binary exists
-    test -x /usr/local/bin/gemini && echo "Gemini CLI installed at /usr/local/bin/gemini"
-
-# Ensure /usr/local/bin is in PATH (usually already is, but be explicit)
-ENV PATH="/usr/local/bin:${PATH}"
+# Copy Gemini CLI from nodejs-22 stage
+COPY --from=react-builder /opt/gemini-cli /opt/gemini-cli
+ENV PATH="/opt/gemini-cli/bin:${PATH}"
 
 # Set up working directory
 WORKDIR /app
