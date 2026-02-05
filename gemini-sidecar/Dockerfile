@@ -30,6 +30,9 @@ RUN npm install --omit=dev
 # Copy server code
 COPY server.js .
 
+# Copy Gemini CLI global context (rules for SysAdmin and Investigator roles)
+COPY gemini-rules/GEMINI.md /home/default/.gemini/GEMINI.md
+
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \

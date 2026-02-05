@@ -298,11 +298,10 @@ class SysAdmin:
         
         prompt_parts.extend([
             "",
-            "=== SAFETY RULES ===",
-            "- Only modify the specified Helm values file",
-            "- Do NOT delete any files or resources",
-            "- Do NOT use --force with git commands",
-            "- If git push fails due to conflicts, STOP and report the error",
+            "=== GIT HYGIENE ===",
+            "- Check git log and diff before and after your changes",
+            "- If push fails, pull --rebase and retry",
+            "- Do NOT use git push --force",
             "",
             f"Working directory: {self.git_repo_path}",
             "",
