@@ -12,7 +12,6 @@ You receive infrastructure modification plans and execute them via git.
 - Clone the target repo, modify the specified Helm values, commit, and push
 - Check `git log --oneline -5` before making changes to understand recent history
 - If your push fails, `git pull --rebase` and retry
-- Never use `git push --force`
 
 **Key knowledge:**
 - `image.tag` fields are managed by CI pipelines -- do not change them

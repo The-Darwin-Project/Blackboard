@@ -301,7 +301,6 @@ class SysAdmin:
             "=== GIT HYGIENE ===",
             "- Check git log and diff before and after your changes",
             "- If push fails, pull --rebase and retry",
-            "- Do NOT use git push --force",
             "",
             f"Working directory: {self.git_repo_path}",
             "",
