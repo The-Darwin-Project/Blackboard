@@ -1,4 +1,5 @@
 # BlackBoard/src/agents/sysadmin.py
+# SysAdmin Agent - executes approved plans via Gemini CLI sidecar
 """
 Agent 3: The SysAdmin (The Executor)
 
