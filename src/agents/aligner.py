@@ -341,6 +341,8 @@ class Aligner:
                     narrative=f"Good news: The high CPU issue on {service} has returned to normal levels ({payload.metrics.cpu:.1f}%).",
                 )
                 logger.info(f"CPU anomaly resolved: {service} now at {payload.metrics.cpu:.1f}%")
+                # Evaluate scale-down (HPA-like behavior)
+                await self._trigger_architect(service, "anomaly_resolved_cpu")
         
         # Check Memory threshold
         if payload.metrics.memory >= MEMORY_THRESHOLD:
@@ -368,6 +370,8 @@ class Aligner:
                     narrative=f"Good news: The high memory issue on {service} has returned to normal levels ({payload.metrics.memory:.1f}%).",
                 )
                 logger.info(f"Memory anomaly resolved: {service} now at {payload.metrics.memory:.1f}%")
+                # Evaluate scale-down (HPA-like behavior)
+                await self._trigger_architect(service, "anomaly_resolved_memory")
         
         # Check Error Rate threshold
         if payload.metrics.error_rate >= ERROR_RATE_THRESHOLD:
@@ -527,6 +531,8 @@ class Aligner:
                     narrative=f"Good news: The high CPU issue on {service} has returned to normal levels ({cpu:.1f}%).",
                 )
                 logger.info(f"CPU anomaly resolved ({source}): {service} now at {cpu:.1f}%")
+                # Evaluate scale-down (HPA-like behavior)
+                await self._trigger_architect(service, "anomaly_resolved_cpu")
         
         # Check Memory threshold
         if memory >= MEMORY_THRESHOLD:
@@ -552,6 +558,8 @@ class Aligner:
                     narrative=f"Good news: The high memory issue on {service} has returned to normal levels ({memory:.1f}%).",
                 )
                 logger.info(f"Memory anomaly resolved ({source}): {service} now at {memory:.1f}%")
+                # Evaluate scale-down (HPA-like behavior)
+                await self._trigger_architect(service, "anomaly_resolved_memory")
     
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""

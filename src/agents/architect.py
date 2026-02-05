@@ -451,6 +451,20 @@ class Architect:
                 f"- Consider action='failover' if a standby is available\n"
                 f"- Provide a clear reason referencing the high error rate\n\n"
             )
+        elif anomaly_type in ("anomaly_resolved_cpu", "anomaly_resolved_memory"):
+            resolved_metric = "CPU" if "cpu" in anomaly_type else "memory"
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' {resolved_metric} usage has returned to normal levels.\n\n"
+                f"The service was previously scaled up due to high {resolved_metric}. "
+                f"Check the current replica count and metrics.\n\n"
+                f"ACTION REQUIRED: If the service currently has MORE than 1 replica AND "
+                f"{resolved_metric} usage is well below the threshold, create a scale-down plan "
+                f"using the generate_ops_plan function.\n"
+                f"- Use action='scale' with params.replicas=1 (or an appropriate lower number)\n"
+                f"- Provide a clear reason referencing the resolved anomaly\n\n"
+                f"If the service is already at 1 replica, or if metrics suggest it still needs "
+                f"the extra capacity, do NOT create a plan.\n\n"
+            )
         else:
             base_prompt = (
                 f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}).\n\n"
