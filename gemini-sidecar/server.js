@@ -103,6 +103,10 @@ function setupGitCredentials(token, workDir) {
     execSync('git config --global user.name "Darwin SysAdmin"', { encoding: 'utf8' });
     execSync('git config --global user.email "darwin-sysadmin@darwin-project.io"', { encoding: 'utf8' });
     
+    // Mark work directory as safe (PVC mounted volumes need this)
+    execSync(`git config --global --add safe.directory ${workDir}`, { encoding: 'utf8' });
+    execSync(`git config --global --add safe.directory '*'`, { encoding: 'utf8' });  // Allow any subdir
+    
     // Store credentials for git operations (token-based auth)
     execSync(`git config --global credential.helper 'store --file=/tmp/git-creds'`, { encoding: 'utf8' });
     fs.writeFileSync('/tmp/git-creds', `https://x-access-token:${token}@github.com\n`);
