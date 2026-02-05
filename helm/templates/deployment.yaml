@@ -24,9 +24,10 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- if and .Values.github.existingSecret .Values.sysadmin.persistence.enabled }}
+      {{- if .Values.github.existingSecret }}
       # =================================================================
       # Init Container: Clone GitOps Repository
+      # Runs when GitHub App secret is configured
       # =================================================================
       initContainers:
         - name: git-clone
@@ -220,10 +221,9 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            {{- if .Values.sysadmin.persistence.enabled }}
+            # GitOps data - always mount (cloned by init container when github secret exists)
             - name: gitops-data
               mountPath: {{ .Values.sysadmin.gitRepoPath }}
-            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
