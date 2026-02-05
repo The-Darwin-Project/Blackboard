@@ -288,6 +288,35 @@ class BlackboardState:
         import re
         return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', value))
     
+    def _is_external_service(self, name: str, metadata: Optional[Service]) -> bool:
+        """
+        Check if service is external (dependency target but never sent telemetry).
+        
+        External services like github.com, api.stripe.com appear only as dependency
+        targets. They don't send telemetry so they have no meaningful metadata.
+        We detect this by checking:
+        1. Has common external TLD (.com, .io, .org, etc.)
+        2. Has no meaningful telemetry data (last_seen is 0 or very old)
+        """
+        # Common external domain TLDs
+        external_tlds = ['.com', '.io', '.org', '.net', '.dev', '.cloud', '.app']
+        
+        # Check if name looks like an external domain
+        is_external_domain = any(tld in name.lower() for tld in external_tlds)
+        if not is_external_domain:
+            return False
+        
+        # If it has metadata with recent telemetry, it's our internal service
+        # (might just have an external-looking name)
+        if metadata and metadata.last_seen > 0:
+            # Check if service has recent telemetry (within last hour)
+            import time
+            age_seconds = time.time() - metadata.last_seen
+            if age_seconds < 3600:  # Has sent telemetry in last hour
+                return False
+        
+        return True
+    
     async def get_topology(self) -> TopologySnapshot:
         """Get complete topology snapshot."""
         services = await self.get_services()
@@ -318,14 +347,20 @@ class BlackboardState:
         logger.debug(f"Building graph with {len(topology.services)} services: {sorted(topology.services)}")
         
         # Build nodes with health status
-        # Filter out IP addresses - they should not appear as nodes, only used for edge resolution
+        # Filter out IP addresses and external domains - they should not appear as nodes
         nodes: list[GraphNode] = []
         for service_name in topology.services:
             # Skip IP addresses - they should not be displayed as nodes
             if self._is_ip_address(service_name):
                 logger.debug(f"Skipping IP address node: {service_name}")
                 continue
+            
+            # Skip external domains (services that never sent telemetry)
+            # External services like github.com, api.stripe.com only appear as dependency targets
             metadata = await self.get_service(service_name)
+            if self._is_external_service(service_name, metadata):
+                logger.debug(f"Skipping external service node: {service_name}")
+                continue
             metrics = await self.get_current_metrics(service_name)
             
             cpu = metrics.get("cpu", 0)
