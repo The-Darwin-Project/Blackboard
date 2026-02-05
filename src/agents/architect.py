@@ -467,15 +467,18 @@ class Architect:
             )
         elif anomaly_type == "over_provisioned":
             base_prompt = (
-                f"AUTOMATED ALERT: Service '{service}' appears over-provisioned.\n\n"
-                f"The service has multiple replicas but both CPU and memory usage are low "
-                f"(well below anomaly thresholds). No active anomalies exist for this service.\n\n"
-                f"ACTION REQUIRED: Check the current replica count and metrics using analyze_topology. "
-                f"If the service has MORE than 1 replica and usage is consistently low, "
-                f"create a scale-down plan using the generate_ops_plan function.\n"
-                f"- Use action='scale' with params.replicas=1\n"
-                f"- Provide a clear reason referencing the low utilization\n\n"
-                f"If metrics suggest the service still needs extra capacity, do NOT create a plan.\n\n"
+                f"AUTOMATED ALERT: Service '{service}' is over-provisioned and must be scaled down.\n\n"
+                f"FACTS:\n"
+                f"- The service has MORE than 1 replica\n"
+                f"- CPU usage is below 30%\n"
+                f"- Memory usage is below 40%\n"
+                f"- No active anomalies exist\n\n"
+                f"ACTION REQUIRED: You MUST call generate_ops_plan now to scale down.\n"
+                f"- Use action='scale'\n"
+                f"- Set params.replicas to 1\n"
+                f"- Set service to '{service}'\n"
+                f"- Provide reason: 'Over-provisioned: low CPU and memory utilization with multiple replicas'\n\n"
+                f"DO NOT call analyze_topology. DO NOT just analyze. You MUST call generate_ops_plan.\n\n"
             )
         else:
             base_prompt = (
