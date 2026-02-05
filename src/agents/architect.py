@@ -284,14 +284,20 @@ class Architect:
                         if result and "plan_id" in result:
                             plan_id = result["plan_id"]
             
-            # Extract text response
+            # Extract text response (with defensive handling for empty Vertex AI responses)
             text_response = ""
-            if response.text:
-                text_response = response.text
-            elif plan_id:
-                text_response = f"I've created a plan ({plan_id}) based on your request. It's now pending approval."
-            else:
-                text_response = "I've analyzed your request but couldn't generate a specific action. Please provide more details."
+            try:
+                if response.text:
+                    text_response = response.text
+            except (ValueError, AttributeError):
+                # Vertex AI SDK raises ValueError when accessing .text on empty response
+                logger.warning("Vertex AI returned empty text response")
+            
+            if not text_response:
+                if plan_id:
+                    text_response = f"I've created a plan ({plan_id}) based on your request. It's now pending approval."
+                else:
+                    text_response = "I've analyzed your request but couldn't generate a specific action. Please provide more details."
             
             # Save messages to conversation history
             await self.blackboard.append_to_conversation(
