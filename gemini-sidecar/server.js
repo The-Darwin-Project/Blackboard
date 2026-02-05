@@ -114,14 +114,16 @@ async function setupRepository(repoUrl, token, workDir) {
         // Different repo - clean and reclone
         console.log(`[${new Date().toISOString()}] Different repo detected, recloning`);
         fs.rmSync(workDir, { recursive: true, force: true });
-        fs.mkdirSync(workDir, { recursive: true });
-        execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data' });
+        // Don't create dir - let git clone create it
+        execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data', encoding: 'utf8' });
       }
     } else {
-      // Fresh clone
+      // Fresh clone - remove any existing empty dir first
       console.log(`[${new Date().toISOString()}] Cloning repository`);
-      fs.mkdirSync(workDir, { recursive: true });
-      execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data' });
+      if (fs.existsSync(workDir)) {
+        fs.rmSync(workDir, { recursive: true, force: true });
+      }
+      execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data', encoding: 'utf8' });
     }
 
     // Configure git user for commits
