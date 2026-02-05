@@ -138,11 +138,22 @@ async def execute_plan(
         # Execute via SysAdmin
         result = await sysadmin.execute_plan(plan)
         
-        # Mark as completed
-        await blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=result)
+        # Check if execution actually succeeded (result should contain "successfully")
+        execution_succeeded = result and "successfully" in result.lower() and "failed" not in result.lower()
         
-        logger.info(f"Plan {plan_id} executed successfully")
-        return {"status": "completed", "plan_id": plan_id, "result": result}
+        if execution_succeeded:
+            # Mark as completed
+            await blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=result)
+            logger.info(f"Plan {plan_id} executed successfully")
+            return {"status": "completed", "plan_id": plan_id, "result": result}
+        else:
+            # Execution returned an error - mark as failed
+            await blackboard.update_plan_status(plan_id, PlanStatus.FAILED, result=result)
+            logger.error(f"Plan {plan_id} execution failed: {result}")
+            raise HTTPException(status_code=500, detail=f"Execution failed: {result}")
+    
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     
     except Exception as e:
         # Mark as failed

@@ -207,23 +207,43 @@ async def lifespan(app: FastAPI):
                     # Execute via SysAdmin
                     result = await sysadmin.execute_plan(plan)
                     
-                    # Mark as completed
-                    await blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
+                    # Check if execution actually succeeded (result should contain "successfully")
+                    execution_succeeded = result and "successfully" in result.lower() and "failed" not in result.lower()
                     
-                    # Record completion event with enhanced details
-                    await blackboard.record_event(
-                        EventType.PLAN_EXECUTED,
-                        {
-                            "plan_id": plan.id,
-                            "service": plan.service,
-                            "action": plan.action.value,
-                            "status": "success",
-                            "summary": f"{plan.action.value} {plan.service}",
-                            "result": result[:500] if result else "",
-                        },
-                        narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
-                    )
-                    logger.info(f"Plan {plan.id} auto-executed successfully")
+                    if execution_succeeded:
+                        # Mark as completed
+                        await blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
+                        
+                        # Record completion event with enhanced details
+                        await blackboard.record_event(
+                            EventType.PLAN_EXECUTED,
+                            {
+                                "plan_id": plan.id,
+                                "service": plan.service,
+                                "action": plan.action.value,
+                                "status": "success",
+                                "summary": f"{plan.action.value} {plan.service}",
+                                "result": result[:500] if result else "",
+                            },
+                            narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
+                        )
+                        logger.info(f"Plan {plan.id} auto-executed successfully")
+                    else:
+                        # Mark as failed - execution returned an error
+                        await blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=result)
+                        
+                        await blackboard.record_event(
+                            EventType.PLAN_FAILED,
+                            {
+                                "plan_id": plan.id,
+                                "service": plan.service,
+                                "action": plan.action.value,
+                                "status": "failed",
+                                "error": result[:500] if result else "Unknown error",
+                            },
+                            narrative=f"Execution failed for {plan.action.value} on {plan.service}: {result[:200] if result else 'Unknown error'}",
+                        )
+                        logger.error(f"Plan {plan.id} execution failed: {result}")
                     
                 except Exception as e:
                     # Mark as failed
