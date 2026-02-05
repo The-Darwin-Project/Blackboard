@@ -31,17 +31,16 @@ USER 0
 RUN dnf install -y python3 python3-pip git nodejs npm && dnf clean all
 
 # Install Gemini CLI (Latest) - required for SysAdmin agent
-# Note: npm global bin may be in /usr/local/bin or $(npm prefix -g)/bin
 RUN npm install -g @google/gemini-cli@latest && \
-    # Verify installation and create symlink if needed
-    NPM_BIN=$(npm prefix -g)/bin && \
-    if [ -f "$NPM_BIN/gemini" ] && [ ! -f /usr/bin/gemini ]; then \
-        ln -s "$NPM_BIN/gemini" /usr/bin/gemini; \
-    fi && \
-    # Verify gemini is accessible
-    gemini --version || (echo "ERROR: gemini CLI not found in PATH" && exit 1)
+    # Debug: show where npm installed global packages
+    echo "npm global prefix: $(npm prefix -g)" && \
+    ls -la "$(npm prefix -g)/bin/" | head -20 && \
+    # Create symlink to /usr/local/bin (standard PATH location)
+    ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
+    # Verify binary exists
+    test -x /usr/local/bin/gemini && echo "Gemini CLI installed at /usr/local/bin/gemini"
 
-# Ensure npm global bin is in PATH for all users
+# Ensure /usr/local/bin is in PATH (usually already is, but be explicit)
 ENV PATH="/usr/local/bin:${PATH}"
 
 # Set up working directory
