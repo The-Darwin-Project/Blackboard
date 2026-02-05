@@ -1,12 +1,144 @@
 // gemini-sidecar/server.js
-// HTTP wrapper for Gemini CLI - runs as sidecar container
+// HTTP wrapper for Gemini CLI with GitHub App authentication
 // Exposes POST /execute endpoint for the brain container
+// Handles dynamic repo cloning with fresh tokens per execution
 
 const http = require('http');
-const { spawn } = require('child_process');
+const fs = require('fs');
+const { spawn, execSync } = require('child_process');
+const jwt = require('jsonwebtoken');
 
 const PORT = process.env.PORT || 9090;
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
+const DEFAULT_WORK_DIR = '/data/gitops';
+
+// GitHub App secret paths (mounted from K8s secret)
+const SECRETS_PATH = '/secrets/github';
+const APP_ID_PATH = `${SECRETS_PATH}/app-id`;
+const INSTALL_ID_PATH = `${SECRETS_PATH}/installation-id`;
+// Note: Private key filename may vary - we'll find it dynamically
+const PRIVATE_KEY_PATTERN = /\.pem$/;
+
+/**
+ * Find the private key file in the secrets directory
+ */
+function findPrivateKeyPath() {
+  if (!fs.existsSync(SECRETS_PATH)) {
+    return null;
+  }
+  const files = fs.readdirSync(SECRETS_PATH);
+  const pemFile = files.find(f => PRIVATE_KEY_PATTERN.test(f));
+  return pemFile ? `${SECRETS_PATH}/${pemFile}` : null;
+}
+
+/**
+ * Check if GitHub App credentials are available
+ */
+function hasGitHubCredentials() {
+  return fs.existsSync(APP_ID_PATH) && 
+         fs.existsSync(INSTALL_ID_PATH) && 
+         findPrivateKeyPath() !== null;
+}
+
+/**
+ * Generate GitHub App installation token
+ * Mirrors logic from BlackBoard/src/utils/github_app.py
+ * @returns {Promise<string>} Installation access token (valid 1 hour)
+ */
+async function generateInstallationToken() {
+  const privateKeyPath = findPrivateKeyPath();
+  if (!privateKeyPath) {
+    throw new Error('GitHub App private key not found in /secrets/github/');
+  }
+
+  // Read credentials from mounted secrets
+  const appId = fs.readFileSync(APP_ID_PATH, 'utf8').trim();
+  const installId = fs.readFileSync(INSTALL_ID_PATH, 'utf8').trim();
+  const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
+
+  console.log(`[${new Date().toISOString()}] Generating GitHub App token (app=${appId}, install=${installId})`);
+
+  // Create JWT (same payload as Python: iat-60, exp+540, iss=appId)
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { iat: now - 60, exp: now + 540, iss: appId };
+  const jwtToken = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+
+  // Exchange JWT for installation token
+  const url = `https://api.github.com/app/installations/${installId}/access_tokens`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${jwtToken}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`GitHub token request failed: ${response.status} - ${error}`);
+  }
+
+  const data = await response.json();
+  console.log(`[${new Date().toISOString()}] Got GitHub installation token (expires: ${data.expires_at})`);
+  return data.token;
+}
+
+/**
+ * Setup repository for GitOps operations
+ * Clones or updates the repo with fresh credentials
+ * @param {string} repoUrl - Full repo URL (https://github.com/owner/repo.git)
+ * @param {string} token - Installation access token
+ * @param {string} workDir - Target directory for clone
+ */
+async function setupRepository(repoUrl, token, workDir) {
+  // Inject token into URL: https://x-access-token:<token>@github.com/...
+  const authUrl = repoUrl.replace('https://', `https://x-access-token:${token}@`);
+  
+  console.log(`[${new Date().toISOString()}] Setting up repository: ${repoUrl} -> ${workDir}`);
+
+  try {
+    if (fs.existsSync(`${workDir}/.git`)) {
+      // Existing repo - check if it's the same repo
+      const currentRemote = execSync('git remote get-url origin', { cwd: workDir, encoding: 'utf8' }).trim();
+      const currentRepo = currentRemote.replace(/https:\/\/[^@]*@/, 'https://').replace(/\.git$/, '');
+      const newRepo = repoUrl.replace(/\.git$/, '');
+      
+      if (currentRepo === newRepo) {
+        // Same repo - update and pull
+        console.log(`[${new Date().toISOString()}] Updating existing repo`);
+        execSync(`git remote set-url origin "${authUrl}"`, { cwd: workDir });
+        execSync('git fetch origin', { cwd: workDir });
+        execSync('git reset --hard origin/main', { cwd: workDir });
+      } else {
+        // Different repo - clean and reclone
+        console.log(`[${new Date().toISOString()}] Different repo detected, recloning`);
+        fs.rmSync(workDir, { recursive: true, force: true });
+        fs.mkdirSync(workDir, { recursive: true });
+        execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data' });
+      }
+    } else {
+      // Fresh clone
+      console.log(`[${new Date().toISOString()}] Cloning repository`);
+      fs.mkdirSync(workDir, { recursive: true });
+      execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data' });
+    }
+
+    // Configure git user for commits
+    execSync('git config user.name "Darwin SysAdmin"', { cwd: workDir });
+    execSync('git config user.email "darwin-sysadmin@darwin-project.io"', { cwd: workDir });
+    
+    // Store credentials for subsequent git operations
+    execSync(`git config credential.helper 'store --file=/tmp/git-creds'`, { cwd: workDir });
+    fs.writeFileSync('/tmp/git-creds', `https://x-access-token:${token}@github.com\n`);
+    
+    console.log(`[${new Date().toISOString()}] Repository setup complete`);
+    
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Git setup error:`, err.message);
+    throw new Error(`Failed to setup repository: ${err.message}`);
+  }
+}
 
 /**
  * Execute gemini CLI with given prompt and options
@@ -14,7 +146,6 @@ const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
 async function executeGemini(prompt, options = {}) {
   return new Promise((resolve, reject) => {
     // Using -p/--prompt triggers non-interactive (headless) mode
-    // No separate --non-interactive flag exists
     const args = [];
     
     // Add auto-approve (yolo) flag if requested
@@ -32,7 +163,7 @@ async function executeGemini(prompt, options = {}) {
         ...process.env,
         GOOGLE_GENAI_USE_VERTEXAI: 'true',
       },
-      cwd: options.cwd || process.cwd(),
+      cwd: options.cwd || DEFAULT_WORK_DIR,
       timeout: TIMEOUT_MS,
     });
     
@@ -56,11 +187,9 @@ async function executeGemini(prompt, options = {}) {
       
       if (code === 0) {
         try {
-          // Try to parse JSON output
           const result = JSON.parse(stdout);
           resolve({ status: 'success', exitCode: code, output: result });
         } catch (e) {
-          // Return raw output if not valid JSON
           resolve({ status: 'success', exitCode: code, output: stdout, raw: true });
         }
       } else {
@@ -107,7 +236,11 @@ async function handleRequest(req, res) {
   // Health check endpoint
   if (url.pathname === '/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'healthy', service: 'gemini-sidecar' }));
+    res.end(JSON.stringify({ 
+      status: 'healthy', 
+      service: 'gemini-sidecar',
+      hasGitHubCredentials: hasGitHubCredentials(),
+    }));
     return;
   }
   
@@ -122,9 +255,37 @@ async function handleRequest(req, res) {
         return;
       }
       
+      const workDir = body.cwd || DEFAULT_WORK_DIR;
+      
+      // If repoUrl provided, setup the repository with fresh credentials
+      if (body.repoUrl) {
+        if (!hasGitHubCredentials()) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            status: 'error',
+            message: 'GitHub App credentials not configured. Mount darwin-github-app secret to /secrets/github/' 
+          }));
+          return;
+        }
+        
+        try {
+          const token = await generateInstallationToken();
+          await setupRepository(body.repoUrl, token, workDir);
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] Repo setup failed:`, err.message);
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            status: 'error',
+            message: `Repository setup failed: ${err.message}` 
+          }));
+          return;
+        }
+      }
+      
+      // Execute gemini CLI
       const result = await executeGemini(body.prompt, {
         autoApprove: body.autoApprove || false,
-        cwd: body.cwd || '/data/gitops',
+        cwd: workDir,
       });
       
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -152,6 +313,7 @@ const server = http.createServer(handleRequest);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Gemini sidecar listening on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute`);
+  console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
 });
 
 // Graceful shutdown

@@ -355,6 +355,9 @@ class BlackboardState:
                     "memory": memory,
                     "error_rate": error_rate,
                     "last_seen": last_seen,
+                    "gitops_repo": metadata.gitops_repo if metadata else None,
+                    "gitops_repo_url": metadata.gitops_repo_url if metadata else None,
+                    "gitops_helm_path": metadata.gitops_helm_path if metadata else None,
                 }
             ))
         
@@ -520,6 +523,7 @@ class BlackboardState:
         memory: float,
         error_rate: float,
         gitops_repo: Optional[str] = None,
+        gitops_repo_url: Optional[str] = None,
         gitops_helm_path: Optional[str] = None,
     ) -> None:
         """Update service metadata in Redis hash."""
@@ -535,6 +539,8 @@ class BlackboardState:
         # Add GitOps metadata if provided
         if gitops_repo:
             mapping["gitops_repo"] = gitops_repo
+        if gitops_repo_url:
+            mapping["gitops_repo_url"] = gitops_repo_url
         if gitops_helm_path:
             mapping["gitops_helm_path"] = gitops_helm_path
         
@@ -562,6 +568,7 @@ class BlackboardState:
             dependencies=deps,
             last_seen=float(data.get("last_seen", 0)),
             gitops_repo=data.get("gitops_repo"),
+            gitops_repo_url=data.get("gitops_repo_url"),
             gitops_helm_path=data.get("gitops_helm_path"),
         )
     
@@ -967,6 +974,7 @@ class BlackboardState:
             memory=payload.metrics.memory,
             error_rate=payload.metrics.error_rate,
             gitops_repo=payload.gitops.repo if payload.gitops else None,
+            gitops_repo_url=payload.gitops.repo_url if payload.gitops else None,
             gitops_helm_path=payload.gitops.helm_path if payload.gitops else None,
         )
         

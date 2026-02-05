@@ -299,17 +299,19 @@ class SysAdmin:
         return "\n".join(prompt_parts)
     
     @safe_execution
-    async def _execute_with_sidecar(self, plan_context: str) -> dict:
+    async def _execute_with_sidecar(self, plan_context: str, gitops_repo: str = None) -> dict:
         """
         Execute the plan via Gemini CLI sidecar.
         
-        Calls the gemini sidecar HTTP endpoint which runs the CLI.
-        Refreshes GitHub App credentials before execution to ensure valid token.
-        """
-        # Refresh git credentials (token may have expired)
-        if self._refresh_git_credentials():
-            logger.info("Git credentials refreshed successfully")
+        Calls the gemini sidecar HTTP endpoint which:
+        1. Generates fresh GitHub App token (handles 1-hour TTL)
+        2. Clones/updates the target repo dynamically
+        3. Runs gemini CLI with the prompt
         
+        Args:
+            plan_context: The prompt for gemini CLI
+            gitops_repo: Repository in owner/repo format (e.g., "The-Darwin-Project/Store")
+        """
         logger.info(f"Executing via Gemini sidecar at {self.gemini_sidecar_url}...")
         
         if self.dry_run:
@@ -319,6 +321,11 @@ class SysAdmin:
                 "message": "Dry run - no actual execution",
             }
         
+        # Construct full repo URL from owner/repo format
+        repo_url = f"https://github.com/{gitops_repo}.git" if gitops_repo else None
+        if repo_url:
+            logger.info(f"Target repo: {repo_url}")
+        
         try:
             async with httpx.AsyncClient(timeout=310.0) as client:  # Slightly longer than sidecar timeout
                 response = await client.post(
@@ -326,6 +333,7 @@ class SysAdmin:
                     json={
                         "prompt": plan_context,
                         "autoApprove": self.auto_approve,
+                        "repoUrl": repo_url,  # Sidecar handles token generation and cloning
                         "cwd": self.git_repo_path,
                     },
                 )
@@ -385,8 +393,9 @@ class SysAdmin:
         prompt = self._build_prompt(plan, gitops_repo, helm_path)
         
         # Execute via sidecar (with safety check)
+        # Pass gitops_repo so sidecar can clone the correct repository
         try:
-            result = await self._execute_with_sidecar(prompt)
+            result = await self._execute_with_sidecar(prompt, gitops_repo)
             
             if result["status"] == "success":
                 return f"Plan executed successfully. Output: {json.dumps(result.get('output', {}))}"

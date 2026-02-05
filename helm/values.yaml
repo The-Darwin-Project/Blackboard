@@ -104,9 +104,10 @@ github:
   # - installation-id: GitHub App Installation ID
   # - darwin-ci.2026-02-04.private-key.pem: Private key file
   existingSecret: "darwin-github-app"
-  # GitOps repository to clone (format: owner/repo)
-  repository: "The-Darwin-Project/gitops"
-  # Branch to use
+  # NOTE: repository field is no longer used - init container removed
+  # GitOps repo is now determined dynamically from service telemetry
+  # repository: "The-Darwin-Project/gitops"  # DEPRECATED
+  # Branch to use (for reference, sidecar defaults to main)
   branch: "main"
 # =============================================================================
 # Resource Limits

@@ -42,6 +42,7 @@ class GitOpsMetadata(BaseModel):
     Allows SysAdmin to discover where to make changes for this service.
     """
     repo: Optional[str] = Field(None, description="GitHub repo (e.g., 'The-Darwin-Project/Store')")
+    repo_url: Optional[str] = Field(None, description="Full clone URL (e.g., 'https://github.com/The-Darwin-Project/Store.git')")
     helm_path: Optional[str] = Field(None, description="Path to Helm values.yaml within repo")
 
 
@@ -71,6 +72,7 @@ class Service(BaseModel):
     dependencies: list[str] = Field(default_factory=list, description="List of dependency target names")
     last_seen: float = Field(default_factory=time.time, description="Unix timestamp of last telemetry")
     gitops_repo: Optional[str] = Field(None, description="GitHub repo for this service")
+    gitops_repo_url: Optional[str] = Field(None, description="Full clone URL for this service")
     gitops_helm_path: Optional[str] = Field(None, description="Helm values path within repo")
 
 

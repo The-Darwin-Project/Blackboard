@@ -104,15 +104,33 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   });
 
   // Build node HTML label
-  const buildNodeLabel = useCallback((node: GraphNode) => {
+  const buildNodeLabel = useCallback((node: GraphNode & { metadata: GraphNode['metadata'] & { gitops_repo?: string; gitops_repo_url?: string; gitops_helm_path?: string } }) => {
     const icon = NODE_ICONS[node.type] || '📦';
     const health = node.metadata.health || 'unknown';
     const version = node.metadata.version || '?';
     const cpu = node.metadata.cpu?.toFixed(0) || '0';
     const mem = node.metadata.memory?.toFixed(0) || '0';
     
+    // GitOps indicator (only show if repo is configured)
+    const gitopsRepo = node.metadata.gitops_repo;
+    const gitopsPath = node.metadata.gitops_helm_path || 'helm/values.yaml';
+    const gitIcon = gitopsRepo 
+      ? `<span 
+          style="
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            font-size: 12px;
+            cursor: help;
+            opacity: 0.9;
+          "
+          title="GitOps Config&#10;Repo: ${gitopsRepo}&#10;Path: ${gitopsPath}"
+        >🔗</span>`
+      : '';
+    
     return `
       <div class="cyto-node-label" style="
+        position: relative;
         background: ${HEALTH_COLORS[health]};
         border-radius: 8px;
         padding: 6px 10px;
@@ -122,6 +140,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         min-width: 80px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.3);
       ">
+        ${gitIcon}
         <div style="font-size: 16px; margin-bottom: 2px;">${icon}</div>
         <div style="font-weight: 600; margin-bottom: 2px;">${node.label}</div>
         <div style="font-size: 9px; opacity: 0.9;">v${version}</div>
@@ -477,7 +496,14 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             valignBox: 'center',
             tpl: (nodeData: unknown) => {
               console.log('[CytoscapeGraph] Generating HTML label for node:', nodeData);
-              const d = nodeData as GraphNode['metadata'] & { id: string; label: string; type: NodeType };
+              const d = nodeData as GraphNode['metadata'] & { 
+                id: string; 
+                label: string; 
+                type: NodeType;
+                gitops_repo?: string;
+                gitops_repo_url?: string;
+                gitops_helm_path?: string;
+              };
               return buildNodeLabel({
                 id: d.id,
                 type: d.type,
@@ -489,6 +515,9 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
                   memory: d.memory,
                   error_rate: d.error_rate,
                   last_seen: d.last_seen,
+                  gitops_repo: d.gitops_repo,
+                  gitops_repo_url: d.gitops_repo_url,
+                  gitops_helm_path: d.gitops_helm_path,
                 },
               });
             },

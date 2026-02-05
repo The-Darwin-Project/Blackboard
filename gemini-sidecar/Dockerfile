@@ -1,5 +1,5 @@
 # gemini-sidecar/Dockerfile
-# Gemini CLI sidecar - HTTP wrapper for gemini-cli
+# Gemini CLI sidecar - HTTP wrapper for gemini-cli with GitHub App auth
 # Uses Node.js 22 (required by @google/gemini-cli)
 
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest
@@ -14,6 +14,10 @@ RUN dnf install -y git && dnf clean all && \
 
 # Create app directory
 WORKDIR /app
+
+# Copy package.json and install dependencies (jsonwebtoken for GitHub App auth)
+COPY package.json .
+RUN npm install --omit=dev
 
 # Copy server code
 COPY server.js .

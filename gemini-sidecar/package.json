@@ -1,0 +1,15 @@
+{
+  "name": "gemini-sidecar",
+  "version": "1.0.0",
+  "description": "HTTP wrapper for Gemini CLI with GitHub App authentication",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
