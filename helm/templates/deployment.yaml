@@ -297,6 +297,11 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.gemini.port }}"
+            # GCP/Vertex AI configuration (required for gemini-cli)
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "{{ .Values.gcp.project }}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "{{ .Values.gcp.location }}"
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
