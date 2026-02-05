@@ -108,8 +108,13 @@ function setupGitCredentials(token, workDir) {
     execSync(`git config --global --add safe.directory '*'`, { encoding: 'utf8' });  // Allow any subdir
     
     // Store credentials for git operations (token-based auth)
-    execSync(`git config --global credential.helper 'store --file=/tmp/git-creds'`, { encoding: 'utf8' });
-    fs.writeFileSync('/tmp/git-creds', `https://x-access-token:${token}@github.com\n`);
+    // Clean up any stale git-creds (may be left as dir from old runs)
+    const credFile = '/tmp/git-creds';
+    if (fs.existsSync(credFile)) {
+      fs.rmSync(credFile, { recursive: true, force: true });
+    }
+    execSync(`git config --global credential.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
+    fs.writeFileSync(credFile, `https://x-access-token:${token}@github.com\n`);
     
     console.log(`[${new Date().toISOString()}] Git credentials configured`);
     
