@@ -242,14 +242,15 @@ spec:
         - name: redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
           imagePullPolicy: IfNotPresent
+          # Override command to bypass Red Hat entrypoint and configure Redis directly
+          # Disables RDB saves to prevent "MISCONF" errors on ephemeral storage
+          command:
+            - redis-server
           args:
-            # Disable RDB snapshots - prevents "MISCONF" errors on ephemeral storage
             - --save
             - ""
-            # Continue serving even if RDB fails (shouldn't happen with save disabled)
             - --stop-writes-on-bgsave-error
             - "no"
-            # Require password
             - --requirepass
             - "$(REDIS_PASSWORD)"
           ports:
