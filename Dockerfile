@@ -36,8 +36,12 @@ USER 1001
 FROM registry.access.redhat.com/ubi9/ubi:latest
 
 # Install system packages as root
+# Use Node.js 22 module stream (required by Gemini CLI which needs Node.js 20+)
 USER 0
-RUN dnf install -y python3 python3-pip git nodejs npm && dnf clean all
+RUN dnf module enable nodejs:22 -y && \
+    dnf install -y python3 python3-pip git nodejs npm && \
+    dnf clean all && \
+    node --version
 
 # Copy Gemini CLI from nodejs-22 stage
 COPY --from=react-builder /opt/gemini-cli /opt/gemini-cli
