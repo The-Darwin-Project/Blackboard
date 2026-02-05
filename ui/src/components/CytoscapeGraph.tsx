@@ -79,7 +79,37 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cyRef = useRef<any>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [containerReady, setContainerReady] = useState(false);
   const { data, isLoading, isError } = useGraph();
+
+  // Debug: Log render state
+  console.log('[CytoscapeGraph] Render state:', {
+    isLoading,
+    isError,
+    hasData: !!data,
+    nodeCount: data?.nodes?.length ?? 0,
+    edgeCount: data?.edges?.length ?? 0,
+    containerReady,
+    isInitialized,
+  });
+
+  // Watch for container to have dimensions
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        console.log('[CytoscapeGraph] ResizeObserver:', { width, height });
+        if (width > 0 && height > 0 && !containerReady) {
+          setContainerReady(true);
+        }
+      }
+    });
+
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [containerReady]);
 
   // Build node HTML label
   const buildNodeLabel = useCallback((node: GraphNode) => {
@@ -128,13 +158,17 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     `;
   }, []);
 
-  // Initialize Cytoscape
+  // Initialize Cytoscape (only when container is ready)
   useEffect(() => {
-    if (!containerRef.current || cyRef.current) return;
+    if (!containerRef.current || cyRef.current || !containerReady) return;
+
+    const container = containerRef.current;
+    const rect = container.getBoundingClientRect();
+    console.log('[CytoscapeGraph] Initializing Cytoscape with dimensions:', { width: rect.width, height: rect.height });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cy = (cytoscape as any)({
-      container: containerRef.current,
+      container: container,
       style: [
         // Base node style (fallback if HTML labels fail)
         {
@@ -234,6 +268,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
 
     cyRef.current = cy;
     setIsInitialized(true);
+    console.log('[CytoscapeGraph] Cytoscape initialized successfully');
 
     return () => {
       // Clean up HTML labels before destroying Cytoscape
@@ -242,7 +277,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       cyRef.current = null;
       setIsInitialized(false);
     };
-  }, []);
+  }, [containerReady]);
 
   // Helper to clean up HTML labels (prevents memory leaks)
   const cleanupHtmlLabels = useCallback(() => {
@@ -444,9 +479,17 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     // Fit to viewport with padding
     cy.fit(undefined, 30);
 
+    // Debug: Log final state
+    console.log('[CytoscapeGraph] Graph updated. Nodes:', cy.nodes().length, 'Edges:', cy.edges().length);
+    cy.nodes().forEach((node: any) => {
+      const pos = node.position();
+      console.log('[CytoscapeGraph] Node position:', node.id(), pos);
+    });
+
   }, [data, isInitialized, buildNodeLabel, buildGhostLabel, cleanupHtmlLabels]);
 
   if (isLoading) {
+    console.log('[CytoscapeGraph] Rendering: LOADING');
     return (
       <div className="flex items-center justify-center h-full">
         <Loader2 className="w-8 h-8 text-accent animate-spin" />
@@ -455,6 +498,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   }
 
   if (isError) {
+    console.log('[CytoscapeGraph] Rendering: ERROR');
     return (
       <div className="flex flex-col items-center justify-center h-full text-text-muted gap-2">
         <Network className="w-12 h-12" />
@@ -465,6 +509,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   }
 
   if (!data?.nodes.length) {
+    console.log('[CytoscapeGraph] Rendering: NO NODES');
     return (
       <div className="flex flex-col items-center justify-center h-full text-text-muted gap-2">
         <Network className="w-12 h-12" />
@@ -474,6 +519,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     );
   }
 
+  console.log('[CytoscapeGraph] Rendering: CONTAINER (nodes:', data.nodes.length, ')');
   return (
     <div
       ref={containerRef}
