@@ -94,12 +94,12 @@ jobs:
       - name: Update Helm values with new sidecar image tag
         if: github.event_name != 'pull_request'
         run: |
-          # Update gemini.image.tag in values.yaml
-          sed -i '/^gemini:/,/^[a-z]/{s/^  tag: ".*"/  tag: "${{ steps.sha.outputs.short }}"/}' helm/values.yaml
+          # Update gemini.image.tag in values.yaml (4 spaces indent under gemini.image)
+          sed -i '/^gemini:/,/^[a-z]/{s/^    tag: ".*"/    tag: "${{ steps.sha.outputs.short }}"/}' helm/values.yaml
 
           # Verify the change
           echo "Updated helm/values.yaml (gemini section):"
-          grep -A5 "^gemini:" helm/values.yaml
+          grep -A6 "^gemini:" helm/values.yaml
 
       - name: Commit and push Helm values update
         if: github.event_name != 'pull_request'
