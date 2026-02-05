@@ -85,60 +85,33 @@ async function generateInstallationToken() {
 }
 
 /**
- * Setup repository for GitOps operations
- * Clones or updates the repo with fresh credentials
- * @param {string} repoUrl - Full repo URL (https://github.com/owner/repo.git)
+ * Configure git credentials for GitHub operations
+ * Gemini will handle clone/pull/push itself
  * @param {string} token - Installation access token
- * @param {string} workDir - Target directory for clone
+ * @param {string} workDir - Working directory for git operations
  */
-async function setupRepository(repoUrl, token, workDir) {
-  // Inject token into URL: https://x-access-token:<token>@github.com/...
-  const authUrl = repoUrl.replace('https://', `https://x-access-token:${token}@`);
-  
-  console.log(`[${new Date().toISOString()}] Setting up repository: ${repoUrl} -> ${workDir}`);
+function setupGitCredentials(token, workDir) {
+  console.log(`[${new Date().toISOString()}] Configuring git credentials`);
 
   try {
-    if (fs.existsSync(`${workDir}/.git`)) {
-      // Existing repo - check if it's the same repo
-      const currentRemote = execSync('git remote get-url origin', { cwd: workDir, encoding: 'utf8' }).trim();
-      const currentRepo = currentRemote.replace(/https:\/\/[^@]*@/, 'https://').replace(/\.git$/, '');
-      const newRepo = repoUrl.replace(/\.git$/, '');
-      
-      if (currentRepo === newRepo) {
-        // Same repo - update and pull
-        console.log(`[${new Date().toISOString()}] Updating existing repo`);
-        execSync(`git remote set-url origin "${authUrl}"`, { cwd: workDir });
-        execSync('git fetch origin', { cwd: workDir });
-        execSync('git reset --hard origin/main', { cwd: workDir });
-      } else {
-        // Different repo - clean and reclone
-        console.log(`[${new Date().toISOString()}] Different repo detected, recloning`);
-        fs.rmSync(workDir, { recursive: true, force: true });
-        // Don't create dir - let git clone create it
-        execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data', encoding: 'utf8' });
-      }
-    } else {
-      // Fresh clone - remove any existing empty dir first
-      console.log(`[${new Date().toISOString()}] Cloning repository`);
-      if (fs.existsSync(workDir)) {
-        fs.rmSync(workDir, { recursive: true, force: true });
-      }
-      execSync(`git clone "${authUrl}" "${workDir}"`, { cwd: '/data', encoding: 'utf8' });
+    // Ensure work directory exists
+    if (!fs.existsSync(workDir)) {
+      fs.mkdirSync(workDir, { recursive: true });
     }
 
-    // Configure git user for commits
-    execSync('git config user.name "Darwin SysAdmin"', { cwd: workDir });
-    execSync('git config user.email "darwin-sysadmin@darwin-project.io"', { cwd: workDir });
+    // Configure git user globally (for any repo Gemini clones)
+    execSync('git config --global user.name "Darwin SysAdmin"', { encoding: 'utf8' });
+    execSync('git config --global user.email "darwin-sysadmin@darwin-project.io"', { encoding: 'utf8' });
     
-    // Store credentials for subsequent git operations
-    execSync(`git config credential.helper 'store --file=/tmp/git-creds'`, { cwd: workDir });
+    // Store credentials for git operations (token-based auth)
+    execSync(`git config --global credential.helper 'store --file=/tmp/git-creds'`, { encoding: 'utf8' });
     fs.writeFileSync('/tmp/git-creds', `https://x-access-token:${token}@github.com\n`);
     
-    console.log(`[${new Date().toISOString()}] Repository setup complete`);
+    console.log(`[${new Date().toISOString()}] Git credentials configured`);
     
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] Git setup error:`, err.message);
-    throw new Error(`Failed to setup repository: ${err.message}`);
+    console.error(`[${new Date().toISOString()}] Git config error:`, err.message);
+    throw new Error(`Failed to configure git: ${err.message}`);
   }
 }
 
@@ -259,28 +232,16 @@ async function handleRequest(req, res) {
       
       const workDir = body.cwd || DEFAULT_WORK_DIR;
       
-      // If repoUrl provided, setup the repository with fresh credentials
-      if (body.repoUrl) {
-        if (!hasGitHubCredentials()) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
-            status: 'error',
-            message: 'GitHub App credentials not configured. Mount darwin-github-app secret to /secrets/github/' 
-          }));
-          return;
-        }
-        
+      // Setup git credentials if GitHub App is configured
+      // Gemini will handle clone/pull/push itself
+      if (hasGitHubCredentials()) {
         try {
           const token = await generateInstallationToken();
-          await setupRepository(body.repoUrl, token, workDir);
+          setupGitCredentials(token, workDir);
         } catch (err) {
-          console.error(`[${new Date().toISOString()}] Repo setup failed:`, err.message);
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
-            status: 'error',
-            message: `Repository setup failed: ${err.message}` 
-          }));
-          return;
+          console.error(`[${new Date().toISOString()}] Git credential setup failed:`, err.message);
+          // Continue anyway - Gemini might not need git for this operation
+          console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
         }
       }
       

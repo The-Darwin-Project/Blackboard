@@ -212,6 +212,9 @@ class SysAdmin:
             helm_path: Path to Helm values within repo (e.g., "helm/values.yaml")
         """
         
+        # Build the full repo URL
+        repo_url = f"https://github.com/{gitops_repo}.git"
+        
         prompt_parts = [
             "You are a DevOps engineer performing GitOps operations.",
             "Execute the following infrastructure modification plan by editing files and committing to git.",
@@ -219,6 +222,7 @@ class SysAdmin:
             f"=== PLAN DETAILS ===",
             f"Action: {plan.action.value}",
             f"Target Service: {plan.service}",
+            f"Repository: {repo_url}",
             f"Helm Values File: {helm_path}",
             f"Reason: {plan.reason}",
             "",
@@ -226,16 +230,22 @@ class SysAdmin:
             json.dumps(plan.params, indent=2),
             "",
             "=== EXECUTION STEPS ===",
+            "",
+            "FIRST, setup the repository:",
+            f"- If {self.git_repo_path} does not exist or is empty, clone: git clone {repo_url} {self.git_repo_path}",
+            f"- If it exists, update: cd {self.git_repo_path} && git pull origin main",
+            "",
+            "THEN, perform the changes:",
         ]
         
         # Add action-specific instructions with explicit commands
         if plan.action.value == "scale":
             replicas = plan.params.get("replicas", 2)
             prompt_parts.extend([
-                f"1. Open the file: {helm_path}",
+                f"1. Open the file: {self.git_repo_path}/{helm_path}",
                 f"2. Find the 'replicaCount' field and change its value to {replicas}",
                 f"3. Save the file",
-                f"4. Run: git add {helm_path}",
+                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
                 f"5. Run: git commit -m \"scale({plan.service}): Update replicaCount to {replicas}\"",
                 f"6. Run: git push origin main",
             ])
@@ -243,10 +253,10 @@ class SysAdmin:
         elif plan.action.value == "rollback":
             version = plan.params.get("version", "previous")
             prompt_parts.extend([
-                f"1. Open the file: {helm_path}",
+                f"1. Open the file: {self.git_repo_path}/{helm_path}",
                 f"2. Find the 'image.tag' field and change its value to \"{version}\"",
                 f"3. Save the file",
-                f"4. Run: git add {helm_path}",
+                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
                 f"5. Run: git commit -m \"rollback({plan.service}): Revert to version {version}\"",
                 f"6. Run: git push origin main",
             ])
@@ -254,10 +264,10 @@ class SysAdmin:
         elif plan.action.value == "reconfig":
             config = plan.params.get("config", {})
             prompt_parts.extend([
-                f"1. Open the file: {helm_path}",
+                f"1. Open the file: {self.git_repo_path}/{helm_path}",
                 f"2. Apply these configuration changes: {json.dumps(config)}",
                 f"3. Save the file",
-                f"4. Run: git add {helm_path}",
+                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
                 f"5. Run: git commit -m \"reconfig({plan.service}): Update configuration\"",
                 f"6. Run: git push origin main",
             ])
@@ -265,10 +275,10 @@ class SysAdmin:
         elif plan.action.value == "failover":
             target = plan.params.get("target", "standby")
             prompt_parts.extend([
-                f"1. Open the file: {helm_path}",
+                f"1. Open the file: {self.git_repo_path}/{helm_path}",
                 f"2. Update the service routing to point to '{target}'",
                 f"3. Save the file",
-                f"4. Run: git add {helm_path}",
+                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
                 f"5. Run: git commit -m \"failover({plan.service}): Switch to {target}\"",
                 f"6. Run: git push origin main",
             ])
@@ -276,10 +286,10 @@ class SysAdmin:
         elif plan.action.value == "optimize":
             optimization = plan.params.get("optimization", "resources")
             prompt_parts.extend([
-                f"1. Open the file: {helm_path}",
+                f"1. Open the file: {self.git_repo_path}/{helm_path}",
                 f"2. Apply optimization: {optimization}",
                 f"3. Save the file",
-                f"4. Run: git add {helm_path}",
+                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
                 f"5. Run: git commit -m \"optimize({plan.service}): Apply {optimization}\"",
                 f"6. Run: git push origin main",
             ])
@@ -300,18 +310,16 @@ class SysAdmin:
         return "\n".join(prompt_parts)
     
     @safe_execution
-    async def _execute_with_sidecar(self, plan_context: str, gitops_repo: str = None) -> dict:
+    async def _execute_with_sidecar(self, plan_context: str) -> dict:
         """
         Execute the plan via Gemini CLI sidecar.
         
         Calls the gemini sidecar HTTP endpoint which:
-        1. Generates fresh GitHub App token (handles 1-hour TTL)
-        2. Clones/updates the target repo dynamically
-        3. Runs gemini CLI with the prompt
+        1. Generates fresh GitHub App token and configures git credentials
+        2. Runs gemini CLI with the prompt (Gemini handles clone/edit/commit/push)
         
         Args:
-            plan_context: The prompt for gemini CLI
-            gitops_repo: Repository in owner/repo format (e.g., "The-Darwin-Project/Store")
+            plan_context: The prompt for gemini CLI (includes repo URL and instructions)
         """
         logger.info(f"Executing via Gemini sidecar at {self.gemini_sidecar_url}...")
         
@@ -322,11 +330,6 @@ class SysAdmin:
                 "message": "Dry run - no actual execution",
             }
         
-        # Construct full repo URL from owner/repo format
-        repo_url = f"https://github.com/{gitops_repo}.git" if gitops_repo else None
-        if repo_url:
-            logger.info(f"Target repo: {repo_url}")
-        
         try:
             async with httpx.AsyncClient(timeout=310.0) as client:  # Slightly longer than sidecar timeout
                 response = await client.post(
@@ -334,7 +337,6 @@ class SysAdmin:
                     json={
                         "prompt": plan_context,
                         "autoApprove": self.auto_approve,
-                        "repoUrl": repo_url,  # Sidecar handles token generation and cloning
                         "cwd": self.git_repo_path,
                     },
                 )
@@ -390,13 +392,13 @@ class SysAdmin:
         gitops_repo, helm_path = await self._get_gitops_info(plan.service)
         logger.info(f"GitOps target: {gitops_repo}/{helm_path}")
         
-        # Build the prompt with GitOps info
+        # Build the prompt with GitOps info (includes repo URL for Gemini to clone)
         prompt = self._build_prompt(plan, gitops_repo, helm_path)
         
         # Execute via sidecar (with safety check)
-        # Pass gitops_repo so sidecar can clone the correct repository
+        # Prompt includes repo URL - Gemini handles clone/edit/commit/push
         try:
-            result = await self._execute_with_sidecar(prompt, gitops_repo)
+            result = await self._execute_with_sidecar(prompt)
             
             if result["status"] == "success":
                 return f"Plan executed successfully. Output: {json.dumps(result.get('output', {}))}"
