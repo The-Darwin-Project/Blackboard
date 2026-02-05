@@ -104,16 +104,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Install yq for safe YAML manipulation
+      - name: Install yq
+        if: github.event_name != 'pull_request'
+        uses: mikefarah/yq@master
+
       # Update helm/values.yaml with the new image tag
       - name: Update Helm values with new image tag
         if: github.event_name != 'pull_request'
         run: |
-          # Update image.tag in values.yaml
-          sed -i 's/^  tag: ".*"/  tag: "${{ steps.sha.outputs.short }}"/' helm/values.yaml
+          yq -i '.image.tag = "${{ steps.sha.outputs.short }}"' helm/values.yaml
 
           # Verify the change
           echo "Updated helm/values.yaml:"
-          grep -A1 "^image:" helm/values.yaml
+          yq '.image' helm/values.yaml
 
       - name: Commit and push Helm values update
         if: github.event_name != 'pull_request'
