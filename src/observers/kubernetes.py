@@ -35,10 +35,14 @@ class KubernetesObserver:
     Maps pod names to service names using the 'app' label.
     """
     
+    # Unhealthy container states that should trigger investigation
+    UNHEALTHY_STATES = {"ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "OOMKilled", "Error", "CreateContainerError"}
+    
     def __init__(
         self,
         blackboard: "BlackboardState",
         anomaly_callback: Optional[Callable[[str, float, float, str], Awaitable[None]]] = None,
+        pod_health_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         namespace: str = K8S_OBSERVER_NAMESPACE,
         interval: int = K8S_OBSERVER_INTERVAL,
         label_selector: str = K8S_OBSERVER_LABEL_SELECTOR,
@@ -49,12 +53,14 @@ class KubernetesObserver:
         Args:
             blackboard: Blackboard state for storing metrics
             anomaly_callback: Async callback(service, cpu, memory, source) for anomaly detection
+            pod_health_callback: Async callback(service, pod_name, reason) for unhealthy pod states
             namespace: Kubernetes namespace to watch
             interval: Polling interval in seconds
             label_selector: Optional label selector to filter pods
         """
         self.blackboard = blackboard
         self.anomaly_callback = anomaly_callback
+        self.pod_health_callback = pod_health_callback
         self.namespace = namespace
         self.interval = interval
         self.label_selector = label_selector
@@ -65,6 +71,8 @@ class KubernetesObserver:
         
         # Pod resource limits cache: {pod_name: {"cpu_limit": millicores, "memory_limit": bytes}}
         self._pod_limits: dict[str, dict] = {}
+        # Track already-reported unhealthy pods to avoid spam: {pod_name: reason}
+        self._reported_unhealthy: dict[str, str] = {}
     
     async def start(self) -> None:
         """Start the background polling loop."""
@@ -140,6 +148,7 @@ class KubernetesObserver:
         while self._running:
             try:
                 await self._poll_metrics()
+                await self._poll_pod_health()
             except Exception as e:
                 logger.error(f"Error polling K8s metrics: {e}")
             
@@ -177,6 +186,82 @@ class KubernetesObserver:
         except Exception as e:
             # Don't crash on metrics-server errors (it might be temporarily unavailable)
             logger.warning(f"Failed to fetch pod metrics: {e}")
+    
+    async def _poll_pod_health(self) -> None:
+        """
+        Check pod container states for unhealthy conditions.
+        
+        Detects: ImagePullBackOff, CrashLoopBackOff, OOMKilled, Error, etc.
+        Pods in these states won't report metrics, so _poll_metrics misses them.
+        """
+        if not self._k8s_available or not self.pod_health_callback:
+            return
+        
+        try:
+            pods = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._core_api.list_namespaced_pod(
+                    self.namespace,
+                    label_selector=self.label_selector or None,
+                )
+            )
+            
+            # Track which pods are healthy this cycle (to clear resolved ones)
+            healthy_pods = set()
+            
+            for pod in pods.items:
+                pod_name = pod.metadata.name
+                labels = pod.metadata.labels or {}
+                service_name = labels.get("app") or labels.get("app.kubernetes.io/name")
+                
+                if not service_name:
+                    continue
+                
+                # Check container statuses for unhealthy states
+                reason = self._get_unhealthy_reason(pod)
+                
+                if reason:
+                    # Only report if not already reported for this pod+reason
+                    if self._reported_unhealthy.get(pod_name) != reason:
+                        self._reported_unhealthy[pod_name] = reason
+                        logger.warning(f"Unhealthy pod: {pod_name} ({service_name}): {reason}")
+                        await self.pod_health_callback(service_name, pod_name, reason)
+                else:
+                    healthy_pods.add(pod_name)
+            
+            # Clear resolved pods from tracking
+            for pod_name in list(self._reported_unhealthy.keys()):
+                if pod_name in healthy_pods:
+                    logger.info(f"Pod recovered: {pod_name}")
+                    del self._reported_unhealthy[pod_name]
+                    
+        except Exception as e:
+            logger.debug(f"Failed to poll pod health: {e}")
+    
+    def _get_unhealthy_reason(self, pod) -> Optional[str]:
+        """Extract unhealthy reason from pod container statuses."""
+        statuses = (pod.status.container_statuses or []) + (pod.status.init_container_statuses or [])
+        
+        for cs in statuses:
+            # Check waiting state (ImagePullBackOff, CrashLoopBackOff, etc.)
+            if cs.state and cs.state.waiting:
+                reason = cs.state.waiting.reason or ""
+                if reason in self.UNHEALTHY_STATES:
+                    return f"{reason}: {cs.state.waiting.message or cs.name}"
+            
+            # Check terminated state (OOMKilled, Error)
+            if cs.state and cs.state.terminated:
+                reason = cs.state.terminated.reason or ""
+                if reason in self.UNHEALTHY_STATES:
+                    return f"{reason}: exit_code={cs.state.terminated.exit_code} ({cs.name})"
+            
+            # Check lastState for recent OOMKills (container restarted but was OOMKilled)
+            if cs.last_state and cs.last_state.terminated:
+                reason = cs.last_state.terminated.reason or ""
+                if reason == "OOMKilled" and (cs.restart_count or 0) > 2:
+                    return f"{reason}: {cs.restart_count} restarts ({cs.name})"
+        
+        return None
     
     async def _process_pod_metrics(self, pod_metrics: dict) -> None:
         """

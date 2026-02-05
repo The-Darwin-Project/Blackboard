@@ -629,6 +629,37 @@ class Aligner:
                 # Evaluate scale-down (HPA-like behavior)
                 await self._trigger_architect(service, "anomaly_resolved_memory")
     
+    async def handle_unhealthy_pod(self, service: str, pod_name: str, reason: str) -> None:
+        """
+        Handle unhealthy pod detected by K8s observer.
+        
+        Called for ImagePullBackOff, CrashLoopBackOff, OOMKilled, etc.
+        Records event and triggers investigation + Architect analysis.
+        """
+        # Map pod state reasons to anomaly types
+        if "OOMKilled" in reason:
+            anomaly_type = "oom_killed"
+        elif "ImagePull" in reason:
+            anomaly_type = "image_pull_error"
+        elif "CrashLoop" in reason:
+            anomaly_type = "crash_loop"
+        else:
+            anomaly_type = "pod_unhealthy"
+        
+        await self.blackboard.record_event(
+            EventType.HIGH_ERROR_RATE_DETECTED,
+            {
+                "service": service,
+                "pod": pod_name,
+                "reason": reason,
+                "anomaly_type": anomaly_type,
+            },
+            narrative=f"Detected unhealthy pod {pod_name} for service {service}: {reason}. Triggering investigation.",
+        )
+        logger.warning(f"Unhealthy pod detected: {pod_name} ({service}): {reason}")
+        
+        await self._trigger_architect(service, anomaly_type)
+    
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""
         self.clear_expired_rules()

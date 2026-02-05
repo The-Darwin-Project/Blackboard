@@ -97,9 +97,17 @@ async def lifespan(app: FastAPI):
                 """Called by K8sObserver with metrics from metrics-server."""
                 await aligner.check_anomalies_for_service(service, cpu, memory, source)
             
+            # Pod health callback for unhealthy states (ImagePullBackOff, CrashLoopBackOff, etc.)
+            async def k8s_pod_health_callback(
+                service: str, pod_name: str, reason: str
+            ) -> None:
+                """Called by K8sObserver when unhealthy pod states are detected."""
+                await aligner.handle_unhealthy_pod(service, pod_name, reason)
+            
             k8s_observer = KubernetesObserver(
                 blackboard=blackboard,
                 anomaly_callback=k8s_anomaly_callback,
+                pod_health_callback=k8s_pod_health_callback,
             )
             await k8s_observer.start()
             logger.info("KubernetesObserver started for external metrics observation")

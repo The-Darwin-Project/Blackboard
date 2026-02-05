@@ -480,6 +480,30 @@ class Architect:
                 f"- Provide reason: 'Over-provisioned: low CPU and memory utilization with multiple replicas'\n\n"
                 f"DO NOT call analyze_topology. DO NOT just analyze. You MUST call generate_ops_plan.\n\n"
             )
+        elif anomaly_type == "image_pull_error":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has pods in ImagePullBackOff state.\n\n"
+                f"This typically means the image tag in Helm values doesn't exist in the registry.\n"
+                f"A recent commit may have set an invalid image tag.\n\n"
+                f"ACTION REQUIRED: Create a rollback plan using generate_ops_plan.\n"
+                f"- Use action='rollback'\n"
+                f"- The SysAdmin will check git history and revert the bad change\n\n"
+            )
+        elif anomaly_type == "crash_loop":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has pods in CrashLoopBackOff.\n\n"
+                f"The containers are repeatedly crashing after startup.\n\n"
+                f"ACTION REQUIRED: Create a rollback plan using generate_ops_plan.\n"
+                f"- Use action='rollback' to revert to the last known working version\n\n"
+            )
+        elif anomaly_type == "oom_killed":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has pods being OOMKilled.\n\n"
+                f"Containers are exceeding their memory limits and being terminated.\n\n"
+                f"ACTION REQUIRED: Create a reconfig plan using generate_ops_plan.\n"
+                f"- Use action='reconfig' to increase memory limits\n"
+                f"- Set params.config to increase resources.limits.memory\n\n"
+            )
         else:
             base_prompt = (
                 f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}).\n\n"
