@@ -78,10 +78,6 @@ export interface TopologyResponse {
   edges: Record<string, string[]>;
 }
 
-export interface MermaidResponse {
-  mermaid: string;
-}
-
 // =============================================================================
 // Graph Visualization (Cytoscape.js)
 // =============================================================================

@@ -1,26 +1,14 @@
 // BlackBoard/ui/src/hooks/useTopology.ts
 /**
  * TanStack Query hook for topology data.
- * Polls /topology/mermaid for diagram, /topology/ for details.
+ * Polls /topology/ for details.
  */
 import { useQuery } from '@tanstack/react-query';
-import { ApiError, getTopology, getTopologyMermaid, getService } from '../api/client';
-import type { MermaidResponse, Service, TopologyResponse } from '../api/types';
+import { ApiError, getTopology, getService } from '../api/client';
+import type { Service, TopologyResponse } from '../api/types';
 
 // Polling interval: 2 seconds
 const TOPOLOGY_POLL_INTERVAL = 2000;
-
-/**
- * Hook for fetching topology mermaid diagram.
- */
-export function useTopologyMermaid() {
-  return useQuery<MermaidResponse>({
-    queryKey: ['topology', 'mermaid'],
-    queryFn: getTopologyMermaid,
-    refetchInterval: TOPOLOGY_POLL_INTERVAL,
-    staleTime: TOPOLOGY_POLL_INTERVAL,
-  });
-}
 
 /**
  * Hook for fetching full topology with service details.

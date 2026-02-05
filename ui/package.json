@@ -15,7 +15,6 @@
     "cytoscape-cose-bilkent": "^4.1.0",
     "cytoscape-node-html-label": "^1.2.2",
     "lucide-react": "^0.563.0",
-    "mermaid": "^11.12.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.0",

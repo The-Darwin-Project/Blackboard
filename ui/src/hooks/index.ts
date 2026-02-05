@@ -7,4 +7,4 @@ export { useEvents } from './useEvents';
 export { useGraph } from './useGraph';
 export { useMetrics } from './useMetrics';
 export { useApprovePlan, usePlans, useRejectPlan } from './usePlans';
-export { useService, useTopology, useTopologyMermaid } from './useTopology';
+export { useService, useTopology } from './useTopology';

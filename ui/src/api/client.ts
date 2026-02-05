@@ -8,7 +8,6 @@ import type {
   ChatResponse,
   ChartData,
   GraphResponse,
-  MermaidResponse,
   Plan,
   Service,
   TopologyResponse,
@@ -85,10 +84,6 @@ async function fetchApi<T>(
 
 export async function getTopology(): Promise<TopologyResponse> {
   return fetchApi<TopologyResponse>('/topology/');
-}
-
-export async function getTopologyMermaid(): Promise<MermaidResponse> {
-  return fetchApi<MermaidResponse>('/topology/mermaid');
 }
 
 export async function getServices(): Promise<string[]> {
