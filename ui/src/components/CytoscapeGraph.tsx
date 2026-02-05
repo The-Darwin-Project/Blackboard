@@ -136,15 +136,40 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     const cy = (cytoscape as any)({
       container: containerRef.current,
       style: [
-        // Base node style (invisible - HTML labels handle appearance)
+        // Base node style (fallback if HTML labels fail)
         {
           selector: 'node',
           style: {
             'width': 100,
             'height': 70,
             'shape': 'round-rectangle',
-            'background-opacity': 0,
-            'border-width': 0,
+            'background-color': '#64748b',
+            'background-opacity': 1,
+            'label': 'data(label)',
+            'color': '#fff',
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'font-size': 10,
+          },
+        },
+        // Health-based colors for fallback
+        {
+          selector: 'node[health="healthy"]',
+          style: {
+            'background-color': '#22c55e',
+          },
+        },
+        {
+          selector: 'node[health="warning"]',
+          style: {
+            'background-color': '#eab308',
+            'color': '#000',
+          },
+        },
+        {
+          selector: 'node[health="critical"]',
+          style: {
+            'background-color': '#ef4444',
           },
         },
         // Ghost node style
@@ -153,7 +178,12 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           style: {
             'width': 90,
             'height': 60,
-            'opacity': 0.7,
+            'background-color': '#6366f1',
+            'background-opacity': 0.1,
+            'border-width': 2,
+            'border-style': 'dashed',
+            'border-color': '#6366f1',
+            'label': 'data(label)',
           },
         },
         // Edge styles
@@ -253,6 +283,8 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     const cy = cyRef.current;
     if (!cy || !data || !isInitialized) return;
 
+    console.log('[CytoscapeGraph] Updating graph with data:', data);
+
     // Build elements
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const elements: any[] = [];
@@ -309,59 +341,105 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       });
     });
 
+    console.log('[CytoscapeGraph] Constructed elements:', elements);
+
     // Clean up existing HTML labels before removing elements (prevents memory leaks)
     cleanupHtmlLabels();
     
     // Update graph
     cy.elements().remove();
     cy.add(elements);
+    console.log('[CytoscapeGraph] Elements added to graph');
 
-    // Apply HTML labels
-    cy.nodeHtmlLabel([
-      {
-        query: 'node:not(.ghost)',
-        halign: 'center',
-        valign: 'center',
-        halignBox: 'center',
-        valignBox: 'center',
-        tpl: (nodeData: unknown) => {
-          const d = nodeData as GraphNode['metadata'] & { id: string; label: string; type: NodeType };
-          return buildNodeLabel({
-            id: d.id,
-            type: d.type,
-            label: d.label,
-            metadata: {
-              version: d.version,
-              health: d.health as HealthStatus,
-              cpu: d.cpu,
-              memory: d.memory,
-              error_rate: d.error_rate,
-              last_seen: d.last_seen,
+    // Apply HTML labels if extension is available
+    if (typeof cy.nodeHtmlLabel === 'function') {
+      try {
+        console.log('[CytoscapeGraph] Configuring nodeHtmlLabel...');
+        // Register HTML labels
+        cy.nodeHtmlLabel([
+          {
+            query: 'node:not(.ghost)',
+            halign: 'center',
+            valign: 'center',
+            halignBox: 'center',
+            valignBox: 'center',
+            tpl: (nodeData: unknown) => {
+              console.log('[CytoscapeGraph] Generating HTML label for node:', nodeData);
+              const d = nodeData as GraphNode['metadata'] & { id: string; label: string; type: NodeType };
+              return buildNodeLabel({
+                id: d.id,
+                type: d.type,
+                label: d.label,
+                metadata: {
+                  version: d.version,
+                  health: d.health as HealthStatus,
+                  cpu: d.cpu,
+                  memory: d.memory,
+                  error_rate: d.error_rate,
+                  last_seen: d.last_seen,
+                },
+              });
             },
-          });
-        },
-      },
-      {
-        query: 'node.ghost',
-        halign: 'center',
-        valign: 'center',
-        halignBox: 'center',
-        valignBox: 'center',
-        tpl: (nodeData: unknown) => {
-          const d = nodeData as { planId: string; action: string; label: string };
-          return buildGhostLabel({
-            plan_id: d.planId,
-            target_node: d.label.split(': ')[1] || '',
-            action: d.action,
-            status: 'pending',
-            params: {},
-          });
-        },
-      },
-    ]);
+          },
+          {
+            query: 'node.ghost',
+            halign: 'center',
+            valign: 'center',
+            halignBox: 'center',
+            valignBox: 'center',
+            tpl: (nodeData: unknown) => {
+              const d = nodeData as { planId: string; action: string; label: string };
+              return buildGhostLabel({
+                plan_id: d.planId,
+                target_node: d.label.split(': ')[1] || '',
+                action: d.action,
+                status: 'pending',
+                params: {},
+              });
+            },
+          },
+        ]);
+
+        // IMPORTANT: Only hide the default node body IF we are sure the HTML label extension is active.
+        // We can't easily detect if it "worked" per node, but if we got here, the extension is registered.
+        // However, if the user sees transparent nodes, it means this code ran but the HTML didn't render.
+        // Let's keep the fallback visible for now to debug, or try to force a redraw.
+        
+        // Strategy: We will NOT hide the node body completely yet. 
+        // Instead, we'll make it transparent ONLY if we are confident.
+        // For now, let's leave the fallback visible underneath (or behind) the HTML label
+        // so if the HTML label fails, the user sees the node.
+        // But if the HTML label works, it covers the node.
+        
+        // To do this, we need the HTML label to be opaque (it is) and centered (it is).
+        // So we can remove the code that hides the node body.
+        
+        /* 
+        cy.style()
+          .selector('node')
+          .style({
+            'background-opacity': 0,
+            'label': '',
+            'border-width': 0,
+          })
+          .update();
+        */
+          
+      } catch (err) {
+        console.error('[CytoscapeGraph] Failed to apply HTML labels:', err);
+      }
+    } else {
+      console.warn('[CytoscapeGraph] nodeHtmlLabel extension not available');
+    }
 
     // Run layout
-    cy.layout(LAYOUT_OPTIONS).run();
+    try {
+      cy.layout(LAYOUT_OPTIONS).run();
+    } catch (err) {
+      console.error('[CytoscapeGraph] Layout failed:', err);
+      // Fallback to basic grid layout
+      cy.layout({ name: 'grid' }).run();
+    }
 
     // Fit to viewport with padding
     cy.fit(undefined, 30);
