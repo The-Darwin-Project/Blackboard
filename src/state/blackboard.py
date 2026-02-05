@@ -16,6 +16,7 @@ Redis Schema (Flat Keys - PoC Simple):
     darwin:plans                        SET     [plan ids]
     darwin:plan:{id}                    HASH    {plan fields}
     darwin:events                       ZSET    {timestamp: event_json}
+    darwin:ip:{ip_address}              STRING  {service_name}  TTL=60s
 """
 from __future__ import annotations
 
@@ -243,6 +244,43 @@ class BlackboardState:
     async def get_edges(self, service: str) -> list[str]:
         """Get all dependencies for a service."""
         return list(await self.redis.smembers(f"darwin:edges:{service}"))
+    
+    # =========================================================================
+    # IP-to-Service Mapping (for graph deduplication)
+    # =========================================================================
+    
+    async def register_service_ips(self, service: str, ips: list[str]) -> None:
+        """
+        Register IP-to-service mapping with 60s TTL.
+        
+        Refreshed on each telemetry push. Allows correlating IP-based
+        dependency targets with named services.
+        """
+        for ip in ips:
+            await self.redis.set(f"darwin:ip:{ip}", service, ex=60)
+            logger.debug(f"Registered IP mapping: {ip} -> {service}")
+    
+    async def resolve_ip_to_service(self, target: str) -> str:
+        """
+        Resolve IP to service name if mapping exists.
+        
+        Args:
+            target: Dependency target (could be IP or service name)
+        
+        Returns:
+            Resolved service name, or original target if not found
+        """
+        if self._is_ip_address(target):
+            resolved = await self.redis.get(f"darwin:ip:{target}")
+            if resolved:
+                logger.debug(f"Resolved IP {target} -> {resolved}")
+                return resolved
+        return target
+    
+    def _is_ip_address(self, value: str) -> bool:
+        """Check if value looks like an IPv4 address."""
+        import re
+        return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', value))
     
     async def get_topology(self) -> TopologySnapshot:
         """Get complete topology snapshot."""
@@ -847,15 +885,22 @@ class BlackboardState:
         
         Called by the Aligner agent.
         """
+        # Register this service's IPs for IP-to-name correlation
+        # (before processing dependencies so other services can resolve us)
+        if payload.pod_ips:
+            await self.register_service_ips(payload.service, payload.pod_ips)
+        
         # Update Structure Layer
         await self.add_service(payload.service)
         
         for dep in payload.topology.dependencies:
-            await self.add_service(dep.target)
+            # Resolve IP to service name if mapping exists
+            resolved_target = await self.resolve_ip_to_service(dep.target)
+            await self.add_service(resolved_target)
             # Store edge with full metadata for rich graph visualization
             await self.add_edge_with_metadata(
                 source=payload.service,
-                target=dep.target,
+                target=resolved_target,  # Use resolved name
                 protocol=self._infer_protocol_from_type(dep.type),
                 dep_type="hard" if dep.type in ["db", "http"] else "async",
                 env_var=dep.env_var,
