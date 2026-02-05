@@ -79,7 +79,6 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cyRef = useRef<any>(null);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [containerReady, setContainerReady] = useState(false);
   const { data, isLoading, isError } = useGraph();
 
   // Debug: Log render state
@@ -89,27 +88,9 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     hasData: !!data,
     nodeCount: data?.nodes?.length ?? 0,
     edgeCount: data?.edges?.length ?? 0,
-    containerReady,
     isInitialized,
+    hasContainer: !!containerRef.current,
   });
-
-  // Watch for container to have dimensions
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        console.log('[CytoscapeGraph] ResizeObserver:', { width, height });
-        if (width > 0 && height > 0 && !containerReady) {
-          setContainerReady(true);
-        }
-      }
-    });
-
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, [containerReady]);
 
   // Build node HTML label
   const buildNodeLabel = useCallback((node: GraphNode) => {
@@ -158,11 +139,19 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     `;
   }, []);
 
-  // Initialize Cytoscape (only when container is ready)
+  // Initialize Cytoscape (when we have data and container is mounted)
+  // This effect runs when data changes - container is only rendered when data.nodes.length > 0
   useEffect(() => {
-    if (!containerRef.current || cyRef.current || !containerReady) return;
-
+    // Skip if no data or already initialized
+    if (!data?.nodes?.length || cyRef.current) return;
+    
+    // Container should exist now since we're past the loading/empty states
     const container = containerRef.current;
+    if (!container) {
+      console.log('[CytoscapeGraph] Container not yet available, waiting...');
+      return;
+    }
+
     const rect = container.getBoundingClientRect();
     console.log('[CytoscapeGraph] Initializing Cytoscape with dimensions:', { width: rect.width, height: rect.height });
 
@@ -277,7 +266,8 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       cyRef.current = null;
       setIsInitialized(false);
     };
-  }, [containerReady]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.nodes?.length]);
 
   // Helper to clean up HTML labels (prevents memory leaks)
   const cleanupHtmlLabels = useCallback(() => {
