@@ -15,17 +15,18 @@ AIR GAP ENFORCEMENT:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Optional
 
 # AIR GAP ENFORCEMENT: These imports are FORBIDDEN
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
 # import subprocess  # FORBIDDEN
 
-from ..models import ChatResponse, ConversationMessage, PlanAction, PlanCreate, Plan
+from ..models import ChatResponse, ConversationMessage, PlanAction, PlanCreate, PlanStatus, Plan
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -72,6 +73,7 @@ class Architect:
         self.blackboard = blackboard
         self._model = None
         self._chat = None
+        self._running = False  # For task loop
         
         # Configuration
         self.project = os.getenv("GCP_PROJECT")
@@ -88,28 +90,12 @@ class Architect:
         else:
             logger.info(f"Architect configured with GCP project: {self.project}")
         
-        # Callback for auto-approval check after plan creation
-        self._plan_created_callback: Optional[Callable[["Plan"], Awaitable[None]]] = None
-    
-    def set_plan_created_callback(
-        self, callback: Callable[["Plan"], Awaitable[None]]
-    ) -> None:
-        """
-        Set callback for auto-approval check after plan creation.
-        
-        Callback signature: async def callback(plan: Plan) -> None
-        This is called after each plan is created, allowing SysAdmin to
-        check if the plan can be auto-approved.
-        """
-        self._plan_created_callback = callback
-        logger.info("Plan created callback registered for auto-approval")
-    
     async def _get_model(self):
         """Lazy-load Vertex AI Pro model with tools."""
         if self._model is None:
             try:
                 import vertexai
-                from vertexai.generative_models import GenerativeModel
+                from vertexai.generative_models import GenerativeModel, GenerationConfig
                 
                 from .tools import architect_tools
                 
@@ -118,6 +104,10 @@ class Architect:
                 self._model = GenerativeModel(
                     self.model_name,
                     tools=[architect_tools],
+                    generation_config=GenerationConfig(
+                        temperature=0.7,  # Balanced: creative enough to reason across diverse data
+                        top_p=0.9,        # Allow varied token selection
+                    ),
                 )
                 
                 logger.info(f"Architect initialized with Vertex AI Pro: {self.model_name}")
@@ -176,17 +166,8 @@ class Architect:
             
             plan = await self.blackboard.create_plan(plan_data)
             
-            # Check for auto-approval (if callback registered)
-            auto_approved = False
-            if self._plan_created_callback:
-                try:
-                    await self._plan_created_callback(plan)
-                    # Re-fetch plan to get updated status
-                    updated_plan = await self.blackboard.get_plan(plan.id)
-                    if updated_plan and updated_plan.status.value == "approved":
-                        auto_approved = True
-                except Exception as e:
-                    logger.warning(f"Auto-approval check failed: {e}")
+            # Check for auto-approval based on action type
+            auto_approved = await self._check_auto_approve(plan)
             
             return {
                 "plan_id": plan.id,
@@ -219,6 +200,56 @@ class Architect:
                 }
         
         return None
+    
+    async def _check_auto_approve(self, plan: Plan) -> bool:
+        """
+        Check if plan can be auto-approved and enqueue for execution.
+        
+        Auto-approval policy:
+        - Values-only changes (scale, reconfig) → Auto-approve + Enqueue
+        - Rollback → Auto-approve only if NOT structural (template_rollback/structural params)
+        - Structural changes (failover, optimize) → Require human approval
+        """
+        auto_approve_enabled = os.getenv("SYSADMIN_AUTO_APPROVE", "false").lower() == "true"
+        
+        if not auto_approve_enabled:
+            return False
+        
+        action = plan.action.value
+        params = plan.params or {}
+        
+        # Actions that are always values-only (safe for auto-approval)
+        values_only_actions = {"scale", "reconfig"}
+        
+        can_approve = False
+        
+        if action in values_only_actions:
+            can_approve = True
+        elif action == "rollback":
+            # Only auto-approve version-only rollbacks, not structural
+            if params.get("template_rollback") or params.get("structural"):
+                logger.info(f"Plan {plan.id} rollback requires structural changes - human approval needed")
+                return False
+            can_approve = True
+        elif action in {"failover", "optimize"}:
+            # Only auto-approve if explicitly marked values_only
+            if params.get("values_only"):
+                can_approve = True
+            else:
+                logger.info(f"Plan {plan.id} '{action}' may require structural changes - human approval needed")
+                return False
+        
+        if can_approve:
+            await self.blackboard.update_plan_status(plan.id, PlanStatus.APPROVED)
+            logger.info(f"Plan {plan.id} auto-approved: {action}")
+            
+            # Enqueue for SysAdmin execution
+            await self.blackboard.enqueue_plan_for_execution(plan.id)
+            logger.info(f"Plan {plan.id} enqueued for execution")
+            return True
+        
+        logger.info(f"Plan {plan.id} requires human approval: {action}")
+        return False
     
     async def chat(
         self,
@@ -344,3 +375,96 @@ class Architect:
             "services": [s.model_dump() for s in snapshot.services.values()],
             "pending_plans": len(snapshot.pending_plans),
         }
+    
+    # =========================================================================
+    # Task Loop (Blackboard-Centric Communication)
+    # =========================================================================
+    
+    async def start_task_loop(self) -> None:
+        """
+        Start background loop that polls Blackboard for tasks.
+        
+        Called from main.py on startup to enable Blackboard-centric communication.
+        """
+        self._running = True
+        logger.info("Architect task loop started")
+        
+        while self._running:
+            try:
+                task = await self.blackboard.dequeue_architect_task()
+                if task:
+                    await self._process_task(task)
+            except Exception as e:
+                logger.error(f"Architect task loop error: {e}")
+                await asyncio.sleep(5)
+    
+    def stop_task_loop(self) -> None:
+        """Stop the task loop."""
+        self._running = False
+        logger.info("Architect task loop stopping")
+    
+    async def _process_task(self, task: dict) -> None:
+        """Process a task from the Blackboard queue."""
+        task_type = task.get("type")
+        logger.info(f"Processing task: {task.get('id')} ({task_type})")
+        
+        if task_type == "anomaly_analysis":
+            prompt = self._build_anomaly_prompt(
+                task["service"],
+                task["anomaly_type"],
+                task.get("investigation"),
+            )
+            response = await self.chat(prompt)
+            logger.info(f"Task {task.get('id')} completed, plan_id: {response.plan_id}")
+        else:
+            logger.warning(f"Unknown task type: {task_type}")
+    
+    def _build_anomaly_prompt(
+        self,
+        service: str,
+        anomaly_type: str,
+        investigation: Optional[str] = None,
+    ) -> str:
+        """Build ACTIONABLE prompt for anomaly analysis."""
+        # Base prompt by anomaly type
+        if anomaly_type == "high_cpu":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has critically high CPU usage (above threshold).\n\n"
+                f"ACTION REQUIRED: Create a scaling plan using the generate_ops_plan function.\n"
+                f"- Use action='scale' to increase replicas\n"
+                f"- Set params.replicas to an appropriate number (e.g., 2 or 3)\n"
+                f"- Provide a clear reason referencing the high CPU\n\n"
+            )
+        elif anomaly_type == "high_memory":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has critically high memory usage (above threshold).\n\n"
+                f"ACTION REQUIRED: Create a scaling plan using the generate_ops_plan function.\n"
+                f"- Use action='scale' to increase replicas and distribute memory load\n"
+                f"- Set params.replicas to an appropriate number\n"
+                f"- Provide a clear reason referencing the high memory\n\n"
+            )
+        elif anomaly_type == "high_error_rate":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' has a critically high error rate (above threshold).\n\n"
+                f"ACTION REQUIRED: Create a remediation plan using the generate_ops_plan function.\n"
+                f"- Consider action='rollback' to revert to a stable version, OR\n"
+                f"- Consider action='failover' if a standby is available\n"
+                f"- Provide a clear reason referencing the high error rate\n\n"
+            )
+        else:
+            base_prompt = (
+                f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}).\n\n"
+                f"ACTION REQUIRED: Create a remediation plan using the generate_ops_plan function.\n"
+                f"Choose the appropriate action: scale, rollback, reconfig, failover, or optimize.\n\n"
+            )
+        
+        # Add investigation context if available
+        if investigation:
+            base_prompt += (
+                f"=== INVESTIGATION FINDINGS ===\n"
+                f"{investigation[:2000]}\n\n"
+            )
+        
+        base_prompt += "DO NOT just analyze - you MUST call generate_ops_plan to create a remediation plan."
+        
+        return base_prompt

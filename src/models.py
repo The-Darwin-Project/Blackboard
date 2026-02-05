@@ -74,6 +74,8 @@ class Service(BaseModel):
     gitops_repo: Optional[str] = Field(None, description="GitHub repo for this service")
     gitops_repo_url: Optional[str] = Field(None, description="Full clone URL for this service")
     gitops_helm_path: Optional[str] = Field(None, description="Helm values path within repo")
+    replicas_ready: Optional[int] = Field(None, description="Number of ready replicas from K8s")
+    replicas_desired: Optional[int] = Field(None, description="Desired replica count from K8s")
 
 
 # =============================================================================

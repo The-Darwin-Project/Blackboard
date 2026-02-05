@@ -16,6 +16,7 @@ AIR GAP ENFORCEMENT:
 """
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -30,7 +31,7 @@ import httpx
 # from vertexai import *  # FORBIDDEN
 
 if TYPE_CHECKING:
-    from ..models import Plan
+    from ..models import Plan, PlanStatus
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ class SysAdmin:
     
     def __init__(self, blackboard: "BlackboardState"):
         self.blackboard = blackboard
+        self._running = False  # For execution loop
         
         # Configuration
         self.git_repo_path = os.getenv("GIT_REPO_PATH", "/tmp/darwin-gitops")
@@ -415,68 +417,105 @@ class SysAdmin:
             logger.error(f"Execution error: {e}")
             return f"Execution failed with error: {e}"
     
-    def validate_plan(self, plan: "Plan") -> tuple[bool, str]:
-        """
-        Validate a plan before execution.
-        
-        Checks safety rules without actually executing.
-        
-        Returns (is_valid, message).
-        """
-        prompt = self._build_prompt(plan)
-        
-        # Check for forbidden patterns
-        for pattern in FORBIDDEN_PATTERNS:
-            if re.search(pattern, prompt, re.IGNORECASE):
-                return False, f"Plan contains forbidden pattern: {pattern}"
-        
-        # Check that service exists in topology
-        # (This would require async, so we skip for sync validation)
-        
-        return True, "Plan validated successfully"
+    # =========================================================================
+    # Execution Loop (Blackboard-Centric Communication)
+    # =========================================================================
     
-    def can_auto_approve(self, plan: "Plan") -> tuple[bool, str]:
+    async def start_execution_loop(self) -> None:
         """
-        Determine if a plan can be auto-approved.
+        Start background loop that polls Blackboard for approved plans.
         
-        Auto-approval policy (per Agent Definitions document):
-        - Values-only changes (scaling, toggles, config values) → AUTO-APPROVE
-        - Structural changes (templates, source code) → Require human approval
-        
-        Returns (can_approve, reason).
+        Called from main.py on startup to enable Blackboard-centric communication.
         """
-        if not self.auto_approve:
-            return False, "Auto-approval disabled (SYSADMIN_AUTO_APPROVE=false)"
+        from ..models import PlanStatus, EventType
         
-        # Actions that are always values-only (safe for auto-approval)
-        values_only_actions = {"scale", "reconfig"}
+        self._running = True
+        logger.info("SysAdmin execution loop started")
         
-        # Actions that may require structural changes (need human review)
-        structural_actions = {"failover", "optimize"}
+        while self._running:
+            try:
+                plan_id = await self.blackboard.dequeue_plan_for_execution()
+                if plan_id:
+                    plan = await self.blackboard.get_plan(plan_id)
+                    if plan and plan.status == PlanStatus.APPROVED:
+                        await self._execute_plan_with_status(plan)
+            except Exception as e:
+                logger.error(f"SysAdmin execution loop error: {e}")
+                await asyncio.sleep(5)
+    
+    def stop_execution_loop(self) -> None:
+        """Stop the execution loop."""
+        self._running = False
+        logger.info("SysAdmin execution loop stopping")
+    
+    async def _execute_plan_with_status(self, plan: "Plan") -> None:
+        """Execute plan and update status in Blackboard."""
+        from ..models import PlanStatus, EventType
         
-        # Rollback is conditionally values-only
-        # - If just changing image tag → values-only
-        # - If rolling back templates → structural
-        
-        action = plan.action.value
-        
-        if action in values_only_actions:
-            return True, f"Auto-approved: '{action}' is a values-only change"
-        
-        elif action == "rollback":
-            # Check if it's just a version/tag change (safe) or structural
-            params = plan.params or {}
-            if params.get("template_rollback") or params.get("structural"):
-                return False, "Rollback requires structural changes - human approval needed"
-            return True, "Auto-approved: rollback is version-only change"
-        
-        elif action in structural_actions:
-            # Check if explicitly marked as safe
-            params = plan.params or {}
-            if params.get("values_only"):
-                return True, f"Auto-approved: '{action}' marked as values_only"
-            return False, f"'{action}' may require structural changes - human approval needed"
-        
-        else:
-            # Unknown action - require human approval
-            return False, f"Unknown action '{action}' - human approval required"
+        try:
+            # Mark as executing
+            await self.blackboard.update_plan_status(plan.id, PlanStatus.EXECUTING)
+            
+            # Record SysAdmin executing event
+            await self.blackboard.record_event(
+                EventType.SYSADMIN_EXECUTING,
+                {"plan_id": plan.id, "service": plan.service, "action": plan.action.value},
+                narrative=f"Executing approved plan: {plan.action.value} on {plan.service}...",
+            )
+            logger.info(f"SysAdmin executing plan {plan.id}")
+            
+            # Execute via SysAdmin
+            result = await self.execute_plan(plan)
+            
+            # Check if execution actually succeeded
+            execution_succeeded = result and "successfully" in result.lower() and "failed" not in result.lower()
+            
+            if execution_succeeded:
+                # Mark as completed
+                await self.blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
+                
+                await self.blackboard.record_event(
+                    EventType.PLAN_EXECUTED,
+                    {
+                        "plan_id": plan.id,
+                        "service": plan.service,
+                        "action": plan.action.value,
+                        "status": "success",
+                        "result": result[:500] if result else "",
+                    },
+                    narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
+                )
+                logger.info(f"Plan {plan.id} executed successfully")
+            else:
+                # Mark as failed
+                await self.blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=result)
+                
+                await self.blackboard.record_event(
+                    EventType.PLAN_FAILED,
+                    {
+                        "plan_id": plan.id,
+                        "service": plan.service,
+                        "action": plan.action.value,
+                        "status": "failed",
+                        "error": result[:500] if result else "Unknown error",
+                    },
+                    narrative=f"Execution failed for {plan.action.value} on {plan.service}: {result[:200] if result else 'Unknown error'}",
+                )
+                logger.error(f"Plan {plan.id} execution failed: {result}")
+                
+        except Exception as e:
+            # Mark as failed
+            await self.blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=str(e))
+            
+            await self.blackboard.record_event(
+                EventType.PLAN_FAILED,
+                {
+                    "plan_id": plan.id,
+                    "service": plan.service,
+                    "action": plan.action.value,
+                    "status": "failed",
+                    "error": str(e)[:500],
+                },
+                narrative=f"Failed to execute plan for {plan.service}: {str(e)[:100]}",
+            )
+            logger.error(f"Plan {plan.id} execution error: {e}")

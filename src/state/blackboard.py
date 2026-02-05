@@ -393,6 +393,8 @@ class BlackboardState:
                     "gitops_repo": metadata.gitops_repo if metadata else None,
                     "gitops_repo_url": metadata.gitops_repo_url if metadata else None,
                     "gitops_helm_path": metadata.gitops_helm_path if metadata else None,
+                    "replicas_ready": metadata.replicas_ready if metadata else None,
+                    "replicas_desired": metadata.replicas_desired if metadata else None,
                 }
             ))
         
@@ -582,6 +584,20 @@ class BlackboardState:
         await self.redis.hset(key, mapping=mapping)
         logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
     
+    async def update_service_replicas(
+        self,
+        name: str,
+        ready: int,
+        desired: int,
+    ) -> None:
+        """Update service replica count in Redis hash."""
+        key = f"darwin:service:{name}"
+        await self.redis.hset(key, mapping={
+            "replicas_ready": str(ready),
+            "replicas_desired": str(desired),
+        })
+        logger.debug(f"Updated replicas for {name}: {ready}/{desired}")
+    
     async def get_service(self, name: str) -> Optional[Service]:
         """Get service metadata."""
         key = f"darwin:service:{name}"
@@ -605,6 +621,8 @@ class BlackboardState:
             gitops_repo=data.get("gitops_repo"),
             gitops_repo_url=data.get("gitops_repo_url"),
             gitops_helm_path=data.get("gitops_helm_path"),
+            replicas_ready=int(data["replicas_ready"]) if data.get("replicas_ready") else None,
+            replicas_desired=int(data["replicas_desired"]) if data.get("replicas_desired") else None,
         )
     
     async def get_all_services(self) -> dict[str, Service]:
@@ -946,6 +964,65 @@ class BlackboardState:
         
         return events
 
+    # =========================================================================
+    # Task Queue Layer (Blackboard-Centric Communication)
+    # =========================================================================
+    
+    # Task queue Redis keys
+    TASK_KEY_ARCHITECT = "darwin:tasks:architect"
+    TASK_KEY_SYSADMIN = "darwin:tasks:sysadmin"
+    
+    async def enqueue_architect_task(self, task: dict) -> str:
+        """
+        Enqueue task for Architect to process.
+        
+        Used by Aligner to trigger Architect analysis via Blackboard.
+        
+        Returns task_id.
+        """
+        task_id = f"task-{uuid.uuid4().hex[:8]}"
+        task["id"] = task_id
+        task["created_at"] = time.time()
+        await self.redis.lpush(self.TASK_KEY_ARCHITECT, json.dumps(task))
+        logger.debug(f"Enqueued architect task: {task_id}")
+        return task_id
+    
+    async def dequeue_architect_task(self) -> Optional[dict]:
+        """
+        Dequeue next task for Architect (blocking pop with timeout).
+        
+        Returns task dict or None if queue is empty after timeout.
+        """
+        result = await self.redis.brpop(self.TASK_KEY_ARCHITECT, timeout=5)
+        if result:
+            _, task_json = result
+            task = json.loads(task_json)
+            logger.debug(f"Dequeued architect task: {task.get('id')}")
+            return task
+        return None
+    
+    async def enqueue_plan_for_execution(self, plan_id: str) -> None:
+        """
+        Enqueue approved plan for SysAdmin execution.
+        
+        Called after plan is approved (either manually or auto-approved).
+        """
+        await self.redis.lpush(self.TASK_KEY_SYSADMIN, plan_id)
+        logger.debug(f"Enqueued plan for execution: {plan_id}")
+    
+    async def dequeue_plan_for_execution(self) -> Optional[str]:
+        """
+        Dequeue next plan_id for SysAdmin (blocking pop with timeout).
+        
+        Returns plan_id or None if queue is empty after timeout.
+        """
+        result = await self.redis.brpop(self.TASK_KEY_SYSADMIN, timeout=5)
+        if result:
+            _, plan_id = result
+            logger.debug(f"Dequeued plan for execution: {plan_id}")
+            return plan_id
+        return None
+    
     async def get_events_for_service(
         self,
         service: str,

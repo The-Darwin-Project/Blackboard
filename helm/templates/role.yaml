@@ -11,10 +11,14 @@ metadata:
     app.kubernetes.io/name: darwin-brain
     app.kubernetes.io/instance: {{ .Release.Name }}
 rules:
-  # Read pods to get labels for service name mapping
+  # Read pods and logs for service mapping and investigation
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # Read deployments/replicasets for replica count
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
   # Read pod metrics from metrics-server
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]

@@ -73,7 +73,10 @@ async def approve_plan(
         )
     
     updated = await blackboard.update_plan_status(plan_id, PlanStatus.APPROVED)
-    logger.info(f"Plan {plan_id} approved")
+    
+    # Enqueue for SysAdmin execution via Blackboard queue
+    await blackboard.enqueue_plan_for_execution(plan_id)
+    logger.info(f"Plan {plan_id} approved and enqueued for execution")
     
     return updated
 

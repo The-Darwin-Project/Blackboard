@@ -44,7 +44,7 @@ gemini:
       memory: 256Mi
       cpu: 100m
     limits:
-      memory: 512Mi
+      memory: 1Gi # Increased from 512Mi - OOMKilled fix
       cpu: 500m
 # =============================================================================
 # GCP / Vertex AI Configuration

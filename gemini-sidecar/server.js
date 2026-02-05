@@ -270,9 +270,77 @@ async function handleRequest(req, res) {
     return;
   }
   
+  // Investigate endpoint - Analyze pod issues using kubectl
+  if (url.pathname === '/investigate' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      
+      const { service, namespace = 'darwin', anomalyType } = body;
+      
+      if (!service || !anomalyType) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing required fields: service, anomalyType' }));
+        return;
+      }
+      
+      // Build investigation prompt for Gemini
+      const prompt = buildInvestigationPrompt(service, namespace, anomalyType);
+      
+      console.log(`[${new Date().toISOString()}] Investigating ${service} (${anomalyType}) in ${namespace}`);
+      
+      // Execute gemini with investigation prompt
+      const result = await executeGemini(prompt, { autoApprove: true });
+      
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] Investigation error:`, err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ 
+        status: 'error', 
+        message: err.message 
+      }));
+    }
+    return;
+  }
+  
   // 404 for unknown routes
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Not found' }));
+}
+
+/**
+ * Build investigation prompt for Gemini to analyze pod issues
+ */
+function buildInvestigationPrompt(service, namespace, anomalyType) {
+  return `You are a Kubernetes operations expert investigating a ${anomalyType.replace('_', ' ')} issue for service "${service}" in namespace "${namespace}".
+
+=== INVESTIGATION STEPS ===
+
+1. First, get recent events for the service:
+   kubectl get events -n ${namespace} --field-selector involvedObject.name=${service} --sort-by='.lastTimestamp' | tail -20
+
+2. If pods exist, get their status:
+   kubectl get pods -n ${namespace} -l app=${service}
+
+3. For each pod showing issues (CrashLoopBackOff, OOMKilled, Error), get logs:
+   kubectl logs -n ${namespace} <pod-name> --tail=50
+   
+   If previous container exists:
+   kubectl logs -n ${namespace} <pod-name> --previous --tail=50
+
+4. Describe the problematic pod for more context:
+   kubectl describe pod -n ${namespace} <pod-name>
+
+=== ANALYSIS REQUIRED ===
+
+Based on the above information, provide:
+1. **Root Cause**: What is causing the ${anomalyType.replace('_', ' ')}?
+2. **Evidence**: Specific log lines or events that support your conclusion
+3. **Recommendation**: What action should be taken (scale, rollback, reconfig, etc.)
+
+Be concise and actionable. Focus on the most likely cause based on the evidence.`;
 }
 
 // Create and start server
@@ -280,7 +348,7 @@ const server = http.createServer(handleRequest);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Gemini sidecar listening on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute`);
+  console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute, POST /investigate`);
   console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
 });
 

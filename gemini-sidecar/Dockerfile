@@ -7,8 +7,8 @@ FROM registry.access.redhat.com/ubi9/nodejs-22:latest
 # Switch to root to install globally
 USER 0
 
-# Install Gemini CLI globally and git (needed for GitOps operations)
-RUN dnf install -y git && dnf clean all && \
+# Install Gemini CLI globally, git (for GitOps), and kubectl (for investigation)
+RUN dnf install -y git kubernetes-client && dnf clean all && \
     npm install -g @google/gemini-cli@latest && \
     gemini --version || echo "Gemini CLI installed"
 

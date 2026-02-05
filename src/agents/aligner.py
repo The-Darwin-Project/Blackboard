@@ -19,11 +19,13 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Optional
 
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
+
+import httpx
 
 from ..models import EventType
 
@@ -94,16 +96,6 @@ class Aligner:
         self._known_services: set[str] = set()
         self._service_versions: dict[str, str] = {}  # service -> last known version
         self._anomaly_state: dict[str, dict] = {}  # service -> {type, timestamp}
-        self._architect_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
-    
-    def set_architect_callback(self, callback: Callable[[str, str], Awaitable[None]]) -> None:
-        """
-        Set callback to trigger Architect analysis on anomaly.
-        
-        Callback signature: async def callback(service: str, anomaly_type: str) -> None
-        """
-        self._architect_callback = callback
-        logger.info("Architect callback registered for closed-loop operation")
     
     async def _get_model(self):
         """Lazy-load Vertex AI Flash model for configuration parsing."""
@@ -404,24 +396,85 @@ class Aligner:
                 )
                 logger.info(f"Error rate anomaly resolved: {service} now at {payload.metrics.error_rate:.2f}%")
     
-    async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
-        """Trigger Architect to analyze the anomaly."""
-        if self._architect_callback:
-            try:
-                # Record that Architect is analyzing
-                await self.blackboard.record_event(
-                    EventType.ARCHITECT_ANALYZING,
-                    {"service": service, "trigger": anomaly_type},
-                    narrative=f"I'm escalating the {anomaly_type.replace('_', ' ')} issue on {service} to the Architect for root cause analysis.",
+    async def _investigate_via_sidecar(self, service: str, anomaly_type: str) -> Optional[str]:
+        """
+        Call gemini sidecar to investigate pod issues using kubectl.
+        
+        Returns investigation results as a string, or None if investigation failed.
+        """
+        sidecar_url = os.getenv("GEMINI_SIDECAR_URL", "http://localhost:9090")
+        namespace = os.getenv("K8S_OBSERVER_NAMESPACE", "darwin")
+        
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    f"{sidecar_url}/investigate",
+                    json={
+                        "service": service,
+                        "namespace": namespace,
+                        "anomalyType": anomaly_type,
+                    },
                 )
                 
-                # Fire and forget - don't block telemetry processing
-                asyncio.create_task(self._architect_callback(service, anomaly_type))
-                logger.info(f"Triggered Architect analysis for {service} ({anomaly_type})")
-            except Exception as e:
-                logger.error(f"Failed to trigger Architect: {e}")
-        else:
-            logger.debug(f"No Architect callback registered, skipping auto-analysis")
+                if response.status_code == 200:
+                    result = response.json()
+                    output = result.get("output", "")
+                    if isinstance(output, dict):
+                        output = str(output)
+                    logger.info(f"Investigation completed for {service}: {len(output)} chars")
+                    return output
+                else:
+                    logger.warning(f"Investigation failed: {response.status_code}")
+                    return None
+                    
+        except httpx.ConnectError:
+            logger.warning(f"Cannot connect to Gemini sidecar at {sidecar_url}")
+            return None
+        except Exception as e:
+            logger.error(f"Investigation error: {e}")
+            return None
+    
+    async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
+        """
+        Trigger investigation + Architect analysis via Blackboard queue.
+        
+        Fire-and-forget: wraps async work in a task to avoid blocking telemetry.
+        """
+        asyncio.create_task(self._investigate_and_enqueue(service, anomaly_type))
+        logger.info(f"Triggered async investigation for {service} ({anomaly_type})")
+    
+    async def _investigate_and_enqueue(self, service: str, anomaly_type: str) -> None:
+        """
+        Investigate via sidecar, then enqueue task for Architect.
+        
+        Runs as a background task - does not block telemetry processing.
+        """
+        try:
+            # Investigate via sidecar to get root cause context
+            investigation = await self._investigate_via_sidecar(service, anomaly_type)
+            
+            if investigation:
+                # Record investigation results
+                await self.blackboard.record_event(
+                    EventType.ARCHITECT_ANALYZING,
+                    {
+                        "service": service,
+                        "trigger": anomaly_type,
+                        "investigation_summary": investigation[:500] if investigation else None,
+                    },
+                    narrative=f"Investigated {anomaly_type.replace('_', ' ')} on {service}. Escalating to Architect with findings.",
+                )
+            
+            # Enqueue task to Blackboard for Architect to pick up
+            await self.blackboard.enqueue_architect_task({
+                "type": "anomaly_analysis",
+                "service": service,
+                "anomaly_type": anomaly_type,
+                "investigation": investigation,
+            })
+            logger.info(f"Enqueued analysis task for {service} ({anomaly_type})")
+        except Exception as e:
+            logger.error(f"Investigation/enqueue failed for {service}: {e}")
     
     async def check_anomalies_for_service(
         self,

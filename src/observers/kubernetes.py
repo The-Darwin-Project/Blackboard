@@ -251,6 +251,15 @@ class KubernetesObserver:
                 service_name, "memory", memory_percent, source="kubernetes"
             )
             
+            # Update replica count for this service
+            replicas = await self.get_deployment_replicas(service_name)
+            if replicas:
+                await self.blackboard.update_service_replicas(
+                    service_name,
+                    replicas["ready"],
+                    replicas["desired"],
+                )
+            
             # Trigger anomaly detection callback
             if self.anomaly_callback:
                 await self.anomaly_callback(
@@ -380,6 +389,44 @@ class KubernetesObserver:
         else:
             # Assume cores
             return int(float(cpu_str) * 1_000_000_000)
+    
+    async def get_deployment_replicas(self, service: str) -> Optional[dict]:
+        """
+        Get ready/desired replicas for a service's deployment.
+        
+        Queries apps/v1 Deployment by label app={service}.
+        
+        Returns dict with {"ready": N, "desired": M} or None if not found.
+        """
+        if not self._k8s_available:
+            return None
+        
+        try:
+            from kubernetes import client
+            apps_api = client.AppsV1Api()
+            
+            # List deployments with app={service} label
+            deployments = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: apps_api.list_namespaced_deployment(
+                    self.namespace,
+                    label_selector=f"app={service}"
+                )
+            )
+            
+            if not deployments.items:
+                return None
+            
+            # Use first matching deployment
+            deploy = deployments.items[0]
+            return {
+                "ready": deploy.status.ready_replicas or 0,
+                "desired": deploy.spec.replicas or 1,
+            }
+            
+        except Exception as e:
+            logger.debug(f"Failed to get replicas for {service}: {e}")
+            return None
     
     @staticmethod
     def _parse_memory(mem_str: str) -> int:

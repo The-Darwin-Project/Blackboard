@@ -78,195 +78,13 @@ async def lifespan(app: FastAPI):
         set_agents(aligner, architect, sysadmin)
         logger.info("Trinity agents initialized (Aligner, Architect, SysAdmin)")
         
-        # === CLOSED-LOOP WIRING ===
-        # Connect Aligner → Architect for autonomous analysis
-        async def architect_anomaly_callback(service: str, anomaly_type: str) -> None:
-            """
-            Called by Aligner when anomalies are detected.
-            
-            Triggers Architect to analyze the situation and CREATE A PLAN.
-            """
-            from .models import EventType
-            
-            try:
-                # Build ACTIONABLE prompt based on anomaly type
-                # Explicitly instruct the model to CREATE A PLAN using the function
-                if anomaly_type == "high_cpu":
-                    prompt = (
-                        f"AUTOMATED ALERT: Service '{service}' has critically high CPU usage (above threshold).\n\n"
-                        f"ACTION REQUIRED: Create a scaling plan using the generate_ops_plan function.\n"
-                        f"- Use action='scale' to increase replicas\n"
-                        f"- Set params.replicas to an appropriate number (e.g., 2 or 3)\n"
-                        f"- Provide a clear reason referencing the high CPU\n\n"
-                        f"DO NOT just analyze - you MUST call generate_ops_plan to create a remediation plan."
-                    )
-                elif anomaly_type == "high_memory":
-                    prompt = (
-                        f"AUTOMATED ALERT: Service '{service}' has critically high memory usage (above threshold).\n\n"
-                        f"ACTION REQUIRED: Create a scaling plan using the generate_ops_plan function.\n"
-                        f"- Use action='scale' to increase replicas and distribute memory load\n"
-                        f"- Set params.replicas to an appropriate number\n"
-                        f"- Provide a clear reason referencing the high memory\n\n"
-                        f"DO NOT just analyze - you MUST call generate_ops_plan to create a remediation plan."
-                    )
-                elif anomaly_type == "high_error_rate":
-                    prompt = (
-                        f"AUTOMATED ALERT: Service '{service}' has a critically high error rate (above threshold).\n\n"
-                        f"ACTION REQUIRED: Create a remediation plan using the generate_ops_plan function.\n"
-                        f"- Consider action='rollback' to revert to a stable version, OR\n"
-                        f"- Consider action='failover' if a standby is available\n"
-                        f"- Provide a clear reason referencing the high error rate\n\n"
-                        f"DO NOT just analyze - you MUST call generate_ops_plan to create a remediation plan."
-                    )
-                else:
-                    prompt = (
-                        f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}).\n\n"
-                        f"ACTION REQUIRED: Create a remediation plan using the generate_ops_plan function.\n"
-                        f"Choose the appropriate action: scale, rollback, reconfig, failover, or optimize.\n\n"
-                        f"DO NOT just analyze - you MUST call generate_ops_plan to create a remediation plan."
-                    )
-                
-                logger.info(f"Architect analyzing anomaly: {service} ({anomaly_type})")
-                
-                # Call Architect's chat method
-                response = await architect.chat(prompt)
-                
-                if response.plan_id:
-                    logger.info(f"Architect created plan {response.plan_id} for {service}")
-                    # Event already recorded by plan creation
-                else:
-                    # Record the Architect's response even when no plan was created
-                    await blackboard.record_event(
-                        EventType.ARCHITECT_ANALYZING,
-                        {
-                            "service": service,
-                            "trigger": anomaly_type,
-                            "response": response.message[:500],
-                            "plan_created": False,
-                        },
-                        narrative=f"Analyzing the {anomaly_type.replace('_', ' ')} anomaly on {service}. {response.message[:150]}",
-                    )
-                    logger.warning(
-                        f"Architect did NOT create a plan for {service} ({anomaly_type}). "
-                        f"Response: {response.message[:200]}..."
-                    )
-                    
-            except Exception as e:
-                logger.error(f"Architect anomaly analysis failed: {e}")
-                # Record failure event so UI shows what happened
-                await blackboard.record_event(
-                    EventType.ARCHITECT_ANALYZING,
-                    {
-                        "service": service,
-                        "trigger": anomaly_type,
-                        "error": str(e),
-                        "plan_created": False,
-                    },
-                    narrative=f"Analysis of {anomaly_type.replace('_', ' ')} on {service} encountered an error: {str(e)[:100]}",
-                )
+        # === BLACKBOARD-CENTRIC COMMUNICATION ===
+        # Start agent task loops (no callbacks - agents communicate via Blackboard queues)
+        import asyncio
         
-        aligner.set_architect_callback(architect_anomaly_callback)
-        logger.info("Closed-loop wiring complete: Aligner → Architect")
-        
-        # === AUTO-APPROVAL & AUTO-EXECUTION WIRING ===
-        # Connect Architect → SysAdmin for intelligent auto-approval and execution
-        from .models import Plan, PlanStatus, EventType
-        
-        async def plan_auto_approval_callback(plan: Plan) -> None:
-            """
-            Called by Architect after creating a plan.
-            
-            Closed-loop completion:
-            1. Check if plan can be auto-approved based on SysAdmin policy
-            2. If auto-approved, automatically execute via SysAdmin
-            3. Update plan status based on execution result
-            
-            Auto-approval policy:
-            - Values-only changes (scale, reconfig) → Auto-approve + Auto-execute
-            - Structural changes (failover, optimize) → Require human approval
-            """
-            can_approve, reason = sysadmin.can_auto_approve(plan)
-            
-            if can_approve:
-                await blackboard.update_plan_status(plan.id, PlanStatus.APPROVED)
-                logger.info(f"Plan {plan.id} auto-approved: {reason}")
-                
-                # === CLOSED-LOOP: Auto-execute after auto-approval ===
-                try:
-                    # Mark as executing
-                    await blackboard.update_plan_status(plan.id, PlanStatus.EXECUTING)
-                    
-                    # Record SysAdmin executing event
-                    await blackboard.record_event(
-                        EventType.SYSADMIN_EXECUTING,
-                        {"plan_id": plan.id, "service": plan.service, "action": plan.action.value},
-                        narrative=f"Executing approved plan: {plan.action.value} on {plan.service}...",
-                    )
-                    logger.info(f"SysAdmin auto-executing plan {plan.id}")
-                    
-                    # Execute via SysAdmin
-                    result = await sysadmin.execute_plan(plan)
-                    
-                    # Check if execution actually succeeded (result should contain "successfully")
-                    execution_succeeded = result and "successfully" in result.lower() and "failed" not in result.lower()
-                    
-                    if execution_succeeded:
-                        # Mark as completed
-                        await blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
-                        
-                        # Record completion event with enhanced details
-                        await blackboard.record_event(
-                            EventType.PLAN_EXECUTED,
-                            {
-                                "plan_id": plan.id,
-                                "service": plan.service,
-                                "action": plan.action.value,
-                                "status": "success",
-                                "summary": f"{plan.action.value} {plan.service}",
-                                "result": result[:500] if result else "",
-                            },
-                            narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
-                        )
-                        logger.info(f"Plan {plan.id} auto-executed successfully")
-                    else:
-                        # Mark as failed - execution returned an error
-                        await blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=result)
-                        
-                        await blackboard.record_event(
-                            EventType.PLAN_FAILED,
-                            {
-                                "plan_id": plan.id,
-                                "service": plan.service,
-                                "action": plan.action.value,
-                                "status": "failed",
-                                "error": result[:500] if result else "Unknown error",
-                            },
-                            narrative=f"Execution failed for {plan.action.value} on {plan.service}: {result[:200] if result else 'Unknown error'}",
-                        )
-                        logger.error(f"Plan {plan.id} execution failed: {result}")
-                    
-                except Exception as e:
-                    # Mark as failed
-                    await blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=str(e))
-                    
-                    # Record failure event with enhanced details
-                    await blackboard.record_event(
-                        EventType.PLAN_FAILED,
-                        {
-                            "plan_id": plan.id,
-                            "service": plan.service,
-                            "action": plan.action.value,
-                            "status": "failed",
-                            "error": str(e)[:500],
-                        },
-                        narrative=f"Failed to execute plan for {plan.service}: {str(e)[:100]}",
-                    )
-                    logger.error(f"Plan {plan.id} auto-execution failed: {e}")
-            else:
-                logger.info(f"Plan {plan.id} requires human approval: {reason}")
-        
-        architect.set_plan_created_callback(plan_auto_approval_callback)
-        logger.info("Closed-loop wiring complete: Aligner → Architect → SysAdmin (auto-execute enabled)")
+        asyncio.create_task(architect.start_task_loop())
+        asyncio.create_task(sysadmin.start_execution_loop())
+        logger.info("Agent task loops started - Blackboard-centric communication active")
         
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
@@ -294,6 +112,12 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     logger.info("Darwin Blackboard shutting down...")
+    
+    # Stop agent loops
+    if redis:
+        architect.stop_task_loop()
+        sysadmin.stop_execution_loop()
+        logger.info("Agent task loops stopped")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:
