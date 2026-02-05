@@ -94,6 +94,21 @@ sysadmin:
       - ReadWriteOnce
 
 # =============================================================================
+# GitHub App Configuration (for GitOps authentication)
+# =============================================================================
+
+github:
+  # The GitHub App secret containing:
+  # - app-id: GitHub App ID
+  # - installation-id: GitHub App Installation ID
+  # - darwin-ci.2026-02-04.private-key.pem: Private key file
+  existingSecret: "darwin-github-app"
+  # GitOps repository to clone (format: owner/repo)
+  repository: "The-Darwin-Project/gitops"
+  # Branch to use
+  branch: "main"
+
+# =============================================================================
 # Resource Limits
 # =============================================================================
 

@@ -24,6 +24,105 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if and .Values.github.existingSecret .Values.sysadmin.persistence.enabled }}
+      # =================================================================
+      # Init Container: Clone GitOps Repository
+      # =================================================================
+      initContainers:
+        - name: git-clone
+          image: alpine/git:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "=== GitOps Init Container ==="
+              
+              # Install dependencies
+              apk add --no-cache python3 py3-pip py3-jwt py3-requests curl jq
+              
+              # Read GitHub App credentials
+              APP_ID=$(cat /secrets/github/app-id)
+              INSTALL_ID=$(cat /secrets/github/installation-id)
+              PRIVATE_KEY="/secrets/github/darwin-ci.2026-02-04.private-key.pem"
+              
+              echo "App ID: $APP_ID"
+              echo "Installation ID: $INSTALL_ID"
+              
+              # Generate JWT token using Python
+              JWT=$(python3 -c "
+              import jwt
+              import time
+              with open('$PRIVATE_KEY', 'r') as f:
+                  key = f.read()
+              now = int(time.time())
+              payload = {'iat': now - 60, 'exp': now + 540, 'iss': '$APP_ID'}
+              print(jwt.encode(payload, key, algorithm='RS256'))
+              ")
+              
+              # Exchange JWT for installation token
+              echo "Requesting installation access token..."
+              TOKEN_RESPONSE=$(curl -s -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $JWT" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/app/installations/$INSTALL_ID/access_tokens")
+              
+              TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.token')
+              
+              if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+                echo "ERROR: Failed to get installation token"
+                echo "$TOKEN_RESPONSE"
+                exit 1
+              fi
+              
+              echo "Got installation token"
+              
+              # Clone or pull the repository
+              REPO_URL="https://x-access-token:${TOKEN}@github.com/{{ .Values.github.repository }}.git"
+              
+              if [ -d "{{ .Values.sysadmin.gitRepoPath }}/.git" ]; then
+                echo "Repository exists, pulling latest..."
+                cd {{ .Values.sysadmin.gitRepoPath }}
+                git remote set-url origin "$REPO_URL"
+                git fetch origin
+                git reset --hard origin/{{ .Values.github.branch }}
+              else
+                echo "Cloning repository..."
+                git clone --branch {{ .Values.github.branch }} "$REPO_URL" {{ .Values.sysadmin.gitRepoPath }}
+              fi
+              
+              # Configure git for commits
+              cd {{ .Values.sysadmin.gitRepoPath }}
+              git config user.name "Darwin SysAdmin"
+              git config user.email "darwin-sysadmin@darwin-project.io"
+              
+              # Store credentials for later use (shared with main container via emptyDir)
+              mkdir -p /tmp/git-creds
+              echo "https://x-access-token:${TOKEN}@github.com" > /tmp/git-creds/credentials
+              git config credential.helper "store --file=/tmp/git-creds/credentials"
+              
+              # Fix ownership for non-root main container (runs as UID 1001)
+              echo "Setting ownership for main container..."
+              chown -R 1001:0 {{ .Values.sysadmin.gitRepoPath }}
+              chown -R 1001:0 /tmp/git-creds
+              
+              echo "=== GitOps Init Complete ==="
+              ls -la {{ .Values.sysadmin.gitRepoPath }}
+          volumeMounts:
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            - name: gitops-data
+              mountPath: {{ .Values.sysadmin.gitRepoPath }}
+            - name: git-credentials
+              mountPath: /tmp/git-creds
+          securityContext:
+            # Init container runs as root to install packages and set ownership
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+      {{- end }}
       containers:
         # =================================================================
         # Brain Container (FastAPI)
@@ -72,6 +171,25 @@ spec:
               value: "{{ .Values.sysadmin.autoApprove }}"
             - name: GIT_REPO_PATH
               value: "{{ .Values.sysadmin.gitRepoPath }}"
+            {{- if .Values.github.existingSecret }}
+            # GitHub App configuration
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.existingSecret }}
+                  key: app-id
+            - name: GITHUB_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.existingSecret }}
+                  key: installation-id
+            - name: GITHUB_PRIVATE_KEY_PATH
+              value: "/secrets/github/darwin-ci.2026-02-04.private-key.pem"
+            - name: GITHUB_REPOSITORY
+              value: "{{ .Values.github.repository }}"
+            - name: GITHUB_BRANCH
+              value: "{{ .Values.github.branch }}"
+            {{- end }}
             # Debug mode
             - name: DEBUG
               value: "{{ .Values.app.debug }}"
@@ -100,6 +218,13 @@ spec:
             {{- if .Values.sysadmin.persistence.enabled }}
             - name: gitops-data
               mountPath: {{ .Values.sysadmin.gitRepoPath }}
+            {{- end }}
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            - name: git-credentials
+              mountPath: /tmp/git-creds
             {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
@@ -157,6 +282,13 @@ spec:
         - name: gitops-data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-gitops-data
+        {{- end }}
+        {{- if .Values.github.existingSecret }}
+        - name: github-app-secret
+          secret:
+            secretName: {{ .Values.github.existingSecret }}
+        - name: git-credentials
+          emptyDir: {}
         {{- end }}
       
       {{- with .Values.nodeSelector }}

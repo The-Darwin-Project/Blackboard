@@ -400,7 +400,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     <div
       ref={containerRef}
       className="w-full h-full"
-      style={{ minHeight: '300px' }}
+      style={{ minHeight: '300px', height: '100%' }}
     />
   );
 }

@@ -35,6 +35,16 @@ class Topology(BaseModel):
     dependencies: list[Dependency] = Field(default_factory=list)
 
 
+class GitOpsMetadata(BaseModel):
+    """
+    GitOps coordinates for self-describing services.
+    
+    Allows SysAdmin to discover where to make changes for this service.
+    """
+    repo: Optional[str] = Field(None, description="GitHub repo (e.g., 'The-Darwin-Project/Store')")
+    helm_path: Optional[str] = Field(None, description="Path to Helm values.yaml within repo")
+
+
 class TelemetryPayload(BaseModel):
     """
     Telemetry payload from self-aware applications.
@@ -45,6 +55,7 @@ class TelemetryPayload(BaseModel):
     version: str = Field("unknown", description="Service version (e.g., v2.0)")
     metrics: Metrics = Field(default_factory=Metrics)
     topology: Topology = Field(default_factory=Topology)
+    gitops: Optional[GitOpsMetadata] = Field(default=None, description="GitOps coordinates for this service")
 
 
 # =============================================================================
@@ -58,6 +69,8 @@ class Service(BaseModel):
     metrics: Metrics = Field(default_factory=Metrics)
     dependencies: list[str] = Field(default_factory=list, description="List of dependency target names")
     last_seen: float = Field(default_factory=time.time, description="Unix timestamp of last telemetry")
+    gitops_repo: Optional[str] = Field(None, description="GitHub repo for this service")
+    gitops_helm_path: Optional[str] = Field(None, description="Helm values path within repo")
 
 
 # =============================================================================

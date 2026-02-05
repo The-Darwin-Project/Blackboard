@@ -433,16 +433,26 @@ class BlackboardState:
         cpu: float,
         memory: float,
         error_rate: float,
+        gitops_repo: Optional[str] = None,
+        gitops_helm_path: Optional[str] = None,
     ) -> None:
         """Update service metadata in Redis hash."""
         key = f"darwin:service:{name}"
-        await self.redis.hset(key, mapping={
+        mapping = {
             "version": version,
             "cpu": str(cpu),
             "memory": str(memory),
             "error_rate": str(error_rate),
             "last_seen": str(time.time()),
-        })
+        }
+        
+        # Add GitOps metadata if provided
+        if gitops_repo:
+            mapping["gitops_repo"] = gitops_repo
+        if gitops_helm_path:
+            mapping["gitops_helm_path"] = gitops_helm_path
+        
+        await self.redis.hset(key, mapping=mapping)
         logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
     
     async def get_service(self, name: str) -> Optional[Service]:
@@ -465,6 +475,8 @@ class BlackboardState:
             },
             dependencies=deps,
             last_seen=float(data.get("last_seen", 0)),
+            gitops_repo=data.get("gitops_repo"),
+            gitops_helm_path=data.get("gitops_helm_path"),
         )
     
     async def get_all_services(self) -> dict[str, Service]:
@@ -849,13 +861,15 @@ class BlackboardState:
                 env_var=dep.env_var,
             )
         
-        # Update Metadata Layer
+        # Update Metadata Layer (including GitOps coordinates if provided)
         await self.update_service_metadata(
             name=payload.service,
             version=payload.version,
             cpu=payload.metrics.cpu,
             memory=payload.metrics.memory,
             error_rate=payload.metrics.error_rate,
+            gitops_repo=payload.gitops.repo if payload.gitops else None,
+            gitops_helm_path=payload.gitops.helm_path if payload.gitops else None,
         )
         
         # Update Metrics History Layer

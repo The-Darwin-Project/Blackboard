@@ -21,7 +21,7 @@ import logging
 import os
 import re
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 # AIR GAP ENFORCEMENT: These imports are FORBIDDEN
 # import vertexai  # FORBIDDEN
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
+
+# GitHub App configuration
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "The-Darwin-Project/gitops")
 
 # =============================================================================
 # Safety Decorator
@@ -106,66 +109,187 @@ class SysAdmin:
         self.git_repo_path = os.getenv("GIT_REPO_PATH", "/tmp/darwin-gitops")
         self.dry_run = os.getenv("SYSADMIN_DRY_RUN", "false").lower() == "true"
         self.auto_approve = os.getenv("SYSADMIN_AUTO_APPROVE", "false").lower() == "true"
+        
+        # GitHub App auth (optional - for token refresh)
+        self._github_auth: Optional["GitHubAppAuth"] = None
     
-    def _build_prompt(self, plan: "Plan") -> str:
+    def _get_github_auth(self) -> Optional["GitHubAppAuth"]:
+        """
+        Get GitHub App auth handler if configured.
+        
+        Lazy initialization to avoid import errors when GitHub App is not configured.
+        """
+        if self._github_auth is None:
+            try:
+                from ..utils.github_app import GitHubAppAuth
+                self._github_auth = GitHubAppAuth()
+                logger.info("GitHub App authentication initialized")
+            except (ImportError, ValueError) as e:
+                logger.warning(f"GitHub App auth not available: {e}")
+                self._github_auth = None  # type: ignore
+        return self._github_auth
+    
+    def _refresh_git_credentials(self) -> bool:
+        """
+        Refresh git credentials using GitHub App token.
+        
+        Called before git push to ensure token is valid.
+        Returns True if credentials were refreshed, False otherwise.
+        """
+        auth = self._get_github_auth()
+        if auth is None:
+            logger.warning("GitHub App auth not configured, skipping credential refresh")
+            return False
+        
+        try:
+            auth.configure_git_credentials(self.git_repo_path, GITHUB_REPOSITORY)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to refresh git credentials: {e}")
+            return False
+    
+    # Fallback service to Helm values path mapping (used when GitOps not in telemetry)
+    SERVICE_HELM_PATHS = {
+        "darwin-store": "Store/helm/values.yaml",
+        "darwin-brain": "BlackBoard/helm/values.yaml",
+        "darwin-blackboard": "BlackBoard/helm/values.yaml",
+    }
+    
+    async def _get_gitops_info(self, service: str) -> tuple[str, str]:
+        """
+        Get GitOps repository and helm path for a service.
+        
+        First tries to look up from service registry (populated from telemetry).
+        Falls back to hardcoded mapping if not found.
+        
+        Returns (repo, helm_path) tuple.
+        """
+        # Try to get from service registry first
+        svc = await self.blackboard.get_service(service)
+        if svc and svc.gitops_repo and svc.gitops_helm_path:
+            logger.info(f"Using GitOps info from telemetry: {svc.gitops_repo}/{svc.gitops_helm_path}")
+            return svc.gitops_repo, svc.gitops_helm_path
+        
+        # Fallback to hardcoded mapping
+        logger.warning(f"No GitOps info in telemetry for {service}, using fallback mapping")
+        helm_path = self._get_helm_path_fallback(service)
+        
+        # Infer repo from helm path
+        repo_prefix = helm_path.split("/")[0]  # e.g., "Store" from "Store/helm/values.yaml"
+        repo = f"The-Darwin-Project/{repo_prefix}"
+        
+        return repo, helm_path
+    
+    def _get_helm_path_fallback(self, service: str) -> str:
+        """Fallback: Get the Helm values.yaml path for a service from hardcoded mapping."""
+        # Try exact match first
+        if service in self.SERVICE_HELM_PATHS:
+            return self.SERVICE_HELM_PATHS[service]
+        
+        # Try partial match (e.g., "store" matches "darwin-store")
+        for svc_name, path in self.SERVICE_HELM_PATHS.items():
+            if service.lower() in svc_name.lower() or svc_name.lower() in service.lower():
+                return path
+        
+        # Default: assume service name maps to directory
+        return f"{service}/helm/values.yaml"
+    
+    def _build_prompt(self, plan: "Plan", gitops_repo: str, helm_path: str) -> str:
         """
         Build the prompt for Gemini CLI.
         
-        Formats the plan into a clear instruction for the AI agent.
+        Formats the plan into clear, explicit instructions for the AI agent
+        to perform GitOps operations.
+        
+        Args:
+            plan: The plan to execute
+            gitops_repo: GitHub repository (e.g., "The-Darwin-Project/Store")
+            helm_path: Path to Helm values within repo (e.g., "helm/values.yaml")
         """
+        
         prompt_parts = [
-            "You are a DevOps engineer. Execute the following infrastructure modification plan.",
+            "You are a DevOps engineer performing GitOps operations.",
+            "Execute the following infrastructure modification plan by editing files and committing to git.",
             "",
+            f"=== PLAN DETAILS ===",
             f"Action: {plan.action.value}",
             f"Target Service: {plan.service}",
+            f"Helm Values File: {helm_path}",
             f"Reason: {plan.reason}",
             "",
             "Parameters:",
             json.dumps(plan.params, indent=2),
             "",
-            "Instructions:",
+            "=== EXECUTION STEPS ===",
         ]
         
-        # Add action-specific instructions
+        # Add action-specific instructions with explicit commands
         if plan.action.value == "scale":
             replicas = plan.params.get("replicas", 2)
-            prompt_parts.append(
-                f"1. Find the Kubernetes deployment or Helm values for '{plan.service}'"
-            )
-            prompt_parts.append(f"2. Update the replicas count to {replicas}")
-            prompt_parts.append("3. Commit the change with a descriptive message")
+            prompt_parts.extend([
+                f"1. Open the file: {helm_path}",
+                f"2. Find the 'replicaCount' field and change its value to {replicas}",
+                f"3. Save the file",
+                f"4. Run: git add {helm_path}",
+                f"5. Run: git commit -m \"scale({plan.service}): Update replicaCount to {replicas}\"",
+                f"6. Run: git push origin main",
+            ])
         
         elif plan.action.value == "rollback":
             version = plan.params.get("version", "previous")
-            prompt_parts.append(f"1. Find the deployment configuration for '{plan.service}'")
-            prompt_parts.append(f"2. Update the image tag or version to '{version}'")
-            prompt_parts.append("3. Commit the change with a descriptive message")
+            prompt_parts.extend([
+                f"1. Open the file: {helm_path}",
+                f"2. Find the 'image.tag' field and change its value to \"{version}\"",
+                f"3. Save the file",
+                f"4. Run: git add {helm_path}",
+                f"5. Run: git commit -m \"rollback({plan.service}): Revert to version {version}\"",
+                f"6. Run: git push origin main",
+            ])
         
         elif plan.action.value == "reconfig":
             config = plan.params.get("config", {})
-            prompt_parts.append(f"1. Find the ConfigMap or values file for '{plan.service}'")
-            prompt_parts.append(f"2. Apply these configuration changes: {json.dumps(config)}")
-            prompt_parts.append("3. Commit the change with a descriptive message")
+            prompt_parts.extend([
+                f"1. Open the file: {helm_path}",
+                f"2. Apply these configuration changes: {json.dumps(config)}",
+                f"3. Save the file",
+                f"4. Run: git add {helm_path}",
+                f"5. Run: git commit -m \"reconfig({plan.service}): Update configuration\"",
+                f"6. Run: git push origin main",
+            ])
         
         elif plan.action.value == "failover":
             target = plan.params.get("target", "standby")
-            prompt_parts.append(f"1. Update the service routing to point to '{target}'")
-            prompt_parts.append("2. Verify the target is healthy")
-            prompt_parts.append("3. Commit the change with a descriptive message")
+            prompt_parts.extend([
+                f"1. Open the file: {helm_path}",
+                f"2. Update the service routing to point to '{target}'",
+                f"3. Save the file",
+                f"4. Run: git add {helm_path}",
+                f"5. Run: git commit -m \"failover({plan.service}): Switch to {target}\"",
+                f"6. Run: git push origin main",
+            ])
         
         elif plan.action.value == "optimize":
             optimization = plan.params.get("optimization", "resources")
-            prompt_parts.append(f"1. Review current configuration for '{plan.service}'")
-            prompt_parts.append(f"2. Apply optimization: {optimization}")
-            prompt_parts.append("3. Commit the change with a descriptive message")
+            prompt_parts.extend([
+                f"1. Open the file: {helm_path}",
+                f"2. Apply optimization: {optimization}",
+                f"3. Save the file",
+                f"4. Run: git add {helm_path}",
+                f"5. Run: git commit -m \"optimize({plan.service}): Apply {optimization}\"",
+                f"6. Run: git push origin main",
+            ])
         
         prompt_parts.extend([
             "",
-            "IMPORTANT:",
-            "- Only modify files related to the target service",
-            "- Use clear, descriptive commit messages",
-            "- Do not delete any critical resources",
-            f"- Working directory: {self.git_repo_path}",
+            "=== SAFETY RULES ===",
+            "- Only modify the specified Helm values file",
+            "- Do NOT delete any files or resources",
+            "- Do NOT use --force with git commands",
+            "- If git push fails due to conflicts, STOP and report the error",
+            "",
+            f"Working directory: {self.git_repo_path}",
+            "",
+            "Execute these steps now.",
         ])
         
         return "\n".join(prompt_parts)
@@ -176,7 +300,12 @@ class SysAdmin:
         Execute the plan via Gemini CLI.
         
         Uses validated CLI pattern with --non-interactive.
+        Refreshes GitHub App credentials before execution to ensure valid token.
         """
+        # Refresh git credentials (token may have expired)
+        if self._refresh_git_credentials():
+            logger.info("Git credentials refreshed successfully")
+        
         cmd = [
             "gemini",
             "--non-interactive",
@@ -269,8 +398,12 @@ class SysAdmin:
         """
         logger.info(f"Executing plan: {plan.id} - {plan.action.value} {plan.service}")
         
-        # Build the prompt
-        prompt = self._build_prompt(plan)
+        # Look up GitOps coordinates from service registry (populated from telemetry)
+        gitops_repo, helm_path = await self._get_gitops_info(plan.service)
+        logger.info(f"GitOps target: {gitops_repo}/{helm_path}")
+        
+        # Build the prompt with GitOps info
+        prompt = self._build_prompt(plan, gitops_repo, helm_path)
         
         # Execute via CLI (with safety check)
         try:

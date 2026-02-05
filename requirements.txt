@@ -23,5 +23,9 @@ gitpython
 # YAML parsing (for Helm values)
 pyyaml
 
+# GitHub App authentication (for GitOps)
+pyjwt[crypto]
+requests
+
 # Kubernetes client (for K8s metrics observer)
 kubernetes
