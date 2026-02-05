@@ -39,8 +39,8 @@ spec:
               set -e
               echo "=== GitOps Init Container ==="
               
-              # Install dependencies
-              apk add --no-cache python3 py3-pip py3-jwt py3-requests curl jq
+              # Install dependencies (py3-cryptography required for RS256 JWT signing)
+              apk add --no-cache python3 py3-pip py3-jwt py3-cryptography py3-requests curl jq
               
               # Read GitHub App credentials
               APP_ID=$(cat /secrets/github/app-id)
