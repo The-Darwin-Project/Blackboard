@@ -49,6 +49,10 @@ async function executeGemini(prompt, options = {}) {
     
     child.on('close', (code) => {
       console.log(`[${new Date().toISOString()}] Gemini exited with code ${code}`);
+      console.log(`[${new Date().toISOString()}] stdout (${stdout.length} chars): ${stdout.slice(0, 500)}${stdout.length > 500 ? '...' : ''}`);
+      if (stderr) {
+        console.log(`[${new Date().toISOString()}] stderr: ${stderr.slice(0, 500)}${stderr.length > 500 ? '...' : ''}`);
+      }
       
       if (code === 0) {
         try {

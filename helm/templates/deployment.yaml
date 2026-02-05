@@ -314,11 +314,13 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            {{- if .Values.sysadmin.persistence.enabled }}
+            # GitOps data - shared with brain container (cloned by init container)
             - name: gitops-data
               mountPath: /data/gitops
-            {{- end }}
+            # Git credentials - shared with brain container
             {{- if .Values.github.existingSecret }}
+            - name: git-credentials
+              mountPath: /tmp/git-creds
             - name: github-app-secret
               mountPath: /secrets/github
               readOnly: true
@@ -354,11 +356,15 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
         {{- end }}
-        {{- if .Values.sysadmin.persistence.enabled }}
+        # GitOps data volume - shared between brain and gemini sidecar
+        # Uses PVC when persistence is enabled, emptyDir otherwise
         - name: gitops-data
+          {{- if .Values.sysadmin.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-gitops-data
-        {{- end }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         {{- if .Values.github.existingSecret }}
         - name: github-app-secret
           secret:
