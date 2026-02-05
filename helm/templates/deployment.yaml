@@ -242,6 +242,16 @@ spec:
         - name: redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
           imagePullPolicy: IfNotPresent
+          args:
+            # Disable RDB snapshots - prevents "MISCONF" errors on ephemeral storage
+            - --save
+            - ""
+            # Continue serving even if RDB fails (shouldn't happen with save disabled)
+            - --stop-writes-on-bgsave-error
+            - "no"
+            # Require password
+            - --requirepass
+            - "$(REDIS_PASSWORD)"
           ports:
             - name: redis
               containerPort: 6379
