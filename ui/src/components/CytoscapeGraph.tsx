@@ -400,7 +400,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const elements: any[] = [];
 
-    // Add nodes
+    // Add nodes (with 'service' class to distinguish from ghost nodes)
     data.nodes.forEach((node) => {
       elements.push({
         data: {
@@ -409,6 +409,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           type: node.type,
           ...node.metadata,  // includes health, version, cpu, memory, etc.
         },
+        classes: 'service',  // Used for nodeHtmlLabel selector (avoids :not() pseudo-selector issues)
       });
     });
 
@@ -469,7 +470,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         // Register HTML labels
         cy.nodeHtmlLabel([
           {
-            query: 'node:not(.ghost)',
+            query: 'node.service',
             halign: 'center',
             valign: 'center',
             halignBox: 'center',

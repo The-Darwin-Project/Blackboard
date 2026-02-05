@@ -43,7 +43,9 @@ async def list_services(
     blackboard: BlackboardState = Depends(get_blackboard),
 ) -> list[str]:
     """Get list of all registered service names."""
-    return await blackboard.get_services()
+    services = await blackboard.get_services()
+    logger.debug(f"/topology/services returning: {sorted(services)}")
+    return services
 
 
 @router.get("/mermaid")

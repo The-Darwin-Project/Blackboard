@@ -242,8 +242,10 @@ class BlackboardState:
         return TYPE_TO_PROTOCOL.get(dep_type.lower(), "TCP")
     
     async def get_services(self) -> list[str]:
-        """Get all service names."""
-        return list(await self.redis.smembers("darwin:services"))
+        """Get all service names (excluding IP addresses)."""
+        all_services = await self.redis.smembers("darwin:services")
+        # Filter out IP addresses that may have been added before the filter was in place
+        return [s for s in all_services if not self._is_ip_address(s)]
     
     async def get_edges(self, service: str) -> list[str]:
         """Get all dependencies for a service."""
@@ -904,6 +906,8 @@ class BlackboardState:
         end_time = time.time()
         start_time = end_time - range_seconds
         
+        logger.debug(f"get_chart_data called for services: {services}, range: {range_seconds}s")
+        
         series = []
         for service in services:
             for metric in metrics:
@@ -916,6 +920,9 @@ class BlackboardState:
                         metric=metric,
                         data=points,
                     ))
+                    logger.debug(f"Chart data: {service}/{metric} has {len(points)} points")
+                else:
+                    logger.debug(f"Chart data: {service}/{metric} has NO points")
         
         events = await self.get_events_in_range(start_time, end_time)
         
