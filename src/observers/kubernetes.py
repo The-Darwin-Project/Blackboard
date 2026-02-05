@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Environment variable configuration
 K8S_OBSERVER_ENABLED = os.getenv("K8S_OBSERVER_ENABLED", "false").lower() == "true"
 K8S_OBSERVER_NAMESPACE = os.getenv("K8S_OBSERVER_NAMESPACE", "darwin")
-K8S_OBSERVER_INTERVAL = int(os.getenv("K8S_OBSERVER_INTERVAL", "30"))
+K8S_OBSERVER_INTERVAL = int(os.getenv("K8S_OBSERVER_INTERVAL", "5"))  # Match darwin-client interval
 K8S_OBSERVER_LABEL_SELECTOR = os.getenv("K8S_OBSERVER_LABEL_SELECTOR", "")
 
 

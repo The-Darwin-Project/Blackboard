@@ -658,8 +658,14 @@ class BlackboardState:
         metric: str,
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
+        interpolate: bool = True,
     ) -> List[MetricPoint]:
-        """Get metric history within time range."""
+        """
+        Get metric history within time range.
+        
+        Merges data from multiple sources (self-reported, kubernetes) and
+        optionally interpolates to fill gaps larger than expected interval.
+        """
         key = f"darwin:metrics:{service}:{metric}"
         
         start = start_time if start_time else 0
@@ -670,14 +676,60 @@ class BlackboardState:
             key, start, end, withscores=True
         )
         
-        points = []
+        # Parse all points with source priority
+        # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
+        raw_points: dict[float, tuple[float, str]] = {}  # timestamp -> (value, source)
+        
         for member, score in results:
-            # Parse value from member
-            # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
             parts = member.split(":")
             if len(parts) >= 2:
-                value_str = parts[1]
-                points.append(MetricPoint(timestamp=score, value=float(value_str)))
+                value = float(parts[1])
+                source = parts[2] if len(parts) >= 3 else "self-reported"
+                timestamp = round(score, 1)  # Round to 100ms for deduplication
+                
+                # Prioritize self-reported over kubernetes
+                if timestamp in raw_points:
+                    existing_source = raw_points[timestamp][1]
+                    if source == "self-reported" and existing_source == "kubernetes":
+                        raw_points[timestamp] = (value, source)
+                    # Keep existing if self-reported
+                else:
+                    raw_points[timestamp] = (value, source)
+        
+        # Sort by timestamp
+        sorted_timestamps = sorted(raw_points.keys())
+        
+        if not sorted_timestamps:
+            return []
+        
+        points = []
+        expected_interval = 5.0  # Expected interval between samples
+        max_gap = expected_interval * 2  # Interpolate gaps up to 2x expected interval
+        
+        for i, ts in enumerate(sorted_timestamps):
+            value, _ = raw_points[ts]
+            points.append(MetricPoint(timestamp=ts, value=value))
+            
+            # Add interpolated points for gaps (if enabled)
+            if interpolate and i < len(sorted_timestamps) - 1:
+                next_ts = sorted_timestamps[i + 1]
+                gap = next_ts - ts
+                
+                if gap > max_gap:
+                    # Interpolate: add points at expected_interval
+                    next_value = raw_points[next_ts][0]
+                    num_interp = int(gap / expected_interval) - 1
+                    
+                    for j in range(1, min(num_interp + 1, 10)):  # Limit to 10 interpolated points
+                        interp_ts = ts + (j * expected_interval)
+                        if interp_ts < next_ts:
+                            # Linear interpolation
+                            ratio = (interp_ts - ts) / gap
+                            interp_value = value + (next_value - value) * ratio
+                            points.append(MetricPoint(timestamp=interp_ts, value=interp_value))
+        
+        # Sort final points by timestamp
+        points.sort(key=lambda p: p.timestamp)
         
         return points
     
