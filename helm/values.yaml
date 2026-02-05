@@ -44,8 +44,8 @@ gemini:
       memory: 256Mi
       cpu: 100m
     limits:
-      memory: 1Gi # Increased from 512Mi - OOMKilled fix
-      cpu: 500m
+      memory: 6Gi # Gemini CLI + Node.js needs ~1.5Gi under load
+      cpu: "6"
 # =============================================================================
 # GCP / Vertex AI Configuration
 # =============================================================================
