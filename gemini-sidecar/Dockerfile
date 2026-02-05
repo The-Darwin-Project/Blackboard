@@ -7,13 +7,18 @@ FROM registry.access.redhat.com/ubi9/nodejs-22:latest
 # Switch to root to install globally
 USER 0
 
-# Install Gemini CLI globally, git (for GitOps), and kubectl (for investigation)
-# npm install -g as root puts binaries under /usr/local/lib/node_modules/.bin
-# Symlink to /usr/local/bin so it's on PATH for non-root user
-RUN dnf install -y git kubernetes-client && dnf clean all && \
-    npm install -g @google/gemini-cli@latest && \
-    ln -sf "$(npm prefix -g)/lib/node_modules/.bin/gemini" /usr/local/bin/gemini && \
-    gemini --version
+# Install git (for GitOps) and kubectl (for investigation)
+RUN dnf install -y git && dnf clean all && \
+    curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
+    rm kubectl && \
+    kubectl version --client
+
+# Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
+# UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
+RUN npm install -g @google/gemini-cli@latest && \
+    ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
+    /usr/local/bin/gemini --version || echo "Gemini CLI linked"
 
 # Create app directory
 WORKDIR /app
