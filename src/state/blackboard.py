@@ -148,6 +148,10 @@ class BlackboardState:
     
     async def add_service(self, name: str) -> None:
         """Add a service node to the topology."""
+        # Don't add IP addresses as services - they should only be used for edge resolution
+        if self._is_ip_address(name):
+            logger.debug(f"Skipping IP address from service set: {name}")
+            return
         await self.redis.sadd("darwin:services", name)
         logger.debug(f"Added service: {name}")
     
@@ -312,8 +316,13 @@ class BlackboardState:
         logger.debug(f"Building graph with {len(topology.services)} services: {sorted(topology.services)}")
         
         # Build nodes with health status
+        # Filter out IP addresses - they should not appear as nodes, only used for edge resolution
         nodes: list[GraphNode] = []
         for service_name in topology.services:
+            # Skip IP addresses - they should not be displayed as nodes
+            if self._is_ip_address(service_name):
+                logger.debug(f"Skipping IP address node: {service_name}")
+                continue
             metadata = await self.get_service(service_name)
             metrics = await self.get_current_metrics(service_name)
             
@@ -348,13 +357,34 @@ class BlackboardState:
             ))
         
         # Build edges with protocol metadata
+        # Only include edges where both source and target are actual services (not IPs)
         edges: list[GraphEdge] = []
+        known_service_ids = {n.id for n in nodes}  # Set of valid service node IDs
+        
         for source, targets in topology.edges.items():
+            # Skip edges from IP addresses
+            if self._is_ip_address(source):
+                logger.debug(f"Skipping edge from IP address: {source}")
+                continue
+            
             for target in targets:
+                # Resolve IP to service name if possible
+                resolved_target = await self.resolve_ip_to_service(target)
+                
+                # Skip edges to IP addresses that couldn't be resolved
+                if self._is_ip_address(resolved_target):
+                    logger.debug(f"Skipping edge to unresolved IP address: {resolved_target}")
+                    continue
+                
+                # Only include edge if target exists as a node in the graph
+                if resolved_target not in known_service_ids:
+                    logger.debug(f"Skipping edge to unknown service: {source} -> {resolved_target}")
+                    continue
+                
                 edge_meta = await self.get_edge_metadata(source, target)
                 edges.append(GraphEdge(
                     source=source,
-                    target=target,
+                    target=resolved_target,  # Use resolved name
                     protocol=edge_meta.get("protocol", "HTTP"),
                     type=edge_meta.get("type", "hard"),
                 ))
