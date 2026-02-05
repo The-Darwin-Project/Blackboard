@@ -22,11 +22,13 @@ RUN npm run build && \
     test -f /build/dist/index.html || (echo "ERROR: React build failed - index.html not found" && exit 1)
 
 # Install Gemini CLI to a known prefix (requires Node.js 20+)
-# This will be copied to the final stage
+# Switch to root to write to /opt, then back to default user
+USER 0
 RUN mkdir -p /opt/gemini-cli && \
     npm install -g --prefix /opt/gemini-cli @google/gemini-cli@latest && \
     ls -la /opt/gemini-cli/bin/ && \
     test -f /opt/gemini-cli/bin/gemini && echo "Gemini CLI installed successfully"
+USER 1001
 
 # =============================================================================
 # Stage 2: Python Application
