@@ -128,12 +128,25 @@ jobs:
           # Check if there are changes to commit
           if git diff --quiet helm/values.yaml; then
             echo "No changes to helm/values.yaml"
-          else
-            git add helm/values.yaml
-            git commit -m "ci: update image tag to ${{ steps.sha.outputs.short }} [skip ci]"
-            git push
-            echo "Pushed helm/values.yaml update"
+            exit 0
           fi
+
+          git add helm/values.yaml
+          git commit -m "ci: update image tag to ${{ steps.sha.outputs.short }} [skip ci]"
+
+          # Retry push with pull-rebase to handle concurrent workflow updates
+          MAX_RETRIES=5
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Push attempt $i/$MAX_RETRIES"
+            if git push; then
+              echo "Pushed helm/values.yaml update"
+              exit 0
+            fi
+            echo "Push failed, pulling and rebasing..."
+            git pull --rebase origin main
+          done
+          echo "Failed to push after $MAX_RETRIES attempts"
+          exit 1
 
       - name: Output image info
         if: github.event_name != 'pull_request'
