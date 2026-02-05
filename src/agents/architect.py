@@ -465,6 +465,18 @@ class Architect:
                 f"If the service is already at 1 replica, or if metrics suggest it still needs "
                 f"the extra capacity, do NOT create a plan.\n\n"
             )
+        elif anomaly_type == "over_provisioned":
+            base_prompt = (
+                f"AUTOMATED ALERT: Service '{service}' appears over-provisioned.\n\n"
+                f"The service has multiple replicas but both CPU and memory usage are low "
+                f"(well below anomaly thresholds). No active anomalies exist for this service.\n\n"
+                f"ACTION REQUIRED: Check the current replica count and metrics using analyze_topology. "
+                f"If the service has MORE than 1 replica and usage is consistently low, "
+                f"create a scale-down plan using the generate_ops_plan function.\n"
+                f"- Use action='scale' with params.replicas=1\n"
+                f"- Provide a clear reason referencing the low utilization\n\n"
+                f"If metrics suggest the service still needs extra capacity, do NOT create a plan.\n\n"
+            )
         else:
             base_prompt = (
                 f"AUTOMATED ALERT: Anomaly detected for service '{service}' ({anomaly_type}).\n\n"

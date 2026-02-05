@@ -41,6 +41,12 @@ ERROR_RATE_THRESHOLD = float(os.getenv("ALIGNER_ERROR_RATE_THRESHOLD", "5.0"))
 # Cooldown between anomaly events for same service (seconds)
 ANOMALY_COOLDOWN = int(os.getenv("ALIGNER_ANOMALY_COOLDOWN", "60"))
 
+# Scale-down thresholds: if BOTH cpu and memory are below these AND replicas > 1
+SCALE_DOWN_CPU_THRESHOLD = float(os.getenv("ALIGNER_SCALE_DOWN_CPU", "30.0"))
+SCALE_DOWN_MEMORY_THRESHOLD = float(os.getenv("ALIGNER_SCALE_DOWN_MEMORY", "40.0"))
+# Cooldown between scale-down evaluations per service (seconds)
+SCALE_DOWN_COOLDOWN = int(os.getenv("ALIGNER_SCALE_DOWN_COOLDOWN", "300"))
+
 
 class FilterRule:
     """A filter rule for noise reduction."""
@@ -96,6 +102,7 @@ class Aligner:
         self._known_services: set[str] = set()
         self._service_versions: dict[str, str] = {}  # service -> last known version
         self._anomaly_state: dict[str, dict] = {}  # service -> {type, timestamp}
+        self._scale_down_last_check: dict[str, float] = {}  # service -> last evaluation timestamp
     
     async def _get_model(self):
         """Lazy-load Vertex AI Flash model for configuration parsing."""
@@ -297,6 +304,9 @@ class Aligner:
         # === CLOSED-LOOP: Anomaly Detection ===
         await self._check_anomalies(payload)
         
+        # === CLOSED-LOOP: Over-Provisioning Check (HPA scale-down) ===
+        await self._check_over_provisioned(payload)
+        
         return True
     
     async def _check_anomalies(self, payload) -> None:
@@ -399,6 +409,64 @@ class Aligner:
                     narrative=f"Good news: The high error rate issue on {service} has returned to normal levels ({payload.metrics.error_rate:.2f}%).",
                 )
                 logger.info(f"Error rate anomaly resolved: {service} now at {payload.metrics.error_rate:.2f}%")
+    
+    async def _check_over_provisioned(self, payload) -> None:
+        """
+        Periodic check: is a service over-provisioned (replicas > 1 but low usage)?
+        
+        HPA-like behavior: if CPU and memory are both well below threshold
+        and the service has more than 1 replica, ask the Architect to evaluate
+        scaling down. Uses cooldown to avoid spamming.
+        """
+        service = payload.service
+        now = time.time()
+        
+        # Cooldown: don't check too frequently per service
+        last_check = self._scale_down_last_check.get(service, 0)
+        if now - last_check < SCALE_DOWN_COOLDOWN:
+            return
+        
+        # Only evaluate if no active anomalies for this service
+        state = self._anomaly_state.get(service, {})
+        if state.get("active"):
+            return
+        
+        # Check if service has more than 1 replica
+        svc = await self.blackboard.get_service(service)
+        if not svc or not svc.replicas_desired or svc.replicas_desired <= 1:
+            return
+        
+        # Check if both CPU and memory are well below thresholds
+        cpu = payload.metrics.cpu
+        memory = payload.metrics.memory
+        
+        if cpu < SCALE_DOWN_CPU_THRESHOLD and memory < SCALE_DOWN_MEMORY_THRESHOLD:
+            self._scale_down_last_check[service] = now
+            
+            logger.info(
+                f"Over-provisioned: {service} has {svc.replicas_desired} replicas "
+                f"but CPU={cpu:.1f}% (<{SCALE_DOWN_CPU_THRESHOLD}%) "
+                f"MEM={memory:.1f}% (<{SCALE_DOWN_MEMORY_THRESHOLD}%)"
+            )
+            
+            await self.blackboard.record_event(
+                EventType.ANOMALY_RESOLVED,
+                {
+                    "service": service,
+                    "anomaly": "over_provisioned",
+                    "cpu": cpu,
+                    "memory": memory,
+                    "replicas": svc.replicas_desired,
+                },
+                narrative=(
+                    f"Service {service} appears over-provisioned: "
+                    f"{svc.replicas_desired} replicas running with only "
+                    f"CPU={cpu:.1f}% and MEM={memory:.1f}% usage. "
+                    f"Asking Architect to evaluate scale-down."
+                ),
+            )
+            
+            await self._trigger_architect(service, "over_provisioned")
     
     async def _investigate_via_sidecar(self, service: str, anomaly_type: str) -> Optional[str]:
         """
