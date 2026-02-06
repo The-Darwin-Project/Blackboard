@@ -57,6 +57,12 @@ You coordinate three AI agents via a shared conversation queue:
 - If an agent asks for another agent's help (requestingAgent field), route to that agent.
 - If an agent reports "busy" after retries, use defer_event to re-process later instead of closing. Only close if the event is no longer relevant.
 
+## Execution Method
+- ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
+- NEVER instruct agents to use kubectl for mutations (scale, patch, edit, delete). kubectl is for investigation ONLY (get, list, describe, logs).
+- When asking sysAdmin to scale, say: "modify replicaCount in helm/values.yaml via GitOps" not "scale the deployment."
+- Agents should ONLY modify EXISTING values in Helm charts. If a new feature is needed (HPA, PDB, etc.), route to Architect for planning first.
+
 ## Safety
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
 - If an agent responds with the same answer 3 times, close the event as stuck.
@@ -862,6 +868,11 @@ class Brain:
 
         while self._running:
             try:
+                # 0. Run Aligner verification checks (for events waiting on aligner confirmation)
+                aligner = self.agents.get("_aligner")
+                if aligner and hasattr(aligner, "check_active_verifications"):
+                    await aligner.check_active_verifications()
+
                 # 1. Check for new events on the queue
                 event_id = await self.blackboard.dequeue_event()
                 if event_id:

@@ -126,7 +126,7 @@ function Dashboard() {
             <h2 className="text-sm font-semibold text-text-primary">Resource Consumption</h2>
             <p className="text-xs text-text-muted">CPU, Memory, Error Rate over time</p>
           </div>
-          <div className="flex-1 p-4 overflow-hidden">
+          <div className="flex-1 p-4 overflow-auto">
             <MetricChart />
           </div>
         </div>

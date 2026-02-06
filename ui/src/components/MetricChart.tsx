@@ -11,10 +11,12 @@ import { ServiceMetricChart } from './ServiceMetricChart';
 function MetricChart() {
   const { data, isLoading, isError } = useMetrics();
 
-  // Extract unique services from the data
+  // Extract unique services from the data, excluding Brain self-monitoring
+  const EXCLUDED_SERVICES = ['darwin-brain', 'darwin-blackboard-brain'];
   const services = useMemo(() => {
     if (!data?.series) return [];
-    return [...new Set(data.series.map(s => s.service))];
+    return [...new Set(data.series.map(s => s.service))]
+      .filter(s => !EXCLUDED_SERVICES.includes(s));
   }, [data]);
 
   if (isLoading) {

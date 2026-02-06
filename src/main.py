@@ -110,6 +110,7 @@ async def lifespan(app: FastAPI):
                 "architect": architect,
                 "sysadmin": sysadmin,
                 "developer": developer,
+                "_aligner": aligner,  # In-process agent for verification checks
             },
             broadcast=broadcast_to_ui,
         )
