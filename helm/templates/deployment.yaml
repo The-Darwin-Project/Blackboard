@@ -15,6 +15,10 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        # Trigger rollout on ConfigMap changes (GEMINI.md rules, app config)
+        checksum/gemini-rules: {{ include (print $.Template.BasePath "/configmap-gemini-rules.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         app: darwin-brain
         app.kubernetes.io/instance: {{ .Release.Name }}
