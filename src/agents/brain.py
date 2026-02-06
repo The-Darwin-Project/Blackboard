@@ -728,10 +728,13 @@ class Brain:
     async def write_event_to_volume(
         self, event_id: str, agent_name: str
     ) -> None:
-        """Serialize event document as MD file to agent's volume."""
+        """Serialize event document as MD file to agent's volume, enriched with GitOps metadata."""
         event = await self.blackboard.get_event(event_id)
         if not event:
             return
+
+        # Enrich with GitOps metadata from Blackboard
+        service_meta = await self.blackboard.get_service(event.service)
 
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
@@ -742,12 +745,12 @@ class Brain:
         events_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = events_dir / f"event-{event_id}.md"
-        content = self._event_to_markdown(event)
+        content = self._event_to_markdown(event, service_meta)
         file_path.write_text(content)
         logger.debug(f"Wrote event MD to {file_path}")
 
-    def _event_to_markdown(self, event: EventDocument) -> str:
-        """Convert event document to readable Markdown."""
+    def _event_to_markdown(self, event: EventDocument, service_meta=None) -> str:
+        """Convert event document to readable Markdown, enriched with service metadata."""
         lines = [
             f"# Event: {event.id}",
             f"",
@@ -757,10 +760,30 @@ class Brain:
             f"- **Reason:** {event.event.reason}",
             f"- **Evidence:** {event.event.evidence}",
             f"- **Time:** {event.event.timeDate}",
+        ]
+
+        # Include GitOps metadata so agents know where to make changes
+        if service_meta:
+            lines.append(f"")
+            lines.append(f"## Service Metadata")
+            lines.append(f"- **Version:** {service_meta.version}")
+            if service_meta.gitops_repo:
+                lines.append(f"- **GitOps Repo:** {service_meta.gitops_repo}")
+            if service_meta.gitops_repo_url:
+                lines.append(f"- **Repo URL:** {service_meta.gitops_repo_url}")
+            if service_meta.gitops_helm_path:
+                lines.append(f"- **Helm Values Path:** {service_meta.gitops_helm_path}")
+            if service_meta.replicas_ready is not None:
+                lines.append(f"- **Replicas:** {service_meta.replicas_ready}/{service_meta.replicas_desired}")
+            lines.append(f"- **CPU:** {service_meta.metrics.cpu:.1f}%")
+            lines.append(f"- **Memory:** {service_meta.metrics.memory:.1f}%")
+            lines.append(f"- **Error Rate:** {service_meta.metrics.error_rate:.2f}%")
+
+        lines.extend([
             f"",
             f"## Conversation",
             f"",
-        ]
+        ])
         for turn in event.conversation:
             lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action})")
             if turn.thoughts:
@@ -787,6 +810,42 @@ class Brain:
     # Event Loop
     # =========================================================================
 
+    async def _cleanup_stale_events(self) -> None:
+        """
+        Startup cleanup: close any stale active events from a previous Brain instance.
+        
+        On restart, active events may be orphaned (agent tasks were in-flight,
+        WebSocket connections dropped). Close them so they don't block the system.
+        """
+        active_ids = await self.blackboard.get_active_events()
+        if not active_ids:
+            return
+
+        stale_count = 0
+        for eid in active_ids:
+            event = await self.blackboard.get_event(eid)
+            if not event:
+                # Orphaned ID in active set -- remove it
+                await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
+                stale_count += 1
+                continue
+
+            # Close events that have turns (were being processed) -- they're stale from the previous instance
+            if event.conversation:
+                await self.blackboard.close_event(
+                    eid,
+                    f"Stale: closed on Brain restart. Previous instance was processing this event. "
+                    f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}",
+                )
+                stale_count += 1
+            else:
+                # No turns yet -- re-queue for fresh processing
+                await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, eid)
+                logger.info(f"Re-queued untouched event {eid} for fresh processing")
+
+        if stale_count:
+            logger.info(f"Startup cleanup: closed {stale_count} stale events from previous instance")
+
     async def start_event_loop(self) -> None:
         """
         Background event loop: dequeue new events + check for user approvals.
@@ -795,6 +854,10 @@ class Brain:
         No agent response scanning needed -- WebSocket agents complete asynchronously.
         """
         self._running = True
+
+        # Startup: clean up stale events from previous Brain instance
+        await self._cleanup_stale_events()
+
         logger.info("Brain event loop started (WebSocket mode)")
 
         while self._running:
