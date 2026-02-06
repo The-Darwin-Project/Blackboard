@@ -99,7 +99,9 @@ async def lifespan(app: FastAPI):
                     await client.send_text(data)
                 except Exception:
                     disconnected.add(client)
-            connected_ui_clients -= disconnected
+            # Use difference_update (in-place mutation) to avoid reassignment
+            # which would break the closure over connected_ui_clients
+            connected_ui_clients.difference_update(disconnected)
         
         # Initialize Brain orchestrator with agents + broadcast
         brain = Brain(
