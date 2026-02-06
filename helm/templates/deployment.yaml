@@ -231,7 +231,7 @@ spec:
               readOnly: true
             {{- end }}
             - name: gitops-architect
-              mountPath: /data/gitops
+              mountPath: /data/gitops-architect
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: architect.md
@@ -298,7 +298,7 @@ spec:
               readOnly: true
             {{- end }}
             - name: gitops-sysadmin
-              mountPath: /data/gitops
+              mountPath: /data/gitops-sysadmin
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: sysadmin.md
@@ -365,7 +365,7 @@ spec:
               readOnly: true
             {{- end }}
             - name: gitops-developer
-              mountPath: /data/gitops
+              mountPath: /data/gitops-developer
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: developer.md
