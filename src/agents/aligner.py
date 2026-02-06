@@ -300,10 +300,12 @@ class Aligner:
             if len(self._version_buffer[payload.service]) == 1:
                 self._version_buffer[payload.service].insert(0, (now - 1, last_version))
 
-            # Check if we have 30s of observations -- time to analyze
+        # Check buffer on EVERY telemetry cycle (not just on version change).
+        # This ensures fast deployments that stabilize quickly still get analyzed.
+        if payload.service in self._version_buffer and not self._version_analysis_pending.get(payload.service):
             buffer = self._version_buffer[payload.service]
             buffer_age = now - buffer[0][0]
-            if buffer_age >= 30 and not self._version_analysis_pending.get(payload.service):
+            if buffer_age >= 30:
                 self._version_analysis_pending[payload.service] = True
                 await self._analyze_version_drift(payload.service)
 
