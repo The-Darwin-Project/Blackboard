@@ -360,6 +360,11 @@ class BlackboardState:
                 logger.debug(f"Skipping IP address node: {service_name}")
                 continue
             
+            # Skip Brain self-monitoring -- Brain should not appear in its own topology
+            if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                logger.debug(f"Skipping Brain self-monitoring node: {service_name}")
+                continue
+
             # Skip external domains (services that never sent telemetry)
             # External services like github.com, api.stripe.com only appear as dependency targets
             metadata = await self.get_service(service_name)
