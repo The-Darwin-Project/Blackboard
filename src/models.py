@@ -286,6 +286,7 @@ class EventStatus(str, Enum):
     NEW = "new"
     ACTIVE = "active"
     WAITING_APPROVAL = "waiting_approval"
+    DEFERRED = "deferred"
     RESOLVED = "resolved"
     CLOSED = "closed"
 

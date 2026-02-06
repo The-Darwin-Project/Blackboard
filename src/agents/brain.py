@@ -55,6 +55,7 @@ You coordinate three AI agents via a shared conversation queue:
 - After execution, use re_trigger_aligner to verify the change took effect.
 - When the issue is resolved and verified, close the event with a summary.
 - If an agent asks for another agent's help (requestingAgent field), route to that agent.
+- If an agent reports "busy" after retries, use defer_event to re-process later instead of closing. Only close if the event is no longer relevant.
 
 ## Safety
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
@@ -186,6 +187,25 @@ def _build_brain_tools():
             },
         )
 
+        defer_event = FunctionDeclaration(
+            name="defer_event",
+            description="Defer an event for later processing. Use when an agent is busy, the issue is not urgent, or you want to retry after a cooldown period.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this event is being deferred (e.g., 'agent busy', 'waiting for cooldown')",
+                    },
+                    "delay_seconds": {
+                        "type": "integer",
+                        "description": "How many seconds to wait before re-processing (30-300)",
+                    },
+                },
+                "required": ["reason", "delay_seconds"],
+            },
+        )
+
         return Tool(function_declarations=[
             select_agent,
             close_event,
@@ -193,6 +213,7 @@ def _build_brain_tools():
             re_trigger_aligner,
             ask_agent_for_state,
             wait_for_verification,
+            defer_event,
         ])
 
     except ImportError:
@@ -524,6 +545,34 @@ class Brain:
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
 
+        elif function_name == "defer_event":
+            reason = args.get("reason", "Deferred by Brain")
+            delay = max(30, min(int(args.get("delay_seconds", 60)), 300))  # Clamp 30-300s
+            defer_until = time.time() + delay
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="defer",
+                thoughts=f"Deferring event for {delay}s: {reason}",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            # Update event status + store defer_until timestamp
+            event = await self.blackboard.get_event(event_id)
+            if event:
+                event.status = EventStatus.DEFERRED
+                await self.blackboard.redis.set(
+                    f"{self.blackboard.EVENT_PREFIX}{event_id}",
+                    json.dumps(event.model_dump()),
+                )
+                # Store defer timestamp for the event loop to check
+                await self.blackboard.redis.set(
+                    f"{self.blackboard.EVENT_PREFIX}{event_id}:defer_until",
+                    str(defer_until),
+                    ex=delay + 60,  # Auto-expire the key after delay + buffer
+                )
+            logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
+
         else:
             logger.warning(f"Unknown function call: {function_name}")
 
@@ -563,22 +612,37 @@ class Brain:
                 on_progress=on_progress,
             )
 
-            # Parse result -- check if agent is asking a question
+            # Parse result -- check for structured responses (question, agent_busy)
             try:
                 result_data = json.loads(result)
-                if isinstance(result_data, dict) and result_data.get("type") == "question":
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor=agent_name,
-                        action="question",
-                        thoughts=result_data.get("message", ""),
-                        requestingAgent=result_data.get("requestingAgent", ""),
-                    )
-                    await self.blackboard.append_turn(event_id, turn)
-                    await self._broadcast_turn(event_id, turn)
-                    # Let Brain decide next routing
-                    await self.process_event(event_id)
-                    return
+                if isinstance(result_data, dict):
+                    if result_data.get("type") == "question":
+                        turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor=agent_name,
+                            action="question",
+                            thoughts=result_data.get("message", ""),
+                            requestingAgent=result_data.get("requestingAgent", ""),
+                        )
+                        await self.blackboard.append_turn(event_id, turn)
+                        await self._broadcast_turn(event_id, turn)
+                        await self.process_event(event_id)
+                        return
+
+                    if result_data.get("type") == "agent_busy":
+                        # Agent exhausted retries -- return to Brain for decision
+                        turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor=agent_name,
+                            action="busy",
+                            thoughts=result_data.get("message", f"{agent_name} is busy after retries"),
+                        )
+                        await self.blackboard.append_turn(event_id, turn)
+                        await self._broadcast_turn(event_id, turn)
+                        logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
+                        # Let Brain decide: close, wait, or try another agent
+                        await self.process_event(event_id)
+                        return
             except (json.JSONDecodeError, TypeError):
                 pass  # Not a JSON question, treat as regular result
 
@@ -719,16 +783,34 @@ class Brain:
                     logger.info(f"New event from queue: {event_id}")
                     await self.process_event(event_id)
 
-                # 2. Scan active events for user approvals
-                # (user approves via UI -> turn appended -> Brain needs to continue)
+                # 2. Scan active events for user approvals + deferred events
                 active = await self.blackboard.get_active_events()
                 for eid in active:
                     # Skip events with active agent tasks
                     if eid in self._active_tasks and not self._active_tasks[eid].done():
                         continue
+
                     event = await self.blackboard.get_event(eid)
                     if not event or not event.conversation:
                         continue
+
+                    # Check if event is deferred -- skip until delay expires
+                    if event.status == EventStatus.DEFERRED:
+                        defer_key = f"{self.blackboard.EVENT_PREFIX}{eid}:defer_until"
+                        defer_until = await self.blackboard.redis.get(defer_key)
+                        if defer_until and time.time() < float(defer_until):
+                            continue  # Still deferred, skip
+                        # Delay expired -- re-activate and process
+                        event.status = EventStatus.ACTIVE
+                        await self.blackboard.redis.set(
+                            f"{self.blackboard.EVENT_PREFIX}{eid}",
+                            json.dumps(event.model_dump()),
+                        )
+                        await self.blackboard.redis.delete(defer_key)
+                        logger.info(f"Deferred event {eid} re-activated")
+                        await self.process_event(eid)
+                        continue
+
                     last_turn = event.conversation[-1]
                     # User approval or Aligner confirmation -> Brain should decide next step
                     if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "confirm"):

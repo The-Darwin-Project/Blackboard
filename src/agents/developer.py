@@ -151,9 +151,21 @@ class Developer:
                     return f"Error: {error_msg}"
 
                 elif msg_type == "busy":
-                    logger.warning(f"Developer busy [{event_id}], retrying in 5s...")
-                    await asyncio.sleep(5)
-                    # Retry once
+                    if not hasattr(self, '_busy_retries'):
+                        self._busy_retries = {}
+                    retries = self._busy_retries.get(event_id, 0) + 1
+                    self._busy_retries[event_id] = retries
+                    if retries > 5:
+                        self._busy_retries.pop(event_id, None)
+                        return json.dumps({
+                            "type": "agent_busy",
+                            "agent": self.agent_name,
+                            "event_id": event_id,
+                            "message": f"{self.agent_name} busy after 5 retries. Returning to Brain for decision.",
+                        })
+                    delay = min(5 * (2 ** (retries - 1)), 60)
+                    logger.warning(f"Developer busy [{event_id}], retry {retries}/5 in {delay}s...")
+                    await asyncio.sleep(delay)
                     try:
                         await self._ws.send(json.dumps({
                             "type": "task",
@@ -163,7 +175,13 @@ class Developer:
                             "autoApprove": True,
                         }))
                     except Exception:
-                        return "Error: Developer sidecar busy and retry failed"
+                        self._busy_retries.pop(event_id, None)
+                        return json.dumps({
+                            "type": "agent_busy",
+                            "agent": self.agent_name,
+                            "event_id": event_id,
+                            "message": f"{self.agent_name} busy and retry send failed.",
+                        })
 
                 elif msg_type == "question":
                     # Agent asking for help from another agent
