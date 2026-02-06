@@ -135,7 +135,6 @@ function Dashboard() {
       {/* Node Inspector Drawer */}
       <NodeInspector
         serviceName={selectedService}
-        planId={null}
         onClose={() => {
           setSelectedService(null);
         }}
