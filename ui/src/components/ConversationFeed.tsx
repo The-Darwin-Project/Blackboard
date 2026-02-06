@@ -1,14 +1,16 @@
 // BlackBoard/ui/src/components/ConversationFeed.tsx
 /**
  * Unified group-chat view with real-time WebSocket updates.
+ * Layout: Events panel (top) + Conversation stream (bottom) + Chat input
  */
 import { useState, useEffect, useRef } from 'react';
 import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useEvents } from '../hooks/useEvents';
 import { useChat } from '../hooks/useChat';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { approveEvent } from '../api/client';
+import { approveEvent, getClosedEvents } from '../api/client';
 import type { ConversationTurn } from '../api/types';
+import { useQuery } from '@tanstack/react-query';
 
 const ACTOR_COLORS: Record<string, string> = {
   brain: '#8b5cf6',
@@ -18,6 +20,67 @@ const ACTOR_COLORS: Record<string, string> = {
   aligner: '#6b7280',
   user: '#ec4899',
 };
+
+const STATUS_COLORS: Record<string, { bg: string; text: string; label: string }> = {
+  new: { bg: '#1e40af', text: '#93c5fd', label: 'New' },
+  active: { bg: '#065f46', text: '#6ee7b7', label: 'Active' },
+  waiting_approval: { bg: '#92400e', text: '#fcd34d', label: 'Awaiting' },
+  deferred: { bg: '#4c1d95', text: '#c4b5fd', label: 'Deferred' },
+  resolved: { bg: '#14532d', text: '#86efac', label: 'Resolved' },
+  closed: { bg: '#374151', text: '#9ca3af', label: 'Closed' },
+};
+
+// ============================================================================
+// Sub-components
+// ============================================================================
+
+function StatusBadge({ status }: { status: string }) {
+  const s = STATUS_COLORS[status] || STATUS_COLORS.closed;
+  return (
+    <span style={{
+      background: s.bg, color: s.text, padding: '1px 8px',
+      borderRadius: 10, fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap',
+    }}>
+      {s.label}
+    </span>
+  );
+}
+
+function EventCard({
+  evt,
+  selected,
+  onClick,
+}: {
+  evt: Record<string, unknown>;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const status = evt.status as string || 'active';
+  const statusStyle = STATUS_COLORS[status] || STATUS_COLORS.active;
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: '8px 10px', marginBottom: 4, borderRadius: 8,
+        background: selected ? '#334155' : '#1e293b',
+        borderLeft: `3px solid ${statusStyle.text}`,
+        cursor: 'pointer', fontSize: 13, transition: 'background 0.15s',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+        <strong style={{ color: '#e2e8f0' }}>{evt.service as string}</strong>
+        <StatusBadge status={status} />
+      </div>
+      <div style={{ color: '#94a3b8', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {(evt.reason as string)?.slice(0, 60)}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: '#64748b' }}>
+        <span>{evt.source as string}</span>
+        <span>{evt.turns as number} turns</span>
+      </div>
+    </div>
+  );
+}
 
 function AttachmentCard({ filename, content }: { filename: string; content: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -66,12 +129,12 @@ function TurnBubble({ turn, eventId }: { turn: ConversationTurn; eventId?: strin
           {new Date(turn.timestamp * 1000).toLocaleTimeString()}
         </span>
       </div>
-      {turn.thoughts && <p style={{ margin: '4px 0', fontSize: 14 }}>{turn.thoughts}</p>}
+      {turn.thoughts && <p style={{ margin: '4px 0', fontSize: 14, color: '#e2e8f0' }}>{turn.thoughts}</p>}
       {turn.result && <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>}
       {turn.plan && (
         <pre style={{
           background: '#1e1e2e', padding: 12, borderRadius: 8,
-          fontSize: 13, overflow: 'auto', maxHeight: 300,
+          fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0',
         }}>
           {turn.plan}
         </pre>
@@ -105,21 +168,31 @@ function ProgressDots({ agent }: { agent: string }) {
       }}>
         {agent}
       </span>
-      <span style={{ fontSize: 13, color: '#94a3b8', marginLeft: 8, animation: 'pulse 1.5s infinite' }}>
+      <span style={{ fontSize: 13, color: '#94a3b8', marginLeft: 8 }}>
         working...
       </span>
     </div>
   );
 }
 
+// ============================================================================
+// Main Component
+// ============================================================================
+
 export function ConversationFeed() {
   const [inputMessage, setInputMessage] = useState('');
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [activeAgents, setActiveAgents] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
+  const [showClosed, setShowClosed] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: activeEvents } = useActiveEvents();
+  const { data: closedEvents } = useQuery({
+    queryKey: ['closedEvents'],
+    queryFn: () => getClosedEvents(20),
+    refetchOnWindowFocus: true,
+  });
   const { data: selectedEvent } = useEventDocument(selectedEventId);
   const { data: archEvents } = useEvents();
   const { invalidateActive, invalidateEvent } = useQueueInvalidation();
@@ -129,7 +202,6 @@ export function ConversationFeed() {
     if (msg.type === 'turn' || msg.type === 'event_created' || msg.type === 'event_closed') {
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
-      // Clear progress for this agent
       if (msg.type === 'turn') {
         const turn = msg.turn as Record<string, unknown>;
         if (turn?.actor) {
@@ -169,6 +241,12 @@ export function ConversationFeed() {
     setInputMessage('');
   };
 
+  // Combine active + closed for the events panel
+  const allEvents = [
+    ...(activeEvents || []),
+    ...(showClosed ? (closedEvents || []) : []),
+  ];
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Reconnect banner */}
@@ -181,46 +259,82 @@ export function ConversationFeed() {
         </div>
       )}
 
-      {/* Connection status */}
+      {/* Connection status bar */}
       <div style={{
-        padding: '4px 12px', fontSize: 11,
+        padding: '4px 12px', fontSize: 11, display: 'flex', justifyContent: 'space-between',
         color: connected ? '#4ade80' : '#f87171',
         borderBottom: '1px solid #333',
       }}>
-        {connected ? 'Live' : 'Disconnected'}
+        <span>{connected ? 'Live' : 'Disconnected'}</span>
+        <span style={{ color: '#64748b' }}>
+          {activeEvents?.length || 0} active
+        </span>
       </div>
 
-      {/* Active Events List */}
-      <div style={{ padding: 12, borderBottom: '1px solid #333', maxHeight: 200, overflow: 'auto' }}>
-        <h3 style={{ margin: '0 0 8px 0', fontSize: 14 }}>Active Events</h3>
-        {activeEvents?.map((evt: Record<string, unknown>) => (
-          <div
-            key={evt.id as string}
-            onClick={() => setSelectedEventId(evt.id as string)}
+      {/* ================================================================ */}
+      {/* Events Panel - scrollable card list with status indicators       */}
+      {/* ================================================================ */}
+      <div style={{
+        borderBottom: '1px solid #333', maxHeight: 240, overflow: 'auto',
+        flexShrink: 0,
+      }}>
+        <div style={{
+          padding: '8px 12px 4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          position: 'sticky', top: 0, background: '#0f172a', zIndex: 1,
+        }}>
+          <h3 style={{ margin: 0, fontSize: 13, color: '#e2e8f0' }}>Events</h3>
+          <button
+            onClick={() => setShowClosed(!showClosed)}
             style={{
-              padding: '6px 10px', marginBottom: 4, borderRadius: 6,
-              background: selectedEventId === evt.id ? '#334155' : '#1e293b',
-              cursor: 'pointer', fontSize: 13,
+              background: 'none', border: '1px solid #334155', borderRadius: 4,
+              color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer',
             }}
           >
-            <strong>{evt.service as string}</strong> - {(evt.reason as string)?.slice(0, 50)}
-            <span style={{ float: 'right', fontSize: 11, color: '#666' }}>
-              {evt.turns as number} turns
-            </span>
-          </div>
-        ))}
-        {(!activeEvents || activeEvents.length === 0) && (
-          <p style={{ color: '#666', fontSize: 13 }}>No active events</p>
-        )}
+            {showClosed ? 'Hide Closed' : 'Show Closed'}
+          </button>
+        </div>
+        <div style={{ padding: '4px 12px 8px' }}>
+          {allEvents.map((evt: Record<string, unknown>) => (
+            <EventCard
+              key={evt.id as string}
+              evt={evt}
+              selected={selectedEventId === evt.id}
+              onClick={() => setSelectedEventId(evt.id as string)}
+            />
+          ))}
+          {allEvents.length === 0 && (
+            <p style={{ color: '#666', fontSize: 13, padding: '8px 0' }}>No events</p>
+          )}
+        </div>
       </div>
 
-      {/* Conversation Timeline */}
-      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>
-        {selectedEvent ? (
-          <>
-            <div style={{ marginBottom: 12, fontSize: 13, color: '#94a3b8' }}>
-              Event: {selectedEvent.id} | {selectedEvent.source} | {selectedEvent.status}
+      {/* ================================================================ */}
+      {/* Conversation Stream - sticky header + scrollable turns           */}
+      {/* ================================================================ */}
+      {selectedEvent ? (
+        <>
+          {/* Sticky event header */}
+          <div style={{
+            padding: '8px 12px', borderBottom: '1px solid #333',
+            background: '#1e293b', flexShrink: 0,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: 600 }}>
+                {selectedEvent.service}
+              </span>
+              <StatusBadge status={selectedEvent.status} />
+              <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>
+                {selectedEvent.id}
+              </span>
             </div>
+            <span style={{ fontSize: 11, color: '#64748b' }}>
+              {selectedEvent.source} | {selectedEvent.conversation.length} turns
+            </span>
+          </div>
+
+          {/* Scrollable conversation */}
+          <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>
             {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => (
               <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} />
             ))}
@@ -234,26 +348,32 @@ export function ConversationFeed() {
             {Object.keys(activeAgents).map((agent) => (
               <ProgressDots key={agent} agent={agent} />
             ))}
-          </>
-        ) : (
-          <div>
-            {archEvents?.slice(0, 20).map((evt, i) => (
-              <div key={i} style={{
-                padding: '4px 0', fontSize: 13, color: '#94a3b8',
-                borderBottom: '1px solid #1e293b',
-              }}>
-                <span style={{ color: '#64748b' }}>
-                  {new Date(evt.timestamp * 1000).toLocaleTimeString()}
-                </span>
-                {' '}{evt.narrative || evt.type}
-              </div>
-            ))}
           </div>
-        )}
-      </div>
+        </>
+      ) : (
+        /* No event selected -- show recent activity stream */
+        <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>
+          <p style={{ color: '#64748b', fontSize: 13, marginBottom: 12 }}>
+            Select an event above to view the conversation, or send a message below.
+          </p>
+          {archEvents?.slice(0, 20).map((evt, i) => (
+            <div key={i} style={{
+              padding: '4px 0', fontSize: 13, color: '#94a3b8',
+              borderBottom: '1px solid #1e293b',
+            }}>
+              <span style={{ color: '#64748b' }}>
+                {new Date(evt.timestamp * 1000).toLocaleTimeString()}
+              </span>
+              {' '}{evt.narrative || evt.type}
+            </div>
+          ))}
+        </div>
+      )}
 
-      {/* Chat Input */}
-      <div style={{ padding: 12, borderTop: '1px solid #333', display: 'flex', gap: 8 }}>
+      {/* ================================================================ */}
+      {/* Chat Input                                                       */}
+      {/* ================================================================ */}
+      <div style={{ padding: 12, borderTop: '1px solid #333', display: 'flex', gap: 8, flexShrink: 0 }}>
         <input
           type="text"
           value={inputMessage}
