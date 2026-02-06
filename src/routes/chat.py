@@ -1,61 +1,57 @@
 # BlackBoard/src/routes/chat.py
 """
-Chat endpoint for Architect interaction.
+Chat endpoint - creates events for Brain processing.
 
-Provides the interface for operators to communicate with Agent 2 (Architect).
+The chat endpoint now creates events in the conversation queue.
+The Brain processes them asynchronously via the event loop.
 """
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
-from ..models import ChatRequest, ChatResponse
-from ..dependencies import get_architect
-
-if TYPE_CHECKING:
-    from ..agents.architect import Architect
+from ..dependencies import get_blackboard
+from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-@router.post("/", response_model=ChatResponse)
-async def chat_with_architect(
-    request: ChatRequest,
-    architect: "Architect" = Depends(get_architect),
-) -> ChatResponse:
+class ChatEventRequest(BaseModel):
+    """Request to create a chat event."""
+    message: str = Field(..., description="User message or request")
+    service: str = Field("general", description="Target service (or 'general')")
+
+
+class ChatEventResponse(BaseModel):
+    """Response with event ID for tracking."""
+    event_id: str
+    status: str = "created"
+
+
+@router.post("/", response_model=ChatEventResponse)
+async def create_chat_event(
+    request: ChatEventRequest,
+    blackboard: BlackboardState = Depends(get_blackboard),
+) -> ChatEventResponse:
     """
-    Send a message to the Architect agent.
+    Create a new event from user chat message.
     
-    The Architect analyzes the current topology and metrics,
-    then generates a structured plan if appropriate.
-    
-    Supports multi-turn conversations via conversation_id:
-    - First message: omit conversation_id, server generates one
-    - Follow-up messages: include conversation_id from previous response
-    
-    Examples:
-        - "Scale inventory-api to 3 replicas"
-        - "What's the current state of the system?"
-        - "Optimize postgres for high traffic"
+    The Brain will process this event asynchronously.
+    Poll GET /queue/{event_id} to track conversation progress.
     """
     try:
-        response = await architect.chat(
-            request.message,
-            conversation_id=request.conversation_id,
+        event_id = await blackboard.create_event(
+            source="chat",
+            service=request.service,
+            reason=request.message,
+            evidence="User request via chat interface",
         )
-        
-        logger.info(
-            f"Architect response: {response.message[:100]}..."
-            f" plan_id={response.plan_id}"
-            f" conversation_id={response.conversation_id}"
-        )
-        
-        return response
-    
+        logger.info(f"Chat event created: {event_id} for service {request.service}")
+        return ChatEventResponse(event_id=event_id)
     except Exception as e:
-        logger.error(f"Architect chat failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Architect error: {e}")
+        logger.error(f"Failed to create chat event: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create event: {e}")

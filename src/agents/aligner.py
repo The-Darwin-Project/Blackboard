@@ -13,9 +13,10 @@ for autonomous analysis, completing the observation → strategy loop.
 
 AIR GAP: This module may import vertexai (for Flash model) but NOT kubernetes or git.
 """
+# NOTE: Aligner keeps vertexai Flash for filter configuration
+# (independent of Brain's Vertex AI Pro). Do NOT remove vertexai imports.
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
@@ -24,8 +25,6 @@ from typing import TYPE_CHECKING, Optional
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
-
-import httpx
 
 from ..models import EventType
 
@@ -468,85 +467,31 @@ class Aligner:
             
             await self._trigger_architect(service, "over_provisioned")
     
-    async def _investigate_via_sidecar(self, service: str, anomaly_type: str) -> Optional[str]:
-        """
-        Call gemini sidecar to investigate pod issues using kubectl.
-        
-        Returns investigation results as a string, or None if investigation failed.
-        """
-        sidecar_url = os.getenv("GEMINI_SIDECAR_URL", "http://localhost:9090")
-        namespace = os.getenv("K8S_OBSERVER_NAMESPACE", "darwin")
-        
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{sidecar_url}/investigate",
-                    json={
-                        "service": service,
-                        "namespace": namespace,
-                        "anomalyType": anomaly_type,
-                    },
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    output = result.get("output", "")
-                    if isinstance(output, dict):
-                        output = str(output)
-                    logger.info(f"Investigation completed for {service}: {len(output)} chars")
-                    return output
-                else:
-                    logger.warning(f"Investigation failed: {response.status_code}")
-                    return None
-                    
-        except httpx.ConnectError:
-            logger.warning(f"Cannot connect to Gemini sidecar at {sidecar_url}")
-            return None
-        except Exception as e:
-            logger.error(f"Investigation error: {e}")
-            return None
-    
     async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
         """
-        Trigger investigation + Architect analysis via Blackboard queue.
+        Create an event for the Brain to process.
         
-        Fire-and-forget: wraps async work in a task to avoid blocking telemetry.
+        Replaces the old fire-and-forget investigate+enqueue pattern.
+        The Brain will decide whether to investigate further via sysAdmin.
         """
-        asyncio.create_task(self._investigate_and_enqueue(service, anomaly_type))
-        logger.info(f"Triggered async investigation for {service} ({anomaly_type})")
-    
-    async def _investigate_and_enqueue(self, service: str, anomaly_type: str) -> None:
-        """
-        Investigate via sidecar, then enqueue task for Architect.
+        # Get current metrics for evidence
+        svc = await self.blackboard.get_service(service)
+        evidence_parts = [f"Service: {service}", f"Anomaly: {anomaly_type}"]
+        if svc:
+            evidence_parts.append(f"CPU: {svc.metrics.cpu:.1f}%")
+            evidence_parts.append(f"Memory: {svc.metrics.memory:.1f}%")
+            evidence_parts.append(f"Error Rate: {svc.metrics.error_rate:.2f}%")
+            if svc.replicas_ready is not None:
+                evidence_parts.append(f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
+        evidence = ", ".join(evidence_parts)
         
-        Runs as a background task - does not block telemetry processing.
-        """
-        try:
-            # Investigate via sidecar to get root cause context
-            investigation = await self._investigate_via_sidecar(service, anomaly_type)
-            
-            if investigation:
-                # Record investigation results
-                await self.blackboard.record_event(
-                    EventType.ARCHITECT_ANALYZING,
-                    {
-                        "service": service,
-                        "trigger": anomaly_type,
-                        "investigation_summary": investigation[:500] if investigation else None,
-                    },
-                    narrative=f"Investigated {anomaly_type.replace('_', ' ')} on {service}. Escalating to Architect with findings.",
-                )
-            
-            # Enqueue task to Blackboard for Architect to pick up
-            await self.blackboard.enqueue_architect_task({
-                "type": "anomaly_analysis",
-                "service": service,
-                "anomaly_type": anomaly_type,
-                "investigation": investigation,
-            })
-            logger.info(f"Enqueued analysis task for {service} ({anomaly_type})")
-        except Exception as e:
-            logger.error(f"Investigation/enqueue failed for {service}: {e}")
+        await self.blackboard.create_event(
+            source="aligner",
+            service=service,
+            reason=anomaly_type.replace("_", " "),
+            evidence=evidence,
+        )
+        logger.info(f"Created event for {service} ({anomaly_type})")
     
     async def check_anomalies_for_service(
         self,
@@ -659,6 +604,50 @@ class Aligner:
         logger.warning(f"Unhealthy pod detected: {pod_name} ({service}): {reason}")
         
         await self._trigger_architect(service, anomaly_type)
+    
+    async def check_active_verifications(self) -> None:
+        """Scan active events for verification requests from Brain."""
+        active_ids = await self.blackboard.get_active_events()
+        for event_id in active_ids:
+            event = await self.blackboard.get_event(event_id)
+            if not event or not event.conversation:
+                continue
+            last_turn = event.conversation[-1]
+            if last_turn.waitingFor == "aligner" and last_turn.actor == "brain":
+                # Check if the condition is met
+                svc = await self.blackboard.get_service(event.service)
+                if svc:
+                    from ..models import ConversationTurn
+                    confirm_turn = ConversationTurn(
+                        turn=len(event.conversation) + 1,
+                        actor="aligner",
+                        action="confirm",
+                        evidence=(
+                            f"Service: {event.service}, "
+                            f"CPU: {svc.metrics.cpu:.1f}%, "
+                            f"Memory: {svc.metrics.memory:.1f}%, "
+                            f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}"
+                            if svc.replicas_ready is not None else
+                            f"Service: {event.service}, CPU: {svc.metrics.cpu:.1f}%"
+                        ),
+                    )
+                    await self.blackboard.append_turn(event_id, confirm_turn)
+                    logger.info(f"Aligner confirmed verification for event {event_id}")
+    
+    async def check_state(self, service: str) -> dict:
+        """Return current state of a service for Brain re-trigger."""
+        svc = await self.blackboard.get_service(service)
+        if not svc:
+            return {"service": service, "status": "not_found"}
+        return {
+            "service": service,
+            "cpu": svc.metrics.cpu,
+            "memory": svc.metrics.memory,
+            "error_rate": svc.metrics.error_rate,
+            "replicas_ready": svc.replicas_ready,
+            "replicas_desired": svc.replicas_desired,
+            "version": svc.version,
+        }
     
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""

@@ -18,13 +18,13 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_blackboard
+from .dependencies import set_agents, set_blackboard, set_brain
 from .models import HealthResponse
 from .routes import (
     chat_router,
     events_router,
     metrics_router,
-    plans_router,
+    queue_router,
     telemetry_router,
     topology_router,
 )
@@ -68,23 +68,27 @@ async def lifespan(app: FastAPI):
         set_blackboard(blackboard)
         logger.info("Blackboard state initialized")
         
-        # Initialize agents
-        from .agents import Aligner, Architect, SysAdmin
+        # Initialize agents (thin HTTP clients to sidecars)
+        from .agents import Aligner, Architect, SysAdmin, Developer, Brain
         
         aligner = Aligner(blackboard)
-        architect = Architect(blackboard)
-        sysadmin = SysAdmin(blackboard)
+        architect = Architect()
+        sysadmin = SysAdmin()
+        developer = Developer()
         
-        set_agents(aligner, architect, sysadmin)
-        logger.info("Trinity agents initialized (Aligner, Architect, SysAdmin)")
+        set_agents(aligner, architect, sysadmin, developer)
+        logger.info("Agents initialized (Aligner, Architect, SysAdmin, Developer)")
         
-        # === BLACKBOARD-CENTRIC COMMUNICATION ===
-        # Start agent task loops (no callbacks - agents communicate via Blackboard queues)
+        # Initialize Brain orchestrator
+        brain = Brain(blackboard)
+        set_brain(brain)
+        logger.info("Brain orchestrator initialized")
+        
+        # Start Brain event loop (replaces old agent task loops)
         import asyncio
         
-        asyncio.create_task(architect.start_task_loop())
-        asyncio.create_task(sysadmin.start_execution_loop())
-        logger.info("Agent task loops started - Blackboard-centric communication active")
+        asyncio.create_task(brain.start_event_loop())
+        logger.info("Brain event loop started - conversation queue active")
         
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
@@ -121,11 +125,10 @@ async def lifespan(app: FastAPI):
     # Cleanup
     logger.info("Darwin Blackboard shutting down...")
     
-    # Stop agent loops
+    # Stop Brain event loop
     if redis:
-        architect.stop_task_loop()
-        sysadmin.stop_execution_loop()
-        logger.info("Agent task loops stopped")
+        await brain.stop_event_loop()
+        logger.info("Brain event loop stopped")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:
@@ -175,7 +178,7 @@ async def health_check() -> HealthResponse:
 
 app.include_router(telemetry_router)
 app.include_router(topology_router)
-app.include_router(plans_router)
+app.include_router(queue_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)
@@ -200,12 +203,11 @@ async def api_info() -> dict:
                 "mermaid": "GET /topology/mermaid",
                 "services": "GET /topology/services",
             },
-            "plans": {
-                "list": "GET /plans/",
-                "get": "GET /plans/{id}",
-                "approve": "POST /plans/{id}/approve",
-                "reject": "POST /plans/{id}/reject",
-                "execute": "POST /plans/{id}/execute",
+            "queue": {
+                "active": "GET /queue/active",
+                "get": "GET /queue/{event_id}",
+                "approve": "POST /queue/{event_id}/approve",
+                "closed": "GET /queue/closed/list",
             },
             "metrics": {
                 "current": "GET /metrics/{service}",

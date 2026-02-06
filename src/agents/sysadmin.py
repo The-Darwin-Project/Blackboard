@@ -1,519 +1,99 @@
 # BlackBoard/src/agents/sysadmin.py
-# SysAdmin Agent - executes approved plans via Gemini CLI sidecar
 """
-Agent 3: The SysAdmin (The Executor)
+SysAdmin Agent - Thin HTTP client to the sysAdmin sidecar.
 
-Role: Safety & Execution
-Nature: Hybrid (Python orchestrator calling Gemini CLI sidecar)
-
-The SysAdmin reads approved plans and executes them via the Gemini CLI
-sidecar container, which performs Git operations agentically.
-
-AIR GAP ENFORCEMENT:
-- This module may import httpx (for sidecar communication)
-- This module may import redis (for Blackboard access)
-- This module CANNOT import vertexai
+This module provides a thin HTTP client interface to the sysAdmin sidecar service.
+It handles task execution requests and health checks via HTTP calls to the sidecar.
 """
 from __future__ import annotations
 
-import asyncio
-import functools
 import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Optional
 
 import httpx
 
-# AIR GAP ENFORCEMENT: These imports are FORBIDDEN
-# import vertexai  # FORBIDDEN
-# from vertexai import *  # FORBIDDEN
-
-if TYPE_CHECKING:
-    from ..models import Plan, PlanStatus
-    from ..state.blackboard import BlackboardState
+from .security import FORBIDDEN_PATTERNS, SecurityError
 
 logger = logging.getLogger(__name__)
 
-# GitHub App configuration
-GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "The-Darwin-Project/gitops")
 
-# =============================================================================
-# Safety Decorator
-# =============================================================================
-
-FORBIDDEN_PATTERNS = [
-    r"rm\s+-rf",
-    r"rm\s+-r\s+/",
-    r"delete\s+volume",
-    r"drop\s+database",
-    r"drop\s+table",
-    r"truncate\s+table",
-    r"kubectl\s+delete\s+namespace",
-    r"kubectl\s+delete\s+pv",
-    r"--force\s+--grace-period=0",
-    r"git\s+push\s+--force",
-    r"git\s+push\s+-f",
-    r">\s*/dev/sd",
-    r"mkfs\.",
-    r"dd\s+if=",
-]
-
-
-class SecurityError(Exception):
-    """Raised when a forbidden operation is detected."""
-    pass
-
-
-def safe_execution(func):
-    """
-    Safety decorator that blocks dangerous operations.
+class SysAdmin:
+    """Thin HTTP client for the sysAdmin sidecar."""
     
-    Scans the plan context for forbidden patterns before execution.
-    """
-    @functools.wraps(func)
-    def wrapper(self, plan_context: str, *args, **kwargs):
-        # Scan for forbidden patterns
+    def __init__(self):
+        self.sidecar_url = os.getenv("SYSADMIN_SIDECAR_URL", "http://localhost:9092")
+        self.timeout = 310.0
+    
+    async def process(self, event_id: str, task: str, event_md_path: str = "") -> str:
+        """
+        Process a task by sending it to the sysAdmin sidecar.
+        
+        Args:
+            event_id: Identifier for the event (for logging/tracking)
+            task: The task description to execute
+            event_md_path: Optional path to event document to read before executing
+        
+        Returns:
+            Output text from the sidecar execution
+        
+        Raises:
+            SecurityError: If forbidden patterns are detected in the prompt
+        """
+        prompt = f"Read the event document at {event_md_path} and execute this task:\n\n{task}" if event_md_path else task
+        
+        # Run security check inline
         for pattern in FORBIDDEN_PATTERNS:
-            if re.search(pattern, plan_context, re.IGNORECASE):
+            if re.search(pattern, prompt, re.IGNORECASE):
                 logger.error(f"SECURITY BLOCK: Forbidden pattern detected: {pattern}")
                 raise SecurityError(f"Blocked forbidden pattern: {pattern}")
         
-        return func(self, plan_context, *args, **kwargs)
-    
-    return wrapper
-
-
-# =============================================================================
-# SysAdmin Agent
-# =============================================================================
-
-class SysAdmin:
-    """
-    The SysAdmin agent - safe execution of infrastructure changes.
-    
-    Responsibilities:
-    - Read approved plans from Blackboard
-    - Validate plans against safety rules
-    - Execute plans via Gemini CLI
-    - Record execution results
-    
-    Uses validated Gemini CLI pattern:
-    - --non-interactive (not --headless, which is deprecated)
-    - --output-format json for structured output
-    - GOOGLE_GENAI_USE_VERTEXAI=true for Vertex AI backend
-    """
-    
-    def __init__(self, blackboard: "BlackboardState"):
-        self.blackboard = blackboard
-        self._running = False  # For execution loop
-        
-        # Configuration
-        self.git_repo_path = os.getenv("GIT_REPO_PATH", "/tmp/darwin-gitops")
-        self.dry_run = os.getenv("SYSADMIN_DRY_RUN", "false").lower() == "true"
-        self.auto_approve = os.getenv("SYSADMIN_AUTO_APPROVE", "false").lower() == "true"
-        
-        # Gemini sidecar configuration (runs as localhost sidecar container)
-        self.gemini_sidecar_url = os.getenv("GEMINI_SIDECAR_URL", "http://localhost:9090")
-        
-        # GitHub App auth (optional - for token refresh)
-        self._github_auth: Optional["GitHubAppAuth"] = None
-    
-    def _get_github_auth(self) -> Optional["GitHubAppAuth"]:
-        """
-        Get GitHub App auth handler if configured.
-        
-        Lazy initialization to avoid import errors when GitHub App is not configured.
-        """
-        if self._github_auth is None:
-            try:
-                from ..utils.github_app import GitHubAppAuth
-                self._github_auth = GitHubAppAuth()
-                logger.info("GitHub App authentication initialized")
-            except (ImportError, ValueError) as e:
-                logger.warning(f"GitHub App auth not available: {e}")
-                self._github_auth = None  # type: ignore
-        return self._github_auth
-    
-    def _refresh_git_credentials(self) -> bool:
-        """
-        Refresh git credentials using GitHub App token.
-        
-        Called before git push to ensure token is valid.
-        Returns True if credentials were refreshed, False otherwise.
-        """
-        auth = self._get_github_auth()
-        if auth is None:
-            logger.warning("GitHub App auth not configured, skipping credential refresh")
-            return False
+        url = f"{self.sidecar_url}/execute"
+        payload = {"prompt": prompt, "autoApprove": True, "cwd": "/data/gitops-sysadmin"}
         
         try:
-            auth.configure_git_credentials(self.git_repo_path, GITHUB_REPOSITORY)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to refresh git credentials: {e}")
-            return False
-    
-    # Fallback service to Helm values path mapping (used when GitOps not in telemetry)
-    SERVICE_HELM_PATHS = {
-        "darwin-store": "Store/helm/values.yaml",
-        "darwin-brain": "BlackBoard/helm/values.yaml",
-        "darwin-blackboard": "BlackBoard/helm/values.yaml",
-    }
-    
-    async def _get_gitops_info(self, service: str) -> tuple[str, str]:
-        """
-        Get GitOps repository and helm path for a service.
-        
-        First tries to look up from service registry (populated from telemetry).
-        Falls back to hardcoded mapping if not found.
-        
-        Returns (repo, helm_path) tuple.
-        """
-        # Try to get from service registry first
-        svc = await self.blackboard.get_service(service)
-        if svc and svc.gitops_repo and svc.gitops_helm_path:
-            logger.info(f"Using GitOps info from telemetry: {svc.gitops_repo}/{svc.gitops_helm_path}")
-            return svc.gitops_repo, svc.gitops_helm_path
-        
-        # Fallback to hardcoded mapping
-        logger.warning(f"No GitOps info in telemetry for {service}, using fallback mapping")
-        helm_path = self._get_helm_path_fallback(service)
-        
-        # Infer repo from helm path
-        repo_prefix = helm_path.split("/")[0]  # e.g., "Store" from "Store/helm/values.yaml"
-        repo = f"The-Darwin-Project/{repo_prefix}"
-        
-        return repo, helm_path
-    
-    def _get_helm_path_fallback(self, service: str) -> str:
-        """Fallback: Get the Helm values.yaml path for a service from hardcoded mapping."""
-        # Try exact match first
-        if service in self.SERVICE_HELM_PATHS:
-            return self.SERVICE_HELM_PATHS[service]
-        
-        # Try partial match (e.g., "store" matches "darwin-store")
-        for svc_name, path in self.SERVICE_HELM_PATHS.items():
-            if service.lower() in svc_name.lower() or svc_name.lower() in service.lower():
-                return path
-        
-        # Default: assume service name maps to directory
-        return f"{service}/helm/values.yaml"
-    
-    def _build_prompt(self, plan: "Plan", gitops_repo: str, helm_path: str) -> str:
-        """
-        Build the prompt for Gemini CLI.
-        
-        Formats the plan into clear, explicit instructions for the AI agent
-        to perform GitOps operations.
-        
-        Args:
-            plan: The plan to execute
-            gitops_repo: GitHub repository (e.g., "The-Darwin-Project/Store")
-            helm_path: Path to Helm values within repo (e.g., "helm/values.yaml")
-        """
-        
-        # Build the full repo URL
-        repo_url = f"https://github.com/{gitops_repo}.git"
-        
-        prompt_parts = [
-            "You are a DevOps engineer performing GitOps operations.",
-            "Execute the following infrastructure modification plan by editing files and committing to git.",
-            "",
-            f"=== PLAN DETAILS ===",
-            f"Action: {plan.action.value}",
-            f"Target Service: {plan.service}",
-            f"Repository: {repo_url}",
-            f"Helm Values File: {helm_path}",
-            f"Reason: {plan.reason}",
-            "",
-            "Parameters:",
-            json.dumps(plan.params, indent=2),
-            "",
-            "=== EXECUTION STEPS ===",
-            "",
-            "FIRST, setup the repository:",
-            f"- If {self.git_repo_path} does not exist or is empty, clone: git clone {repo_url} {self.git_repo_path}",
-            f"- If it exists, update: cd {self.git_repo_path} && git pull origin main",
-            "",
-            "THEN, perform the changes:",
-        ]
-        
-        # Add action-specific instructions with explicit commands
-        if plan.action.value == "scale":
-            replicas = plan.params.get("replicas", 2)
-            prompt_parts.extend([
-                f"1. Open the file: {self.git_repo_path}/{helm_path}",
-                f"2. Find the 'replicaCount' field and change its value to {replicas}",
-                f"3. Save the file",
-                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
-                f"5. Run: git commit -m \"scale({plan.service}): Update replicaCount to {replicas}\"",
-                f"6. Run: git push origin main",
-            ])
-        
-        elif plan.action.value == "rollback":
-            version = plan.params.get("version", "previous")
-            prompt_parts.extend([
-                f"1. Open the file: {self.git_repo_path}/{helm_path}",
-                f"2. Find the 'image.tag' field and change its value to \"{version}\"",
-                f"3. Save the file",
-                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
-                f"5. Run: git commit -m \"rollback({plan.service}): Revert to version {version}\"",
-                f"6. Run: git push origin main",
-            ])
-        
-        elif plan.action.value == "reconfig":
-            config = plan.params.get("config", {})
-            prompt_parts.extend([
-                f"1. Open the file: {self.git_repo_path}/{helm_path}",
-                f"2. Apply these configuration changes: {json.dumps(config)}",
-                f"3. Save the file",
-                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
-                f"5. Run: git commit -m \"reconfig({plan.service}): Update configuration\"",
-                f"6. Run: git push origin main",
-            ])
-        
-        elif plan.action.value == "failover":
-            target = plan.params.get("target", "standby")
-            prompt_parts.extend([
-                f"1. Open the file: {self.git_repo_path}/{helm_path}",
-                f"2. Update the service routing to point to '{target}'",
-                f"3. Save the file",
-                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
-                f"5. Run: git commit -m \"failover({plan.service}): Switch to {target}\"",
-                f"6. Run: git push origin main",
-            ])
-        
-        elif plan.action.value == "optimize":
-            optimization = plan.params.get("optimization", "resources")
-            prompt_parts.extend([
-                f"1. Open the file: {self.git_repo_path}/{helm_path}",
-                f"2. Apply optimization: {optimization}",
-                f"3. Save the file",
-                f"4. Run: cd {self.git_repo_path} && git add {helm_path}",
-                f"5. Run: git commit -m \"optimize({plan.service}): Apply {optimization}\"",
-                f"6. Run: git push origin main",
-            ])
-        
-        prompt_parts.extend([
-            "",
-            "=== GIT HYGIENE ===",
-            "- Check git log and diff before and after your changes",
-            "- If push fails, pull --rebase and retry",
-            "",
-            f"Working directory: {self.git_repo_path}",
-            "",
-            "Execute these steps now.",
-        ])
-        
-        return "\n".join(prompt_parts)
-    
-    @safe_execution
-    async def _execute_with_sidecar(self, plan_context: str) -> dict:
-        """
-        Execute the plan via Gemini CLI sidecar.
-        
-        Calls the gemini sidecar HTTP endpoint which:
-        1. Generates fresh GitHub App token and configures git credentials
-        2. Runs gemini CLI with the prompt (Gemini handles clone/edit/commit/push)
-        
-        Args:
-            plan_context: The prompt for gemini CLI (includes repo URL and instructions)
-        """
-        logger.info(f"Executing via Gemini sidecar at {self.gemini_sidecar_url}...")
-        
-        if self.dry_run:
-            logger.info("DRY RUN: Would call Gemini sidecar")
-            return {
-                "status": "dry_run",
-                "message": "Dry run - no actual execution",
-            }
-        
-        try:
-            async with httpx.AsyncClient(timeout=310.0) as client:  # Slightly longer than sidecar timeout
-                response = await client.post(
-                    f"{self.gemini_sidecar_url}/execute",
-                    json={
-                        "prompt": plan_context,
-                        "autoApprove": self.auto_approve,
-                        "cwd": self.git_repo_path,
-                    },
-                )
-                
-                result = response.json()
-                
-                if response.status_code != 200:
-                    logger.error(f"Sidecar returned error: {result}")
-                    return {
-                        "status": "error",
-                        "message": result.get("error", "Unknown sidecar error"),
-                    }
-                
-                if result.get("status") == "success":
-                    logger.info("Gemini sidecar execution completed successfully")
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.info(f"Sending execution request to {url} for event {event_id}")
+                response = await client.post(url, json=payload)
+                if response.status_code == 200:
+                    result = response.json()
+                    output = result.get("output", "")
+                    if isinstance(output, dict):
+                        output = json.dumps(output)
+                    elif not isinstance(output, str):
+                        output = str(output)
+                    logger.info(f"Execution completed successfully for event {event_id}")
+                    return output
                 else:
-                    logger.warning(f"Sidecar returned status: {result.get('status')}")
-                
-                return result
-        
+                    error_msg = f"Sidecar returned status {response.status_code}: {response.text}"
+                    logger.error(f"Execution failed for event {event_id}: {error_msg}")
+                    return f"Error: {error_msg}"
         except httpx.TimeoutException:
-            logger.error("Gemini sidecar execution timed out")
-            return {
-                "status": "timeout",
-                "message": "Execution timed out after 5 minutes",
-            }
-        
+            error_msg = f"Execution timed out after {self.timeout} seconds"
+            logger.error(f"Timeout for event {event_id}: {error_msg}")
+            return f"Error: {error_msg}"
         except httpx.ConnectError:
-            logger.error(f"Cannot connect to Gemini sidecar at {self.gemini_sidecar_url}")
-            return {
-                "status": "error",
-                "message": f"Gemini sidecar not available at {self.gemini_sidecar_url}. Is the sidecar container running?",
-            }
-        
-        except Exception as e:
-            logger.error(f"Sidecar execution error: {e}")
-            return {
-                "status": "error",
-                "message": str(e),
-            }
-    
-    async def execute_plan(self, plan: "Plan") -> str:
-        """
-        Execute an approved plan.
-        
-        This is the main entry point called by the plans route.
-        
-        Returns a result string describing the execution outcome.
-        """
-        logger.info(f"Executing plan: {plan.id} - {plan.action.value} {plan.service}")
-        
-        # Look up GitOps coordinates from service registry (populated from telemetry)
-        gitops_repo, helm_path = await self._get_gitops_info(plan.service)
-        logger.info(f"GitOps target: {gitops_repo}/{helm_path}")
-        
-        # Build the prompt with GitOps info (includes repo URL for Gemini to clone)
-        prompt = self._build_prompt(plan, gitops_repo, helm_path)
-        
-        # Execute via sidecar (with safety check)
-        # Prompt includes repo URL - Gemini handles clone/edit/commit/push
-        try:
-            result = await self._execute_with_sidecar(prompt)
-            
-            if result["status"] == "success":
-                return f"Plan executed successfully. Output: {json.dumps(result.get('output', {}))}"
-            elif result["status"] == "dry_run":
-                return f"Dry run completed. Command: {result.get('command', [])}"
-            else:
-                return f"Execution failed: {result.get('message', result.get('stderr', 'Unknown error'))}"
-        
-        except SecurityError as e:
-            logger.error(f"Security block during execution: {e}")
+            error_msg = f"Cannot connect to sysAdmin sidecar at {self.sidecar_url}"
+            logger.error(f"Connection error for event {event_id}: {error_msg}")
+            return f"Error: {error_msg}"
+        except SecurityError:
             raise
-        
         except Exception as e:
-            logger.error(f"Execution error: {e}")
-            return f"Execution failed with error: {e}"
+            error_msg = f"Unexpected error: {str(e)}"
+            logger.error(f"Execution error for event {event_id}: {error_msg}")
+            return f"Error: {error_msg}"
     
-    # =========================================================================
-    # Execution Loop (Blackboard-Centric Communication)
-    # =========================================================================
-    
-    async def start_execution_loop(self) -> None:
-        """
-        Start background loop that polls Blackboard for approved plans.
-        
-        Called from main.py on startup to enable Blackboard-centric communication.
-        """
-        from ..models import PlanStatus, EventType
-        
-        self._running = True
-        logger.info("SysAdmin execution loop started")
-        
-        while self._running:
-            try:
-                plan_id = await self.blackboard.dequeue_plan_for_execution()
-                if plan_id:
-                    plan = await self.blackboard.get_plan(plan_id)
-                    if plan and plan.status == PlanStatus.APPROVED:
-                        await self._execute_plan_with_status(plan)
-            except Exception as e:
-                logger.error(f"SysAdmin execution loop error: {e}")
-                await asyncio.sleep(5)
-    
-    def stop_execution_loop(self) -> None:
-        """Stop the execution loop."""
-        self._running = False
-        logger.info("SysAdmin execution loop stopping")
-    
-    async def _execute_plan_with_status(self, plan: "Plan") -> None:
-        """Execute plan and update status in Blackboard."""
-        from ..models import PlanStatus, EventType
-        
+    async def health(self) -> bool:
+        """Check the health of the sysAdmin sidecar."""
+        url = f"{self.sidecar_url}/health"
         try:
-            # Mark as executing
-            await self.blackboard.update_plan_status(plan.id, PlanStatus.EXECUTING)
-            
-            # Record SysAdmin executing event
-            await self.blackboard.record_event(
-                EventType.SYSADMIN_EXECUTING,
-                {"plan_id": plan.id, "service": plan.service, "action": plan.action.value},
-                narrative=f"Executing approved plan: {plan.action.value} on {plan.service}...",
-            )
-            logger.info(f"SysAdmin executing plan {plan.id}")
-            
-            # Execute via SysAdmin
-            result = await self.execute_plan(plan)
-            
-            # Check if execution actually succeeded
-            execution_succeeded = result and "successfully" in result.lower() and "failed" not in result.lower()
-            
-            if execution_succeeded:
-                # Mark as completed
-                await self.blackboard.update_plan_status(plan.id, PlanStatus.COMPLETED, result=result)
-                
-                await self.blackboard.record_event(
-                    EventType.PLAN_EXECUTED,
-                    {
-                        "plan_id": plan.id,
-                        "service": plan.service,
-                        "action": plan.action.value,
-                        "status": "success",
-                        "result": result[:500] if result else "",
-                    },
-                    narrative=f"Successfully executed {plan.action.value} on {plan.service}.",
-                )
-                logger.info(f"Plan {plan.id} executed successfully")
-            else:
-                # Mark as failed
-                await self.blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=result)
-                
-                await self.blackboard.record_event(
-                    EventType.PLAN_FAILED,
-                    {
-                        "plan_id": plan.id,
-                        "service": plan.service,
-                        "action": plan.action.value,
-                        "status": "failed",
-                        "error": result[:500] if result else "Unknown error",
-                    },
-                    narrative=f"Execution failed for {plan.action.value} on {plan.service}: {result[:200] if result else 'Unknown error'}",
-                )
-                logger.error(f"Plan {plan.id} execution failed: {result}")
-                
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(url)
+                is_healthy = response.status_code == 200
+                if not is_healthy:
+                    logger.warning(f"Health check failed: status {response.status_code}")
+                return is_healthy
         except Exception as e:
-            # Mark as failed
-            await self.blackboard.update_plan_status(plan.id, PlanStatus.FAILED, result=str(e))
-            
-            await self.blackboard.record_event(
-                EventType.PLAN_FAILED,
-                {
-                    "plan_id": plan.id,
-                    "service": plan.service,
-                    "action": plan.action.value,
-                    "status": "failed",
-                    "error": str(e)[:500],
-                },
-                narrative=f"Failed to execute plan for {plan.service}: {str(e)[:100]}",
-            )
-            logger.error(f"Plan {plan.id} execution error: {e}")
+            logger.error(f"Health check error: {e}")
+            return False

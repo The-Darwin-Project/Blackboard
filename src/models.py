@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -274,6 +275,60 @@ class ConversationMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     timestamp: float = Field(default_factory=time.time)
+
+
+# =============================================================================
+# Event Queue (Conversation Queue System)
+# =============================================================================
+
+class EventStatus(str, Enum):
+    """Event lifecycle states."""
+    NEW = "new"
+    ACTIVE = "active"
+    WAITING_APPROVAL = "waiting_approval"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class EventInput(BaseModel):
+    """Input data that triggered an event."""
+    reason: str = Field(..., description="What triggered this event")
+    evidence: str = Field(..., description="Logs, metrics, event details")
+    timeDate: str = Field(
+        default_factory=lambda: datetime.now().isoformat(),
+        description="ISO 8601 timestamp",
+    )
+
+
+class ConversationTurn(BaseModel):
+    """A single turn in an event conversation."""
+    turn: int = Field(..., description="Turn number in conversation")
+    actor: str = Field(..., description="brain, architect, sysadmin, developer, aligner, user")
+    action: str = Field(
+        ...,
+        description="triage, investigate, review, execute, plan, question, clarify, approve, confirm, close, request_approval, route, decide, verify",
+    )
+    thoughts: Optional[str] = None
+    result: Optional[str] = None
+    plan: Optional[str] = Field(None, description="Markdown format plan")
+    selectedAgents: Optional[list[str]] = None
+    taskForAgent: Optional[dict[str, Any]] = None
+    requestingAgent: Optional[str] = None
+    executed: Optional[bool] = None
+    evidence: Optional[str] = None
+    waitingFor: Optional[str] = None
+    pendingApproval: Optional[bool] = None
+    timestamp: float = Field(default_factory=time.time)
+
+
+class EventDocument(BaseModel):
+    """A complete event document with conversation history."""
+    id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
+    source: Literal["aligner", "chat"]
+    status: EventStatus = EventStatus.NEW
+    service: str = Field(..., description="Target service name")
+    event: EventInput
+    conversation: list[ConversationTurn] = Field(default_factory=list)
 
 
 # =============================================================================

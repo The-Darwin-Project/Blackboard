@@ -4,11 +4,11 @@
  */
 import type {
   ArchitectureEvent,
-  ChatRequest,
-  ChatResponse,
+  ChatEventRequest,
+  ChatEventResponse,
   ChartData,
+  EventDocument,
   GraphResponse,
-  Plan,
   Service,
   TopologyResponse,
 } from './types';
@@ -118,29 +118,26 @@ export async function getCurrentMetrics(service: string): Promise<Record<string,
 }
 
 // =============================================================================
-// Plans API
+// Queue API (event documents)
 // =============================================================================
 
-export async function getPlans(status?: string): Promise<Plan[]> {
-  const params = status ? `?status=${status}` : '';
-  return fetchApi<Plan[]>(`/plans/${params}`);
+export async function getActiveEvents(): Promise<any[]> {
+  return fetchApi<any[]>('/queue/active');
 }
 
-export async function getPlan(id: string): Promise<Plan> {
-  return fetchApi<Plan>(`/plans/${encodeURIComponent(id)}`);
+export async function getEventDocument(eventId: string): Promise<EventDocument> {
+  return fetchApi<EventDocument>(`/queue/${encodeURIComponent(eventId)}`);
 }
 
-export async function approvePlan(id: string): Promise<Plan> {
-  return fetchApi<Plan>(`/plans/${encodeURIComponent(id)}/approve`, {
+export async function approveEvent(eventId: string): Promise<any> {
+  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/approve`, {
     method: 'POST',
   });
 }
 
-export async function rejectPlan(id: string, reason = ''): Promise<Plan> {
-  const params = reason ? `?reason=${encodeURIComponent(reason)}` : '';
-  return fetchApi<Plan>(`/plans/${encodeURIComponent(id)}/reject${params}`, {
-    method: 'POST',
-  });
+export async function getClosedEvents(limit?: number): Promise<any[]> {
+  const params = limit ? `?limit=${limit}` : '';
+  return fetchApi<any[]>(`/queue/closed/list${params}`);
 }
 
 // =============================================================================
@@ -163,18 +160,15 @@ export async function getEvents(
 }
 
 // =============================================================================
-// Chat API
+// Chat API (event-based)
 // =============================================================================
 
-export async function sendChatMessage(
+export async function createChatEvent(
   message: string,
-  conversationId?: string | null
-): Promise<ChatResponse> {
-  const request: ChatRequest = {
-    message,
-    conversation_id: conversationId ?? undefined,
-  };
-  return fetchApi<ChatResponse>('/chat/', {
+  service?: string
+): Promise<ChatEventResponse> {
+  const request: ChatEventRequest = { message, service };
+  return fetchApi<ChatEventResponse>('/chat/', {
     method: 'POST',
     body: JSON.stringify(request),
   });

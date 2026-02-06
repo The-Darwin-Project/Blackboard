@@ -24,12 +24,17 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
 from ..models import (
     ConversationMessage,
+    ConversationTurn,
     ArchitectureEvent,
     ChartData,
+    EventDocument,
+    EventInput,
+    EventStatus,
     EventType,
     GhostNode,
     GraphEdge,
@@ -974,6 +979,8 @@ class BlackboardState:
     
     async def enqueue_architect_task(self, task: dict) -> str:
         """
+        DEPRECATED: Use create_event() instead.
+        
         Enqueue task for Architect to process.
         
         Used by Aligner to trigger Architect analysis via Blackboard.
@@ -989,6 +996,8 @@ class BlackboardState:
     
     async def dequeue_architect_task(self) -> Optional[dict]:
         """
+        DEPRECATED: Use dequeue_event() instead.
+        
         Dequeue next task for Architect (blocking pop with timeout).
         
         Returns task dict or None if queue is empty after timeout.
@@ -1003,6 +1012,8 @@ class BlackboardState:
     
     async def enqueue_plan_for_execution(self, plan_id: str) -> None:
         """
+        DEPRECATED: Use event conversation turns instead.
+        
         Enqueue approved plan for SysAdmin execution.
         
         Called after plan is approved (either manually or auto-approved).
@@ -1012,6 +1023,8 @@ class BlackboardState:
     
     async def dequeue_plan_for_execution(self) -> Optional[str]:
         """
+        DEPRECATED: Use event conversation turns instead.
+        
         Dequeue next plan_id for SysAdmin (blocking pop with timeout).
         
         Returns plan_id or None if queue is empty after timeout.
@@ -1223,3 +1236,134 @@ class BlackboardState:
         logger.debug(
             f"Appended {message.role} message to conversation {conversation_id}"
         )
+
+    # =========================================================================
+    # Event Queue Layer (Conversation Queue System)
+    # =========================================================================
+    #
+    # Redis Schema:
+    #     darwin:queue                        LIST    [event IDs awaiting Brain triage]
+    #     darwin:event:{id}                   STRING  {JSON EventDocument}
+    #     darwin:event:active                 SET     [event IDs currently processing]
+    #     darwin:event:closed                 ZSET    {close_timestamp: event_id}
+    #     darwin:agent:notify:{agent_name}    LIST    [event IDs for agent attention]
+    
+    EVENT_QUEUE = "darwin:queue"
+    EVENT_PREFIX = "darwin:event:"
+    EVENT_ACTIVE = "darwin:event:active"
+    EVENT_CLOSED = "darwin:event:closed"
+    AGENT_NOTIFY_PREFIX = "darwin:agent:notify:"
+
+    async def create_event(
+        self,
+        source: str,
+        service: str,
+        reason: str,
+        evidence: str,
+    ) -> str:
+        """Create a new event and add to the queue for Brain triage."""
+        from datetime import datetime
+        event = EventDocument(
+            source=source,
+            service=service,
+            event=EventInput(
+                reason=reason,
+                evidence=evidence,
+                timeDate=datetime.now().isoformat(),
+            ),
+        )
+        # Store event document
+        await self.redis.set(
+            f"{self.EVENT_PREFIX}{event.id}",
+            json.dumps(event.model_dump())
+        )
+        # Add to active set
+        await self.redis.sadd(self.EVENT_ACTIVE, event.id)
+        # Push to queue for Brain
+        await self.redis.lpush(self.EVENT_QUEUE, event.id)
+        logger.info(f"Created event: {event.id} ({source}) for {service}")
+        return event.id
+
+    async def get_event(self, event_id: str) -> Optional[EventDocument]:
+        """Get an event document by ID."""
+        data = await self.redis.get(f"{self.EVENT_PREFIX}{event_id}")
+        if not data:
+            return None
+        return EventDocument(**json.loads(data))
+
+    async def append_turn(
+        self,
+        event_id: str,
+        turn: ConversationTurn,
+    ) -> None:
+        """Append a conversation turn to an event document."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        # Use WATCH for optimistic locking
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for append_turn")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    event.conversation.append(turn)
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except Exception:
+                    continue
+        logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
+
+    async def notify_agent(self, agent_name: str, event_id: str) -> None:
+        """Notify an agent that an event needs their attention."""
+        await self.redis.lpush(
+            f"{self.AGENT_NOTIFY_PREFIX}{agent_name}", event_id
+        )
+        logger.debug(f"Notified agent {agent_name} about event {event_id}")
+
+    async def dequeue_agent_notification(self, agent_name: str) -> Optional[str]:
+        """Dequeue next event_id for an agent (blocking pop with timeout)."""
+        result = await self.redis.brpop(
+            f"{self.AGENT_NOTIFY_PREFIX}{agent_name}", timeout=5
+        )
+        if result:
+            _, event_id = result
+            return event_id
+        return None
+
+    async def dequeue_event(self) -> Optional[str]:
+        """Dequeue next event_id from the Brain queue (blocking pop with timeout)."""
+        result = await self.redis.brpop(self.EVENT_QUEUE, timeout=5)
+        if result:
+            _, event_id = result
+            logger.debug(f"Dequeued event: {event_id}")
+            return event_id
+        return None
+
+    async def get_active_events(self) -> list[str]:
+        """Get all active event IDs."""
+        return list(await self.redis.smembers(self.EVENT_ACTIVE))
+
+    async def close_event(self, event_id: str, summary: str) -> None:
+        """Close an event with summary. Move from active to closed."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        data = await self.redis.get(key)
+        if data:
+            event = EventDocument(**json.loads(data))
+            event.status = EventStatus.CLOSED
+            # Append closing turn
+            close_turn = ConversationTurn(
+                turn=len(event.conversation) + 1,
+                actor="brain",
+                action="close",
+                thoughts=summary,
+            )
+            event.conversation.append(close_turn)
+            await self.redis.set(key, json.dumps(event.model_dump()))
+        # Move from active to closed
+        await self.redis.srem(self.EVENT_ACTIVE, event_id)
+        await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
+        logger.info(f"Closed event: {event_id}")

@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/components/Dashboard.tsx
 /**
  * Main dashboard page with 2-column layout.
- * Left: AgentFeed (Sidebar) - Resizable
+ * Left: ConversationFeed (Sidebar) - Resizable
  * Right: CytoscapeGraph (Top) + MetricChart (Bottom)
  */
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -9,7 +9,7 @@ import CytoscapeGraph from './CytoscapeGraph';
 import GraphContextMenu from './GraphContextMenu';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
-import AgentFeed from './AgentFeed';
+import ConversationFeed from './ConversationFeed';
 
 interface ContextMenuState {
   serviceName: string;
@@ -23,7 +23,6 @@ const DEFAULT_SIDEBAR_WIDTH = 400;
 
 function Dashboard() {
   const [selectedService, setSelectedService] = useState<string | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
@@ -32,13 +31,11 @@ function Dashboard() {
   // Handle node click - open inspector
   const handleNodeClick = useCallback((serviceName: string) => {
     setSelectedService(serviceName);
-    setSelectedPlan(null);
   }, []);
 
   // Handle plan (ghost node) click - open inspector in plan mode
-  const handlePlanClick = useCallback((planId: string) => {
-    setSelectedPlan(planId);
-    setSelectedService(null);
+  const handlePlanClick = useCallback((_planId: string) => {
+    // Plan ghost nodes are no longer used; no-op for now
   }, []);
 
   // Close context menu
@@ -91,7 +88,7 @@ function Dashboard() {
           <p className="text-xs text-text-muted">Thought stream & plan management</p>
         </div>
         <div className="flex-1 overflow-hidden flex flex-col min-h-0">
-          <AgentFeed />
+          <ConversationFeed />
         </div>
       </div>
 
@@ -138,10 +135,9 @@ function Dashboard() {
       {/* Node Inspector Drawer */}
       <NodeInspector
         serviceName={selectedService}
-        planId={selectedPlan}
+        planId={null}
         onClose={() => {
           setSelectedService(null);
-          setSelectedPlan(null);
         }}
       />
 

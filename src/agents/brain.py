@@ -1,0 +1,611 @@
+# BlackBoard/src/agents/brain.py
+"""
+The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
+
+This module contains ZERO routing logic, ZERO hardcoded agent selection rules,
+ZERO if/else decision trees. ALL complex reasoning (triage, agent selection,
+interpreting responses, deciding next steps) is delegated to the Gemini 3 Pro
+LLM via function calling.
+
+The Python code only:
+  (a) polls Redis for events
+  (b) builds prompts from event data
+  (c) executes whatever function the LLM chooses
+  (d) writes results back to Redis + event MD to sidecar volumes
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+from ..models import ConversationTurn, EventDocument, EventStatus
+
+if TYPE_CHECKING:
+    from ..state.blackboard import BlackboardState
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Brain System Prompt - THIS IS THE DECISION ENGINE
+# =============================================================================
+
+BRAIN_SYSTEM_PROMPT = """You are the Brain orchestrator of Project Darwin, an autonomous cloud operations system.
+
+You coordinate three AI agents via a shared conversation queue:
+- **Architect**: Reviews codebases, analyzes topology, produces Markdown plans. NEVER executes. Use for: planning, code review, design decisions.
+- **sysAdmin**: Executes GitOps changes (Helm values), investigates K8s issues via kubectl. Use for: scaling, investigation, infrastructure changes.
+- **Developer**: Implements source code changes based on Architect plans. Use for: adding features, fixing bugs, modifying application code.
+
+## Your Job
+1. Read the event (anomaly or user request) and its conversation history.
+2. Decide the NEXT action by calling ONE of your available functions.
+3. You are called repeatedly as the conversation progresses. Each call, you see the full history and decide the next step.
+
+## Decision Guidelines
+- For infrastructure anomalies (high CPU, pod issues): start with sysAdmin to investigate, then decide action.
+- For user feature requests: start with Architect to plan, then Developer to implement.
+- For scaling/config changes: sysAdmin can handle directly after a plan.
+- Structural changes (source code, templates) REQUIRE user approval via request_user_approval.
+- Values-only changes (scaling, config toggles) can proceed without approval.
+- After execution, use re_trigger_aligner to verify the change took effect.
+- When the issue is resolved and verified, close the event with a summary.
+- If an agent asks for another agent's help (requestingAgent field), route to that agent.
+
+## Safety
+- Never approve plans that delete namespaces, volumes, or databases without user approval.
+- If an agent responds with the same answer 3 times, close the event as stuck.
+
+## GitOps Context
+Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
+The Store app uses helm/values.yaml in The-Darwin-Project/Store repo.
+"""
+
+# Circuit breaker limits
+MAX_TURNS_PER_EVENT = 20
+MAX_EVENT_DURATION_SECONDS = 1800  # 30 minutes
+
+# Volume mount paths (must match Helm deployment.yaml)
+VOLUME_PATHS = {
+    "architect": "/data/gitops-architect",
+    "sysadmin": "/data/gitops-sysadmin",
+    "developer": "/data/gitops-developer",
+}
+
+
+def _build_brain_tools():
+    """Build Vertex AI function declarations for Brain's available actions."""
+    try:
+        from vertexai.generative_models import FunctionDeclaration, Tool
+
+        select_agent = FunctionDeclaration(
+            name="select_agent",
+            description="Route work to an agent. Use this to assign a task to Architect, sysAdmin, or Developer.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "enum": ["architect", "sysadmin", "developer"],
+                        "description": "Which agent to route to",
+                    },
+                    "task_instruction": {
+                        "type": "string",
+                        "description": "What the agent should do (be specific and actionable)",
+                    },
+                },
+                "required": ["agent_name", "task_instruction"],
+            },
+        )
+
+        close_event = FunctionDeclaration(
+            name="close_event",
+            description="Close the event as resolved. Use when the issue is fixed and verified, or the request is complete.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Summary of what was done and the outcome",
+                    },
+                },
+                "required": ["summary"],
+            },
+        )
+
+        request_user_approval = FunctionDeclaration(
+            name="request_user_approval",
+            description="Pause and ask the user to approve a plan. Use for structural changes (source code, templates).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "plan_summary": {
+                        "type": "string",
+                        "description": "Summary of the plan for the user to review",
+                    },
+                },
+                "required": ["plan_summary"],
+            },
+        )
+
+        re_trigger_aligner = FunctionDeclaration(
+            name="re_trigger_aligner",
+            description="Ask the Aligner to verify that a change took effect (e.g., replicas increased, CPU normalized).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "Service to check",
+                    },
+                    "check_condition": {
+                        "type": "string",
+                        "description": "What condition to verify (e.g., 'replicas == 2', 'CPU < 80%')",
+                    },
+                },
+                "required": ["service", "check_condition"],
+            },
+        )
+
+        ask_agent_for_state = FunctionDeclaration(
+            name="ask_agent_for_state",
+            description="Ask an agent for information (e.g., ask sysAdmin for kubectl logs, pod status).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "enum": ["architect", "sysadmin", "developer"],
+                        "description": "Which agent to ask",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "What information you need",
+                    },
+                },
+                "required": ["agent_name", "question"],
+            },
+        )
+
+        wait_for_verification = FunctionDeclaration(
+            name="wait_for_verification",
+            description="Mark that you are waiting for the Aligner to confirm a state change.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "condition": {
+                        "type": "string",
+                        "description": "What you are waiting for",
+                    },
+                },
+                "required": ["condition"],
+            },
+        )
+
+        return Tool(function_declarations=[
+            select_agent,
+            close_event,
+            request_user_approval,
+            re_trigger_aligner,
+            ask_agent_for_state,
+            wait_for_verification,
+        ])
+
+    except ImportError:
+        logger.warning("vertexai not available - Brain running in probe mode")
+        return None
+
+
+class Brain:
+    """
+    Brain orchestrator - thin shell around LLM function calling.
+    
+    ALL decision logic lives in BRAIN_SYSTEM_PROMPT + function declarations.
+    Python code only polls, serializes, calls LLM, and executes the result.
+    """
+
+    def __init__(self, blackboard: BlackboardState):
+        self.blackboard = blackboard
+        self._running = False
+        self._model = None
+        self._llm_available = False
+        # LLM config from environment
+        self.project = os.getenv("GCP_PROJECT", "")
+        self.location = os.getenv("GCP_LOCATION", "global")
+        self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
+        logger.info(f"Brain initialized (project={self.project}, model={self.model_name})")
+
+    async def _get_model(self):
+        """Lazy-load Vertex AI Pro model with Brain tools."""
+        if self._model is None:
+            try:
+                import vertexai
+                from vertexai.generative_models import GenerativeModel, GenerationConfig
+
+                tools = _build_brain_tools()
+                if not tools:
+                    logger.warning("Brain tools not available - staying in probe mode")
+                    return None
+
+                vertexai.init(project=self.project, location=self.location)
+
+                self._model = GenerativeModel(
+                    self.model_name,
+                    tools=[tools],
+                    generation_config=GenerationConfig(
+                        temperature=0.8,
+                        top_p=0.95,
+                    ),
+                    system_instruction=BRAIN_SYSTEM_PROMPT,
+                )
+                self._llm_available = True
+                logger.info(f"Brain LLM initialized: {self.model_name}")
+
+            except Exception as e:
+                logger.warning(f"Vertex AI not available: {e}. Brain stays in probe mode.")
+                self._model = None
+
+        return self._model
+
+    # =========================================================================
+    # Event Processing
+    # =========================================================================
+
+    async def process_event(self, event_id: str) -> None:
+        """
+        Process an event. Reads from Redis, decides next action, writes back.
+        
+        Step 6a: Hardcoded probe path (no LLM).
+        Step 6b: Will replace with LLM function calling.
+        """
+        event = await self.blackboard.get_event(event_id)
+        if not event:
+            logger.warning(f"Event {event_id} not found")
+            return
+
+        # Circuit breaker: max turns
+        if len(event.conversation) >= MAX_TURNS_PER_EVENT:
+            logger.warning(f"Event {event_id} hit max turns ({MAX_TURNS_PER_EVENT})")
+            await self.blackboard.close_event(
+                event_id,
+                f"TIMEOUT: Event exceeded {MAX_TURNS_PER_EVENT} turns. Force closed.",
+            )
+            return
+
+        # Circuit breaker: max duration
+        if event.conversation:
+            first_turn_time = event.conversation[0].timestamp
+            if time.time() - first_turn_time > MAX_EVENT_DURATION_SECONDS:
+                logger.warning(f"Event {event_id} exceeded max duration")
+                await self.blackboard.close_event(
+                    event_id,
+                    f"TIMEOUT: Event exceeded {MAX_EVENT_DURATION_SECONDS}s. Force closed.",
+                )
+                return
+
+        # Try LLM processing, fall back to probe mode
+        model = await self._get_model()
+        if model:
+            await self._process_with_llm(event_id, event, model)
+        else:
+            # PROBE MODE fallback (no LLM available)
+            turn = ConversationTurn(
+                turn=len(event.conversation) + 1,
+                actor="brain",
+                action="triage",
+                thoughts=f"PROBE: Brain received event {event_id} for service {event.service}. "
+                         f"Source: {event.source}. Reason: {event.event.reason}. "
+                         f"Conversation has {len(event.conversation)} turns.",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            logger.info(f"Brain processed event {event_id} (probe mode)")
+
+    async def _process_with_llm(
+        self,
+        event_id: str,
+        event: EventDocument,
+        model,
+    ) -> None:
+        """Process event using Vertex AI LLM function calling."""
+        # Build prompt from event context
+        prompt = self._build_event_prompt(event)
+
+        try:
+            response = await asyncio.to_thread(
+                model.generate_content, prompt
+            )
+
+            # Check for function call
+            if (response.candidates
+                    and response.candidates[0].content.parts):
+                part = response.candidates[0].content.parts[0]
+
+                if hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    func_name = fc.name
+                    func_args = dict(fc.args) if fc.args else {}
+                    logger.info(f"Brain LLM decision for {event_id}: {func_name}({func_args})")
+                    await self._execute_function_call(event_id, func_name, func_args)
+                    return
+
+                # Text-only response (no function call) -- treat as brain thoughts
+                if hasattr(part, "text") and part.text:
+                    turn = ConversationTurn(
+                        turn=len(event.conversation) + 1,
+                        actor="brain",
+                        action="think",
+                        thoughts=part.text,
+                    )
+                    await self.blackboard.append_turn(event_id, turn)
+                    logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
+                    return
+
+            logger.warning(f"Brain LLM returned empty response for {event_id}")
+
+        except Exception as e:
+            logger.error(f"Brain LLM call failed for {event_id}: {e}", exc_info=True)
+            # Append error turn so conversation isn't stuck
+            turn = ConversationTurn(
+                turn=len(event.conversation) + 1,
+                actor="brain",
+                action="error",
+                thoughts=f"LLM call failed: {str(e)[:200]}",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+
+    def _build_event_prompt(self, event: EventDocument) -> str:
+        """Serialize event document as prompt text for the LLM."""
+        lines = [
+            f"Event ID: {event.id}",
+            f"Source: {event.source}",
+            f"Service: {event.service}",
+            f"Status: {event.status.value}",
+            f"Reason: {event.event.reason}",
+            f"Evidence: {event.event.evidence}",
+            f"Time: {event.event.timeDate}",
+            "",
+            "Conversation so far:",
+        ]
+
+        if not event.conversation:
+            lines.append("(No turns yet -- this is a new event. Triage it.)")
+        else:
+            for turn in event.conversation:
+                lines.append(f"  Turn {turn.turn} [{turn.actor}.{turn.action}]:")
+                if turn.thoughts:
+                    lines.append(f"    Thoughts: {turn.thoughts}")
+                if turn.result:
+                    lines.append(f"    Result: {turn.result}")
+                if turn.plan:
+                    lines.append(f"    Plan: {turn.plan[:500]}")
+                if turn.evidence:
+                    lines.append(f"    Evidence: {turn.evidence}")
+                if turn.requestingAgent:
+                    lines.append(f"    Requesting agent: {turn.requestingAgent}")
+                if turn.pendingApproval:
+                    lines.append(f"    PENDING USER APPROVAL")
+                if turn.waitingFor:
+                    lines.append(f"    Waiting for: {turn.waitingFor}")
+
+        lines.append("")
+        lines.append("What is the next action? Call one of your functions.")
+
+        return "\n".join(lines)
+
+    # =========================================================================
+    # Function Call Dispatcher
+    # =========================================================================
+
+    async def _execute_function_call(
+        self,
+        event_id: str,
+        function_name: str,
+        args: dict,
+    ) -> None:
+        """
+        Execute an LLM function call. Maps function names to real operations.
+        
+        Available functions (defined in Step 6b):
+          - select_agent(agent_name, task_instruction)
+          - close_event(summary)
+          - request_user_approval(plan_summary)
+          - re_trigger_aligner(service, check_condition)
+          - ask_agent_for_state(agent_name, question)
+          - wait_for_verification(condition)
+        """
+        if function_name == "select_agent":
+            agent_name = args.get("agent_name", "")
+            task = args.get("task_instruction", "")
+            # Write event MD to agent volume
+            await self.write_event_to_volume(event_id, agent_name)
+            # Notify agent
+            await self.blackboard.notify_agent(agent_name, event_id)
+            # Append brain turn
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="route",
+                thoughts=f"Routing to {agent_name}: {task}",
+                selectedAgents=[agent_name],
+                taskForAgent={"agent": agent_name, "instruction": task},
+            )
+            await self.blackboard.append_turn(event_id, turn)
+
+        elif function_name == "close_event":
+            summary = args.get("summary", "Event closed.")
+            await self.blackboard.close_event(event_id, summary)
+
+        elif function_name == "request_user_approval":
+            plan_summary = args.get("plan_summary", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="request_approval",
+                thoughts=plan_summary,
+                pendingApproval=True,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            # Update event status
+            event = await self.blackboard.get_event(event_id)
+            if event:
+                event.status = EventStatus.WAITING_APPROVAL
+                await self.blackboard.redis.set(
+                    f"{self.blackboard.EVENT_PREFIX}{event_id}",
+                    json.dumps(event.model_dump()),
+                )
+
+        elif function_name == "re_trigger_aligner":
+            service = args.get("service", "")
+            condition = args.get("check_condition", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="verify",
+                thoughts=f"Re-triggering Aligner to check: {condition}",
+                waitingFor="aligner",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+
+        elif function_name == "ask_agent_for_state":
+            agent_name = args.get("agent_name", "sysadmin")
+            question = args.get("question", "")
+            await self.write_event_to_volume(event_id, agent_name)
+            await self.blackboard.notify_agent(agent_name, event_id)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="route",
+                thoughts=f"Asking {agent_name}: {question}",
+                selectedAgents=[agent_name],
+                taskForAgent={"agent": agent_name, "instruction": question},
+            )
+            await self.blackboard.append_turn(event_id, turn)
+
+        elif function_name == "wait_for_verification":
+            condition = args.get("condition", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="verify",
+                thoughts=f"Waiting for verification: {condition}",
+                waitingFor="aligner",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+
+        else:
+            logger.warning(f"Unknown function call: {function_name}")
+
+    # =========================================================================
+    # Volume Writer
+    # =========================================================================
+
+    async def write_event_to_volume(
+        self, event_id: str, agent_name: str
+    ) -> None:
+        """Serialize event document as MD file to agent's volume."""
+        event = await self.blackboard.get_event(event_id)
+        if not event:
+            return
+
+        base_path = VOLUME_PATHS.get(agent_name)
+        if not base_path:
+            logger.warning(f"No volume path for agent: {agent_name}")
+            return
+
+        events_dir = Path(base_path) / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = events_dir / f"event-{event_id}.md"
+        content = self._event_to_markdown(event)
+        file_path.write_text(content)
+        logger.debug(f"Wrote event MD to {file_path}")
+
+    def _event_to_markdown(self, event: EventDocument) -> str:
+        """Convert event document to readable Markdown."""
+        lines = [
+            f"# Event: {event.id}",
+            f"",
+            f"- **Source:** {event.source}",
+            f"- **Service:** {event.service}",
+            f"- **Status:** {event.status.value}",
+            f"- **Reason:** {event.event.reason}",
+            f"- **Evidence:** {event.event.evidence}",
+            f"- **Time:** {event.event.timeDate}",
+            f"",
+            f"## Conversation",
+            f"",
+        ]
+        for turn in event.conversation:
+            lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action})")
+            if turn.thoughts:
+                lines.append(f"**Thoughts:** {turn.thoughts}")
+            if turn.result:
+                lines.append(f"**Result:** {turn.result}")
+            if turn.plan:
+                lines.append(f"**Plan:**\n{turn.plan}")
+            if turn.evidence:
+                lines.append(f"**Evidence:** {turn.evidence}")
+            if turn.selectedAgents:
+                lines.append(f"**Selected Agents:** {', '.join(turn.selectedAgents)}")
+            if turn.executed is not None:
+                lines.append(f"**Executed:** {turn.executed}")
+            if turn.pendingApproval:
+                lines.append(f"**Pending Approval:** YES")
+            if turn.waitingFor:
+                lines.append(f"**Waiting For:** {turn.waitingFor}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # =========================================================================
+    # Event Loop
+    # =========================================================================
+
+    async def start_event_loop(self) -> None:
+        """Background event loop: dequeue new events + scan active events."""
+        self._running = True
+        logger.info("Brain event loop started")
+
+        while self._running:
+            try:
+                # 1. Check for new events on the queue
+                event_id = await self.blackboard.dequeue_event()
+                if event_id:
+                    logger.info(f"New event from queue: {event_id}")
+                    await self.process_event(event_id)
+
+                # 2. Scan active events for agent responses
+                active = await self.blackboard.get_active_events()
+                for eid in active:
+                    event = await self.blackboard.get_event(eid)
+                    if not event or not event.conversation:
+                        continue
+                    last_turn = event.conversation[-1]
+                    # If last turn is NOT from brain, there's a new response to process
+                    if last_turn.actor != "brain":
+                        logger.info(f"Agent response on event {eid}: {last_turn.actor}.{last_turn.action}")
+                        await self.process_event(eid)
+
+            except Exception as e:
+                logger.error(f"Brain event loop error: {e}", exc_info=True)
+                await asyncio.sleep(2)
+
+    async def stop_event_loop(self) -> None:
+        """Stop the event loop."""
+        self._running = False
+        logger.info("Brain event loop stopped")
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    async def _next_turn_number(self, event_id: str) -> int:
+        """Get the next turn number for an event."""
+        event = await self.blackboard.get_event(event_id)
+        if event:
+            return len(event.conversation) + 1
+        return 1

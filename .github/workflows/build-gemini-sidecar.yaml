@@ -11,6 +11,7 @@ on:
       - master
     paths:
       - "gemini-sidecar/**"
+      - "gemini-sidecar/rules/**"
       - ".github/workflows/build-gemini-sidecar.yaml"
   pull_request:
     branches:
@@ -18,6 +19,7 @@ on:
       - master
     paths:
       - "gemini-sidecar/**"
+      - "gemini-sidecar/rules/**"
   workflow_dispatch:
 
 env:
@@ -99,11 +101,12 @@ jobs:
       - name: Update Helm values with new sidecar image tag
         if: github.event_name != 'pull_request'
         run: |
-          yq -i '.gemini.image.tag = "${{ steps.sha.outputs.short }}"' helm/values.yaml
+          TAG="${{ steps.sha.outputs.short }}"
+          yq -i ".sidecars.image.tag = \"$TAG\"" helm/values.yaml
 
           # Verify the change
-          echo "Updated helm/values.yaml (gemini section):"
-          yq '.gemini' helm/values.yaml
+          echo "Updated helm/values.yaml (sidecars section):"
+          yq '.sidecars' helm/values.yaml
 
       - name: Commit and push Helm values update
         if: github.event_name != 'pull_request'

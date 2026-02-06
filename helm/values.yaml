@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "95ecbf9" # Updated by CI to commit SHA
+  tag: "d82b350" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -31,20 +31,34 @@ redis:
       memory: 256Mi
       cpu: 200m
 # =============================================================================
-# Gemini CLI Sidecar Configuration
+# Agent Sidecars Configuration (same base image, different GEMINI.md)
 # =============================================================================
-gemini:
-  enabled: true
+sidecars:
+  architect:
+    enabled: true
+    port: 9091
+    gitUserName: "Darwin Architect"
+    gitUserEmail: "darwin-architect@darwin-project.io"
+  sysadmin:
+    enabled: true
+    port: 9092
+    gitUserName: "Darwin SysAdmin"
+    gitUserEmail: "darwin-sysadmin@darwin-project.io"
+  developer:
+    enabled: true
+    port: 9093
+    gitUserName: "Darwin Developer"
+    gitUserEmail: "darwin-developer@darwin-project.io"
+  # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "95ecbf9" # Updated by CI to commit SHA
-  port: 9090
+    tag: "dee1e4a"  # Updated by CI to commit SHA
   resources:
     requests:
       memory: 256Mi
       cpu: 100m
     limits:
-      memory: 6Gi # Gemini CLI + Node.js needs ~1.5Gi under load
+      memory: 6Gi
       cpu: "6"
 # =============================================================================
 # GCP / Vertex AI Configuration

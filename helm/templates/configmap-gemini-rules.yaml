@@ -1,0 +1,16 @@
+# BlackBoard/helm/templates/configmap-gemini-rules.yaml
+# GEMINI.md rules for each agent sidecar - mounted via subPath
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-gemini-rules
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  architect.md: |
+{{ .Files.Get "files/architect.md" | indent 4 }}
+  sysadmin.md: |
+{{ .Files.Get "files/sysadmin.md" | indent 4 }}
+  developer.md: |
+{{ .Files.Get "files/developer.md" | indent 4 }}

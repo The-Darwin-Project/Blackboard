@@ -1,42 +1,21 @@
 // BlackBoard/ui/src/hooks/useChat.ts
 /**
- * TanStack Query mutation hook for chat with conversation support.
- * Sends messages to /chat/ endpoint and tracks conversation state.
+ * TanStack Query mutation hook for creating chat events.
+ * Sends messages to /chat/ which creates an event in the queue.
  */
-import { useState, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { sendChatMessage } from '../api/client';
+import { createChatEvent } from '../api/client';
 
-/**
- * Hook for sending chat messages to the Architect with conversation tracking.
- * 
- * Maintains conversation_id state across multiple messages for multi-turn context.
- */
 export function useChat() {
   const queryClient = useQueryClient();
-  const [conversationId, setConversationId] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: (message: string) => sendChatMessage(message, conversationId),
-    onSuccess: (data) => {
-      // Update conversation ID for follow-up messages
-      if (data.conversation_id) {
-        setConversationId(data.conversation_id);
-      }
-      // Invalidate plans and events as chat may create new plans
-      queryClient.invalidateQueries({ queryKey: ['plans'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
+    mutationFn: (params: { message: string; service?: string }) =>
+      createChatEvent(params.message, params.service),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
     },
   });
 
-  // Reset conversation to start fresh
-  const resetConversation = useCallback(() => {
-    setConversationId(null);
-  }, []);
-
-  return {
-    ...mutation,
-    conversationId,
-    resetConversation,
-  };
+  return mutation;
 }

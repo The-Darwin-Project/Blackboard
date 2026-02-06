@@ -72,10 +72,14 @@ spec:
               value: "{{ .Values.sysadmin.autoApprove }}"
             - name: GIT_REPO_PATH
               value: "{{ .Values.sysadmin.gitRepoPath }}"
-            {{- if .Values.gemini.enabled }}
-            # Gemini sidecar configuration
-            - name: GEMINI_SIDECAR_URL
-              value: "http://localhost:{{ .Values.gemini.port }}"
+            {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
+            # Agent sidecar URLs
+            - name: ARCHITECT_SIDECAR_URL
+              value: "http://localhost:{{ .Values.sidecars.architect.port }}"
+            - name: SYSADMIN_SIDECAR_URL
+              value: "http://localhost:{{ .Values.sidecars.sysadmin.port }}"
+            - name: DEVELOPER_SIDECAR_URL
+              value: "http://localhost:{{ .Values.sidecars.developer.port }}"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
@@ -121,9 +125,13 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            # GitOps data - always mount (cloned by init container when github secret exists)
-            - name: gitops-data
-              mountPath: {{ .Values.sysadmin.gitRepoPath }}
+            # GitOps data volumes - one per agent sidecar
+            - name: gitops-architect
+              mountPath: /data/gitops-architect
+            - name: gitops-sysadmin
+              mountPath: /data/gitops-sysadmin
+            - name: gitops-developer
+              mountPath: /data/gitops-developer
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -184,19 +192,23 @@ spec:
         {{- end }}
         
         # =================================================================
-        # Gemini CLI Sidecar
+        # Architect Agent Sidecar
         # =================================================================
-        {{- if .Values.gemini.enabled }}
-        - name: gemini
-          image: "{{ .Values.gemini.image.repository }}:{{ .Values.gemini.image.tag }}"
+        {{- if .Values.sidecars.architect.enabled }}
+        - name: architect-sidecar
+          image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
           imagePullPolicy: IfNotPresent
           ports:
-            - name: gemini
-              containerPort: {{ .Values.gemini.port }}
+            - name: architect
+              containerPort: {{ .Values.sidecars.architect.port }}
               protocol: TCP
           env:
             - name: PORT
-              value: "{{ .Values.gemini.port }}"
+              value: "{{ .Values.sidecars.architect.port }}"
+            - name: GIT_USER_NAME
+              value: "{{ .Values.sidecars.architect.gitUserName }}"
+            - name: GIT_USER_EMAIL
+              value: "{{ .Values.sidecars.architect.gitUserEmail }}"
             # GCP/Vertex AI configuration (required for gemini-cli)
             - name: GOOGLE_CLOUD_PROJECT
               value: "{{ .Values.gcp.project }}"
@@ -207,34 +219,169 @@ spec:
               value: "/var/secrets/google/service-account.json"
             {{- end }}
           resources:
-            {{- toYaml .Values.gemini.resources | nindent 12 }}
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
             {{- if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            # GitOps data - shared with brain container (cloned by init container)
-            - name: gitops-data
+            - name: gitops-architect
               mountPath: /data/gitops
-            # Git credentials - shared with brain container
+            - name: gemini-rules
+              mountPath: /home/default/.gemini/GEMINI.md
+              subPath: architect.md
             {{- if .Values.github.existingSecret }}
-            - name: git-credentials
-              mountPath: /tmp/git-creds
             - name: github-app-secret
               mountPath: /secrets/github
               readOnly: true
+            - name: git-credentials
+              mountPath: /tmp/git-creds
             {{- end }}
           livenessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.gemini.port }}
+              port: {{ .Values.sidecars.architect.port }}
             initialDelaySeconds: 5
             periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /health
-              port: {{ .Values.gemini.port }}
+              port: {{ .Values.sidecars.architect.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        
+        # =================================================================
+        # SysAdmin Agent Sidecar
+        # =================================================================
+        {{- if .Values.sidecars.sysadmin.enabled }}
+        - name: sysadmin-sidecar
+          image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: sysadmin
+              containerPort: {{ .Values.sidecars.sysadmin.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.sidecars.sysadmin.port }}"
+            - name: GIT_USER_NAME
+              value: "{{ .Values.sidecars.sysadmin.gitUserName }}"
+            - name: GIT_USER_EMAIL
+              value: "{{ .Values.sidecars.sysadmin.gitUserEmail }}"
+            # GCP/Vertex AI configuration (required for gemini-cli)
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "{{ .Values.gcp.project }}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "{{ .Values.gcp.location }}"
+            {{- if .Values.gcp.existingSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/service-account.json"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+            - name: gitops-sysadmin
+              mountPath: /data/gitops
+            - name: gemini-rules
+              mountPath: /home/default/.gemini/GEMINI.md
+              subPath: sysadmin.md
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            - name: git-credentials
+              mountPath: /tmp/git-creds
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.sysadmin.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.sysadmin.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        
+        # =================================================================
+        # Developer Agent Sidecar
+        # =================================================================
+        {{- if .Values.sidecars.developer.enabled }}
+        - name: developer-sidecar
+          image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: developer
+              containerPort: {{ .Values.sidecars.developer.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.sidecars.developer.port }}"
+            - name: GIT_USER_NAME
+              value: "{{ .Values.sidecars.developer.gitUserName }}"
+            - name: GIT_USER_EMAIL
+              value: "{{ .Values.sidecars.developer.gitUserEmail }}"
+            # GCP/Vertex AI configuration (required for gemini-cli)
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "{{ .Values.gcp.project }}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "{{ .Values.gcp.location }}"
+            {{- if .Values.gcp.existingSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/service-account.json"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+            - name: gitops-developer
+              mountPath: /data/gitops
+            - name: gemini-rules
+              mountPath: /home/default/.gemini/GEMINI.md
+              subPath: developer.md
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            - name: git-credentials
+              mountPath: /tmp/git-creds
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.developer.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.developer.port }}
             initialDelaySeconds: 3
             periodSeconds: 10
           securityContext:
@@ -256,15 +403,17 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
         {{- end }}
-        # GitOps data volume - shared between brain and gemini sidecar
-        # Uses PVC when persistence is enabled, emptyDir otherwise
-        - name: gitops-data
-          {{- if .Values.sysadmin.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-gitops-data
-          {{- else }}
+        # GitOps data volumes - one per agent sidecar
+        - name: gitops-architect
           emptyDir: {}
-          {{- end }}
+        - name: gitops-sysadmin
+          emptyDir: {}
+        - name: gitops-developer
+          emptyDir: {}
+        # Gemini rules ConfigMap (GEMINI.md per agent)
+        - name: gemini-rules
+          configMap:
+            name: {{ .Release.Name }}-gemini-rules
         {{- if .Values.github.existingSecret }}
         - name: github-app-secret
           secret:

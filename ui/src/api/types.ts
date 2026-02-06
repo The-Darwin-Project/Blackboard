@@ -8,20 +8,12 @@
 // Enums
 // =============================================================================
 
-export type PlanStatus = 
-  | 'pending'
-  | 'approved'
-  | 'rejected'
-  | 'executing'
-  | 'completed'
-  | 'failed';
-
-export type PlanAction = 
-  | 'scale'
-  | 'rollback'
-  | 'reconfig'
-  | 'failover'
-  | 'optimize';
+export type EventStatus =
+  | 'new'
+  | 'active'
+  | 'waiting_approval'
+  | 'resolved'
+  | 'closed';
 
 export type EventType =
   | 'telemetry_received'
@@ -126,27 +118,39 @@ export interface GraphResponse {
 }
 
 // =============================================================================
-// Plans
+// Event Queue (Brain conversation documents)
 // =============================================================================
 
-export interface Plan {
-  id: string;
-  action: PlanAction;
-  service: string;
-  params: Record<string, unknown>;
+export interface EventInput {
   reason: string;
-  status: PlanStatus;
-  created_at: number;
-  approved_at: number | null;
-  executed_at: number | null;
-  result: string | null;
+  evidence: string;
+  timeDate: string;
 }
 
-export interface PlanCreate {
-  action: PlanAction;
+export interface ConversationTurn {
+  turn: number;
+  actor: string;
+  action: string;
+  thoughts?: string;
+  result?: string;
+  plan?: string;
+  selectedAgents?: string[];
+  taskForAgent?: Record<string, unknown>;
+  requestingAgent?: string;
+  executed?: boolean;
+  evidence?: string;
+  waitingFor?: string;
+  pendingApproval?: boolean;
+  timestamp: number;
+}
+
+export interface EventDocument {
+  id: string;
+  source: 'aligner' | 'chat';
+  status: EventStatus;
   service: string;
-  params: Record<string, unknown>;
-  reason: string;
+  event: EventInput;
+  conversation: ConversationTurn[];
 }
 
 // =============================================================================
@@ -185,18 +189,17 @@ export interface ChartData {
 }
 
 // =============================================================================
-// Chat
+// Chat (event-based)
 // =============================================================================
 
-export interface ChatRequest {
+export interface ChatEventRequest {
   message: string;
-  conversation_id?: string | null;
+  service?: string;
 }
 
-export interface ChatResponse {
-  message: string;
-  plan_id: string | null;
-  conversation_id: string | null;
+export interface ChatEventResponse {
+  event_id: string;
+  status: string;
 }
 
 // =============================================================================
@@ -211,7 +214,7 @@ export interface HealthResponse {
 // Agent Mapping Helper
 // =============================================================================
 
-export type Agent = 'aligner' | 'architect' | 'sysadmin';
+export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'brain';
 
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {

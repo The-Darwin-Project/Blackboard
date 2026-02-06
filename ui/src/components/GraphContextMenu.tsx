@@ -17,15 +17,16 @@ interface GraphContextMenuProps {
 }
 
 function GraphContextMenu({ serviceName, position, onClose }: GraphContextMenuProps) {
-  const { mutate: sendMessage, isPending } = useChat();
+  const chatMutation = useChat();
+  const { mutate: sendMessage, isPending } = chatMutation;
 
   const handleScale = useCallback(() => {
-    sendMessage(`Please analyze ${serviceName} and create a scaling plan if needed.`);
+    sendMessage({ message: `Please analyze ${serviceName} and create a scaling plan if needed.`, service: serviceName });
     onClose();
   }, [serviceName, sendMessage, onClose]);
 
   const handleDebug = useCallback(() => {
-    sendMessage(`Please investigate any issues with ${serviceName} and suggest fixes.`);
+    sendMessage({ message: `Please investigate any issues with ${serviceName} and suggest fixes.`, service: serviceName });
     onClose();
   }, [serviceName, sendMessage, onClose]);
 
