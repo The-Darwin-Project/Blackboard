@@ -52,7 +52,7 @@ sidecars:
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "dee1e4a"  # Updated by CI to commit SHA
+    tag: "84445e8" # Updated by CI to commit SHA
   resources:
     requests:
       memory: 256Mi
