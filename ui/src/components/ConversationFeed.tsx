@@ -328,9 +328,22 @@ export function ConversationFeed() {
                 {selectedEvent.id}
               </span>
             </div>
-            <span style={{ fontSize: 11, color: '#64748b' }}>
-              {selectedEvent.source} | {selectedEvent.conversation.length} turns
-            </span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 11, color: '#64748b' }}>
+                {selectedEvent.source} | {selectedEvent.conversation.length} turns
+              </span>
+              <button
+                onClick={() => setSelectedEventId(null)}
+                style={{
+                  background: '#334155', border: 'none', borderRadius: 4,
+                  color: '#94a3b8', fontSize: 14, padding: '2px 8px',
+                  cursor: 'pointer', lineHeight: 1,
+                }}
+                title="Close conversation"
+              >
+                x
+              </button>
+            </div>
           </div>
 
           {/* Scrollable conversation */}
