@@ -469,11 +469,23 @@ class Aligner:
     
     async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
         """
-        Create an event for the Brain to process.
+        Create an event for the Brain to process -- with deduplication.
         
-        Replaces the old fire-and-forget investigate+enqueue pattern.
-        The Brain will decide whether to investigate further via sysAdmin.
+        Before creating a new event, checks if an active event already exists
+        for the same service. If so, skips creation (the existing event is
+        already being handled by the Brain/agents).
         """
+        # Dedup: check if an active event already exists for this service
+        active_ids = await self.blackboard.get_active_events()
+        for eid in active_ids:
+            existing = await self.blackboard.get_event(eid)
+            if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
+                logger.info(
+                    f"Skipping event creation for {service} ({anomaly_type}) "
+                    f"-- active event {eid} already exists (status: {existing.status.value})"
+                )
+                return
+
         # Get current metrics for evidence
         svc = await self.blackboard.get_service(service)
         evidence_parts = [f"Service: {service}", f"Anomaly: {anomaly_type}"]

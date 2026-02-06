@@ -289,13 +289,35 @@ class Brain:
         """
         Process an event. Reads from Redis, decides next action, writes back.
         
-        Step 6a: Hardcoded probe path (no LLM).
-        Step 6b: Will replace with LLM function calling.
+        Includes deduplication: if another active event exists for the same
+        service, close this one as a duplicate.
         """
         event = await self.blackboard.get_event(event_id)
         if not event:
             logger.warning(f"Event {event_id} not found")
             return
+
+        # Dedup: if this is a new event (no turns yet), check for existing active events
+        # on the same service. Close as duplicate if one already exists.
+        if not event.conversation:
+            active_ids = await self.blackboard.get_active_events()
+            for eid in active_ids:
+                if eid == event_id:
+                    continue
+                existing = await self.blackboard.get_event(eid)
+                if (existing
+                        and existing.service == event.service
+                        and existing.conversation  # has turns = being worked on
+                        and existing.status.value in ("active", "new", "deferred")):
+                    logger.info(
+                        f"Closing duplicate event {event_id} -- "
+                        f"existing event {eid} already handling {event.service}"
+                    )
+                    await self._close_and_broadcast(
+                        event_id,
+                        f"Duplicate: merged with existing event {eid} for {event.service}.",
+                    )
+                    return
 
         # Circuit breaker: max turns
         if len(event.conversation) >= MAX_TURNS_PER_EVENT:
@@ -812,9 +834,15 @@ class Brain:
                         continue
 
                     last_turn = event.conversation[-1]
-                    # User approval or Aligner confirmation -> Brain should decide next step
+                    # Re-process if:
+                    # 1. User approved or Aligner confirmed
+                    # 2. Agent completed (last turn from agent, no active task) -- pick up stalled events
                     if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "confirm"):
                         logger.info(f"User/Aligner action on event {eid}: {last_turn.actor}.{last_turn.action}")
+                        await self.process_event(eid)
+                    elif last_turn.actor in ("architect", "sysadmin", "developer") and last_turn.action not in ("busy",):
+                        # Agent completed but Brain hasn't continued -- re-process
+                        logger.info(f"Resuming stalled event {eid}: agent {last_turn.actor} completed, Brain continuing")
                         await self.process_event(eid)
 
             except Exception as e:
