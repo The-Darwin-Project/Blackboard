@@ -1,99 +1,193 @@
 # BlackBoard/src/agents/architect.py
 """
-Thin HTTP client to the Architect sidecar.
+Agent 2: The Architect - WebSocket client to Architect sidecar.
 
-This module provides a lightweight interface to communicate with the Architect
-sidecar service via HTTP. The actual AI processing and decision-making happens
-in the sidecar, not in this module.
+Persistent WebSocket connection for real-time bidirectional communication.
+Streams progress from Gemini CLI execution back to Brain for UI broadcast.
 """
-import httpx
+from __future__ import annotations
+
+import asyncio
 import json
 import logging
 import os
 import re
+from typing import Callable, Optional
 
-from ..agents.security import safe_execution, SecurityError
+import websockets
+
+from .security import FORBIDDEN_PATTERNS, SecurityError
 
 logger = logging.getLogger(__name__)
 
-# Import forbidden patterns for inline security check
-from ..agents.security import FORBIDDEN_PATTERNS
-
 
 class Architect:
-    """
-    Thin HTTP client to the Architect sidecar.
-    
-    This class forwards requests to the Architect sidecar service,
-    which handles all AI processing and decision-making.
-    """
-    
+    """WebSocket client to the Architect Gemini CLI sidecar."""
+
     def __init__(self):
-        """Initialize the Architect HTTP client."""
         self.sidecar_url = os.getenv("ARCHITECT_SIDECAR_URL", "http://localhost:9091")
-        self.timeout = 310.0
-        logger.info(f"Architect client initialized with sidecar URL: {self.sidecar_url}")
-    
-    async def process(self, event_id: str, task: str, event_md_path: str = "") -> str:
+        # Convert http:// to ws:// for WebSocket
+        ws_base = self.sidecar_url.replace("http://", "ws://").replace("https://", "wss://")
+        self.ws_url = f"{ws_base}/ws"
+        self.agent_name = "architect"
+        self.cwd = "/data/gitops-architect"
+        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._connected = False
+        logger.info(f"Architect client initialized (WS: {self.ws_url})")
+
+    async def connect(self) -> None:
+        """Establish persistent WebSocket connection with retry."""
+        delays = [1, 2, 4, 8, 16]
+        for attempt, delay in enumerate(delays, 1):
+            try:
+                self._ws = await websockets.connect(
+                    self.ws_url,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5,
+                )
+                self._connected = True
+                logger.info(f"Architect WebSocket connected to {self.ws_url}")
+                return
+            except Exception as e:
+                logger.warning(f"Architect WS connect attempt {attempt}/{len(delays)} failed: {e}")
+                if attempt < len(delays):
+                    await asyncio.sleep(delay)
+        logger.error(f"Architect WebSocket failed to connect after {len(delays)} attempts")
+
+    async def close(self) -> None:
+        """Close WebSocket connection."""
+        if self._ws:
+            await self._ws.close()
+            self._connected = False
+            logger.info("Architect WebSocket closed")
+
+    async def _ensure_connected(self) -> bool:
+        """Reconnect if disconnected."""
+        if self._ws and self._connected:
+            try:
+                await self._ws.ping()
+                return True
+            except Exception:
+                self._connected = False
+        await self.connect()
+        return self._connected
+
+    async def process(
+        self,
+        event_id: str,
+        task: str,
+        event_md_path: str = "",
+        on_progress: Optional[Callable] = None,
+    ) -> str:
         """
-        Process a task by forwarding it to the Architect sidecar.
-        
+        Send task to sidecar via WebSocket, stream progress, return result.
+
         Args:
-            event_id: Event identifier
-            task: Task description to execute
-            event_md_path: Path to event markdown document
-            
+            event_id: Event ID for tracking
+            task: Task instruction
+            event_md_path: Path to event MD file on shared volume
+            on_progress: Async callback for progress messages
+
         Returns:
-            Output text from the sidecar, or error message on failure
+            Result output string, or error message
         """
         # Build prompt
         if event_md_path:
             prompt = f"Read the event document at {event_md_path} and execute this task:\n\n{task}"
         else:
             prompt = task
-        
-        # Run security check inline (not as decorator since this is async)
+
+        # Security check
         for pattern in FORBIDDEN_PATTERNS:
             if re.search(pattern, prompt, re.IGNORECASE):
-                logger.error(f"SECURITY BLOCK: Forbidden pattern detected: {pattern}")
-                return f"SecurityError: Blocked forbidden pattern: {pattern}"
-        
-        # Prepare request
-        url = f"{self.sidecar_url}/execute"
-        payload = {
-            "prompt": prompt,
-            "autoApprove": True,
-            "cwd": "/data/gitops-architect"
-        }
-        
+                msg = f"SECURITY BLOCK: Forbidden pattern: {pattern}"
+                logger.error(msg)
+                raise SecurityError(msg)
+
+        # Ensure connected
+        if not await self._ensure_connected():
+            return "Error: Cannot connect to Architect sidecar WebSocket"
+
+        # Send task
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                result = response.json()
-                return result.get("output", result.get("text", str(result)))
-        except httpx.ConnectError as e:
-            logger.error(f"Failed to connect to Architect sidecar at {self.sidecar_url}: {e}")
-            return f"Error: Could not connect to Architect sidecar at {self.sidecar_url}"
-        except httpx.TimeoutException:
-            logger.error(f"Request to Architect sidecar timed out after {self.timeout}s")
-            return f"Error: Request to Architect sidecar timed out after {self.timeout}s"
+            await self._ws.send(json.dumps({
+                "type": "task",
+                "event_id": event_id,
+                "prompt": prompt,
+                "cwd": self.cwd,
+                "autoApprove": True,
+            }))
         except Exception as e:
-            logger.error(f"Error calling Architect sidecar: {e}")
-            return f"Error: {str(e)}"
-    
-    async def health(self) -> bool:
-        """
-        Check if the Architect sidecar is healthy.
-        
-        Returns:
-            True if sidecar is healthy, False otherwise
-        """
-        url = f"{self.sidecar_url}/health"
+            self._connected = False
+            return f"Error: Failed to send task: {e}"
+
+        # Receive messages until result or error
         try:
+            async for raw_msg in self._ws:
+                msg = json.loads(raw_msg)
+                msg_type = msg.get("type")
+
+                if msg_type == "progress":
+                    progress_text = msg.get("message", "")
+                    logger.debug(f"Architect progress [{event_id}]: {progress_text[:100]}")
+                    if on_progress:
+                        await on_progress({
+                            "actor": self.agent_name,
+                            "event_id": event_id,
+                            "message": progress_text,
+                        })
+
+                elif msg_type == "result":
+                    output = msg.get("output", "")
+                    if isinstance(output, dict):
+                        output = json.dumps(output, indent=2)
+                    logger.info(f"Architect completed [{event_id}]: {len(str(output))} chars")
+                    return str(output)
+
+                elif msg_type == "error":
+                    error_msg = msg.get("message", "Unknown error")
+                    logger.error(f"Architect error [{event_id}]: {error_msg}")
+                    return f"Error: {error_msg}"
+
+                elif msg_type == "busy":
+                    logger.warning(f"Architect busy [{event_id}], retrying in 5s...")
+                    await asyncio.sleep(5)
+                    # Retry once
+                    try:
+                        await self._ws.send(json.dumps({
+                            "type": "task",
+                            "event_id": event_id,
+                            "prompt": prompt,
+                            "cwd": self.cwd,
+                            "autoApprove": True,
+                        }))
+                    except Exception:
+                        return "Error: Architect sidecar busy and retry failed"
+
+                elif msg_type == "question":
+                    # Agent asking for help from another agent
+                    return json.dumps({
+                        "type": "question",
+                        "message": msg.get("message", ""),
+                        "requestingAgent": msg.get("requestingAgent", ""),
+                    })
+
+        except websockets.exceptions.ConnectionClosed:
+            self._connected = False
+            return "Error: WebSocket connection closed during execution"
+        except Exception as e:
+            return f"Error: {e}"
+
+        return "Error: No result received"
+
+    async def health(self) -> bool:
+        """Check sidecar health via HTTP (K8s probes use HTTP)."""
+        import httpx
+        try:
+            url = f"{self.sidecar_url}/health"
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(url)
                 return response.status_code == 200
-        except Exception as e:
-            logger.debug(f"Health check failed: {e}")
+        except Exception:
             return False

@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from ..models import ConversationTurn, EventDocument, EventStatus
 
@@ -208,16 +208,25 @@ class Brain:
     Python code only polls, serializes, calls LLM, and executes the result.
     """
 
-    def __init__(self, blackboard: BlackboardState):
+    def __init__(
+        self,
+        blackboard: BlackboardState,
+        agents: Optional[dict[str, Any]] = None,
+        broadcast: Optional[Callable] = None,
+    ):
         self.blackboard = blackboard
+        self.agents = agents or {}
+        self.broadcast = broadcast  # async callable to push to UI WebSocket clients
         self._running = False
         self._model = None
         self._llm_available = False
+        self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
+        self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
         self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
-        logger.info(f"Brain initialized (project={self.project}, model={self.model_name})")
+        logger.info(f"Brain initialized (project={self.project}, model={self.model_name}, agents={list(self.agents.keys())})")
 
     async def _get_model(self):
         """Lazy-load Vertex AI Pro model with Brain tools."""
@@ -270,7 +279,7 @@ class Brain:
         # Circuit breaker: max turns
         if len(event.conversation) >= MAX_TURNS_PER_EVENT:
             logger.warning(f"Event {event_id} hit max turns ({MAX_TURNS_PER_EVENT})")
-            await self.blackboard.close_event(
+            await self._close_and_broadcast(
                 event_id,
                 f"TIMEOUT: Event exceeded {MAX_TURNS_PER_EVENT} turns. Force closed.",
             )
@@ -281,7 +290,7 @@ class Brain:
             first_turn_time = event.conversation[0].timestamp
             if time.time() - first_turn_time > MAX_EVENT_DURATION_SECONDS:
                 logger.warning(f"Event {event_id} exceeded max duration")
-                await self.blackboard.close_event(
+                await self._close_and_broadcast(
                     event_id,
                     f"TIMEOUT: Event exceeded {MAX_EVENT_DURATION_SECONDS}s. Force closed.",
                 )
@@ -341,6 +350,7 @@ class Brain:
                         thoughts=part.text,
                     )
                     await self.blackboard.append_turn(event_id, turn)
+                    await self._broadcast_turn(event_id, turn)
                     logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
                     return
 
@@ -348,7 +358,6 @@ class Brain:
 
         except Exception as e:
             logger.error(f"Brain LLM call failed for {event_id}: {e}", exc_info=True)
-            # Append error turn so conversation isn't stuck
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -356,6 +365,7 @@ class Brain:
                 thoughts=f"LLM call failed: {str(e)[:200]}",
             )
             await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
 
     def _build_event_prompt(self, event: EventDocument) -> str:
         """Serialize event document as prompt text for the LLM."""
@@ -409,35 +419,65 @@ class Brain:
         """
         Execute an LLM function call. Maps function names to real operations.
         
-        Available functions (defined in Step 6b):
-          - select_agent(agent_name, task_instruction)
-          - close_event(summary)
-          - request_user_approval(plan_summary)
-          - re_trigger_aligner(service, check_condition)
-          - ask_agent_for_state(agent_name, question)
-          - wait_for_verification(condition)
+        Agent dispatch uses asyncio.create_task for non-blocking execution.
+        Other functions (close, approve, verify) are fast Redis writes.
         """
-        if function_name == "select_agent":
+        if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
-            task = args.get("task_instruction", "")
+            task = args.get("task_instruction", "") or args.get("question", "")
+
+            # Duplicate task prevention
+            if event_id in self._active_tasks and not self._active_tasks[event_id].done():
+                logger.info(f"Task already active for {event_id}, skipping dispatch")
+                return
+
+            # Recursion guard
+            depth = self._routing_depth.get(event_id, 0) + 1
+            if depth > 5:
+                logger.warning(f"Event {event_id} hit routing depth limit (5)")
+                await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
+                return
+            self._routing_depth[event_id] = depth
+
             # Write event MD to agent volume
             await self.write_event_to_volume(event_id, agent_name)
-            # Notify agent
-            await self.blackboard.notify_agent(agent_name, event_id)
-            # Append brain turn
+
+            # Append brain routing turn + broadcast
+            action = "route" if function_name == "select_agent" else "route"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="route",
+                action=action,
                 thoughts=f"Routing to {agent_name}: {task}",
                 selectedAgents=[agent_name],
                 taskForAgent={"agent": agent_name, "instruction": task},
             )
             await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+
+            # Broadcast the event MD as attachment
+            event = await self.blackboard.get_event(event_id)
+            if event and self.broadcast:
+                await self.broadcast({
+                    "type": "attachment",
+                    "event_id": event_id,
+                    "actor": "brain",
+                    "filename": f"event-{event_id}.md",
+                    "content": self._event_to_markdown(event),
+                })
+
+            # Launch agent task (non-blocking)
+            agent = self.agents.get(agent_name)
+            if agent:
+                event_md_path = f"./events/event-{event_id}.md"
+                task_coro = self._run_agent_task(event_id, agent_name, agent, task, event_md_path)
+                self._active_tasks[event_id] = asyncio.create_task(task_coro)
+            else:
+                logger.error(f"Agent '{agent_name}' not found in agents dict")
 
         elif function_name == "close_event":
             summary = args.get("summary", "Event closed.")
-            await self.blackboard.close_event(event_id, summary)
+            await self._close_and_broadcast(event_id, summary)
 
         elif function_name == "request_user_approval":
             plan_summary = args.get("plan_summary", "")
@@ -449,6 +489,7 @@ class Brain:
                 pendingApproval=True,
             )
             await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
             # Update event status
             event = await self.blackboard.get_event(event_id)
             if event:
@@ -469,21 +510,7 @@ class Brain:
                 waitingFor="aligner",
             )
             await self.blackboard.append_turn(event_id, turn)
-
-        elif function_name == "ask_agent_for_state":
-            agent_name = args.get("agent_name", "sysadmin")
-            question = args.get("question", "")
-            await self.write_event_to_volume(event_id, agent_name)
-            await self.blackboard.notify_agent(agent_name, event_id)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="route",
-                thoughts=f"Asking {agent_name}: {question}",
-                selectedAgents=[agent_name],
-                taskForAgent={"agent": agent_name, "instruction": question},
-            )
-            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
 
         elif function_name == "wait_for_verification":
             condition = args.get("condition", "")
@@ -495,9 +522,118 @@ class Brain:
                 waitingFor="aligner",
             )
             await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
+
+    # =========================================================================
+    # Agent Task Runner (non-blocking via create_task)
+    # =========================================================================
+
+    async def _run_agent_task(
+        self,
+        event_id: str,
+        agent_name: str,
+        agent: Any,
+        task: str,
+        event_md_path: str,
+    ) -> None:
+        """
+        Run agent.process() with progress streaming. Non-blocking via create_task.
+        
+        On completion: appends result turn, broadcasts, triggers next Brain decision.
+        """
+        try:
+            async def on_progress(progress_data: dict) -> None:
+                """Broadcast agent progress to UI in real-time."""
+                if self.broadcast:
+                    await self.broadcast({
+                        "type": "progress",
+                        "event_id": event_id,
+                        "actor": agent_name,
+                        "message": progress_data.get("message", ""),
+                    })
+
+            logger.info(f"Agent task started: {agent_name} for {event_id}")
+            result = await agent.process(
+                event_id=event_id,
+                task=task,
+                event_md_path=event_md_path,
+                on_progress=on_progress,
+            )
+
+            # Parse result -- check if agent is asking a question
+            try:
+                result_data = json.loads(result)
+                if isinstance(result_data, dict) and result_data.get("type") == "question":
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor=agent_name,
+                        action="question",
+                        thoughts=result_data.get("message", ""),
+                        requestingAgent=result_data.get("requestingAgent", ""),
+                    )
+                    await self.blackboard.append_turn(event_id, turn)
+                    await self._broadcast_turn(event_id, turn)
+                    # Let Brain decide next routing
+                    await self.process_event(event_id)
+                    return
+            except (json.JSONDecodeError, TypeError):
+                pass  # Not a JSON question, treat as regular result
+
+            # Append agent result turn
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor=agent_name,
+                action="execute",
+                result=str(result)[:2000],  # Cap result length
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            logger.info(f"Agent task completed: {agent_name} for {event_id}")
+
+            # Trigger next Brain decision
+            await self.process_event(event_id)
+
+        except Exception as e:
+            logger.error(f"Agent task failed: {agent_name} for {event_id}: {e}", exc_info=True)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor=agent_name,
+                action="error",
+                thoughts=f"Agent execution failed: {str(e)[:300]}",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+
+        finally:
+            # Clean up active task tracking
+            self._active_tasks.pop(event_id, None)
+
+    # =========================================================================
+    # Broadcast Helpers
+    # =========================================================================
+
+    async def _broadcast_turn(self, event_id: str, turn: ConversationTurn) -> None:
+        """Broadcast a conversation turn to connected UI clients."""
+        if self.broadcast:
+            await self.broadcast({
+                "type": "turn",
+                "event_id": event_id,
+                "turn": turn.model_dump(),
+            })
+
+    async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
+        """Close an event and broadcast the closure to UI."""
+        await self.blackboard.close_event(event_id, summary)
+        self._routing_depth.pop(event_id, None)
+        if self.broadcast:
+            await self.broadcast({
+                "type": "event_closed",
+                "event_id": event_id,
+                "summary": summary,
+            })
 
     # =========================================================================
     # Volume Writer
@@ -566,9 +702,14 @@ class Brain:
     # =========================================================================
 
     async def start_event_loop(self) -> None:
-        """Background event loop: dequeue new events + scan active events."""
+        """
+        Background event loop: dequeue new events + check for user approvals.
+        
+        Agent responses are handled via _run_agent_task callbacks (non-blocking).
+        No agent response scanning needed -- WebSocket agents complete asynchronously.
+        """
         self._running = True
-        logger.info("Brain event loop started")
+        logger.info("Brain event loop started (WebSocket mode)")
 
         while self._running:
             try:
@@ -578,16 +719,20 @@ class Brain:
                     logger.info(f"New event from queue: {event_id}")
                     await self.process_event(event_id)
 
-                # 2. Scan active events for agent responses
+                # 2. Scan active events for user approvals
+                # (user approves via UI -> turn appended -> Brain needs to continue)
                 active = await self.blackboard.get_active_events()
                 for eid in active:
+                    # Skip events with active agent tasks
+                    if eid in self._active_tasks and not self._active_tasks[eid].done():
+                        continue
                     event = await self.blackboard.get_event(eid)
                     if not event or not event.conversation:
                         continue
                     last_turn = event.conversation[-1]
-                    # If last turn is NOT from brain, there's a new response to process
-                    if last_turn.actor != "brain":
-                        logger.info(f"Agent response on event {eid}: {last_turn.actor}.{last_turn.action}")
+                    # User approval or Aligner confirmation -> Brain should decide next step
+                    if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "confirm"):
+                        logger.info(f"User/Aligner action on event {eid}: {last_turn.actor}.{last_turn.action}")
                         await self.process_event(eid)
 
             except Exception as e:

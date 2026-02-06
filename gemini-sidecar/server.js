@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const { spawn, execSync } = require('child_process');
 const jwt = require('jsonwebtoken');
+const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 9090;
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
@@ -121,6 +122,15 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
+ * Safe WebSocket send - only sends if connection is open
+ */
+function wsSend(ws, data) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+
+/**
  * Execute gemini CLI with given prompt and options
  */
 async function executeGemini(prompt, options = {}) {
@@ -182,6 +192,76 @@ async function executeGemini(prompt, options = {}) {
       }
     });
     
+    child.on('error', (err) => {
+      console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Execute gemini CLI with streaming progress over WebSocket
+ */
+async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
+  return new Promise((resolve, reject) => {
+    const args = [];
+    if (options.autoApprove) args.push('--yolo');
+    args.push('-p', prompt);
+
+    console.log(`[${new Date().toISOString()}] Streaming exec: gemini ${args[0]} (prompt: ${prompt.length} chars)`);
+
+    const child = spawn('gemini', args, {
+      env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
+      cwd: options.cwd || DEFAULT_WORK_DIR,
+      timeout: TIMEOUT_MS,
+    });
+
+    currentTask = { eventId, child };
+
+    let stdout = '';
+    let stderr = '';
+    let lineBuffer = '';
+
+    // Stream stdout line-by-line as progress
+    child.stdout.on('data', (data) => {
+      const text = data.toString();
+      stdout += text;
+      lineBuffer += text;
+
+      // Flush complete lines
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop(); // Keep incomplete line in buffer
+      for (const line of lines) {
+        if (line.trim()) {
+          wsSend(ws, { type: 'progress', event_id: eventId, message: line });
+        }
+      }
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      // Flush remaining buffer
+      if (lineBuffer.trim()) {
+        wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
+      }
+
+      console.log(`[${new Date().toISOString()}] Gemini exited code ${code} (${stdout.length} chars)`);
+
+      if (code === 0) {
+        try {
+          const result = JSON.parse(stdout);
+          resolve({ status: 'success', output: result });
+        } catch (e) {
+          resolve({ status: 'success', output: stdout, raw: true });
+        }
+      } else {
+        resolve({ status: 'failed', exitCode: code, stderr, stdout });
+      }
+    });
+
     child.on('error', (err) => {
       console.error(`[${new Date().toISOString()}] Spawn error:`, err.message);
       reject(err);
@@ -278,9 +358,103 @@ async function handleRequest(req, res) {
 // Create and start server
 const server = http.createServer(handleRequest);
 
+// WebSocket server on /ws path
+const wss = new WebSocket.Server({ server, path: '/ws' });
+
+// Track current execution state
+let currentTask = null; // { eventId, child } or null
+
+wss.on('connection', (ws) => {
+  console.log(`[${new Date().toISOString()}] WebSocket client connected`);
+
+  ws.on('message', async (data) => {
+    let msg;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch (e) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON' }));
+      return;
+    }
+
+    if (msg.type === 'task') {
+      // Reject if already busy
+      if (currentTask) {
+        ws.send(JSON.stringify({
+          type: 'busy',
+          event_id: msg.event_id || '',
+          message: 'Agent busy, task rejected. One task at a time.',
+        }));
+        return;
+      }
+
+      const eventId = msg.event_id || 'unknown';
+      const prompt = msg.prompt;
+      const workDir = msg.cwd || DEFAULT_WORK_DIR;
+      const autoApprove = msg.autoApprove || false;
+
+      if (!prompt) {
+        ws.send(JSON.stringify({ type: 'error', event_id: eventId, message: 'Missing prompt' }));
+        return;
+      }
+
+      console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars)`);
+
+      // Setup git credentials
+      if (hasGitHubCredentials()) {
+        try {
+          const token = await generateInstallationToken();
+          setupGitCredentials(token, workDir);
+          wsSend(ws, { type: 'progress', event_id: eventId, message: 'Git credentials configured' });
+        } catch (err) {
+          wsSend(ws, { type: 'progress', event_id: eventId, message: `Git credentials failed: ${err.message}, continuing...` });
+        }
+      }
+
+      // Execute Gemini CLI with streaming progress
+      try {
+        const result = await executeGeminiStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
+        wsSend(ws, {
+          type: 'result',
+          event_id: eventId,
+          status: result.status,
+          output: result.output || result.stdout || '',
+        });
+      } catch (err) {
+        wsSend(ws, {
+          type: 'error',
+          event_id: eventId,
+          message: err.message,
+        });
+      }
+      currentTask = null;
+
+    } else if (msg.type === 'cancel') {
+      if (currentTask && currentTask.child) {
+        console.log(`[${new Date().toISOString()}] Cancelling task: ${currentTask.eventId}`);
+        currentTask.child.kill('SIGTERM');
+        currentTask = null;
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    console.log(`[${new Date().toISOString()}] WebSocket client disconnected`);
+    // Kill running process on disconnect
+    if (currentTask && currentTask.child) {
+      console.log(`[${new Date().toISOString()}] Killing orphaned process for ${currentTask.eventId}`);
+      currentTask.child.kill('SIGTERM');
+      currentTask = null;
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[${new Date().toISOString()}] WebSocket error:`, err.message);
+  });
+});
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Gemini sidecar listening on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute`);
+  console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute, WS /ws`);
   console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
 });
 

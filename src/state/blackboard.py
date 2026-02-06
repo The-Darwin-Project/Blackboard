@@ -1252,7 +1252,7 @@ class BlackboardState:
     EVENT_PREFIX = "darwin:event:"
     EVENT_ACTIVE = "darwin:event:active"
     EVENT_CLOSED = "darwin:event:closed"
-    AGENT_NOTIFY_PREFIX = "darwin:agent:notify:"
+    # AGENT_NOTIFY_PREFIX removed -- WebSocket replaces Redis agent notifications
 
     async def create_event(
         self,
@@ -1317,22 +1317,9 @@ class BlackboardState:
                     continue
         logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
 
-    async def notify_agent(self, agent_name: str, event_id: str) -> None:
-        """Notify an agent that an event needs their attention."""
-        await self.redis.lpush(
-            f"{self.AGENT_NOTIFY_PREFIX}{agent_name}", event_id
-        )
-        logger.debug(f"Notified agent {agent_name} about event {event_id}")
-
-    async def dequeue_agent_notification(self, agent_name: str) -> Optional[str]:
-        """Dequeue next event_id for an agent (blocking pop with timeout)."""
-        result = await self.redis.brpop(
-            f"{self.AGENT_NOTIFY_PREFIX}{agent_name}", timeout=5
-        )
-        if result:
-            _, event_id = result
-            return event_id
-        return None
+    # NOTE: notify_agent and dequeue_agent_notification REMOVED.
+    # Agent communication now uses WebSocket (Brain -> Agent direct).
+    # Redis agent notification queues (darwin:agent:notify:*) are no longer used.
 
     async def dequeue_event(self) -> Optional[str]:
         """Dequeue next event_id from the Brain queue (blocking pop with timeout)."""

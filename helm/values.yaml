@@ -52,7 +52,7 @@ sidecars:
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "8b9ee74" # Updated by CI to commit SHA
+    tag: "84445e8" # Updated by CI to commit SHA
   resources:
     requests:
       memory: 256Mi
@@ -84,7 +84,8 @@ service:
 route:
   enabled: true
   # host: darwin-brain.apps.example.com  # Leave empty for auto-generated
-  annotations: {}
+  annotations:
+    haproxy.router.openshift.io/timeout: 300s
   tls:
     enabled: true
     termination: edge # edge, passthrough, or reencrypt

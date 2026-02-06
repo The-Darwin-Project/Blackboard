@@ -1,10 +1,7 @@
 // BlackBoard/ui/src/components/GraphContextMenu.tsx
 /**
  * Context menu for right-click actions on graph nodes.
- * 
- * Actions:
- * - Ask Architect to Scale
- * - Ask Architect to Debug
+ * Uses useChat hook which routes via WebSocket when available.
  */
 import { useCallback } from 'react';
 import { Scale, Bug, X } from 'lucide-react';
@@ -17,16 +14,15 @@ interface GraphContextMenuProps {
 }
 
 function GraphContextMenu({ serviceName, position, onClose }: GraphContextMenuProps) {
-  const chatMutation = useChat();
-  const { mutate: sendMessage, isPending } = chatMutation;
+  const { sendMessage, isPending } = useChat();
 
   const handleScale = useCallback(() => {
-    sendMessage({ message: `Please analyze ${serviceName} and create a scaling plan if needed.`, service: serviceName });
+    sendMessage(`Please analyze ${serviceName} and create a scaling plan if needed.`, serviceName);
     onClose();
   }, [serviceName, sendMessage, onClose]);
 
   const handleDebug = useCallback(() => {
-    sendMessage({ message: `Please investigate any issues with ${serviceName} and suggest fixes.`, service: serviceName });
+    sendMessage(`Please investigate any issues with ${serviceName} and suggest fixes.`, serviceName);
     onClose();
   }, [serviceName, sendMessage, onClose]);
 
@@ -65,7 +61,7 @@ function GraphContextMenu({ serviceName, position, onClose }: GraphContextMenuPr
             className="w-full flex items-center gap-3 px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors disabled:opacity-50"
           >
             <Scale className="w-4 h-4" />
-            <span>Ask Architect to Scale</span>
+            <span>Ask Brain to Scale</span>
           </button>
           
           <button
@@ -74,7 +70,7 @@ function GraphContextMenu({ serviceName, position, onClose }: GraphContextMenuPr
             className="w-full flex items-center gap-3 px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors disabled:opacity-50"
           >
             <Bug className="w-4 h-4" />
-            <span>Ask Architect to Debug</span>
+            <span>Ask Brain to Debug</span>
           </button>
         </div>
 

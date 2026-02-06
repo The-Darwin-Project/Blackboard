@@ -6,5 +6,6 @@ export { useChat } from './useChat';
 export { useEvents } from './useEvents';
 export { useGraph } from './useGraph';
 export { useMetrics } from './useMetrics';
-export { useActiveEvents, useEventDocument } from './useQueue';
+export { useActiveEvents, useEventDocument, useQueueInvalidation } from './useQueue';
 export { useService, useTopology } from './useTopology';
+export { useWebSocket } from './useWebSocket';

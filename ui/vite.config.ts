@@ -22,6 +22,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
       '/topology': {
         target: 'http://localhost:8000',
         changeOrigin: true,
@@ -30,7 +34,7 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
-      '/plans': {
+      '/queue': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       },

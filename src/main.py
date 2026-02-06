@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .dependencies import set_agents, set_blackboard, set_brain
@@ -68,27 +68,58 @@ async def lifespan(app: FastAPI):
         set_blackboard(blackboard)
         logger.info("Blackboard state initialized")
         
-        # Initialize agents (thin HTTP clients to sidecars)
+        # Initialize agents (WebSocket clients to sidecars)
         from .agents import Aligner, Architect, SysAdmin, Developer, Brain
+        import asyncio
         
         aligner = Aligner(blackboard)
         architect = Architect()
         sysadmin = SysAdmin()
         developer = Developer()
         
+        # Connect agent WebSocket clients (async with retry)
+        await architect.connect()
+        await sysadmin.connect()
+        await developer.connect()
+        
         set_agents(aligner, architect, sysadmin, developer)
-        logger.info("Agents initialized (Aligner, Architect, SysAdmin, Developer)")
+        logger.info("Agents initialized + WebSocket connected (Aligner, Architect, SysAdmin, Developer)")
         
-        # Initialize Brain orchestrator
-        brain = Brain(blackboard)
+        # UI WebSocket broadcast function (wired in Step 4)
+        # For now, a no-op until the /ws endpoint is added
+        connected_ui_clients: set = set()
+        
+        async def broadcast_to_ui(message: dict) -> None:
+            """Push message to all connected UI WebSocket clients."""
+            import json as _json
+            data = _json.dumps(message)
+            disconnected = set()
+            for client in connected_ui_clients:
+                try:
+                    await client.send_text(data)
+                except Exception:
+                    disconnected.add(client)
+            connected_ui_clients -= disconnected
+        
+        # Initialize Brain orchestrator with agents + broadcast
+        brain = Brain(
+            blackboard=blackboard,
+            agents={
+                "architect": architect,
+                "sysadmin": sysadmin,
+                "developer": developer,
+            },
+            broadcast=broadcast_to_ui,
+        )
         set_brain(brain)
-        logger.info("Brain orchestrator initialized")
+        # Store connected_clients on app state for the WS endpoint
+        app.state.connected_ui_clients = connected_ui_clients
+        app.state.brain = brain
+        logger.info("Brain orchestrator initialized with WebSocket agents + broadcast")
         
-        # Start Brain event loop (replaces old agent task loops)
-        import asyncio
-        
+        # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
-        logger.info("Brain event loop started - conversation queue active")
+        logger.info("Brain event loop started - WebSocket conversation queue active")
         
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
@@ -125,10 +156,13 @@ async def lifespan(app: FastAPI):
     # Cleanup
     logger.info("Darwin Blackboard shutting down...")
     
-    # Stop Brain event loop
+    # Stop Brain event loop + close agent WebSocket connections
     if redis:
         await brain.stop_event_loop()
-        logger.info("Brain event loop stopped")
+        await architect.close()
+        await sysadmin.close()
+        await developer.close()
+        logger.info("Brain event loop stopped, agent WebSocket connections closed")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:
@@ -170,6 +204,80 @@ async def health_check() -> HealthResponse:
         )
     
     return HealthResponse(status="brain_online")
+
+
+# =============================================================================
+# WebSocket Endpoint (UI real-time communication)
+# =============================================================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time UI communication.
+    
+    Receives: chat messages, approval actions
+    Sends: conversation turns, progress updates, event lifecycle
+    """
+    await websocket.accept()
+    
+    # Add to connected clients (set stored on app.state during lifespan)
+    clients = getattr(app.state, 'connected_ui_clients', set())
+    clients.add(websocket)
+    logger.info(f"UI WebSocket connected ({len(clients)} clients)")
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+            
+            if msg_type == "chat":
+                # Create event from chat message
+                from .dependencies import _blackboard
+                if _blackboard:
+                    message = data.get("message", "")
+                    service = data.get("service", "general")
+                    event_id = await _blackboard.create_event(
+                        source="chat",
+                        service=service,
+                        reason=message,
+                        evidence="User request via WebSocket chat",
+                    )
+                    await websocket.send_json({
+                        "type": "event_created",
+                        "event_id": event_id,
+                        "service": service,
+                        "reason": message,
+                    })
+                    logger.info(f"WS chat event created: {event_id}")
+                    
+            elif msg_type == "approve":
+                from .dependencies import _blackboard
+                from .models import ConversationTurn
+                event_id = data.get("event_id", "")
+                if _blackboard and event_id:
+                    event = await _blackboard.get_event(event_id)
+                    if event:
+                        turn = ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="user",
+                            action="approve",
+                            thoughts="User approved the plan.",
+                        )
+                        await _blackboard.append_turn(event_id, turn)
+                        await websocket.send_json({
+                            "type": "turn",
+                            "event_id": event_id,
+                            "turn": turn.model_dump(),
+                        })
+                        logger.info(f"WS approval for event: {event_id}")
+                        
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        clients.discard(websocket)
+        logger.info(f"UI WebSocket disconnected ({len(clients)} clients)")
 
 
 # =============================================================================
