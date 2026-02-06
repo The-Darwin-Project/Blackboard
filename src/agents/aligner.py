@@ -312,8 +312,10 @@ class Aligner:
         # Delegate to Blackboard for storage
         await self.blackboard.process_telemetry(payload)
         
-        # === CLOSED-LOOP: Anomaly Detection ===
+        # === CLOSED-LOOP: Anomaly Detection (LLM-assisted via Flash) ===
         await self._check_anomalies(payload)
+        
+        return True
     
     async def _analyze_version_drift(self, service: str) -> None:
         """
@@ -404,11 +406,6 @@ class Aligner:
             # Clear buffer and reset pending flag
             self._version_buffer.pop(service, None)
             self._version_analysis_pending[service] = False
-        
-        # === CLOSED-LOOP: Over-Provisioning Check (HPA scale-down) ===
-        await self._check_over_provisioned(payload)
-        
-        return True
     
     async def _check_anomalies(self, payload) -> None:
         """
