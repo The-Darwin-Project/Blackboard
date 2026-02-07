@@ -111,7 +111,7 @@ Before deciding how to respond to an event, classify it into a domain:
 
 ## GitOps Context
 Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
-The Store app uses helm/values.yaml in The-Darwin-Project/Store repo.
+When checking GitOps sync status, instruct sysAdmin to discover the GitOps tooling namespace first (e.g., search for ArgoCD or Flux namespaces) rather than assuming a specific namespace.
 """
 
 # Circuit breaker limits
@@ -524,7 +524,7 @@ class Brain:
 
             # Recursion guard
             depth = self._routing_depth.get(event_id, 0) + 1
-            if depth > 5:
+            if depth > 15:
                 logger.warning(f"Event {event_id} hit routing depth limit (5)")
                 await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
                 return

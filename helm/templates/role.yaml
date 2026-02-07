@@ -11,15 +11,27 @@ metadata:
     app.kubernetes.io/name: darwin-brain
     app.kubernetes.io/instance: {{ .Release.Name }}
 rules:
-  # Read pods and logs for service mapping and investigation
+  # Core resources -- read-only investigation
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "events"]
+    resources: ["pods", "pods/log", "events", "services", "endpoints", "configmaps", "secrets", "serviceaccounts", "namespaces"]
     verbs: ["get", "list", "watch"]
-  # Read deployments/replicasets for replica count
+  # Apps -- deployments, replicasets, statefulsets, daemonsets
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # Autoscaling -- HPA
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list"]
-  # Read pod metrics from metrics-server
+  # Networking -- ingresses, network policies
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list"]
+  # OpenShift routes
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list"]
+  # Pod metrics from metrics-server
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
@@ -38,6 +50,14 @@ rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications", "applicationsets"]
     verbs: ["get", "list", "watch"]
+  # Cluster-level read access for investigation
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces"]
+    verbs: ["get", "list"]
+  # Node metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
 ---
 # RoleBinding in openshift-gitops namespace for ArgoCD read access
 apiVersion: rbac.authorization.k8s.io/v1

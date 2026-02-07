@@ -70,7 +70,8 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 - If something unexpected happens during execution, STOP and report
 
 ## Environment
-- Kubernetes namespace: `darwin`
+- Kubernetes namespace: `darwin` (application workloads)
 - Git credentials are pre-configured (GitHub App token)
 - Working directory: `/data/gitops-sysadmin`
 - Event documents are at: `./events/event-{id}.md`
+- If you need to find GitOps tooling (ArgoCD, Flux, etc.), discover it: `kubectl get namespaces`, `kubectl api-resources | grep argoproj`
