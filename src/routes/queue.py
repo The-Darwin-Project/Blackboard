@@ -79,6 +79,29 @@ async def approve_event(
     return {"status": "approved", "event_id": event_id}
 
 
+@router.post("/{event_id}/reject")
+async def reject_event(
+    event_id: str,
+    body: dict = None,
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Reject a pending plan in an event conversation."""
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    reason = (body or {}).get("reason", "User rejected the plan.")
+    turn = ConversationTurn(
+        turn=len(event.conversation) + 1,
+        actor="user",
+        action="reject",
+        thoughts=reason,
+    )
+    await blackboard.append_turn(event_id, turn)
+    logger.info(f"User rejected event {event_id}: {reason}")
+    return {"status": "rejected", "event_id": event_id}
+
+
 @router.get("/closed/list")
 async def list_closed_events(
     limit: int = Query(50, ge=1, le=200),

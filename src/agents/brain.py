@@ -911,7 +911,7 @@ class Brain:
                     # Re-process if:
                     # 1. User approved or Aligner confirmed
                     # 2. Agent completed (last turn from agent, no active task) -- pick up stalled events
-                    if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "confirm"):
+                    if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "reject", "confirm"):
                         logger.info(f"User/Aligner action on event {eid}: {last_turn.actor}.{last_turn.action}")
                         await self.process_event(eid)
                     elif last_turn.actor in ("architect", "sysadmin", "developer") and last_turn.action not in ("busy",):

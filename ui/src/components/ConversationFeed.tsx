@@ -82,38 +82,190 @@ function EventCard({
   );
 }
 
-function AttachmentCard({ filename, content }: { filename: string; content: string }) {
-  const [expanded, setExpanded] = useState(false);
+/** Floating resizable Markdown preview window */
+function MarkdownViewer({
+  filename,
+  content,
+  onClose,
+}: {
+  filename: string;
+  content: string;
+  onClose: () => void;
+}) {
+  const [maximized, setMaximized] = useState(false);
+  const [size, setSize] = useState({ width: 600, height: 450 });
+  const [pos, setPos] = useState({ x: 100, y: 60 });
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
+
+  // Drag handler
+  const onDragStart = (e: React.MouseEvent) => {
+    if (maximized) return;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
+    const onMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      setPos({
+        x: dragRef.current.origX + (ev.clientX - dragRef.current.startX),
+        y: dragRef.current.origY + (ev.clientY - dragRef.current.startY),
+      });
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // Resize handler
+  const onResizeStart = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (maximized) return;
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: size.width, origH: size.height };
+    const onMove = (ev: MouseEvent) => {
+      if (!resizeRef.current) return;
+      setSize({
+        width: Math.max(300, resizeRef.current.origW + (ev.clientX - resizeRef.current.startX)),
+        height: Math.max(200, resizeRef.current.origH + (ev.clientY - resizeRef.current.startY)),
+      });
+    };
+    const onUp = () => {
+      resizeRef.current = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // Simple markdown-to-HTML (headers, bold, lists, code blocks)
+  const renderMarkdown = (md: string) => {
+    return md
+      .replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 4px;color:#e2e8f0">$1</h4>')
+      .replace(/^## (.+)$/gm, '<h3 style="margin:16px 0 6px;color:#e2e8f0">$1</h3>')
+      .replace(/^# (.+)$/gm, '<h2 style="margin:20px 0 8px;color:#e2e8f0">$1</h2>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e2e8f0">$1</strong>')
+      .replace(/^- (.+)$/gm, '<li style="margin:2px 0;color:#cbd5e1">$1</li>')
+      .replace(/^(\d+)\. (.+)$/gm, '<li style="margin:2px 0;color:#cbd5e1">$2</li>')
+      .replace(/\n/g, '<br/>');
+  };
+
+  const windowStyle: React.CSSProperties = maximized
+    ? { position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 1000 }
+    : { position: 'fixed', top: pos.y, left: pos.x, width: size.width, height: size.height, zIndex: 1000 };
+
   return (
-    <div style={{
-      border: '1px solid #334155', borderRadius: 8, marginTop: 8,
-      background: '#0f172a', overflow: 'hidden',
-    }}>
+    <>
+      {/* Backdrop */}
       <div
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          padding: '6px 12px', cursor: 'pointer', display: 'flex',
-          justifyContent: 'space-between', alignItems: 'center',
-          background: '#1e293b', fontSize: 12, color: '#94a3b8',
+        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 999 }}
+        onClick={onClose}
+      />
+      {/* Window */}
+      <div style={{
+        ...windowStyle,
+        background: '#0f172a', border: '1px solid #334155', borderRadius: maximized ? 0 : 8,
+        display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+      }}>
+        {/* Title bar */}
+        <div
+          onMouseDown={onDragStart}
+          style={{
+            padding: '8px 12px', background: '#1e293b', borderBottom: '1px solid #334155',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            cursor: maximized ? 'default' : 'move', borderRadius: maximized ? 0 : '8px 8px 0 0',
+            flexShrink: 0, userSelect: 'none',
+          }}
+        >
+          <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: 600 }}>{filename}</span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={() => setMaximized(!maximized)}
+              style={{
+                background: '#334155', border: 'none', borderRadius: 4, color: '#94a3b8',
+                width: 24, height: 24, cursor: 'pointer', fontSize: 12,
+              }}
+              title={maximized ? 'Restore' : 'Maximize'}
+            >
+              {maximized ? '◱' : '◳'}
+            </button>
+            <button
+              onClick={onClose}
+              style={{
+                background: '#dc2626', border: 'none', borderRadius: 4, color: '#fff',
+                width: 24, height: 24, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+              }}
+              title="Close"
+            >
+              x
+            </button>
+          </div>
+        </div>
+        {/* Content */}
+        <div style={{
+          flex: 1, overflow: 'auto', padding: 16, fontSize: 13, lineHeight: 1.6, color: '#cbd5e1',
         }}
-      >
-        <span>{filename}</span>
-        <span>{expanded ? '[-]' : '[+]'}</span>
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+        />
+        {/* Resize handle */}
+        {!maximized && (
+          <div
+            onMouseDown={onResizeStart}
+            style={{
+              position: 'absolute', bottom: 0, right: 0, width: 16, height: 16,
+              cursor: 'nwse-resize', opacity: 0.5,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16">
+              <path d="M14 14L8 14L14 8Z" fill="#64748b" />
+            </svg>
+          </div>
+        )}
       </div>
-      {expanded && (
-        <pre style={{
-          padding: 12, fontSize: 12, color: '#e2e8f0',
-          overflow: 'auto', maxHeight: 400, margin: 0,
-          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-        }}>
-          {content}
-        </pre>
-      )}
-    </div>
+    </>
   );
 }
 
-function TurnBubble({ turn, eventId }: { turn: ConversationTurn; eventId?: string }) {
+/** Attachment icon shown inline in Brain turn bubbles */
+function AttachmentIcon({
+  filename,
+  content,
+}: {
+  filename: string;
+  content: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <span
+        onClick={() => setOpen(true)}
+        title={filename}
+        style={{
+          cursor: 'pointer', marginLeft: 6, display: 'inline-flex',
+          alignItems: 'center', verticalAlign: 'middle',
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.8 }}>
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+        </svg>
+      </span>
+      {open && (
+        <MarkdownViewer filename={filename} content={content} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+function TurnBubble({
+  turn,
+  eventId,
+  attachment,
+}: {
+  turn: ConversationTurn;
+  eventId?: string;
+  attachment?: { filename: string; content: string } | null;
+}) {
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   return (
     <div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12, marginBottom: 12 }}>
@@ -128,6 +280,9 @@ function TurnBubble({ turn, eventId }: { turn: ConversationTurn; eventId?: strin
         <span style={{ fontSize: 11, color: '#666' }}>
           {new Date(turn.timestamp * 1000).toLocaleTimeString()}
         </span>
+        {attachment && (
+          <AttachmentIcon filename={attachment.filename} content={attachment.content} />
+        )}
       </div>
       {turn.thoughts && <p style={{ margin: '4px 0', fontSize: 14, color: '#e2e8f0' }}>{turn.thoughts}</p>}
       {turn.result && <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>}
@@ -143,16 +298,35 @@ function TurnBubble({ turn, eventId }: { turn: ConversationTurn; eventId?: strin
         <p style={{ margin: '4px 0', fontSize: 13, color: '#94a3b8' }}>Evidence: {turn.evidence}</p>
       )}
       {turn.pendingApproval && eventId && (
-        <button
-          onClick={() => approveEvent(eventId)}
-          style={{
-            background: '#22c55e', color: '#fff', border: 'none',
-            padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
-            marginTop: 8, fontWeight: 600,
-          }}
-        >
-          Approve Plan
-        </button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button
+            onClick={() => approveEvent(eventId)}
+            style={{
+              background: '#22c55e', color: '#fff', border: 'none',
+              padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >
+            Approve
+          </button>
+          <button
+            onClick={() => {
+              const reason = prompt('Reason for rejection (optional):') || 'User rejected the plan.';
+              fetch(`/queue/${eventId}/reject`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason }),
+              });
+            }}
+            style={{
+              background: '#ef4444', color: '#fff', border: 'none',
+              padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >
+            Reject
+          </button>
+        </div>
       )}
     </div>
   );
@@ -202,6 +376,10 @@ export function ConversationFeed() {
     if (msg.type === 'turn' || msg.type === 'event_created' || msg.type === 'event_closed') {
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
+      // Auto-select newly created events from chat
+      if (msg.type === 'event_created' && msg.event_id) {
+        setSelectedEventId(msg.event_id as string);
+      }
       if (msg.type === 'turn') {
         const turn = msg.turn as Record<string, unknown>;
         if (turn?.actor) {
@@ -348,15 +526,20 @@ export function ConversationFeed() {
 
           {/* Scrollable conversation */}
           <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>
-            {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => (
-              <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} />
-            ))}
-            {/* Attachments for this event */}
-            {attachments
-              .filter((a) => a.eventId === selectedEventId)
-              .map((a, i) => (
-                <AttachmentCard key={i} filename={a.filename} content={a.content} />
-              ))}
+            {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
+              // Find attachment for this turn (Brain route turns have attachments)
+              const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
+                ? attachments.find((a) => a.eventId === selectedEventId)
+                : null;
+              return (
+                <TurnBubble
+                  key={i}
+                  turn={turn}
+                  eventId={selectedEvent.id}
+                  attachment={turnAttachment}
+                />
+              );
+            })}
             {/* Active progress indicators */}
             {Object.keys(activeAgents).map((agent) => (
               <ProgressDots key={agent} agent={agent} />
@@ -387,15 +570,22 @@ export function ConversationFeed() {
       {/* Chat Input                                                       */}
       {/* ================================================================ */}
       <div style={{ padding: 12, borderTop: '1px solid #333', display: 'flex', gap: 8, flexShrink: 0 }}>
-        <input
-          type="text"
+        <textarea
           value={inputMessage}
           onChange={(e) => setInputMessage(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-          placeholder="Ask the Brain..."
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+            }
+          }}
+          placeholder="Ask the Brain... (Shift+Enter for new line)"
+          rows={1}
           style={{
             flex: 1, background: '#1e293b', border: '1px solid #334155',
             borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
+            resize: 'none', minHeight: 38, maxHeight: 120, overflow: 'auto',
+            fontFamily: 'inherit', lineHeight: '1.4',
           }}
         />
         <button
