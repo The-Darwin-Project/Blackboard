@@ -1,43 +1,59 @@
 # Darwin Blackboard (Brain)
 
-The central nervous system of Darwin - autonomous infrastructure management.
+The central nervous system of Darwin -- an autonomous closed-loop cloud operations system.
 
 ## Architecture
 
-The Blackboard implements the **Blackboard Pattern** where agents never communicate directly:
+The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Darwin Brain Pod                          │
-│                                                              │
-│  ┌──────────┐    ┌──────────────────────────────────────┐  │
-│  │  Redis   │◄───│           Blackboard State            │  │
-│  │ Sidecar  │    │  ┌────────┐ ┌────────┐ ┌────────┐   │  │
-│  └──────────┘    │  │Structure│ │Metadata│ │ Plans  │   │  │
-│                  │  │ Layer   │ │ Layer  │ │ Layer  │   │  │
-│                  │  └────────┘ └────────┘ └────────┘   │  │
-│                  └──────────────────────────────────────┘  │
-│                           ▲         ▲         ▲            │
-│                           │         │         │            │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐            │
-│  │ Aligner  │    │ Architect │    │ SysAdmin │            │
-│  │ (Agent 1)│    │ (Agent 2) │    │ (Agent 3)│            │
-│  └──────────┘    └──────────┘    └──────────┘            │
-│       ▲               ▲               │                    │
-└───────┼───────────────┼───────────────┼────────────────────┘
-        │               │               │
-        │               │               ▼
-   [Telemetry]     [Chat API]      [Git Repo]
-   from Store
+                 ┌──────────────────────────────────────────────────┐
+                 │                  Darwin Brain Pod                 │
+                 │                                                   │
+                 │  ┌─────────┐    ┌──────────┐    ┌───────────┐   │
+                 │  │  Brain  │◄──►│  Redis    │◄──►│  Aligner  │   │
+                 │  │ Vertex  │    │ (State +  │    │ (In-proc  │   │
+                 │  │ AI Pro  │    │  Queue)   │    │  + Flash)  │   │
+                 │  └────┬────┘    └──────────┘    └───────────┘   │
+                 │       │ WebSocket                                 │
+                 │  ┌────┼──────────────┬──────────────┐           │
+                 │  ▼    ▼              ▼              ▼           │
+                 │ ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+                 │ │Architect │  │ sysAdmin │  │Developer │       │
+                 │ │  :9091   │  │  :9092   │  │  :9093   │       │
+                 │ │Gemini CLI│  │Gemini CLI│  │Gemini CLI│       │
+                 │ └──────────┘  └──────────┘  └──────────┘       │
+                 │   Same base image, different GEMINI.md rules     │
+                 └──────────────────────────────────────────────────┘
 ```
 
-## Trinity Agents
+## Agents
 
-| Agent | Role | Nature | Input | Output |
-|-------|------|--------|-------|--------|
-| **Aligner** | Truth Maintenance | Hybrid (Python + AI Flash) | Telemetry | Updates Blackboard |
-| **Architect** | Strategy | Pure AI (Vertex AI Pro) | Chat + Context | JSON Plans |
-| **SysAdmin** | Execution | Hybrid (Python + Gemini CLI) | Approved Plans | Git Commits |
+| Agent | Role | Technology | Capabilities |
+|-------|------|-----------|--------------|
+| **Brain** | Orchestrator | Vertex AI Pro (Gemini 3 Pro, temp >0.7) | Cynefin classification, agent routing, feedback loop verification |
+| **Aligner** | Truth Maintenance | In-process Python + Vertex AI Flash | Telemetry processing, LLM signal analysis, event creation |
+| **Architect** | Strategy | Gemini CLI sidecar | Code review, Markdown plans, risk assessment. NEVER executes. |
+| **sysAdmin** | Execution | Gemini CLI sidecar | GitOps changes, kubectl investigation. Read-only cluster access. |
+| **Developer** | Implementation | Gemini CLI sidecar | Source code changes, feature implementation, bug fixes. |
+
+## Key Features
+
+- **Conversation Queue** -- Shared event documents in Redis with append-only conversation turns
+- **WebSocket Communication** -- Real-time bidirectional streaming between Brain, agents, and UI
+- **Cynefin Decision Framework** -- Brain classifies events into Clear/Complicated/Complex/Chaotic domains
+- **LLM Signal Analysis** -- Aligner uses Flash to interpret metrics patterns (not hardcoded thresholds)
+- **GitOps-Only Mutations** -- All changes go through git (clone, modify, push). kubectl is read-only.
+- **Event Dedup + Defer** -- Prevents event spam, supports deferred re-processing
+- **Closed-Loop Verification** -- Brain verifies every change via Aligner before closing events
+
+## Autonomous Remediation Examples
+
+See [docs/autonomous-remediation-example.md](../docs/autonomous-remediation-example.md) for a documented 21-turn multi-agent event where the system autonomously:
+1. Detected an over-provisioned service
+2. Discovered the GitOps repository by reasoning from the container image URL
+3. Produced and executed a scaling plan via GitOps
+4. Verified the outcome through independent sources
 
 ## Quick Start
 
@@ -48,7 +64,6 @@ The Blackboard implements the **Blackboard Pattern** where agents never communic
 docker run -d --name redis -p 6379:6379 redis:7
 
 # Install dependencies
-cd BlackBoard
 pip install -r requirements.txt
 
 # Set environment variables
@@ -63,117 +78,74 @@ uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ### Helm Deployment (OpenShift)
 
 ```bash
-# Set GCP project
 helm install darwin-brain ./helm \
   --set gcp.project=your-project-id \
   --set gcp.existingSecret=gcp-sa-key
 
-# Verify
+# Verify -- should show 5 containers (brain, redis, architect, sysadmin, developer)
 kubectl get pods -l app=darwin-brain
-curl http://darwin-brain:8000/
 ```
 
 ## API Endpoints
 
-### Health
+### Health & Info
 
-```bash
-GET /              # Returns {"status": "brain_online"}
-GET /health        # Alternative health check
-GET /info          # API information
+```
+GET /health         # {"status": "brain_online"}
+GET /info           # API information and available endpoints
 ```
 
-### Telemetry (from Darwin Store)
+### WebSocket (Real-time UI)
 
-```bash
-POST /telemetry/
-{
-  "service": "inventory-api",
-  "version": "v2.0",
-  "metrics": {"cpu": 75.0, "memory": 60.0, "error_rate": 0.5},
-  "topology": {
-    "dependencies": [
-      {"target": "postgres-primary", "type": "db", "env_var": "DATABASE_URL"}
-    ]
-  }
-}
+```
+WS /ws              # Bidirectional WebSocket for live conversation updates
+                    # Receives: turn, progress, event_created, event_closed, attachment
+                    # Sends: chat, approve, reject, user_message
 ```
 
-### Topology (Architecture Graph - Visualization #1)
+### Conversation Queue
 
-```bash
-GET /topology/           # JSON topology
-GET /topology/mermaid    # Mermaid diagram
-GET /topology/services   # List service names
+```
+GET  /queue/active             # List active events with metadata
+GET  /queue/{event_id}         # Full event document with conversation
+POST /queue/{event_id}/approve # Approve a pending plan
+POST /queue/{event_id}/reject  # Reject a pending plan with reason
+GET  /queue/closed/list        # Recently closed events
 ```
 
-### Plans
+### Chat
 
-```bash
-GET /plans/                  # List all plans
-GET /plans/{id}              # Get plan details
-POST /plans/{id}/approve     # Approve a pending plan
-POST /plans/{id}/reject      # Reject a pending plan
-POST /plans/{id}/execute     # Execute an approved plan
 ```
-
-### Metrics (Resources Chart - Visualization #2)
-
-```bash
-GET /metrics/{service}          # Current metrics
-GET /metrics/{service}/history  # Time-series history
-GET /metrics/chart?services=svc1&services=svc2&range_seconds=3600
-```
-
-### Chat (Architect Interface)
-
-```bash
 POST /chat/
-{"message": "Scale inventory-api to 3 replicas"}
+{"message": "Scale darwin-store to 3 replicas", "service": "darwin-store"}
 
 # Response:
+{"event_id": "evt-abc123", "status": "created"}
+# Brain processes asynchronously -- track via WebSocket or GET /queue/{event_id}
+```
+
+### Telemetry
+
+```
+POST /telemetry/
 {
-  "message": "I've created a plan (plan-abc123) for scaling inventory-api...",
-  "plan_id": "plan-abc123"
+  "service": "darwin-store",
+  "version": "v52",
+  "metrics": {"cpu": 75.0, "memory": 60.0, "error_rate": 0.5},
+  "topology": {"dependencies": [{"target": "postgres", "type": "db"}]},
+  "gitops": {"repo": "The-Darwin-Project/Store", "helm_path": "helm/values.yaml"}
 }
 ```
 
-## Two Key Visualizations
+### Topology & Metrics
 
-### 1. Architecture Graph
-
-Real-time topology of services and their dependencies.
-
-```bash
-curl http://localhost:8000/topology/mermaid
 ```
-
-Returns Mermaid graph:
-```mermaid
-graph TD
-    inventory_api[inventory-api] --> postgres_primary[postgres-primary]
-    inventory_api[inventory-api] --> cache_redis[cache-redis]
-```
-
-### 2. Resources Consumption Chart
-
-Time-series metrics correlated with architecture events.
-
-```bash
-curl "http://localhost:8000/metrics/chart?services=inventory-api&range_seconds=3600"
-```
-
-Returns:
-```json
-{
-  "series": [
-    {"service": "inventory-api", "metric": "cpu", "data": [[timestamp, value], ...]},
-    {"service": "inventory-api", "metric": "memory", "data": [...]}
-  ],
-  "events": [
-    {"type": "plan_executed", "timestamp": 1234567890, "details": {"action": "scale"}}
-  ]
-}
+GET /topology/                 # JSON topology
+GET /topology/graph            # Cytoscape.js graph data
+GET /topology/mermaid          # Mermaid diagram
+GET /metrics/{service}         # Current metrics
+GET /metrics/chart             # Time-series chart data
+GET /events/                   # Architecture event timeline
 ```
 
 ## Configuration
@@ -185,34 +157,29 @@ Returns:
 | `REDIS_HOST` | Redis hostname | `localhost` |
 | `REDIS_PASSWORD` | Redis password | (empty) |
 | `GCP_PROJECT` | GCP project ID | (required) |
-| `GCP_LOCATION` | Vertex AI location | `us-central1` |
-| `VERTEX_MODEL_PRO` | Architect model | `gemini-3-pro-preview` |
+| `GCP_LOCATION` | Vertex AI location | `global` |
+| `VERTEX_MODEL_PRO` | Brain model | `gemini-3-pro-preview` |
 | `VERTEX_MODEL_FLASH` | Aligner model | `gemini-3-flash-preview` |
-| `SYSADMIN_DRY_RUN` | Dry run mode | `true` |
-| `SYSADMIN_AUTO_APPROVE` | Auto-approve CLI actions | `false` |
+| `ARCHITECT_SIDECAR_URL` | Architect WebSocket | `http://localhost:9091` |
+| `SYSADMIN_SIDECAR_URL` | sysAdmin WebSocket | `http://localhost:9092` |
+| `DEVELOPER_SIDECAR_URL` | Developer WebSocket | `http://localhost:9093` |
 | `DEBUG` | Enable debug logging | `false` |
 
-## Air Gap Constraints
+## Safety
 
-Per the architecture rules, agents have import restrictions:
+### Air Gap (Soft Enforcement via GEMINI.md)
 
-| Agent | CAN Import | CANNOT Import |
-|-------|------------|---------------|
-| Aligner | redis, vertexai | kubernetes, git |
-| Architect | redis, vertexai | kubernetes, git, subprocess |
-| SysAdmin | redis, subprocess | vertexai |
+| Agent | Can Do | Cannot Do |
+|-------|--------|-----------|
+| Architect | Clone + read repos | Commit, push, kubectl mutations |
+| sysAdmin | Git clone/push, kubectl read | kubectl write, invent Helm sections |
+| Developer | Git clone/push, read Helm | Modify infrastructure, kubectl scale |
 
-## Safety Features
+### Security Patterns
 
-The SysAdmin includes a safety decorator that blocks dangerous operations:
-
-- `rm -rf`
-- `kubectl delete namespace`
-- `git push --force`
-- `drop database`
-- etc.
-
-See `agents/sysadmin.py` for the full list.
+- `FORBIDDEN_PATTERNS` in `security.py` blocks: `rm -rf`, `drop database`, `kubectl delete namespace`, `git push --force`, etc.
+- Dockerfile safety rules: agents can add `ARG/ENV/COPY/RUN` but cannot change `FROM/CMD/USER/WORKDIR`
+- Structural changes require user approval (Brain pauses for confirmation)
 
 ## License
 
