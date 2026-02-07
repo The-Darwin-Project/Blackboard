@@ -412,7 +412,7 @@ class Brain:
     ) -> None:
         """Process event using Vertex AI LLM function calling."""
         # Build prompt from event context
-        prompt = self._build_event_prompt(event)
+        prompt = await self._build_event_prompt(event)
 
         try:
             response = await asyncio.to_thread(
@@ -458,8 +458,8 @@ class Brain:
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
 
-    def _build_event_prompt(self, event: EventDocument) -> str:
-        """Serialize event document as prompt text for the LLM."""
+    async def _build_event_prompt(self, event: EventDocument) -> str:
+        """Serialize event document as prompt text for the LLM, including service metadata."""
         lines = [
             f"Event ID: {event.id}",
             f"Source: {event.source}",
@@ -468,9 +468,26 @@ class Brain:
             f"Reason: {event.event.reason}",
             f"Evidence: {event.event.evidence}",
             f"Time: {event.event.timeDate}",
-            "",
-            "Conversation so far:",
         ]
+
+        # Include service metadata so the LLM knows the GitOps coordinates
+        svc = await self.blackboard.get_service(event.service)
+        if svc:
+            lines.append("")
+            lines.append("Service Metadata:")
+            lines.append(f"  Version: {svc.version}")
+            if svc.gitops_repo:
+                lines.append(f"  GitOps Repo: {svc.gitops_repo}")
+            if svc.gitops_repo_url:
+                lines.append(f"  Repo URL: {svc.gitops_repo_url}")
+            if svc.gitops_helm_path:
+                lines.append(f"  Helm Values Path: {svc.gitops_helm_path}")
+            if svc.replicas_ready is not None:
+                lines.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
+            lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
+            lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
+
+        lines.extend(["", "Conversation so far:"])
 
         if not event.conversation:
             lines.append("(No turns yet -- this is a new event. Triage it.)")
@@ -716,12 +733,27 @@ class Brain:
             except (json.JSONDecodeError, TypeError):
                 pass  # Not a JSON question, treat as regular result
 
+            # Handle empty result as an error (Gemini CLI returned no output)
+            result_str = str(result).strip() if result else ""
+            if not result_str:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=agent_name,
+                    action="error",
+                    thoughts="Agent returned empty response (Gemini CLI produced no output). May need retry.",
+                )
+                await self.blackboard.append_turn(event_id, turn)
+                await self._broadcast_turn(event_id, turn)
+                logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
+                await self.process_event(event_id)
+                return
+
             # Append agent result turn
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
                 action="execute",
-                result=str(result)[:2000],  # Cap result length
+                result=result_str[:2000],  # Cap result length
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)

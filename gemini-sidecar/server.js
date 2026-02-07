@@ -233,6 +233,7 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
       lineBuffer = lines.pop(); // Keep incomplete line in buffer
       for (const line of lines) {
         if (line.trim()) {
+          console.log(`[${new Date().toISOString()}] [${eventId}] >> ${line.slice(0, 200)}`);
           wsSend(ws, { type: 'progress', event_id: eventId, message: line });
         }
       }
@@ -249,6 +250,14 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
       }
 
       console.log(`[${new Date().toISOString()}] Gemini exited code ${code} (${stdout.length} chars)`);
+      if (stdout.length > 0) {
+        console.log(`[${new Date().toISOString()}] Gemini stdout: ${stdout.slice(0, 1000)}${stdout.length > 1000 ? '...' : ''}`);
+      } else {
+        console.log(`[${new Date().toISOString()}] WARNING: Gemini produced EMPTY stdout`);
+      }
+      if (stderr) {
+        console.log(`[${new Date().toISOString()}] Gemini stderr: ${stderr.slice(0, 500)}`);
+      }
 
       if (code === 0) {
         try {
