@@ -7,14 +7,14 @@ import { useQuery } from '@tanstack/react-query';
 import { getChartData, getServices } from '../api/client';
 import type { ChartData } from '../api/types';
 
-// Polling interval: 5 seconds
-const METRICS_POLL_INTERVAL = 5000;
+// Polling interval: 15 seconds (reduced from 5s to save memory)
+const METRICS_POLL_INTERVAL = 15000;
 
 /**
  * Hook for fetching chart data for specified services.
  * If services is undefined/empty, fetches all services first.
  */
-export function useMetrics(services?: string[], rangeSeconds = 3600) {
+export function useMetrics(services?: string[], rangeSeconds = 900) {  // 15 min window (was 1h)
   // First fetch services if not provided
   const servicesQuery = useQuery<string[]>({
     queryKey: ['services'],
@@ -33,5 +33,6 @@ export function useMetrics(services?: string[], rangeSeconds = 3600) {
     enabled: effectiveServices.length > 0,
     refetchInterval: METRICS_POLL_INTERVAL,
     staleTime: METRICS_POLL_INTERVAL,
+    gcTime: 60000, // Garbage collect stale cache after 60s
   });
 }

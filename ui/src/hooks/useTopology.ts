@@ -7,8 +7,8 @@ import { useQuery } from '@tanstack/react-query';
 import { ApiError, getTopology, getService } from '../api/client';
 import type { Service, TopologyResponse } from '../api/types';
 
-// Polling interval: 2 seconds
-const TOPOLOGY_POLL_INTERVAL = 2000;
+// Polling interval: 15 seconds (reduced from 2s -- topology rarely changes)
+const TOPOLOGY_POLL_INTERVAL = 15000;
 
 /**
  * Hook for fetching full topology with service details.

@@ -6,8 +6,8 @@ import { useQuery } from '@tanstack/react-query';
 import { getGraphData } from '../api/client';
 import type { GraphResponse } from '../api/types';
 
-// Polling interval: 5 seconds (matches metrics)
-const GRAPH_POLL_INTERVAL = 5000;
+// Polling interval: 15 seconds (reduced from 5s to save memory)
+const GRAPH_POLL_INTERVAL = 15000;
 
 /**
  * Hook for fetching graph data for Cytoscape visualization.
