@@ -115,7 +115,7 @@ When checking GitOps sync status, instruct sysAdmin to discover the GitOps tooli
 """
 
 # Circuit breaker limits
-MAX_TURNS_PER_EVENT = 20
+MAX_TURNS_PER_EVENT = 30
 MAX_EVENT_DURATION_SECONDS = 1800  # 30 minutes
 
 # Volume mount paths (must match Helm deployment.yaml)
@@ -367,12 +367,16 @@ class Brain:
                     )
                     return
 
-        # Circuit breaker: max turns
-        if len(event.conversation) >= MAX_TURNS_PER_EVENT:
-            logger.warning(f"Event {event_id} hit max turns ({MAX_TURNS_PER_EVENT})")
+        # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
+        agent_turns = sum(
+            1 for t in event.conversation
+            if t.actor in ("architect", "sysadmin", "developer")
+        )
+        if agent_turns >= MAX_TURNS_PER_EVENT:
+            logger.warning(f"Event {event_id} hit max agent turns ({agent_turns}/{MAX_TURNS_PER_EVENT})")
             await self._close_and_broadcast(
                 event_id,
-                f"TIMEOUT: Event exceeded {MAX_TURNS_PER_EVENT} turns. Force closed.",
+                f"TIMEOUT: Event exceeded {MAX_TURNS_PER_EVENT} agent execution turns. Force closed.",
             )
             return
 
