@@ -1,5 +1,5 @@
 # BlackBoard/helm/templates/role.yaml
-# Role for reading pod metrics from metrics-server
+# Role for reading pod metrics + K8s resources in the darwin namespace
 {{- if .Values.observer.enabled }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -23,4 +23,38 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+---
+# ClusterRole for reading ArgoCD Application and ApplicationSet CRDs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-argocd-reader
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  # Read ArgoCD Applications
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets"]
+    verbs: ["get", "list", "watch"]
+---
+# RoleBinding in openshift-gitops namespace for ArgoCD read access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-argocd-reader
+  namespace: openshift-gitops
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-argocd-reader
+  apiGroup: rbac.authorization.k8s.io
 {{- end }}

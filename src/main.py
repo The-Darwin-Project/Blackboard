@@ -253,6 +253,29 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     logger.info(f"WS chat event created: {event_id}")
                     
+            elif msg_type == "user_message":
+                # Add user message to an existing event conversation
+                from .dependencies import _blackboard
+                from .models import ConversationTurn
+                event_id = data.get("event_id", "")
+                message = data.get("message", "")
+                if _blackboard and event_id and message:
+                    event = await _blackboard.get_event(event_id)
+                    if event:
+                        turn = ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="user",
+                            action="message",
+                            thoughts=message,
+                        )
+                        await _blackboard.append_turn(event_id, turn)
+                        await websocket.send_json({
+                            "type": "turn",
+                            "event_id": event_id,
+                            "turn": turn.model_dump(),
+                        })
+                        logger.info(f"WS user message added to event: {event_id}")
+
             elif msg_type == "approve":
                 from .dependencies import _blackboard
                 from .models import ConversationTurn

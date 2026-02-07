@@ -396,11 +396,15 @@ export function ConversationFeed() {
         [msg.actor as string]: msg.message as string,
       }));
     } else if (msg.type === 'attachment') {
-      setAttachments((prev) => [...prev.slice(-10), {
-        eventId: msg.event_id as string,
-        filename: msg.filename as string,
-        content: msg.content as string,
-      }]);
+      // Replace attachment per event (always show latest version)
+      setAttachments((prev) => {
+        const filtered = prev.filter((a) => a.eventId !== (msg.event_id as string));
+        return [...filtered.slice(-9), {
+          eventId: msg.event_id as string,
+          filename: msg.filename as string,
+          content: msg.content as string,
+        }];
+      });
     }
   });
 
@@ -415,7 +419,17 @@ export function ConversationFeed() {
 
   const handleSend = () => {
     if (!inputMessage.trim()) return;
-    sendMessage(inputMessage);
+    if (selectedEventId && connected) {
+      // Send as user message to the existing event conversation
+      send({
+        type: 'user_message',
+        event_id: selectedEventId,
+        message: inputMessage.trim(),
+      });
+    } else {
+      // No event selected -- create a new event
+      sendMessage(inputMessage);
+    }
     setInputMessage('');
   };
 
