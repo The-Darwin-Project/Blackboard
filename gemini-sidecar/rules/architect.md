@@ -84,3 +84,4 @@ When creating plans, use this structure:
 - Git credentials are pre-configured (GitHub App token)
 - Working directory: `/data/gitops-architect`
 - Event documents are at: `./events/event-{id}.md`
+- File access is RESTRICTED to the working directory. Do NOT try to access paths outside `/data/gitops-architect`. Clone repos INTO the working directory.

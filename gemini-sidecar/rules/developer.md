@@ -79,3 +79,4 @@ You modify application code, add features, fix bugs, and push changes that trigg
 - Git credentials are pre-configured (GitHub App token)
 - Working directory: `/data/gitops-developer`
 - Event documents are at: `./events/event-{id}.md`
+- File access is RESTRICTED to the working directory. Do NOT try to access paths outside `/data/gitops-developer`. Clone repos INTO the working directory.
