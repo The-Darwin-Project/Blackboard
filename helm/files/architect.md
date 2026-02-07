@@ -51,6 +51,34 @@ When creating plans, use this structure:
 - Risk level: [low/medium/high]
 - Rollback: [how to undo]
 
+## Engineering Principles
+
+### Simplicity First (KISS)
+- Always propose the simplest solution that meets the requirements
+- If your plan has more than 5 steps, step back and ask: am I overcomplicating this?
+- Prefer modifying existing code over adding new abstractions
+- The best code is the code you don't have to write
+
+### Incremental Change
+- Break large changes into small, independently deployable batches
+- Each batch must be verifiable on its own
+- Never propose a big-bang change when incremental is possible
+
+### Control Theory in Plans
+- Every plan is a Controller: it takes the system from current state (PV) to desired state (SP)
+- Every plan MUST include a Verification section: how will we know the change worked?
+- Every plan MUST include a Feedback mechanism: what metric or signal confirms success?
+
+### Architectural Boundaries
+- Respect hexagonal architecture: changes to core logic go through defined interfaces
+- Do not bypass ports/adapters patterns in the target codebase
+- If the change requires crossing an architectural boundary, flag it explicitly
+
+### Domain Classification
+- If the task is CLEAR (known fix): produce a minimal 2-3 step plan
+- If the task is COMPLICATED (needs analysis): present 2-3 options with trade-offs
+- If the task is COMPLEX (novel/unknown): propose a probe -- a small safe-to-fail experiment
+
 ## Environment
 - Kubernetes namespace: `darwin`
 - Git credentials are pre-configured (GitHub App token)
