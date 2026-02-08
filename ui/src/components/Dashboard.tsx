@@ -10,6 +10,8 @@ import GraphContextMenu from './GraphContextMenu';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
 import ConversationFeed from './ConversationFeed';
+import AgentStreamCard from './AgentStreamCard';
+import { WebSocketProvider, useWSMessage } from '../contexts/WebSocketContext';
 
 interface ContextMenuState {
   serviceName: string;
@@ -21,12 +23,50 @@ const MIN_SIDEBAR_WIDTH = 280;
 const MAX_SIDEBAR_WIDTH = 600;
 const DEFAULT_SIDEBAR_WIDTH = 400;
 
-function Dashboard() {
+// Agent stream state -- per-agent message buffers
+interface AgentStreamState {
+  messages: string[];
+  eventId: string | null;
+  isActive: boolean;
+}
+
+const AGENTS = ['architect', 'sysadmin', 'developer'] as const;
+const MAX_BUFFER = 100;
+
+function DashboardInner() {
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Agent streaming card state
+  const [agentStreams, setAgentStreams] = useState<Record<string, AgentStreamState>>(() => {
+    const init: Record<string, AgentStreamState> = {};
+    for (const a of AGENTS) init[a] = { messages: [], eventId: null, isActive: false };
+    return init;
+  });
+
+  // Route WS messages to agent stream cards
+  useWSMessage((msg) => {
+    if (msg.type === 'progress' && msg.actor && AGENTS.includes(msg.actor as typeof AGENTS[number])) {
+      setAgentStreams((prev) => {
+        const agent = msg.actor as string;
+        const current = prev[agent] || { messages: [], eventId: null, isActive: false };
+        const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
+        return { ...prev, [agent]: { messages, eventId: (msg.event_id as string) || current.eventId, isActive: true } };
+      });
+    } else if (msg.type === 'turn') {
+      const turn = msg.turn as Record<string, unknown>;
+      const actor = turn?.actor as string;
+      if (actor && AGENTS.includes(actor as typeof AGENTS[number])) {
+        setAgentStreams((prev) => ({
+          ...prev,
+          [actor]: { ...prev[actor], isActive: false },
+        }));
+      }
+    }
+  });
 
   // Handle node click - open inspector
   const handleNodeClick = useCallback((serviceName: string) => {
@@ -104,10 +144,23 @@ function Dashboard() {
         }`} />
       </div>
 
-      {/* Right Column: Graphs & Metrics */}
-      <div className="flex-1 flex flex-col gap-4 min-w-0">
-        {/* Top: Architecture Graph */}
-        <div className="flex-1 min-h-[300px] bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
+      {/* Right Column: Agent Streams + Graphs + Metrics */}
+      <div className="flex-1 flex flex-col gap-3 min-w-0">
+        {/* Top: Agent Streaming Cards */}
+        <div className="flex gap-3 flex-shrink-0" style={{ height: 220 }}>
+          {AGENTS.map((agent) => (
+            <AgentStreamCard
+              key={agent}
+              agentName={agent}
+              eventId={agentStreams[agent]?.eventId || null}
+              messages={agentStreams[agent]?.messages || []}
+              isActive={agentStreams[agent]?.isActive || false}
+            />
+          ))}
+        </div>
+
+        {/* Middle: Architecture Graph */}
+        <div className="flex-1 min-h-[250px] bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
           <div className="px-4 py-3 border-b border-border">
             <h2 className="text-sm font-semibold text-text-primary">Architecture Graph</h2>
             <p className="text-xs text-text-muted">Service topology with health status</p>
@@ -121,7 +174,7 @@ function Dashboard() {
         </div>
 
         {/* Bottom: Metrics Chart */}
-        <div className="h-[320px] bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
+        <div className="h-[280px] bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
           <div className="px-4 py-3 border-b border-border">
             <h2 className="text-sm font-semibold text-text-primary">Resource Consumption</h2>
             <p className="text-xs text-text-muted">CPU, Memory, Error Rate over time</p>
@@ -149,6 +202,15 @@ function Dashboard() {
         />
       )}
     </div>
+  );
+}
+
+/** Wrapper that provides WebSocket context to DashboardInner + children. */
+function Dashboard() {
+  return (
+    <WebSocketProvider>
+      <DashboardInner />
+    </WebSocketProvider>
   );
 }
 

@@ -7,28 +7,12 @@ import { useState, useEffect, useRef } from 'react';
 import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useEvents } from '../hooks/useEvents';
 import { useChat } from '../hooks/useChat';
-import { useWebSocket } from '../hooks/useWebSocket';
-import { approveEvent, getClosedEvents } from '../api/client';
+import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
+import { approveEvent, rejectEvent, getClosedEvents } from '../api/client';
 import type { ConversationTurn } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
-
-const ACTOR_COLORS: Record<string, string> = {
-  brain: '#8b5cf6',
-  architect: '#3b82f6',
-  sysadmin: '#f59e0b',
-  developer: '#10b981',
-  aligner: '#6b7280',
-  user: '#ec4899',
-};
-
-const STATUS_COLORS: Record<string, { bg: string; text: string; label: string }> = {
-  new: { bg: '#1e40af', text: '#93c5fd', label: 'New' },
-  active: { bg: '#065f46', text: '#6ee7b7', label: 'Active' },
-  waiting_approval: { bg: '#92400e', text: '#fcd34d', label: 'Awaiting' },
-  deferred: { bg: '#4c1d95', text: '#c4b5fd', label: 'Deferred' },
-  resolved: { bg: '#14532d', text: '#86efac', label: 'Resolved' },
-  closed: { bg: '#374151', text: '#9ca3af', label: 'Closed' },
-};
+import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
+import { resizeImage } from '../utils/imageResize';
 
 // ============================================================================
 // Sub-components
@@ -257,6 +241,119 @@ function AttachmentIcon({
   );
 }
 
+/** Reject button with modal supporting text + image attachment */
+function RejectButton({ eventId, onStatusChange }: { eventId: string; onStatusChange?: () => void }) {
+  const [showModal, setShowModal] = useState(false);
+  const [reason, setReason] = useState('');
+  const [rejectImage, setRejectImage] = useState<string | null>(null);
+
+  const handleRejectPaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        resizeImage(file, 1024, 1_400_000).then((dataUrl) => {
+          if (dataUrl) setRejectImage(dataUrl);
+          else alert('Image too large even after resize.');
+        });
+        e.preventDefault();
+        break;
+      }
+    }
+  };
+
+  const handleSubmit = () => {
+    const finalReason = reason.trim() || 'User rejected the plan.';
+    rejectEvent(eventId, finalReason, rejectImage || undefined).then(() => {
+      onStatusChange?.();
+      setShowModal(false);
+      setReason('');
+      setRejectImage(null);
+    });
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => setShowModal(true)}
+        style={{
+          background: '#ef4444', color: '#fff', border: 'none',
+          padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600,
+        }}
+      >
+        Reject
+      </button>
+      {showModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }}>
+          <div style={{
+            background: '#1e293b', borderRadius: 12, padding: 20, width: 480,
+            border: '1px solid #334155', boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          }}>
+            <h3 style={{ color: '#e2e8f0', margin: '0 0 12px', fontSize: 16 }}>Reject Plan</h3>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              onPaste={handleRejectPaste}
+              placeholder="Reason for rejection... (Ctrl+V to paste screenshot)"
+              rows={3}
+              style={{
+                width: '100%', background: '#0f172a', border: '1px solid #334155',
+                borderRadius: 8, padding: 10, color: '#e2e8f0', fontSize: 14,
+                resize: 'vertical', fontFamily: 'inherit',
+              }}
+            />
+            {rejectImage && (
+              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <img src={rejectImage} alt="Attached" style={{ maxHeight: 60, maxWidth: 150, borderRadius: 4, border: '1px solid #334155' }} />
+                <button onClick={() => setRejectImage(null)} style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 11 }}>Remove</button>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' }}>
+              <button onClick={() => { setShowModal(false); setReason(''); setRejectImage(null); }} style={{ background: '#334155', color: '#94a3b8', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer' }}>Cancel</button>
+              <button onClick={handleSubmit} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Reject</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Collapsible viewer for long agent execute results */
+function ResultViewer({ actor, result }: { actor: string; result: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const color = ACTOR_COLORS[actor] || '#6b7280';
+  return (
+    <div style={{ margin: '4px 0' }}>
+      <p style={{ fontSize: 14, color: '#4ade80' }}>
+        {result.slice(0, 150)}...
+      </p>
+      <button
+        onClick={() => setExpanded(true)}
+        style={{
+          background: `${color}22`, color, border: `1px solid ${color}44`,
+          padding: '3px 12px', borderRadius: 6, fontSize: 12,
+          cursor: 'pointer', marginTop: 4,
+        }}
+      >
+        View full response
+      </button>
+      {expanded && (
+        <MarkdownViewer
+          filename={`${actor}-response.md`}
+          content={result}
+          onClose={() => setExpanded(false)}
+        />
+      )}
+    </div>
+  );
+}
+
 function TurnBubble({
   turn,
   eventId,
@@ -287,7 +384,21 @@ function TurnBubble({
         )}
       </div>
       {turn.thoughts && <p style={{ margin: '4px 0', fontSize: 14, color: '#e2e8f0' }}>{turn.thoughts}</p>}
-      {turn.result && <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>}
+      {turn.image && (
+        <img
+          src={turn.image}
+          alt="User attachment"
+          style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer' }}
+          onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')}
+        />
+      )}
+      {turn.result && (
+        turn.action === 'execute' && turn.result.length > 200 ? (
+          <ResultViewer actor={turn.actor} result={turn.result} />
+        ) : (
+          <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>
+        )
+      )}
       {turn.plan && (
         <pre style={{
           background: '#1e1e2e', padding: 12, borderRadius: 8,
@@ -311,47 +422,14 @@ function TurnBubble({
           >
             Approve
           </button>
-          <button
-            onClick={() => {
-              const input = prompt('Reason for rejection (optional):');
-              if (input === null) return; // User clicked Cancel
-              const reason = input.trim() || 'User rejected the plan.';
-              fetch(`/queue/${eventId}/reject`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ reason }),
-              }).then(() => onStatusChange?.());
-            }}
-            style={{
-              background: '#ef4444', color: '#fff', border: 'none',
-              padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
-              fontWeight: 600,
-            }}
-          >
-            Reject
-          </button>
+          <RejectButton eventId={eventId!} onStatusChange={onStatusChange} />
         </div>
       )}
     </div>
   );
 }
 
-function ProgressDots({ agent }: { agent: string }) {
-  const color = ACTOR_COLORS[agent] || '#6b7280';
-  return (
-    <div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12, marginBottom: 8, opacity: 0.7 }}>
-      <span style={{
-        background: color, color: '#fff', padding: '2px 8px',
-        borderRadius: 12, fontSize: 11, fontWeight: 600,
-      }}>
-        {agent}
-      </span>
-      <span style={{ fontSize: 13, color: '#94a3b8', marginLeft: 8 }}>
-        working...
-      </span>
-    </div>
-  );
-}
+// ProgressDots removed -- replaced by AgentStreamCard in Dashboard
 
 // ============================================================================
 // Main Component
@@ -363,6 +441,7 @@ export function ConversationFeed() {
   const [activeAgents, setActiveAgents] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
   const [showClosed, setShowClosed] = useState(false);
+  const [pendingImage, setPendingImage] = useState<string | null>(null); // base64 data URI
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: activeEvents } = useActiveEvents();
@@ -376,8 +455,9 @@ export function ConversationFeed() {
   const { data: archEvents } = useEvents();
   const { invalidateActive, invalidateEvent } = useQueueInvalidation();
 
-  // WebSocket connection
-  const { connected, reconnecting, send } = useWebSocket((msg) => {
+  // WebSocket connection (from shared context provider)
+  const { connected, reconnecting, send } = useWSConnection();
+  useWSMessage((msg) => {
     if (msg.type === 'turn' || msg.type === 'event_created' || msg.type === 'event_closed') {
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
@@ -423,19 +503,40 @@ export function ConversationFeed() {
   }, [selectedEvent?.conversation?.length, Object.keys(activeAgents).length]);
 
   const handleSend = () => {
-    if (!inputMessage.trim()) return;
+    if (!inputMessage.trim() && !pendingImage) return;
     if (selectedEventId && connected) {
-      // Send as user message to the existing event conversation
       send({
         type: 'user_message',
         event_id: selectedEventId,
         message: inputMessage.trim(),
+        ...(pendingImage ? { image: pendingImage } : {}),
       });
     } else {
-      // No event selected -- create a new event
-      sendMessage(inputMessage);
+      sendMessage(inputMessage, undefined, pendingImage || undefined);
     }
     setInputMessage('');
+    setPendingImage(null);
+  };
+
+  // Handle image paste from clipboard (with resize)
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        resizeImage(file, 1024, 1_400_000).then((dataUrl) => {
+          if (dataUrl) {
+            setPendingImage(dataUrl);
+          } else {
+            alert('Image too large even after resize. Try a smaller screenshot.');
+          }
+        });
+        e.preventDefault();
+        break;
+      }
+    }
   };
 
   // Combine active + recently closed (always show last 5 min) + older closed (toggle)
@@ -577,10 +678,7 @@ export function ConversationFeed() {
                 />
               );
             })}
-            {/* Active progress indicators */}
-            {Object.keys(activeAgents).map((agent) => (
-              <ProgressDots key={agent} agent={agent} />
-            ))}
+            {/* Agent progress now shown in AgentStreamCards in Dashboard */}
           </div>
         </>
       ) : (
@@ -606,36 +704,51 @@ export function ConversationFeed() {
       {/* ================================================================ */}
       {/* Chat Input                                                       */}
       {/* ================================================================ */}
-      <div style={{ padding: 12, borderTop: '1px solid #333', display: 'flex', gap: 8, flexShrink: 0 }}>
-        <textarea
-          value={inputMessage}
-          onChange={(e) => setInputMessage(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          placeholder="Ask the Brain... (Shift+Enter for new line)"
-          rows={1}
-          style={{
-            flex: 1, background: '#1e293b', border: '1px solid #334155',
-            borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
-            resize: 'none', minHeight: 38, maxHeight: 120, overflow: 'auto',
-            fontFamily: 'inherit', lineHeight: '1.4',
-          }}
-        />
-        <button
-          onClick={handleSend}
-          disabled={isPending}
-          style={{
-            background: '#3b82f6', color: '#fff', border: 'none',
-            padding: '8px 16px', borderRadius: 8, cursor: 'pointer',
-            fontWeight: 600, opacity: isPending ? 0.5 : 1,
-          }}
-        >
-          Send
-        </button>
+      <div style={{ padding: 12, borderTop: '1px solid #333', flexShrink: 0 }}>
+        {/* Image preview */}
+        {pendingImage && (
+          <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <img src={pendingImage} alt="Attached" style={{ maxHeight: 80, maxWidth: 200, borderRadius: 6, border: '1px solid #334155' }} />
+            <button
+              onClick={() => setPendingImage(null)}
+              style={{ background: '#334155', border: 'none', color: '#94a3b8', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: 12 }}
+            >
+              Remove
+            </button>
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <textarea
+            value={inputMessage}
+            onChange={(e) => setInputMessage(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            onPaste={handlePaste}
+            placeholder="Ask the Brain... (Ctrl+V to paste screenshot)"
+            rows={1}
+            style={{
+              flex: 1, background: '#1e293b', border: '1px solid #334155',
+              borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
+              resize: 'none', minHeight: 38, maxHeight: 120, overflow: 'auto',
+              fontFamily: 'inherit', lineHeight: '1.4',
+            }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={isPending}
+            style={{
+              background: '#3b82f6', color: '#fff', border: 'none',
+              padding: '8px 16px', borderRadius: 8, cursor: 'pointer',
+              fontWeight: 600, opacity: isPending ? 0.5 : 1,
+            }}
+          >
+            Send
+          </button>
+        </div>
       </div>
     </div>
   );
