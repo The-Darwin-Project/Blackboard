@@ -59,12 +59,11 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list"]
 ---
-# RoleBinding in openshift-gitops namespace for ArgoCD read access
+# ClusterRoleBinding for cluster-scoped resources (nodes, namespaces, ArgoCD)
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-argocd-reader
-  namespace: openshift-gitops
   labels:
     app: darwin-brain
     app.kubernetes.io/name: darwin-brain

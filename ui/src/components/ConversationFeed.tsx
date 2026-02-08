@@ -366,6 +366,7 @@ export function ConversationFeed() {
     queryKey: ['closedEvents'],
     queryFn: () => getClosedEvents(20),
     refetchOnWindowFocus: true,
+    refetchInterval: 10000, // Check for newly closed events every 10s
   });
   const { data: selectedEvent } = useEventDocument(selectedEventId);
   const { data: archEvents } = useEvents();
@@ -433,10 +434,24 @@ export function ConversationFeed() {
     setInputMessage('');
   };
 
-  // Combine active + closed for the events panel
+  // Combine active + recently closed (always show last 5 min) + older closed (toggle)
+  const recentClosed = (closedEvents || []).filter((evt: Record<string, unknown>) => {
+    // Show events closed in last 5 minutes regardless of toggle
+    const created = evt.created as string;
+    if (!created) return false;
+    const age = Date.now() - new Date(created).getTime();
+    return age < 30 * 60 * 1000;
+  });
+  const olderClosed = (closedEvents || []).filter((evt: Record<string, unknown>) => {
+    const created = evt.created as string;
+    if (!created) return true;
+    const age = Date.now() - new Date(created).getTime();
+    return age >= 30 * 60 * 1000;
+  });
   const allEvents = [
     ...(activeEvents || []),
-    ...(showClosed ? (closedEvents || []) : []),
+    ...recentClosed,
+    ...(showClosed ? olderClosed : []),
   ];
 
   return (
@@ -482,7 +497,7 @@ export function ConversationFeed() {
               color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer',
             }}
           >
-            {showClosed ? 'Hide Closed' : 'Show Closed'}
+            {showClosed ? `Hide Closed (${closedEvents?.length || 0})` : `Show Closed (${closedEvents?.length || 0})`}
           </button>
         </div>
         <div style={{ padding: '4px 12px 8px' }}>
