@@ -768,24 +768,58 @@ class BlackboardState:
         return points
     
     async def get_current_metrics(self, service: str) -> dict[str, float]:
-        """Get the most recent metrics for a service."""
+        """
+        Get current metrics for a service using peak-over-30s with source priority.
+        
+        Returns the peak value from the last 30s of self-reported data (preferred)
+        or kubernetes data (fallback). This aligns the graph health color with what
+        Flash sees in the 30s analysis window -- if CPU peaked at 99.9% recently,
+        the node shows yellow/red, not green from a single low K8s reading.
+        """
         metrics = {}
+        now = time.time()
+        cutoff = now - 30  # 30s window matching the Aligner analysis interval
         
         for metric_name in ["cpu", "memory", "error_rate"]:
             key = f"darwin:metrics:{service}:{metric_name}"
-            # Get the most recent value
-            results = await self.redis.zrevrange(key, 0, 0, withscores=True)
-            if results:
-                member, _ = results[0]
-                # Parse value from member
-                # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
-                parts = member.split(":")
-                if len(parts) >= 2:
-                    metrics[metric_name] = float(parts[1])
+            # Get last 30s of data (score = timestamp)
+            results = await self.redis.zrangebyscore(
+                key, cutoff, now, withscores=True
+            )
+            
+            if not results:
+                # No recent data -- fall back to latest entry regardless of age
+                fallback = await self.redis.zrevrange(key, 0, 0, withscores=True)
+                if fallback:
+                    parts = fallback[0][0].split(":")
+                    metrics[metric_name] = float(parts[1]) if len(parts) >= 2 else 0.0
                 else:
                     metrics[metric_name] = 0.0
+                continue
+            
+            # Separate by source, find peak value per source
+            self_reported_peak = 0.0
+            kubernetes_peak = 0.0
+            has_self_reported = False
+            
+            for member, _score in results:
+                parts = member.split(":")
+                if len(parts) < 2:
+                    continue
+                value = float(parts[1])
+                source = parts[2] if len(parts) >= 3 else "self-reported"
+                
+                if source == "self-reported":
+                    has_self_reported = True
+                    self_reported_peak = max(self_reported_peak, value)
+                else:
+                    kubernetes_peak = max(kubernetes_peak, value)
+            
+            # Prefer self-reported; fall back to kubernetes
+            if has_self_reported:
+                metrics[metric_name] = self_reported_peak
             else:
-                metrics[metric_name] = 0.0
+                metrics[metric_name] = kubernetes_peak
         
         return metrics
     

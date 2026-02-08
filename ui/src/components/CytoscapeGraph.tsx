@@ -565,30 +565,18 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           },
         ]);
 
-        // IMPORTANT: Only hide the default node body IF we are sure the HTML label extension is active.
-        // We can't easily detect if it "worked" per node, but if we got here, the extension is registered.
-        // However, if the user sees transparent nodes, it means this code ran but the HTML didn't render.
-        // Let's keep the fallback visible for now to debug, or try to force a redraw.
-        
-        // Strategy: We will NOT hide the node body completely yet. 
-        // Instead, we'll make it transparent ONLY if we are confident.
-        // For now, let's leave the fallback visible underneath (or behind) the HTML label
-        // so if the HTML label fails, the user sees the node.
-        // But if the HTML label works, it covers the node.
-        
-        // To do this, we need the HTML label to be opaque (it is) and centered (it is).
-        // So we can remove the code that hides the node body.
-        
-        /* 
+        // HTML labels are confirmed working -- hide the underlying Cytoscape
+        // node body for service nodes so the grey rectangle doesn't show
+        // through as a "shadow" behind the HTML label.
+        // Ghost nodes keep their dashed border style (selector targets .service only).
         cy.style()
-          .selector('node')
+          .selector('node.service')
           .style({
             'background-opacity': 0,
             'label': '',
             'border-width': 0,
           })
           .update();
-        */
           
       } catch (err) {
         console.error('[CytoscapeGraph] Failed to apply HTML labels:', err);
