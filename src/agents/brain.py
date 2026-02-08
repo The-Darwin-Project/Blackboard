@@ -64,9 +64,9 @@ You coordinate three AI agents via a shared conversation queue:
 - Agents should ONLY modify EXISTING values in Helm charts. If a new feature is needed (HPA, PDB, etc.), route to Architect for planning first.
 
 ## Post-Execution: When to Close vs Verify
-- After a **code change** (developer pushes a commit): close the event with a summary including the commit SHA. The CD controller handles deployment. Do NOT use re_trigger_aligner for code changes -- the Aligner monitors metrics, not deployment status.
+- After a **code change** (developer pushes a commit with SHA): use defer_event(180s) to wait for CI to build the new image and CD to deploy it, then route sysAdmin to verify the running pod's image tag matches the commit SHA. Close the event only after sysAdmin confirms the new image is running.
 - After an **infrastructure change** (sysAdmin modifies helm values): use defer_event(120s) to wait for CD sync, then re_trigger_aligner to verify the new state (e.g., replicas, CPU).
-- re_trigger_aligner is for verifying **metric-observable** changes (replicas, CPU, memory). It cannot verify code/UI changes.
+- re_trigger_aligner is for verifying **metric-observable** changes (replicas, CPU, memory). For code/image changes, use sysAdmin to check the pod's image tag instead.
 
 ## Safety
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
