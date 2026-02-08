@@ -566,7 +566,11 @@ class Brain:
         # Architecture diagram: show the Brain the full topology with health,
         # metrics, and dependency edges so it can correlate issues across services
         # (e.g., darwin-store high CPU might be caused by postgres being slow).
-        mermaid = await self.blackboard.generate_mermaid()
+        mermaid = ""
+        try:
+            mermaid = await self.blackboard.generate_mermaid()
+        except Exception as e:
+            logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
         if mermaid:
             lines.append("")
             lines.append("Architecture Diagram (Mermaid):")
@@ -993,7 +997,10 @@ class Brain:
         # Complete any associated Plan (removes ghost node from graph)
         plan_id = self._event_plans.pop(event_id, None)
         if plan_id:
-            await self.blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=summary)
+            try:
+                await self.blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=summary)
+            except Exception as e:
+                logger.warning(f"Failed to complete plan {plan_id}: {e}")
         if self.broadcast:
             await self.broadcast({
                 "type": "event_closed",
@@ -1015,7 +1022,11 @@ class Brain:
 
         # Enrich with GitOps metadata + architecture diagram from Blackboard
         service_meta = await self.blackboard.get_service(event.service)
-        mermaid = await self.blackboard.generate_mermaid()
+        mermaid = ""
+        try:
+            mermaid = await self.blackboard.generate_mermaid()
+        except Exception as e:
+            logger.warning(f"Failed to generate mermaid for event MD: {e}")
 
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
@@ -1108,14 +1119,17 @@ class Brain:
         Also completes any PENDING plans so ghost nodes don't linger on the graph.
         """
         # --- Clean up orphaned PENDING plans (ghost nodes from previous instance) ---
-        pending_plans = await self.blackboard.get_pending_plans()
-        if pending_plans:
-            for plan in pending_plans:
-                await self.blackboard.update_plan_status(
-                    plan.id, PlanStatus.FAILED,
-                    result="Stale: closed on Brain restart.",
-                )
-            logger.info(f"Startup cleanup: completed {len(pending_plans)} orphaned pending plans")
+        try:
+            pending_plans = await self.blackboard.get_pending_plans()
+            if pending_plans:
+                for plan in pending_plans:
+                    await self.blackboard.update_plan_status(
+                        plan.id, PlanStatus.FAILED,
+                        result="Stale: closed on Brain restart.",
+                    )
+                logger.info(f"Startup cleanup: completed {len(pending_plans)} orphaned pending plans")
+        except Exception as e:
+            logger.warning(f"Failed to clean up orphaned plans on startup: {e}")
 
         # --- Clean up stale active events ---
         active_ids = await self.blackboard.get_active_events()
