@@ -74,12 +74,8 @@ ArgoCD and Kargo credentials are mounted only on Architect and SysAdmin sidecars
 
 ## Autonomous Remediation Examples
 
-See [docs/autonomous-remediation-example.md](docs/autonomous-remediation-example.md) for a documented 21-turn multi-agent event where the system autonomously:
-
-1. Detected an over-provisioned service
-2. Discovered the GitOps repository by reasoning from the container image URL
-3. Produced and executed a scaling plan via GitOps
-4. Verified the outcome through independent sources
+- [Over-Provisioned Scale-Down](docs/autonomous-remediation-example.md) -- 21-turn event: Detected over-provisioned service, discovered GitOps repo by reasoning from container image URL, scaled down via GitOps, verified outcome.
+- [OOMKilled Recovery](docs/oom-killed-remediation-example.md) -- 10-turn event: Detected OOMKilled pod, confirmed root cause via SysAdmin, increased memory limits via GitOps as preventive fix, verified recovery through Aligner.
 
 ## SDK
 
