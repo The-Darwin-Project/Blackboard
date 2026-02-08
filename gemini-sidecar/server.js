@@ -122,50 +122,45 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
- * Login to ArgoCD CLI using admin credentials if mounted.
- * Secret holds the admin password (from openshift-gitops-cluster secret).
- * Fire-and-forget -- logs and returns false on failure.
+ * Login to ArgoCD/Kargo CLIs in the background (non-blocking).
+ * Spawns login processes that run concurrently with Gemini CLI execution.
+ * The CLI sessions become available within ~2s; if the agent uses argocd/kargo
+ * before login completes, the command fails gracefully (agent retries or
+ * falls back to kubectl/oc).
  */
-function setupArgocdLogin() {
-  const server = process.env.ARGOCD_SERVER;
-  const secretPath = '/secrets/argocd/auth-token';
-  if (!server || !fs.existsSync(secretPath)) return false;
-
-  const password = fs.readFileSync(secretPath, 'utf8').trim();
-  const insecure = process.env.ARGOCD_INSECURE === 'true' ? '--insecure' : '';
-  try {
-    execSync(`argocd login ${server} --username admin --password "${password}" ${insecure} --grpc-web`,
-      { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
-    console.log(`[${new Date().toISOString()}] ArgoCD login successful (${server})`);
-    return true;
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ArgoCD login failed: ${err.message.split('\n')[0]}`);
-    return false;
+function setupCLILoginsBackground() {
+  // ArgoCD login (background)
+  const argoServer = process.env.ARGOCD_SERVER;
+  const argoSecretPath = '/secrets/argocd/auth-token';
+  if (argoServer && fs.existsSync(argoSecretPath)) {
+    const password = fs.readFileSync(argoSecretPath, 'utf8').trim();
+    const insecure = process.env.ARGOCD_INSECURE === 'true' ? '--insecure' : '';
+    const child = spawn('argocd', ['login', argoServer, '--username', 'admin', '--password', password, insecure, '--grpc-web'].filter(Boolean),
+      { stdio: 'pipe', timeout: 10000 });
+    child.on('close', (code) => {
+      if (code === 0) console.log(`[${new Date().toISOString()}] ArgoCD login successful (${argoServer})`);
+      else console.log(`[${new Date().toISOString()}] ArgoCD login failed (exit ${code}), agents use kubectl/oc fallback`);
+    });
+    child.on('error', (err) => {
+      console.log(`[${new Date().toISOString()}] ArgoCD login error: ${err.message}`);
+    });
   }
-}
 
-/**
- * Login to Kargo CLI using admin password if credentials are mounted.
- * Uses: kargo login <server> --admin --password <pass> --insecure-skip-tls-verify
- * The secret's auth-token key holds the admin password.
- * Fire-and-forget -- logs and returns false on failure.
- */
-function setupKargoLogin() {
-  const server = process.env.KARGO_SERVER;
-  const secretPath = '/secrets/kargo/auth-token';
-  if (!server || !fs.existsSync(secretPath)) return false;
-
-  const password = fs.readFileSync(secretPath, 'utf8').trim();
-  const insecure = process.env.KARGO_INSECURE === 'true' ? '--insecure-skip-tls-verify' : '';
-  try {
-    execSync(`kargo login https://${server} --admin --password "${password}" ${insecure}`,
-      { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
-    console.log(`[${new Date().toISOString()}] Kargo login successful (${server})`);
-    return true;
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] Kargo login failed: ${err.message.split('\n')[0]}`);
-    console.log(`[${new Date().toISOString()}] Agents can still use kubectl/oc for Kargo CRD access`);
-    return false;
+  // Kargo login (background)
+  const kargoServer = process.env.KARGO_SERVER;
+  const kargoSecretPath = '/secrets/kargo/auth-token';
+  if (kargoServer && fs.existsSync(kargoSecretPath)) {
+    const password = fs.readFileSync(kargoSecretPath, 'utf8').trim();
+    const insecure = process.env.KARGO_INSECURE === 'true' ? '--insecure-skip-tls-verify' : '';
+    const child = spawn('kargo', ['login', `https://${kargoServer}`, '--admin', '--password', password, insecure].filter(Boolean),
+      { stdio: 'pipe', timeout: 10000 });
+    child.on('close', (code) => {
+      if (code === 0) console.log(`[${new Date().toISOString()}] Kargo login successful (${kargoServer})`);
+      else console.log(`[${new Date().toISOString()}] Kargo login failed (exit ${code}), agents use kubectl/oc fallback`);
+    });
+    child.on('error', (err) => {
+      console.log(`[${new Date().toISOString()}] Kargo login error: ${err.message}`);
+    });
   }
 }
 
@@ -389,9 +384,8 @@ async function handleRequest(req, res) {
         }
       }
 
-      // Login to ArgoCD/Kargo CLIs if credentials are mounted
-      setupArgocdLogin();
-      setupKargoLogin();
+      // Login to ArgoCD/Kargo CLIs in background (non-blocking)
+      setupCLILoginsBackground();
       
       // Execute gemini CLI
       const result = await executeGemini(body.prompt, {
@@ -473,13 +467,8 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // Login to ArgoCD/Kargo CLIs if credentials are mounted
-      if (setupArgocdLogin()) {
-        wsSend(ws, { type: 'progress', event_id: eventId, message: 'ArgoCD CLI authenticated' });
-      }
-      if (setupKargoLogin()) {
-        wsSend(ws, { type: 'progress', event_id: eventId, message: 'Kargo CLI authenticated' });
-      }
+      // Login to ArgoCD/Kargo CLIs in background (non-blocking, runs concurrent with Gemini)
+      setupCLILoginsBackground();
 
       // Execute Gemini CLI with streaming progress
       try {
