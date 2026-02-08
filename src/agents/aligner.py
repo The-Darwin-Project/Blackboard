@@ -413,6 +413,45 @@ class Aligner:
             self._version_buffer.pop(service, None)
             self._version_analysis_pending[service] = False
     
+    def _buffer_metric(self, service: str, now: float, cpu: float, memory: float,
+                       error_rate: float, replicas: str) -> None:
+        """
+        Add a metric observation to the buffer, merging with existing entries
+        in the same 5s time bucket (max wins).
+        
+        Both self-reported telemetry (app-level CPU) and K8s observer (container-
+        level CPU) feed this buffer. An app may self-report 0.2% CPU while the
+        container is at 100% limit. By merging into time buckets with max(),
+        the higher (more accurate) reading wins, preventing Flash from seeing
+        a mix of low app values and high K8s values as "transient spikes."
+        """
+        if service not in self._metrics_buffer:
+            self._metrics_buffer[service] = []
+
+        # Bucket key: round timestamp to nearest 5s
+        bucket_ts = round(now / 5) * 5
+        buffer = self._metrics_buffer[service]
+
+        # Check if a bucket already exists for this time window
+        for entry in buffer:
+            if abs(entry["timestamp"] - bucket_ts) < 3:  # Within same bucket
+                # Merge: max of each metric (highest reading wins)
+                entry["cpu"] = max(entry["cpu"], cpu)
+                entry["memory"] = max(entry["memory"], memory)
+                entry["error_rate"] = max(entry["error_rate"], error_rate)
+                if replicas != "unknown":
+                    entry["replicas"] = replicas
+                return
+
+        # New bucket
+        buffer.append({
+            "timestamp": bucket_ts,
+            "cpu": cpu,
+            "memory": memory,
+            "error_rate": error_rate,
+            "replicas": replicas,
+        })
+
     async def _check_anomalies(self, payload) -> None:
         """
         Buffer metrics observations and use Flash to analyze patterns.
@@ -429,16 +468,9 @@ class Aligner:
         svc = await self.blackboard.get_service(service)
         replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
 
-        # Buffer the observation
-        if service not in self._metrics_buffer:
-            self._metrics_buffer[service] = []
-        self._metrics_buffer[service].append({
-            "timestamp": now,
-            "cpu": payload.metrics.cpu,
-            "memory": payload.metrics.memory,
-            "error_rate": payload.metrics.error_rate,
-            "replicas": replicas,
-        })
+        # Buffer the observation (merged with K8s data in same time bucket)
+        self._buffer_metric(service, now, payload.metrics.cpu, payload.metrics.memory,
+                            payload.metrics.error_rate, replicas)
 
         # Trim buffer to last 60s max (sliding window, not reset)
         cutoff = now - 60
@@ -672,16 +704,8 @@ class Aligner:
         svc = await self.blackboard.get_service(service)
         replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
 
-        # Feed the unified metrics buffer (same structure as _check_anomalies)
-        if service not in self._metrics_buffer:
-            self._metrics_buffer[service] = []
-        self._metrics_buffer[service].append({
-            "timestamp": now,
-            "cpu": cpu,
-            "memory": memory,
-            "error_rate": error_rate,
-            "replicas": replicas,
-        })
+        # Buffer the observation (merged with self-reported data in same time bucket)
+        self._buffer_metric(service, now, cpu, memory, error_rate, replicas)
 
         # Trim buffer to last 60s max
         cutoff = now - 60
