@@ -236,6 +236,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if msg_type == "chat":
                 # Create event from chat message
                 from .dependencies import _blackboard
+                from .models import ConversationTurn
                 if _blackboard:
                     message = data.get("message", "")
                     service = data.get("service", "general")
@@ -245,6 +246,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         reason=message,
                         evidence="User request via WebSocket chat",
                     )
+                    # Add user message as the first conversation turn
+                    user_turn = ConversationTurn(
+                        turn=1,
+                        actor="user",
+                        action="message",
+                        thoughts=message,
+                    )
+                    await _blackboard.append_turn(event_id, user_turn)
                     await websocket.send_json({
                         "type": "event_created",
                         "event_id": event_id,

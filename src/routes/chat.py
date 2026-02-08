@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..dependencies import get_blackboard
+from ..models import ConversationTurn
 from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,14 @@ async def create_chat_event(
             reason=request.message,
             evidence="User request via chat interface",
         )
+        # Add user message as the first conversation turn
+        user_turn = ConversationTurn(
+            turn=1,
+            actor="user",
+            action="message",
+            thoughts=request.message,
+        )
+        await blackboard.append_turn(event_id, user_turn)
         logger.info(f"Chat event created: {event_id} for service {request.service}")
         return ChatEventResponse(event_id=event_id)
     except Exception as e:
