@@ -246,12 +246,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         reason=message,
                         evidence="User request via WebSocket chat",
                     )
+                    # Extract optional image (with size guard)
+                    image = data.get("image")
+                    if image and len(image) > 1_400_000:
+                        await websocket.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
+                        image = None
                     # Add user message as the first conversation turn
                     user_turn = ConversationTurn(
                         turn=1,
                         actor="user",
                         action="message",
                         thoughts=message,
+                        image=image,
                     )
                     await _blackboard.append_turn(event_id, user_turn)
                     await websocket.send_json({
@@ -268,6 +274,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 from .models import ConversationTurn
                 event_id = data.get("event_id", "")
                 message = data.get("message", "")
+                image = data.get("image")
+                if image and len(image) > 1_400_000:
+                    await websocket.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
+                    image = None
                 if _blackboard and event_id and message:
                     event = await _blackboard.get_event(event_id)
                     if event:
@@ -276,6 +286,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             actor="user",
                             action="message",
                             thoughts=message,
+                            image=image,
                         )
                         await _blackboard.append_turn(event_id, turn)
                         await websocket.send_json({

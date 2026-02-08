@@ -141,6 +141,7 @@ export interface ConversationTurn {
   evidence?: string;
   waitingFor?: string;
   pendingApproval?: boolean;
+  image?: string;
   timestamp: number;
 }
 

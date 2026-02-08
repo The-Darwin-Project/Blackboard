@@ -22,9 +22,9 @@ export function useChat(wsSend?: (data: object) => void) {
     },
   });
 
-  const sendMessage = useCallback((message: string, service?: string) => {
+  const sendMessage = useCallback((message: string, service?: string, image?: string) => {
     if (wsSend) {
-      wsSend({ type: 'chat', message, service: service || 'general' });
+      wsSend({ type: 'chat', message, service: service || 'general', ...(image ? { image } : {}) });
     } else {
       httpMutation.mutate({ message, service });
     }

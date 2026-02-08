@@ -319,6 +319,7 @@ class ConversationTurn(BaseModel):
     evidence: Optional[str] = None
     waitingFor: Optional[str] = None
     pendingApproval: Optional[bool] = None
+    image: Optional[str] = Field(None, description="Base64 data URI of an attached image")
     timestamp: float = Field(default_factory=time.time)
 
 

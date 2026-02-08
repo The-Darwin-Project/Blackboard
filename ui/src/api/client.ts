@@ -135,6 +135,14 @@ export async function approveEvent(eventId: string): Promise<any> {
   });
 }
 
+export async function rejectEvent(eventId: string, reason: string, image?: string): Promise<any> {
+  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason, ...(image ? { image } : {}) }),
+  });
+}
+
 export async function getClosedEvents(limit?: number): Promise<any[]> {
   const params = limit ? `?limit=${limit}` : '';
   return fetchApi<any[]>(`/queue/closed/list${params}`);

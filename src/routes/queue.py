@@ -13,11 +13,20 @@ from __future__ import annotations
 import logging
 import time
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..dependencies import get_blackboard
 from ..models import ConversationTurn, EventDocument, EventStatus
 from ..state.blackboard import BlackboardState
+
+
+class RejectRequest(BaseModel):
+    """Typed request body for plan rejection."""
+    reason: str = Field("User rejected the plan.", description="Rejection reason")
+    image: Optional[str] = Field(None, description="Base64 data URI of screenshot")
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +97,7 @@ async def approve_event(
 @router.post("/{event_id}/reject")
 async def reject_event(
     event_id: str,
-    body: dict = None,
+    body: RejectRequest = RejectRequest(),
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
     """Reject a pending plan in an event conversation."""
@@ -96,12 +105,16 @@ async def reject_event(
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
-    reason = (body or {}).get("reason", "User rejected the plan.")
+    # Server-side image size guard (~1MB)
+    if body.image and len(body.image) > 1_400_000:
+        raise HTTPException(status_code=413, detail="Image too large (max 1MB)")
+
     turn = ConversationTurn(
         turn=len(event.conversation) + 1,
         actor="user",
         action="reject",
-        thoughts=reason,
+        thoughts=body.reason,
+        image=body.image,
     )
     await blackboard.append_turn(event_id, turn)
 
