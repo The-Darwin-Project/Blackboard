@@ -670,12 +670,15 @@ class Aligner:
         else:
             if "high_cpu" in state["active"]:
                 state["active"].remove("high_cpu")
+                narrative = f"Good news: The high CPU issue on {service} has returned to normal levels ({cpu:.1f}%)."
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
                     {"service": service, "anomaly": "high_cpu", "cpu": cpu, "source": source},
-                    narrative=f"Good news: The high CPU issue on {service} has returned to normal levels ({cpu:.1f}%).",
+                    narrative=narrative,
                 )
                 logger.info(f"CPU anomaly resolved ({source}): {service} now at {cpu:.1f}%")
+                # Notify any active events for this service so the Brain sees the resolution
+                await self._notify_active_events(service, f"CPU anomaly resolved: {service} now at {cpu:.1f}%")
                 # Evaluate scale-down (HPA-like behavior)
                 await self._trigger_architect(service, "anomaly_resolved_cpu")
         
@@ -697,12 +700,15 @@ class Aligner:
         else:
             if "high_memory" in state["active"]:
                 state["active"].remove("high_memory")
+                narrative = f"Good news: The high memory issue on {service} has returned to normal levels ({memory:.1f}%)."
                 await self.blackboard.record_event(
                     EventType.ANOMALY_RESOLVED,
                     {"service": service, "anomaly": "high_memory", "memory": memory, "source": source},
-                    narrative=f"Good news: The high memory issue on {service} has returned to normal levels ({memory:.1f}%).",
+                    narrative=narrative,
                 )
                 logger.info(f"Memory anomaly resolved ({source}): {service} now at {memory:.1f}%")
+                # Notify any active events for this service so the Brain sees the resolution
+                await self._notify_active_events(service, f"Memory anomaly resolved: {service} now at {memory:.1f}%")
                 # Evaluate scale-down (HPA-like behavior)
                 await self._trigger_architect(service, "anomaly_resolved_memory")
     
@@ -766,6 +772,27 @@ class Aligner:
                     await self.blackboard.append_turn(event_id, confirm_turn)
                     logger.info(f"Aligner confirmed verification for event {event_id}")
     
+    async def _notify_active_events(self, service: str, message: str) -> None:
+        """Append an aligner.confirm turn to any active events for this service.
+
+        When an anomaly resolves (e.g., CPU returns to normal), the Brain needs
+        to see this in the event conversation -- otherwise it continues chasing
+        a problem that no longer exists.
+        """
+        from ..models import ConversationTurn
+        active_ids = await self.blackboard.get_active_events()
+        for eid in active_ids:
+            event = await self.blackboard.get_event(eid)
+            if event and event.service == service:
+                turn = ConversationTurn(
+                    turn=len(event.conversation) + 1,
+                    actor="aligner",
+                    action="confirm",
+                    evidence=message,
+                )
+                await self.blackboard.append_turn(eid, turn)
+                logger.info(f"Aligner notified active event {eid}: {message[:80]}")
+
     async def check_state(self, service: str) -> dict:
         """Return current state of a service for Brain re-trigger."""
         svc = await self.blackboard.get_service(service)
