@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "ac5315f" # Updated by CI to commit SHA
+  tag: "74290c1" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -127,6 +127,29 @@ github:
   # repository: "The-Darwin-Project/gitops"  # DEPRECATED
   # Branch to use (for reference, sidecar defaults to main)
   branch: "main"
+# =============================================================================
+# ArgoCD CLI Credentials (for agent ArgoCD API access)
+# =============================================================================
+argocd:
+  enabled: false
+  # Pre-created secret with keys: server, auth-token
+  # If empty and enabled=true, a placeholder secret is rendered by the chart
+  existingSecret: ""
+  # Server URL (e.g., argocd-server.openshift-gitops.svc:443)
+  server: ""
+  # Set to true if using self-signed certs
+  insecure: true
+# =============================================================================
+# Kargo CLI Credentials (for agent Kargo pipeline access)
+# =============================================================================
+kargo:
+  enabled: false
+  # Pre-created secret with keys: server, auth-token
+  # If empty and enabled=true, a placeholder secret is rendered by the chart
+  existingSecret: ""
+  # Server URL (e.g., kargo-api.kargo-system.svc:443)
+  server: ""
+  insecure: true
 # =============================================================================
 # Resource Limits
 # =============================================================================

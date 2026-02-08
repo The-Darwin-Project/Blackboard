@@ -226,6 +226,18 @@ spec:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
             {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: ARGOCD_SERVER
+              value: "{{ .Values.argocd.server }}"
+            - name: ARGOCD_INSECURE
+              value: "{{ .Values.argocd.insecure }}"
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: KARGO_SERVER
+              value: "{{ .Values.kargo.server }}"
+            - name: KARGO_INSECURE
+              value: "{{ .Values.kargo.insecure }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -245,6 +257,16 @@ spec:
               readOnly: true
             - name: git-credentials
               mountPath: /tmp/git-creds
+            {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: argocd-secret
+              mountPath: /secrets/argocd
+              readOnly: true
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: kargo-secret
+              mountPath: /secrets/kargo
+              readOnly: true
             {{- end }}
           livenessProbe:
             httpGet:
@@ -297,6 +319,18 @@ spec:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
             {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: ARGOCD_SERVER
+              value: "{{ .Values.argocd.server }}"
+            - name: ARGOCD_INSECURE
+              value: "{{ .Values.argocd.insecure }}"
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: KARGO_SERVER
+              value: "{{ .Values.kargo.server }}"
+            - name: KARGO_INSECURE
+              value: "{{ .Values.kargo.insecure }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
@@ -316,6 +350,16 @@ spec:
               readOnly: true
             - name: git-credentials
               mountPath: /tmp/git-creds
+            {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: argocd-secret
+              mountPath: /secrets/argocd
+              readOnly: true
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: kargo-secret
+              mountPath: /secrets/kargo
+              readOnly: true
             {{- end }}
           livenessProbe:
             httpGet:
@@ -436,6 +480,16 @@ spec:
             secretName: {{ .Values.github.existingSecret }}
         - name: git-credentials
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.argocd.enabled }}
+        - name: argocd-secret
+          secret:
+            secretName: {{ .Values.argocd.existingSecret | default (printf "%s-argocd" .Release.Name) }}
+        {{- end }}
+        {{- if .Values.kargo.enabled }}
+        - name: kargo-secret
+          secret:
+            secretName: {{ .Values.kargo.existingSecret | default (printf "%s-kargo" .Release.Name) }}
         {{- end }}
       
       {{- with .Values.nodeSelector }}

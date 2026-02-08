@@ -77,28 +77,31 @@ export function ServiceMetricChart({ service, data, events: _events }: ServiceMe
             formatter={(value) => [`${Number(value).toFixed(1)}%`, '']}
           />
           <Line 
-            type="monotone" 
+            type="stepAfter" 
             dataKey="cpu" 
             stroke="#3b82f6" 
             strokeWidth={2}
             dot={false}
             name="CPU %"
+            connectNulls
           />
           <Line 
-            type="monotone" 
+            type="stepAfter" 
             dataKey="memory" 
             stroke="#8b5cf6" 
             strokeWidth={2}
             dot={false}
             name="Memory %"
+            connectNulls
           />
           <Line 
-            type="monotone" 
+            type="stepAfter" 
             dataKey="error_rate" 
             stroke="#ef4444" 
             strokeWidth={2}
             dot={false}
             name="Error Rate"
+            connectNulls
           />
         </LineChart>
       </ResponsiveContainer>

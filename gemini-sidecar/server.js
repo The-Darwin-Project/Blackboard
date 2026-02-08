@@ -122,6 +122,50 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
+ * Login to ArgoCD CLI if credentials are mounted
+ * Fire-and-forget -- logs and returns false on failure
+ */
+function setupArgocdLogin() {
+  const server = process.env.ARGOCD_SERVER;
+  const secretPath = '/secrets/argocd/auth-token';
+  if (!server || !fs.existsSync(secretPath)) return false;
+
+  const token = fs.readFileSync(secretPath, 'utf8').trim();
+  const insecure = process.env.ARGOCD_INSECURE === 'true' ? '--insecure' : '';
+  try {
+    execSync(`argocd login ${server} --auth-token ${token} ${insecure} --grpc-web`,
+      { encoding: 'utf8', timeout: 10000 });
+    console.log(`[${new Date().toISOString()}] ArgoCD login successful (${server})`);
+    return true;
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ArgoCD login failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Login to Kargo CLI if credentials are mounted
+ * Fire-and-forget -- logs and returns false on failure
+ */
+function setupKargoLogin() {
+  const server = process.env.KARGO_SERVER;
+  const secretPath = '/secrets/kargo/auth-token';
+  if (!server || !fs.existsSync(secretPath)) return false;
+
+  const token = fs.readFileSync(secretPath, 'utf8').trim();
+  const insecure = process.env.KARGO_INSECURE === 'true' ? '--insecure-skip-tls-verify' : '';
+  try {
+    execSync(`kargo login ${server} --bearer-token ${token} ${insecure}`,
+      { encoding: 'utf8', timeout: 10000 });
+    console.log(`[${new Date().toISOString()}] Kargo login successful (${server})`);
+    return true;
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Kargo login failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Safe WebSocket send - only sends if connection is open
  */
 function wsSend(ws, data) {
@@ -309,6 +353,8 @@ async function handleRequest(req, res) {
       status: 'healthy', 
       service: 'gemini-sidecar',
       hasGitHubCredentials: hasGitHubCredentials(),
+      hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
+      hasKargoCredentials: fs.existsSync('/secrets/kargo/auth-token'),
     }));
     return;
   }
@@ -338,6 +384,10 @@ async function handleRequest(req, res) {
           console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
         }
       }
+
+      // Login to ArgoCD/Kargo CLIs if credentials are mounted
+      setupArgocdLogin();
+      setupKargoLogin();
       
       // Execute gemini CLI
       const result = await executeGemini(body.prompt, {
@@ -419,6 +469,14 @@ wss.on('connection', (ws) => {
         }
       }
 
+      // Login to ArgoCD/Kargo CLIs if credentials are mounted
+      if (setupArgocdLogin()) {
+        wsSend(ws, { type: 'progress', event_id: eventId, message: 'ArgoCD CLI authenticated' });
+      }
+      if (setupKargoLogin()) {
+        wsSend(ws, { type: 'progress', event_id: eventId, message: 'Kargo CLI authenticated' });
+      }
+
       // Execute Gemini CLI with streaming progress
       try {
         const result = await executeGeminiStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
@@ -465,6 +523,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Gemini sidecar listening on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute, WS /ws`);
   console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
+  console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);
+  console.log(`[${new Date().toISOString()}] Kargo credentials: ${fs.existsSync('/secrets/kargo/auth-token') ? 'available' : 'not configured'}`);
 });
 
 // Graceful shutdown

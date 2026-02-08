@@ -704,9 +704,10 @@ class BlackboardState:
             key, start, end, withscores=True
         )
         
-        # Parse all points with source priority
+        # Parse all points, separating by source.
         # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
-        raw_points: dict[float, tuple[float, str]] = {}  # timestamp -> (value, source)
+        self_reported: dict[float, float] = {}  # timestamp -> value
+        kubernetes: dict[float, float] = {}     # timestamp -> value
         
         for member, score in results:
             parts = member.split(":")
@@ -715,14 +716,21 @@ class BlackboardState:
                 source = parts[2] if len(parts) >= 3 else "self-reported"
                 timestamp = round(score, 1)  # Round to 100ms for deduplication
                 
-                # Prioritize self-reported over kubernetes
-                if timestamp in raw_points:
-                    existing_source = raw_points[timestamp][1]
-                    if source == "self-reported" and existing_source == "kubernetes":
-                        raw_points[timestamp] = (value, source)
-                    # Keep existing if self-reported
+                if source == "self-reported":
+                    self_reported[timestamp] = value
                 else:
-                    raw_points[timestamp] = (value, source)
+                    kubernetes[timestamp] = value
+        
+        # Source selection: if self-reported data exists, use it exclusively.
+        # Interleaving K8s metrics-server averages with instantaneous app values
+        # creates sawtooth spikes (K8s reports low averages between high app samples).
+        # Fall back to K8s data only when no self-reported data is available.
+        if self_reported:
+            raw_points = self_reported
+        elif kubernetes:
+            raw_points = kubernetes
+        else:
+            raw_points = {}
         
         # Sort by timestamp
         sorted_timestamps = sorted(raw_points.keys())
@@ -731,30 +739,28 @@ class BlackboardState:
             return []
         
         points = []
-        expected_interval = 5.0  # Expected interval between samples
-        max_gap = expected_interval * 2  # Interpolate gaps up to 2x expected interval
+        expected_interval = 10.0  # Expected interval between telemetry samples
+        max_gap = expected_interval * 3  # Fill gaps up to 3x expected interval
         
         for i, ts in enumerate(sorted_timestamps):
-            value, _ = raw_points[ts]
+            value = raw_points[ts]
             points.append(MetricPoint(timestamp=ts, value=value))
             
-            # Add interpolated points for gaps (if enabled)
+            # Fill gaps with step-hold (carry last value forward).
+            # Sampled metrics represent "this was the value at sample time" --
+            # the correct assumption is the value held until the next sample,
+            # NOT that it linearly moved to the next value.
             if interpolate and i < len(sorted_timestamps) - 1:
                 next_ts = sorted_timestamps[i + 1]
                 gap = next_ts - ts
                 
                 if gap > max_gap:
-                    # Interpolate: add points at expected_interval
-                    next_value = raw_points[next_ts][0]
-                    num_interp = int(gap / expected_interval) - 1
-                    
-                    for j in range(1, min(num_interp + 1, 10)):  # Limit to 10 interpolated points
-                        interp_ts = ts + (j * expected_interval)
-                        if interp_ts < next_ts:
-                            # Linear interpolation
-                            ratio = (interp_ts - ts) / gap
-                            interp_value = value + (next_value - value) * ratio
-                            points.append(MetricPoint(timestamp=interp_ts, value=interp_value))
+                    # Step-hold: repeat current value at regular intervals
+                    num_fill = int(gap / expected_interval) - 1
+                    for j in range(1, min(num_fill + 1, 10)):
+                        fill_ts = ts + (j * expected_interval)
+                        if fill_ts < next_ts:
+                            points.append(MetricPoint(timestamp=fill_ts, value=value))
         
         # Sort final points by timestamp
         points.sort(key=lambda p: p.timestamp)

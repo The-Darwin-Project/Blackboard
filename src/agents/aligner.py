@@ -97,8 +97,12 @@ class Aligner:
         self._version_buffer: dict[str, list[tuple[float, str]]] = {}  # service -> [(timestamp, version)]
         self._version_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         # Unified metrics signal buffer for LLM-based anomaly analysis
+        # Buffer is RETAINED across analysis windows (60s trim handles old entries).
+        # This gives Flash continuity: each analysis sees up to 60s of data, not
+        # just the last 30s, so sustained patterns aren't misclassified as transient.
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
+        self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
     
@@ -413,8 +417,10 @@ class Aligner:
         """
         Buffer metrics observations and use Flash to analyze patterns.
         
-        Instead of firing on every threshold breach, collects 30s of data
-        then asks Flash: is this a sustained issue, a transient spike, or noise?
+        Instead of firing on every threshold breach, collects data continuously
+        then asks Flash every 30s: is this a sustained issue, a transient spike,
+        or noise? Buffer is retained across analysis windows so Flash sees up to
+        60s of history for pattern continuity.
         """
         service = payload.service
         now = time.time()
@@ -434,18 +440,16 @@ class Aligner:
             "replicas": replicas,
         })
 
-        # Trim buffer to last 60s max
+        # Trim buffer to last 60s max (sliding window, not reset)
         cutoff = now - 60
         self._metrics_buffer[service] = [
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Check if we have 30s of observations and no pending analysis
-        buffer = self._metrics_buffer[service]
-        if not buffer:
-            return
-        buffer_age = now - buffer[0]["timestamp"]
-        if buffer_age >= 30 and not self._metrics_analysis_pending.get(service):
+        # Trigger analysis every 30s (time since last analysis, not buffer age).
+        # Buffer is retained between windows so Flash sees continuity.
+        time_since_analysis = now - self._last_analysis_time.get(service, 0)
+        if time_since_analysis >= 30 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
     
@@ -583,7 +587,10 @@ class Aligner:
             logger.error(f"Metrics analysis failed for {service}: {e}")
 
         finally:
-            self._metrics_buffer.pop(service, None)
+            # DON'T clear the buffer -- retain it for continuity across analysis
+            # windows. The 60s trim in _check_anomalies() handles old entries.
+            # This ensures Flash sees a sliding 60s window, not isolated 30s slices.
+            self._last_analysis_time[service] = time.time()
             self._metrics_analysis_pending[service] = False
     
     async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
@@ -680,12 +687,9 @@ class Aligner:
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger LLM analysis if buffer has 30s+ of data and no pending analysis
-        buffer = self._metrics_buffer[service]
-        if not buffer:
-            return
-        buffer_age = now - buffer[0]["timestamp"]
-        if buffer_age >= 30 and not self._metrics_analysis_pending.get(service):
+        # Trigger analysis every 30s (time since last analysis, not buffer age)
+        time_since_analysis = now - self._last_analysis_time.get(service, 0)
+        if time_since_analysis >= 30 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
     

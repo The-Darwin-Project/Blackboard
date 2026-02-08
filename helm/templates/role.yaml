@@ -50,6 +50,14 @@ rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications", "applicationsets"]
     verbs: ["get", "list", "watch"]
+  # Tekton pipeline resources (read-only)
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelines", "pipelineruns", "tasks", "taskruns", "pipelineresources"]
+    verbs: ["get", "list", "watch"]
+  # Kargo resources (read-only)
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["projects", "stages", "promotions", "freight", "warehouses"]
+    verbs: ["get", "list", "watch"]
   # Cluster-level read access for investigation
   - apiGroups: [""]
     resources: ["nodes", "namespaces"]

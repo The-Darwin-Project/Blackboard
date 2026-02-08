@@ -14,6 +14,25 @@ RUN dnf install -y git && dnf clean all && \
     rm kubectl && \
     kubectl version --client
 
+# Install CLI tools: oc, argocd, kargo, tkn (all use latest/stable -- no pinned versions)
+RUN \
+    # oc -- OpenShift CLI (superset of kubectl, adds routes, projects, builds)
+    curl -sL https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/stable/openshift-client-linux.tar.gz \
+      | tar -xz -C /usr/local/bin/ oc && \
+    # argocd -- ArgoCD CLI (app sync status, diff, management)
+    curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 \
+      -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd && \
+    # kargo -- Kargo CLI (promotion stages, freight, warehouses)
+    curl -sL https://github.com/akuity/kargo/releases/latest/download/kargo-linux-amd64 \
+      -o /usr/local/bin/kargo && chmod +x /usr/local/bin/kargo && \
+    # tkn -- Tekton CLI (pipelines, pipelineruns, taskruns)
+    TKN_VERSION=$(curl -sL https://api.github.com/repos/tektoncd/cli/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/tektoncd/cli/releases/download/${TKN_VERSION}/tkn_${TKN_VERSION#v}_Linux_x86_64.tar.gz" \
+      | tar -xz -C /usr/local/bin/ tkn && \
+    # Verify all CLIs installed
+    oc version --client && argocd version --client && kargo version && tkn version
+
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
 # UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
 RUN npm install -g @google/gemini-cli@latest && \

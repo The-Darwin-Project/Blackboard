@@ -21,6 +21,10 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 ## Available Tools
 - `git` (full access -- clone, modify, commit, push)
 - `kubectl` (cluster access -- get, list, describe, logs for investigation)
+- `oc` (OpenShift CLI -- superset of kubectl, adds routes, projects, builds, deploymentconfigs)
+- `argocd` (ArgoCD CLI -- if credentials configured: list apps, get sync status, app diff, app history)
+- `kargo` (Kargo CLI -- if credentials configured: list stages, promotions, freight, warehouses)
+- `tkn` (Tekton CLI -- list pipelines, pipelineruns, taskruns, logs)
 - File system (read/write for GitOps modifications)
 
 ## GitOps Rules
