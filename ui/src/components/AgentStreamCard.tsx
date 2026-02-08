@@ -27,7 +27,7 @@ function FloatingWindow({
 }) {
   const color = ACTOR_COLORS[agentName] || '#6b7280';
   const [pos, setPos] = useState({ x: 120, y: 80 });
-  const [size, setSize] = useState({ width: 700, height: 500 });
+  const [size] = useState({ width: 700, height: 500 });
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
