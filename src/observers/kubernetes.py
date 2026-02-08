@@ -228,6 +228,10 @@ class KubernetesObserver:
                 if not service_name:
                     continue
                 
+                # Skip self-monitoring
+                if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                    continue
+                
                 # Check container statuses for unhealthy states
                 reason = self._get_unhealthy_reason(pod)
                 
@@ -299,6 +303,10 @@ class KubernetesObserver:
                 if not service_name:
                     continue
                 
+                # Skip self-monitoring
+                if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                    continue
+                
                 count = event.count or 1
                 if service_name not in service_warnings:
                     service_warnings[service_name] = {"total_count": 0, "reasons": []}
@@ -366,6 +374,10 @@ class KubernetesObserver:
             service_name = await self._get_service_name(pod_name)
             if not service_name:
                 logger.debug(f"Skipping pod {pod_name}: no service name mapping")
+                return
+            
+            # Skip self-monitoring: Brain should never create anomaly events for itself
+            if service_name in ("darwin-brain", "darwin-blackboard-brain"):
                 return
             
             # Get resource limits for percentage calculation
