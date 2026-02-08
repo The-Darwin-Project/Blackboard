@@ -19,6 +19,12 @@ spec:
         # Trigger rollout on ConfigMap changes (GEMINI.md rules, app config)
         checksum/gemini-rules: {{ include (print $.Template.BasePath "/configmap-gemini-rules.yaml") . | sha256sum }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.argocd.enabled }}
+        checksum/argocd: {{ include (print $.Template.BasePath "/secret-argocd.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.kargo.enabled }}
+        checksum/kargo: {{ include (print $.Template.BasePath "/secret-kargo.yaml") . | sha256sum }}
+        {{- end }}
       labels:
         app: darwin-brain
         app.kubernetes.io/instance: {{ .Release.Name }}

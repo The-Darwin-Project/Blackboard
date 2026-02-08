@@ -131,24 +131,24 @@ github:
 # ArgoCD CLI Credentials (for agent ArgoCD API access)
 # =============================================================================
 argocd:
-  enabled: false
+  enabled: true
   # Pre-created secret with keys: server, auth-token
   # If empty and enabled=true, a placeholder secret is rendered by the chart
-  existingSecret: ""
+  existingSecret: "darwin-argocd-creds"
   # Server URL (e.g., argocd-server.openshift-gitops.svc:443)
-  server: ""
+  server: "openshift-gitops-server.openshift-gitops.svc.cluster.local:8080"
   # Set to true if using self-signed certs
   insecure: true
 # =============================================================================
 # Kargo CLI Credentials (for agent Kargo pipeline access)
 # =============================================================================
 kargo:
-  enabled: false
+  enabled: true
   # Pre-created secret with keys: server, auth-token
   # If empty and enabled=true, a placeholder secret is rendered by the chart
-  existingSecret: ""
+  existingSecret: "darwin-kargo-creds"
   # Server URL (e.g., kargo-api.kargo-system.svc:443)
-  server: ""
+  server: "kargo-api.kargo.svc.cluster.local:8080"
   insecure: true
 # =============================================================================
 # Resource Limits
