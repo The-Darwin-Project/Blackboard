@@ -11,12 +11,12 @@ Provides endpoints for the unified group chat UI to:
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..dependencies import get_blackboard
-from ..models import ConversationTurn, EventDocument
+from ..models import ConversationTurn, EventDocument, EventStatus
 from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,12 @@ async def approve_event(
         thoughts="User approved the plan.",
     )
     await blackboard.append_turn(event_id, turn)
+
+    # Atomically transition status so the Brain picks it up
+    await blackboard.transition_event_status(
+        event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
+    )
+
     logger.info(f"User approved event {event_id}")
     return {"status": "approved", "event_id": event_id}
 
@@ -98,6 +104,12 @@ async def reject_event(
         thoughts=reason,
     )
     await blackboard.append_turn(event_id, turn)
+
+    # Atomically transition status so the Brain re-processes with rejection feedback
+    await blackboard.transition_event_status(
+        event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
+    )
+
     logger.info(f"User rejected event {event_id}: {reason}")
     return {"status": "rejected", "event_id": event_id}
 
@@ -108,8 +120,6 @@ async def list_closed_events(
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
     """Get recently closed events."""
-    import time
-    # Get closed events from last 24h
     closed_ids = await blackboard.redis.zrevrangebyscore(
         blackboard.EVENT_CLOSED,
         max=time.time(),

@@ -261,10 +261,12 @@ function TurnBubble({
   turn,
   eventId,
   attachment,
+  onStatusChange,
 }: {
   turn: ConversationTurn;
   eventId?: string;
   attachment?: { filename: string; content: string } | null;
+  onStatusChange?: () => void;
 }) {
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   return (
@@ -300,7 +302,7 @@ function TurnBubble({
       {turn.pendingApproval && eventId && (
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button
-            onClick={() => approveEvent(eventId)}
+            onClick={() => approveEvent(eventId).then(() => onStatusChange?.())}
             style={{
               background: '#22c55e', color: '#fff', border: 'none',
               padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
@@ -311,12 +313,14 @@ function TurnBubble({
           </button>
           <button
             onClick={() => {
-              const reason = prompt('Reason for rejection (optional):') || 'User rejected the plan.';
+              const input = prompt('Reason for rejection (optional):');
+              if (input === null) return; // User clicked Cancel
+              const reason = input.trim() || 'User rejected the plan.';
               fetch(`/queue/${eventId}/reject`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ reason }),
-              });
+              }).then(() => onStatusChange?.());
             }}
             style={{
               background: '#ef4444', color: '#fff', border: 'none',
@@ -566,6 +570,10 @@ export function ConversationFeed() {
                   turn={turn}
                   eventId={selectedEvent.id}
                   attachment={turnAttachment}
+                  onStatusChange={() => {
+                    invalidateActive();
+                    invalidateEvent(selectedEvent.id);
+                  }}
                 />
               );
             })}

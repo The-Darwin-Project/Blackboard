@@ -1322,6 +1322,40 @@ class BlackboardState:
                     continue
         logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
 
+    async def transition_event_status(
+        self,
+        event_id: str,
+        from_status: str,
+        to_status: "EventStatus",
+    ) -> bool:
+        """Atomically transition an event's status using WATCH/MULTI/EXEC.
+
+        Returns True if the transition succeeded, False if the current status
+        didn't match from_status (no-op).
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for status transition")
+                        return False
+                    event = EventDocument(**json.loads(data))
+                    if event.status.value != from_status:
+                        logger.debug(f"Event {event_id} status is '{event.status.value}', expected '{from_status}' -- skipping transition")
+                        return False
+                    event.status = to_status
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except Exception:
+                    continue
+        logger.info(f"Event {event_id} status: {from_status} -> {to_status.value}")
+        return True
+
     # NOTE: notify_agent and dequeue_agent_notification REMOVED.
     # Agent communication now uses WebSocket (Brain -> Agent direct).
     # Redis agent notification queues (darwin:agent:notify:*) are no longer used.

@@ -254,6 +254,21 @@ def _build_brain_tools():
             },
         )
 
+        lookup_service = FunctionDeclaration(
+            name="lookup_service",
+            description="Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, version, replicas, and current metrics. Use this BEFORE routing to an agent when you need a service's repository URL or deployment details.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "service_name": {
+                        "type": "string",
+                        "description": "Service name to look up (e.g., 'darwin-store')",
+                    },
+                },
+                "required": ["service_name"],
+            },
+        )
+
         return Tool(function_declarations=[
             select_agent,
             close_event,
@@ -262,6 +277,7 @@ def _build_brain_tools():
             ask_agent_for_state,
             wait_for_verification,
             defer_event,
+            lookup_service,
         ])
 
     except ImportError:
@@ -391,11 +407,9 @@ class Brain:
                 )
                 return
 
-        # Try LLM processing, fall back to probe mode
+        # Get LLM model; fall back to probe mode if unavailable
         model = await self._get_model()
-        if model:
-            await self._process_with_llm(event_id, event, model)
-        else:
+        if not model:
             # PROBE MODE fallback (no LLM available)
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
@@ -407,14 +421,36 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             logger.info(f"Brain processed event {event_id} (probe mode)")
+            return
+
+        # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
+        # returns True, meaning the LLM needs to make a follow-up decision.
+        # Bounded to prevent runaway loops.
+        max_llm_iterations = 5
+        for iteration in range(max_llm_iterations):
+            # Re-fetch event to pick up turns appended by the previous iteration
+            if iteration > 0:
+                event = await self.blackboard.get_event(event_id)
+                if not event:
+                    return
+            should_continue = await self._process_with_llm(event_id, event, model)
+            if not should_continue:
+                break
+            logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
+        else:
+            logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
 
     async def _process_with_llm(
         self,
         event_id: str,
         event: EventDocument,
         model,
-    ) -> None:
-        """Process event using Vertex AI LLM function calling."""
+    ) -> bool:
+        """Process event using Vertex AI LLM function calling.
+
+        Returns True if the caller should re-invoke immediately (e.g., after
+        a lookup_service call that needs a follow-up LLM decision).
+        """
         # Build prompt from event context
         prompt = await self._build_event_prompt(event)
 
@@ -433,8 +469,7 @@ class Brain:
                     func_name = fc.name
                     func_args = dict(fc.args) if fc.args else {}
                     logger.info(f"Brain LLM decision for {event_id}: {func_name}({func_args})")
-                    await self._execute_function_call(event_id, func_name, func_args)
-                    return
+                    return await self._execute_function_call(event_id, func_name, func_args)
 
                 # Text-only response (no function call) -- treat as brain thoughts
                 if hasattr(part, "text") and part.text:
@@ -447,9 +482,10 @@ class Brain:
                     await self.blackboard.append_turn(event_id, turn)
                     await self._broadcast_turn(event_id, turn)
                     logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
-                    return
+                    return False
 
             logger.warning(f"Brain LLM returned empty response for {event_id}")
+            return False
 
         except Exception as e:
             logger.error(f"Brain LLM call failed for {event_id}: {e}", exc_info=True)
@@ -461,6 +497,7 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            return False
 
     async def _build_event_prompt(self, event: EventDocument) -> str:
         """Serialize event document as prompt text for the LLM, including service metadata."""
@@ -527,9 +564,12 @@ class Brain:
         event_id: str,
         function_name: str,
         args: dict,
-    ) -> None:
+    ) -> bool:
         """
         Execute an LLM function call. Maps function names to real operations.
+        
+        Returns True if the caller should re-invoke the LLM immediately
+        (e.g., after lookup_service). Returns False for all other cases.
         
         Agent dispatch uses asyncio.create_task for non-blocking execution.
         Other functions (close, approve, verify) are fast Redis writes.
@@ -541,14 +581,14 @@ class Brain:
             # Duplicate task prevention
             if event_id in self._active_tasks and not self._active_tasks[event_id].done():
                 logger.info(f"Task already active for {event_id}, skipping dispatch")
-                return
+                return False
 
             # Recursion guard
             depth = self._routing_depth.get(event_id, 0) + 1
             if depth > 15:
-                logger.warning(f"Event {event_id} hit routing depth limit (5)")
+                logger.warning(f"Event {event_id} hit routing depth limit (15)")
                 await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
-                return
+                return False
             self._routing_depth[event_id] = depth
 
             # Write event MD to agent volume
@@ -570,12 +610,13 @@ class Brain:
             # Broadcast the event MD as attachment
             event = await self.blackboard.get_event(event_id)
             if event and self.broadcast:
+                svc_meta = await self.blackboard.get_service(event.service)
                 await self.broadcast({
                     "type": "attachment",
                     "event_id": event_id,
                     "actor": "brain",
                     "filename": f"event-{event_id}.md",
-                    "content": self._event_to_markdown(event),
+                    "content": self._event_to_markdown(event, svc_meta),
                 })
 
             # Launch agent task (non-blocking)
@@ -586,10 +627,12 @@ class Brain:
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
+            return False
 
         elif function_name == "close_event":
             summary = args.get("summary", "Event closed.")
             await self._close_and_broadcast(event_id, summary)
+            return False
 
         elif function_name == "request_user_approval":
             plan_summary = args.get("plan_summary", "")
@@ -610,6 +653,7 @@ class Brain:
                     f"{self.blackboard.EVENT_PREFIX}{event_id}",
                     json.dumps(event.model_dump()),
                 )
+            return False
 
         elif function_name == "re_trigger_aligner":
             service = args.get("service", "")
@@ -623,6 +667,7 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            return False
 
         elif function_name == "wait_for_verification":
             condition = args.get("condition", "")
@@ -635,6 +680,7 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            return False
 
         elif function_name == "defer_event":
             reason = args.get("reason", "Deferred by Brain")
@@ -663,9 +709,45 @@ class Brain:
                     ex=delay + 60,  # Auto-expire the key after delay + buffer
                 )
             logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
+            return False
+
+        elif function_name == "lookup_service":
+            service_name = args.get("service_name", "")
+            svc = await self.blackboard.get_service(service_name)
+            if svc:
+                info_parts = [f"Service '{service_name}' metadata:"]
+                info_parts.append(f"  Version: {svc.version}")
+                if svc.gitops_repo:
+                    info_parts.append(f"  GitOps Repo: {svc.gitops_repo}")
+                if svc.gitops_repo_url:
+                    info_parts.append(f"  Repo URL: {svc.gitops_repo_url}")
+                if svc.gitops_helm_path:
+                    info_parts.append(f"  Helm Values Path: {svc.gitops_helm_path}")
+                if svc.replicas_ready is not None:
+                    info_parts.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
+                info_parts.append(f"  CPU: {svc.metrics.cpu:.1f}%")
+                info_parts.append(f"  Memory: {svc.metrics.memory:.1f}%")
+                result_text = "\n".join(info_parts)
+            else:
+                # List available services to help the LLM find the right name
+                known = await self.blackboard.get_services()
+                result_text = f"Service '{service_name}' not found. Known services: {', '.join(sorted(known)) if known else 'none'}"
+
+            # Append as a brain turn so the LLM sees the result in the next prompt
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="think",
+                evidence=result_text,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            # Signal caller to re-invoke LLM so it can act on the lookup result
+            return True
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
+            return False
 
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)

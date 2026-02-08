@@ -74,6 +74,37 @@ You modify application code, add features, fix bugs, and push changes that trigg
 - If the plan doesn't make sense or is missing information, STOP and ask
 - Do not invent features, add "nice to haves", or refactor beyond the plan's scope
 
+## Backward Compatibility
+When adding new fields to data models, APIs, or schemas:
+- Always provide a default value (e.g., `sku: str = ""` or `Optional[str] = None`)
+- Existing API consumers must NOT break when the new field is absent from their payloads
+- If backward compatibility is not possible, document the breaking change explicitly in your response
+
+## Git Identity
+- Use the pre-configured `GIT_USER_NAME` and `GIT_USER_EMAIL` environment variables for commits
+- Before committing, verify your git identity with `git config user.name` and `git config user.email`
+- If they are not set, run: `git config user.name "$GIT_USER_NAME"` and `git config user.email "$GIT_USER_EMAIL"`
+- Commit author should reflect the agent name (e.g., "Darwin Developer"), not "Gemini CLI"
+
+## Completion Report
+When you finish implementing and pushing changes, your response MUST include:
+- **Commit SHA**: The full or short SHA of the commit you pushed (run `git rev-parse --short HEAD`)
+- **Branch**: The branch you pushed to (e.g., `main`)
+- **Repository**: The repo URL you cloned
+- **Files changed**: List of files you modified
+- **Summary**: One-line description of what was implemented
+
+Example response format:
+```
+Implementation complete.
+- Commit: 3a29b03 (pushed to main)
+- Repository: https://github.com/The-Darwin-Project/Store.git
+- Files changed: src/app/models.py, src/app/routes/products.py, src/app/static/index.html
+- Summary: Added SKU field to Product entity across model, API, and UI.
+```
+
+The Brain uses this information to verify the deployment. Without the commit SHA, the system cannot confirm ArgoCD has deployed your changes.
+
 ## Environment
 - Kubernetes namespace: `darwin`
 - Git credentials are pre-configured (GitHub App token)
