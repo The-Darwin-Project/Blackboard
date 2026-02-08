@@ -24,16 +24,17 @@ RUN npm run build && \
 # =============================================================================
 # Stage 2: Python Application
 # =============================================================================
-FROM registry.access.redhat.com/ubi9/ubi:latest
+FROM registry.access.redhat.com/ubi9/python-312:latest
 
-# Install system packages as root
+# Python 3.12 required by google-genai SDK (>= 3.10)
+# Install git as root (needed for GitPython)
 USER 0
-RUN dnf install -y python3 python3-pip git && dnf clean all
+RUN dnf install -y git && dnf clean all
 
 # Set up working directory
 WORKDIR /app
 
-# Install Python dependencies as root (before switching to non-root)
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
