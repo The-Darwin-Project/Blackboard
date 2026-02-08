@@ -122,45 +122,49 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
- * Login to ArgoCD CLI if credentials are mounted
- * Fire-and-forget -- logs and returns false on failure
+ * Login to ArgoCD CLI using admin credentials if mounted.
+ * Secret holds the admin password (from openshift-gitops-cluster secret).
+ * Fire-and-forget -- logs and returns false on failure.
  */
 function setupArgocdLogin() {
   const server = process.env.ARGOCD_SERVER;
   const secretPath = '/secrets/argocd/auth-token';
   if (!server || !fs.existsSync(secretPath)) return false;
 
-  const token = fs.readFileSync(secretPath, 'utf8').trim();
+  const password = fs.readFileSync(secretPath, 'utf8').trim();
   const insecure = process.env.ARGOCD_INSECURE === 'true' ? '--insecure' : '';
   try {
-    execSync(`argocd login ${server} --auth-token ${token} ${insecure} --grpc-web`,
-      { encoding: 'utf8', timeout: 10000 });
+    execSync(`argocd login ${server} --username admin --password "${password}" ${insecure} --grpc-web`,
+      { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
     console.log(`[${new Date().toISOString()}] ArgoCD login successful (${server})`);
     return true;
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] ArgoCD login failed: ${err.message}`);
+    console.error(`[${new Date().toISOString()}] ArgoCD login failed: ${err.message.split('\n')[0]}`);
     return false;
   }
 }
 
 /**
- * Login to Kargo CLI if credentials are mounted
- * Fire-and-forget -- logs and returns false on failure
+ * Login to Kargo CLI using admin password if credentials are mounted.
+ * Uses: kargo login <server> --admin --password <pass> --insecure-skip-tls-verify
+ * The secret's auth-token key holds the admin password.
+ * Fire-and-forget -- logs and returns false on failure.
  */
 function setupKargoLogin() {
   const server = process.env.KARGO_SERVER;
   const secretPath = '/secrets/kargo/auth-token';
   if (!server || !fs.existsSync(secretPath)) return false;
 
-  const token = fs.readFileSync(secretPath, 'utf8').trim();
+  const password = fs.readFileSync(secretPath, 'utf8').trim();
   const insecure = process.env.KARGO_INSECURE === 'true' ? '--insecure-skip-tls-verify' : '';
   try {
-    execSync(`kargo login ${server} --bearer-token ${token} ${insecure}`,
-      { encoding: 'utf8', timeout: 10000 });
+    execSync(`kargo login https://${server} --admin --password "${password}" ${insecure}`,
+      { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] });
     console.log(`[${new Date().toISOString()}] Kargo login successful (${server})`);
     return true;
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] Kargo login failed: ${err.message}`);
+    console.error(`[${new Date().toISOString()}] Kargo login failed: ${err.message.split('\n')[0]}`);
+    console.log(`[${new Date().toISOString()}] Agents can still use kubectl/oc for Kargo CRD access`);
     return false;
   }
 }
