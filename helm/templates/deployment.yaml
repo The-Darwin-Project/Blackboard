@@ -218,6 +218,10 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "true"
+            - name: GEMINI_MODEL
+              value: "{{ .Values.sidecars.architect.modelName }}"
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
@@ -285,6 +289,10 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "true"
+            - name: GEMINI_MODEL
+              value: "{{ .Values.sidecars.sysadmin.modelName }}"
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
@@ -352,6 +360,10 @@ spec:
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "true"
+            - name: GEMINI_MODEL
+              value: "{{ .Values.sidecars.developer.modelName }}"
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
