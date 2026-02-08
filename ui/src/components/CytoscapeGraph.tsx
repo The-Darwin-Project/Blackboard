@@ -565,16 +565,16 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           },
         ]);
 
-        // HTML labels are confirmed working -- hide the underlying Cytoscape
-        // node body for service nodes so the grey rectangle doesn't show
-        // through as a "shadow" behind the HTML label.
-        // Ghost nodes keep their dashed border style (selector targets .service only).
+        // Shrink the Cytoscape node body so it doesn't show as a "shadow"
+        // behind the HTML label, but keep it VISIBLE as a tiny fallback dot.
+        // If HTML labels fail to render, nodes still appear as small colored
+        // dots rather than being completely invisible.
         cy.style()
           .selector('node.service')
           .style({
-            'background-opacity': 0,
+            'width': 10,
+            'height': 10,
             'label': '',
-            'border-width': 0,
           })
           .update();
           
