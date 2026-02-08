@@ -648,6 +648,7 @@ class Aligner:
         cpu: float,
         memory: float,
         source: str = "kubernetes",
+        error_rate: float = 0.0,
     ) -> None:
         """
         Feed K8s Observer metrics into the unified buffer for LLM analysis.
@@ -663,6 +664,7 @@ class Aligner:
             cpu: CPU usage percentage
             memory: Memory usage percentage
             source: Metrics source (for logging)
+            error_rate: Error rate percentage (elevated when K8s warning events detected)
         """
         now = time.time()
 
@@ -677,7 +679,7 @@ class Aligner:
             "timestamp": now,
             "cpu": cpu,
             "memory": memory,
-            "error_rate": 0.0,  # metrics-server doesn't provide error rates
+            "error_rate": error_rate,
             "replicas": replicas,
         })
 

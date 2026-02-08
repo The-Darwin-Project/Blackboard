@@ -38,10 +38,15 @@ class KubernetesObserver:
     # Unhealthy container states that should trigger investigation
     UNHEALTHY_STATES = {"ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "OOMKilled", "Error", "CreateContainerError"}
     
+    # K8s Event reasons that indicate pod-level issues (even when pod status is Running)
+    WARNING_EVENT_REASONS = {"Unhealthy", "BackOff", "Failed", "FailedMount", "FailedScheduling"}
+    # Minimum event count within the polling window to trigger an alert
+    WARNING_EVENT_THRESHOLD = 3
+    
     def __init__(
         self,
         blackboard: "BlackboardState",
-        anomaly_callback: Optional[Callable[[str, float, float, str], Awaitable[None]]] = None,
+        anomaly_callback: Optional[Callable[..., Awaitable[None]]] = None,
         pod_health_callback: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
         namespace: str = K8S_OBSERVER_NAMESPACE,
         interval: int = K8S_OBSERVER_INTERVAL,
@@ -73,6 +78,11 @@ class KubernetesObserver:
         self._pod_limits: dict[str, dict] = {}
         # Track already-reported unhealthy pods to avoid spam: {pod_name: reason}
         self._reported_unhealthy: dict[str, str] = {}
+        # Track reported K8s Warning events: {"pod:reason" -> True}
+        self._reported_events: dict[str, bool] = {}
+        # Active warning events per service: {service -> reason_string}
+        # Fed into anomaly_callback as elevated error_rate (30s buffer path)
+        self._active_warnings: dict[str, str] = {}
     
     async def start(self) -> None:
         """Start the background polling loop."""
@@ -149,6 +159,7 @@ class KubernetesObserver:
             try:
                 await self._poll_metrics()
                 await self._poll_pod_health()
+                await self._poll_warning_events()
             except Exception as e:
                 logger.error(f"Error polling K8s metrics: {e}")
             
@@ -237,6 +248,80 @@ class KubernetesObserver:
                     
         except Exception as e:
             logger.debug(f"Failed to poll pod health: {e}")
+    
+    async def _poll_warning_events(self) -> None:
+        """
+        Poll K8s Warning events for probe failures and recurring issues.
+        
+        Catches problems invisible to container status checks:
+        - Liveness/readiness probe failures (pod still Running, but failing probes)
+        - Image pull secret warnings (pod Running, but secret missing)
+        - Volume mount failures, scheduling issues
+        
+        Feeds through the anomaly_callback (30s metrics buffer) NOT the instant
+        pod_health_callback. Probe failures can be transient (lazy loading,
+        rolling deployments), so Flash needs the full 30s window to decide
+        if it's sustained or noise.
+        
+        Only activates when the same warning repeats >= WARNING_EVENT_THRESHOLD times.
+        """
+        if not self._k8s_available or not self.anomaly_callback:
+            return
+        
+        try:
+            events = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._core_api.list_namespaced_event(
+                    self.namespace,
+                    field_selector="type=Warning",
+                )
+            )
+            
+            # Group events by service, count occurrences per reason
+            # Key: service_name, Value: {total_count, reasons: []}
+            service_warnings: dict[str, dict] = {}
+            
+            for event in events.items:
+                reason = event.reason or ""
+                if reason not in self.WARNING_EVENT_REASONS:
+                    message = event.message or ""
+                    if "probe failed" not in message.lower() and "liveness" not in message.lower() and "readiness" not in message.lower():
+                        continue
+                
+                obj = event.involved_object
+                if not obj or obj.kind != "Pod":
+                    continue
+                pod_name = obj.name or ""
+                if not pod_name:
+                    continue
+                
+                service_name = await self._get_service_name(pod_name)
+                if not service_name:
+                    continue
+                
+                count = event.count or 1
+                if service_name not in service_warnings:
+                    service_warnings[service_name] = {"total_count": 0, "reasons": []}
+                service_warnings[service_name]["total_count"] += count
+                
+                reason_str = f"{reason}: {(event.message or '')[:120]} ({count}x)"
+                if reason_str not in service_warnings[service_name]["reasons"]:
+                    service_warnings[service_name]["reasons"].append(reason_str)
+            
+            # Update active warnings per service (used by _process_pod_metrics)
+            new_warnings: dict[str, str] = {}
+            for svc, info in service_warnings.items():
+                if info["total_count"] >= self.WARNING_EVENT_THRESHOLD:
+                    new_warnings[svc] = "; ".join(info["reasons"][:3])
+                    if svc not in self._active_warnings:
+                        logger.warning(
+                            f"K8s Warning events for {svc} ({info['total_count']}x): "
+                            f"{new_warnings[svc][:200]}"
+                        )
+            self._active_warnings = new_warnings
+                    
+        except Exception as e:
+            logger.debug(f"Failed to poll K8s warning events: {e}")
     
     def _get_unhealthy_reason(self, pod) -> Optional[str]:
         """Extract unhealthy reason from pod container statuses."""
@@ -345,10 +430,19 @@ class KubernetesObserver:
                     replicas["desired"],
                 )
             
-            # Trigger anomaly detection callback
+            # Trigger anomaly detection callback.
+            # If active K8s Warning events exist for this service (probe failures,
+            # image pull warnings), inject an elevated error_rate into the buffer
+            # so Flash sees it alongside CPU/memory data.
+            error_rate = 0.0
+            if service_name in self._active_warnings:
+                error_rate = 100.0  # Signal to Flash: something is wrong
+                logger.debug(f"Injecting error_rate=100% for {service_name}: {self._active_warnings[service_name][:80]}")
+            
             if self.anomaly_callback:
                 await self.anomaly_callback(
-                    service_name, cpu_percent, memory_percent, "kubernetes"
+                    service_name, cpu_percent, memory_percent, "kubernetes",
+                    error_rate=error_rate,
                 )
                 
         except Exception as e:

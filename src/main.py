@@ -130,10 +130,13 @@ async def lifespan(app: FastAPI):
         if K8S_OBSERVER_ENABLED:
             # Create anomaly callback that calls Aligner's threshold check
             async def k8s_anomaly_callback(
-                service: str, cpu: float, memory: float, source: str
+                service: str, cpu: float, memory: float, source: str,
+                error_rate: float = 0.0,
             ) -> None:
                 """Called by K8sObserver with metrics from metrics-server."""
-                await aligner.check_anomalies_for_service(service, cpu, memory, source)
+                await aligner.check_anomalies_for_service(
+                    service, cpu, memory, source, error_rate=error_rate,
+                )
             
             # Pod health callback for unhealthy states (ImagePullBackOff, CrashLoopBackOff, etc.)
             async def k8s_pod_health_callback(
