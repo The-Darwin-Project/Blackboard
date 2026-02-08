@@ -33,18 +33,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Anomaly thresholds (configurable via env)
+# Anomaly thresholds (configurable via env) -- used by Flash LLM prompt context
 CPU_THRESHOLD = float(os.getenv("ALIGNER_CPU_THRESHOLD", "80.0"))
 MEMORY_THRESHOLD = float(os.getenv("ALIGNER_MEMORY_THRESHOLD", "85.0"))
 ERROR_RATE_THRESHOLD = float(os.getenv("ALIGNER_ERROR_RATE_THRESHOLD", "5.0"))
-# Cooldown between anomaly events for same service (seconds)
-ANOMALY_COOLDOWN = int(os.getenv("ALIGNER_ANOMALY_COOLDOWN", "60"))
-
-# Scale-down thresholds: if BOTH cpu and memory are below these AND replicas > 1
-SCALE_DOWN_CPU_THRESHOLD = float(os.getenv("ALIGNER_SCALE_DOWN_CPU", "30.0"))
-SCALE_DOWN_MEMORY_THRESHOLD = float(os.getenv("ALIGNER_SCALE_DOWN_MEMORY", "40.0"))
-# Cooldown between scale-down evaluations per service (seconds)
-SCALE_DOWN_COOLDOWN = int(os.getenv("ALIGNER_SCALE_DOWN_COOLDOWN", "300"))
 
 
 class FilterRule:
@@ -101,15 +93,14 @@ class Aligner:
         # Closed-loop state tracking
         self._known_services: set[str] = set()
         self._service_versions: dict[str, str] = {}  # service -> last known version
-        self._anomaly_state: dict[str, dict] = {}  # service -> {type, timestamp}
-        self._anomaly_cooldowns: dict[str, float] = {}  # cooldown_key -> last event timestamp
-        self._scale_down_last_check: dict[str, float] = {}  # service -> last evaluation timestamp
         # Version observation buffer for LLM-based drift detection
         self._version_buffer: dict[str, list[tuple[float, str]]] = {}  # service -> [(timestamp, version)]
         self._version_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         # Unified metrics signal buffer for LLM-based anomaly analysis
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
+        # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
+        self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
     
     async def _get_client(self):
         """Lazy-load google-genai Client for Aligner LLM calls."""
@@ -458,10 +449,6 @@ class Aligner:
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
     
-    async def _check_over_provisioned(self, payload) -> None:
-        """Over-provisioning is now handled by _analyze_metrics_signals via Flash."""
-        pass
-
     async def _analyze_metrics_signals(self, service: str) -> None:
         """
         Use Flash to analyze buffered metrics and determine what's happening.
@@ -555,6 +542,12 @@ class Aligner:
                         narrative=f"Service {service} appears over-provisioned: {latest['replicas']} replicas with avg CPU={avg_cpu:.1f}%, MEM={avg_mem:.1f}%. {explanation}",
                     )
                     logger.info(f"OVER-PROVISIONED (Flash): {service} {latest['replicas']} replicas, avg cpu={avg_cpu:.1f}%")
+                    # Notify active events so the Brain sees the over-provisioned signal
+                    await self._notify_active_events(
+                        service,
+                        f"Over-provisioned: {service} has {latest['replicas']} replicas "
+                        f"with avg CPU={avg_cpu:.1f}%, MEM={avg_mem:.1f}%",
+                    )
                     await self._trigger_architect(service, "over_provisioned")
 
                 elif verdict == "RECOVERING":
@@ -564,6 +557,12 @@ class Aligner:
                         narrative=f"Service {service} is recovering: metrics trending back to normal. {explanation}",
                     )
                     logger.info(f"RECOVERING (Flash): {service} -- {explanation}")
+                    # Notify active events so the Brain sees the resolution
+                    await self._notify_active_events(
+                        service,
+                        f"Anomaly resolved (recovering): {service} metrics trending to normal. "
+                        f"CPU={latest['cpu']:.1f}%, MEM={latest['memory']:.1f}%",
+                    )
 
                 elif verdict == "TRANSIENT_SPIKE":
                     logger.info(f"TRANSIENT SPIKE (Flash): {service} -- {explanation}. No action needed.")
@@ -589,13 +588,14 @@ class Aligner:
     
     async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
         """
-        Create an event for the Brain to process -- with deduplication.
+        Create an event for the Brain to process -- with two-layer deduplication.
         
-        Before creating a new event, checks if an active event already exists
-        for the same service. If so, skips creation (the existing event is
-        already being handled by the Brain/agents).
+        Layer 1 (active-event check): skip if an event is already being worked on.
+        Layer 2 (time-based cooldown): skip if we recently created an event for
+        this service, even if it was closed fast. Prevents rapid event churn
+        during oscillation cycles (scale up -> over-provisioned -> scale down).
         """
-        # Dedup: check if an active event already exists for this service
+        # Layer 1: check if an active event already exists for this service
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
             existing = await self.blackboard.get_event(eid)
@@ -605,6 +605,15 @@ class Aligner:
                     f"-- active event {eid} already exists (status: {existing.status.value})"
                 )
                 return
+
+        # Layer 2: time-based cooldown (2 minutes between events per service)
+        last_event_time = self._last_event_creation.get(service, 0)
+        if time.time() - last_event_time < 120:
+            logger.info(
+                f"Skipping event for {service} ({anomaly_type}): "
+                f"cooldown ({int(time.time() - last_event_time)}s since last)"
+            )
+            return
 
         # Get current metrics for evidence
         svc = await self.blackboard.get_service(service)
@@ -623,6 +632,7 @@ class Aligner:
             reason=anomaly_type.replace("_", " "),
             evidence=evidence,
         )
+        self._last_event_creation[service] = time.time()
         logger.info(f"Created event for {service} ({anomaly_type})")
     
     async def check_anomalies_for_service(
@@ -633,84 +643,51 @@ class Aligner:
         source: str = "kubernetes",
     ) -> None:
         """
-        Check for anomalies from external metrics (e.g., Kubernetes observer).
+        Feed K8s Observer metrics into the unified buffer for LLM analysis.
         
-        This is called by the KubernetesObserver with metrics from metrics-server.
-        Reuses the same threshold logic as _check_anomalies but for external sources.
+        Called by the KubernetesObserver with metrics from metrics-server.
+        Instead of instant hardcoded threshold checks, feeds the same 30s
+        metrics buffer used by _check_anomalies(). Both telemetry push AND
+        K8s Observer now converge on _analyze_metrics_signals() for a single
+        LLM-based assessment.
         
         Args:
             service: Service name
             cpu: CPU usage percentage
             memory: Memory usage percentage
-            source: Metrics source (for event metadata)
+            source: Metrics source (for logging)
         """
         now = time.time()
-        
-        # Get or create anomaly state for this service
-        if service not in self._anomaly_state:
-            self._anomaly_state[service] = {"high_cpu": 0, "high_memory": 0, "high_error": 0, "active": set()}
-        
-        state = self._anomaly_state[service]
-        
-        # Check CPU threshold
-        if cpu >= CPU_THRESHOLD:
-            if "high_cpu" not in state["active"]:
-                if now - state["high_cpu"] > ANOMALY_COOLDOWN:
-                    state["high_cpu"] = now
-                    state["active"].add("high_cpu")
-                    
-                    await self.blackboard.record_event(
-                        EventType.HIGH_CPU_DETECTED,
-                        {"service": service, "cpu": cpu, "threshold": CPU_THRESHOLD, "source": source},
-                        narrative=f"Warning: {service} CPU usage ({cpu:.1f}%) exceeds the {CPU_THRESHOLD:.0f}% threshold. Escalating to Architect for analysis.",
-                    )
-                    logger.warning(f"HIGH CPU detected ({source}): {service} at {cpu:.1f}%")
-                    
-                    await self._trigger_architect(service, "high_cpu")
-        else:
-            if "high_cpu" in state["active"]:
-                state["active"].remove("high_cpu")
-                narrative = f"Good news: The high CPU issue on {service} has returned to normal levels ({cpu:.1f}%)."
-                await self.blackboard.record_event(
-                    EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_cpu", "cpu": cpu, "source": source},
-                    narrative=narrative,
-                )
-                logger.info(f"CPU anomaly resolved ({source}): {service} now at {cpu:.1f}%")
-                # Notify any active events for this service so the Brain sees the resolution
-                await self._notify_active_events(service, f"CPU anomaly resolved: {service} now at {cpu:.1f}%")
-                # Evaluate scale-down (HPA-like behavior)
-                await self._trigger_architect(service, "anomaly_resolved_cpu")
-        
-        # Check Memory threshold
-        if memory >= MEMORY_THRESHOLD:
-            if "high_memory" not in state["active"]:
-                if now - state["high_memory"] > ANOMALY_COOLDOWN:
-                    state["high_memory"] = now
-                    state["active"].add("high_memory")
-                    
-                    await self.blackboard.record_event(
-                        EventType.HIGH_MEMORY_DETECTED,
-                        {"service": service, "memory": memory, "threshold": MEMORY_THRESHOLD, "source": source},
-                        narrative=f"Warning: {service} memory usage ({memory:.1f}%) exceeds the {MEMORY_THRESHOLD:.0f}% threshold.",
-                    )
-                    logger.warning(f"HIGH MEMORY detected ({source}): {service} at {memory:.1f}%")
-                    
-                    await self._trigger_architect(service, "high_memory")
-        else:
-            if "high_memory" in state["active"]:
-                state["active"].remove("high_memory")
-                narrative = f"Good news: The high memory issue on {service} has returned to normal levels ({memory:.1f}%)."
-                await self.blackboard.record_event(
-                    EventType.ANOMALY_RESOLVED,
-                    {"service": service, "anomaly": "high_memory", "memory": memory, "source": source},
-                    narrative=narrative,
-                )
-                logger.info(f"Memory anomaly resolved ({source}): {service} now at {memory:.1f}%")
-                # Notify any active events for this service so the Brain sees the resolution
-                await self._notify_active_events(service, f"Memory anomaly resolved: {service} now at {memory:.1f}%")
-                # Evaluate scale-down (HPA-like behavior)
-                await self._trigger_architect(service, "anomaly_resolved_memory")
+
+        # Get replica info for context
+        svc = await self.blackboard.get_service(service)
+        replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
+
+        # Feed the unified metrics buffer (same structure as _check_anomalies)
+        if service not in self._metrics_buffer:
+            self._metrics_buffer[service] = []
+        self._metrics_buffer[service].append({
+            "timestamp": now,
+            "cpu": cpu,
+            "memory": memory,
+            "error_rate": 0.0,  # metrics-server doesn't provide error rates
+            "replicas": replicas,
+        })
+
+        # Trim buffer to last 60s max
+        cutoff = now - 60
+        self._metrics_buffer[service] = [
+            m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
+        ]
+
+        # Trigger LLM analysis if buffer has 30s+ of data and no pending analysis
+        buffer = self._metrics_buffer[service]
+        if not buffer:
+            return
+        buffer_age = now - buffer[0]["timestamp"]
+        if buffer_age >= 30 and not self._metrics_analysis_pending.get(service):
+            self._metrics_analysis_pending[service] = True
+            await self._analyze_metrics_signals(service)
     
     async def handle_unhealthy_pod(self, service: str, pod_name: str, reason: str) -> None:
         """
