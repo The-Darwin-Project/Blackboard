@@ -1,97 +1,112 @@
-# Darwin Agent Service Accounts
+# Darwin Agent -- External Service Access
 
-ServiceAccounts for Darwin agents to access ArgoCD and Kargo APIs.
-These live in their respective GitOps repos and are synced by ArgoCD.
+Configuration for Darwin agents to access ArgoCD and Kargo APIs.
 
-## ArgoCD Agent
+## Overview
 
-**File**: `openshift-gitops/ArgoCD/darwin-agent-sa.yaml`
-**Synced to**: `openshift-gitops` namespace (via ArgoCD self-management)
+The sidecar agents authenticate to ArgoCD and Kargo before each task execution.
+Credentials are stored as K8s Secrets in the `darwin` namespace and mounted
+into the Architect and SysAdmin sidecar containers. The Developer sidecar
+does NOT receive these credentials.
 
-Creates:
-- `ServiceAccount/darwin-argocd-agent`
-- `Secret/darwin-argocd-agent-token` (auto-populated by K8s)
-- `ClusterRole/darwin-argocd-agent` (read ArgoCD CRDs)
-- `ClusterRoleBinding/darwin-argocd-agent`
+```mermaid
+flowchart TD
+    A["Task arrives via WebSocket"]
+    B["server.js: setupGitCredentials()<br/>&#8203;<i>GitHub App token</i>"]
+    C["server.js: setupArgocdLogin()<br/>&#8203;<i>argocd login --username admin</i>"]
+    D["server.js: setupKargoLogin()<br/>&#8203;<i>kargo login --admin --password</i>"]
+    E["Spawn: gemini -p &lt;prompt&gt;<br/>&#8203;<i>agent has all CLIs authenticated</i>"]
 
-### Setup
+    A --> B --> C --> D --> E
+```
 
-1. Commit and push `darwin-agent-sa.yaml` to the ArgoCD repo -- ArgoCD syncs it.
+## ArgoCD
 
-2. Add the ArgoCD API RBAC policy to `Argocd-cr.yaml` under `spec.rbac.policy`:
-   ```
-   p, role:darwin-readonly, applications, get, */*, allow
-   p, role:darwin-readonly, applications, sync, */*, deny
-   p, role:darwin-readonly, projects, get, *, allow
-   p, role:darwin-readonly, clusters, get, *, allow
-   p, role:darwin-readonly, repositories, get, *, allow
-   p, role:darwin-readonly, logs, get, */*, allow
+**Auth method**: Admin username + password
+**Login command**: `argocd login <server> --username admin --password <pass> --insecure --grpc-web`
 
-   g, system:serviceaccount:openshift-gitops:darwin-argocd-agent, role:darwin-readonly
-   ```
+### ArgoCD Setup
 
-3. Once synced, extract the token and create the Darwin secret:
+1. Get the admin password from the existing ArgoCD secret:
+
    ```bash
-   ARGOCD_TOKEN=$(oc get secret darwin-argocd-agent-token -n openshift-gitops -o jsonpath='{.data.token}' | base64 -d)
+   ADMIN_PASS=$(oc get secret openshift-gitops-cluster -n openshift-gitops \
+     -o jsonpath='{.data.admin\.password}' | base64 -d)
+   ```
 
+2. Create the Darwin secret:
+
+   ```bash
    oc create secret generic darwin-argocd-creds \
      --from-literal=server=openshift-gitops-server.openshift-gitops.svc:443 \
-     --from-literal=auth-token="$ARGOCD_TOKEN" \
+     --from-literal=auth-token="$ADMIN_PASS" \
      -n darwin
    ```
 
-4. Enable in `BlackBoard/helm/values.yaml`:
+3. Enable in `helm/values.yaml`:
+
    ```yaml
    argocd:
      enabled: true
      existingSecret: "darwin-argocd-creds"
      server: "openshift-gitops-server.openshift-gitops.svc:443"
+     insecure: true
    ```
 
----
+## Kargo
 
-## Kargo Agent
-
-**File**: `kargo/kargo/templates/openshift/darwin-agent-sa.yaml`
-**Synced to**: `kargo` namespace (via ArgoCD Kargo Application)
-
-Creates:
-- `ServiceAccount/darwin-kargo-agent`
-- `Secret/darwin-kargo-agent-token` (auto-populated by K8s)
-- `ClusterRole/darwin-kargo-agent` (read Kargo CRDs)
-- `ClusterRoleBinding/darwin-kargo-agent`
+**Auth method**: Admin password (non-interactive via `--password` flag)
+**Login command**: `kargo login <server> --admin --password <pass> --insecure-skip-tls-verify`
 
 ### Setup
 
-1. Commit and push `darwin-agent-sa.yaml` to the Kargo repo -- ArgoCD syncs it.
+1. Use the Kargo admin password (from your Kargo `values-openshift.yaml`):
 
-2. Once synced, extract the token and create the Darwin secret:
    ```bash
-   KARGO_TOKEN=$(oc get secret darwin-kargo-agent-token -n kargo -o jsonpath='{.data.token}' | base64 -d)
-
    oc create secret generic darwin-kargo-creds \
      --from-literal=server=kargo-api.kargo.svc:443 \
-     --from-literal=auth-token="$KARGO_TOKEN" \
+     --from-literal=auth-token="<kargo-admin-password>" \
      -n darwin
    ```
 
-3. Enable in `BlackBoard/helm/values.yaml`:
+2. Enable in `helm/values.yaml`:
+
    ```yaml
    kargo:
      enabled: true
      existingSecret: "darwin-kargo-creds"
      server: "kargo-api.kargo.svc:443"
+     insecure: true
    ```
 
-> **Note**: If the Kargo API rejects the SA bearer token (it uses
-> Dex/OIDC), use the admin password instead in the `auth-token` key
-> and update `server.js` to use `kargo login --admin --password`.
+## K8s RBAC (CRD Read Access)
 
----
+In addition to CLI login, agents have read-only K8s API access to ArgoCD
+and Kargo CRDs via the pod's ServiceAccount. This allows `kubectl`/`oc`
+commands like `oc get applications -A` and `oc get stages` without
+CLI authentication.
 
-## Cluster-specific values
+These are defined in the Helm chart's `role.yaml` ClusterRole:
 
-| Component | Namespace | Service | Token Secret |
-|-----------|-----------|---------|-------------|
-| ArgoCD | `openshift-gitops` | `openshift-gitops-server:443` | `darwin-argocd-agent-token` |
-| Kargo | `kargo` | `kargo-api:443` | `darwin-kargo-agent-token` |
+- `argoproj.io`: applications, applicationsets, appprojects
+- `tekton.dev`: pipelines, pipelineruns, tasks, taskruns
+- `kargo.akuity.io`: projects, stages, promotions, freight, warehouses
+
+## GitOps-Managed ServiceAccounts
+
+For K8s CRD access, ServiceAccounts are deployed via GitOps:
+
+| File                                                   | Namespace          | Synced by               |
+|--------------------------------------------------------|--------------------|-------------------------|
+| `openshift-gitops/ArgoCD/darwin-agent-sa.yaml`         | `openshift-gitops` | ArgoCD self-management  |
+| `kargo/kargo/templates/openshift/darwin-agent-sa.yaml` | `kargo`            | ArgoCD Kargo Application|
+
+These SAs provide the ClusterRoles for CRD read access. The CLI
+authentication (admin password) is separate and handled by `server.js`.
+
+## Cluster-Specific Values
+
+| Component |     Namespace         |         Service             | Port |
+|-----------|-----------------------|-----------------------------|------|
+| ArgoCD    | `openshift-gitops`    | `openshift-gitops-server`   | 443  |
+| Kargo     | `kargo`               | `kargo-api`                 | 443  |
