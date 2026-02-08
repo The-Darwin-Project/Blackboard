@@ -49,7 +49,7 @@ The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** 
 
 ## Autonomous Remediation Examples
 
-See [docs/autonomous-remediation-example.md](../docs/autonomous-remediation-example.md) for a documented 21-turn multi-agent event where the system autonomously:
+See [docs/autonomous-remediation-example.md](docs/autonomous-remediation-example.md) for a documented 21-turn multi-agent event where the system autonomously:
 1. Detected an over-provisioned service
 2. Discovered the GitOps repository by reasoning from the container image URL
 3. Produced and executed a scaling plan via GitOps
