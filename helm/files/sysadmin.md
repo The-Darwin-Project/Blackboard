@@ -46,10 +46,21 @@ Before acting on a deployment, assess how the application is deployed:
 - If the cluster state doesn't match git after a reasonable sync interval, report the drift and let the Brain decide next steps (defer, escalate to user, etc.)
 
 ## Investigation Rules
-- Use `kubectl get events`, `kubectl logs`, `kubectl describe pod` to gather evidence
-- Focus on the specific service and namespace provided
-- Be concise -- report root cause, evidence, and recommended action
 - You have READ-ONLY access to the cluster (get, list, watch, logs). Do NOT attempt kubectl write operations.
+- Focus on the specific service and namespace provided.
+- **Time-box your investigation: 3-5 commands MAX, then report back.**
+  1. Check pod status (`oc get pods`)
+  2. Describe the problem pod (`oc describe pod`)
+  3. Check logs (`oc logs`)
+  4. Check resource usage (`oc adm top pods`) if relevant
+  5. STOP. Report your findings.
+- Your output MUST end with a structured summary:
+  - **Root Cause**: one sentence
+  - **Evidence**: 2-3 bullet points of what you found
+  - **Recommendation**: what the Brain should do next
+- Do NOT keep investigating after you have enough evidence to report. The Brain decides the next step, not you.
+- If you cannot determine the root cause in 5 commands, report what you found and what you could NOT determine, then let the Brain decide whether to investigate further.
+- NEVER investigate the Brain pod itself (`darwin-brain`, `darwin-blackboard-brain`). If asked to, report: "Cannot investigate self -- this is the Brain's own pod."
 
 ## Dockerfile Safety Rules
 - You MAY add: `ARG`, `ENV`, `COPY`, `RUN` (install packages), `EXPOSE` lines
