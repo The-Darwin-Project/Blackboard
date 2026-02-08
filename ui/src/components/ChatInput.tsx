@@ -33,8 +33,9 @@ function ChatInput() {
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Ask the Brain..."
-          rows={1}
-          className="flex-1 px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder-text-muted resize-none focus:outline-none focus:border-border-focus"
+          rows={3}
+          className="flex-1 px-3 py-2 bg-bg-primary border border-border rounded-lg text-sm text-text-primary placeholder-text-muted resize-y focus:outline-none focus:border-border-focus"
+          style={{ minHeight: 60, maxHeight: 200 }}
           disabled={isPending}
         />
         <button

@@ -729,11 +729,11 @@ export function ConversationFeed() {
             }}
             onPaste={handlePaste}
             placeholder="Ask the Brain... (Ctrl+V to paste screenshot)"
-            rows={1}
+            rows={3}
             style={{
               flex: 1, background: '#1e293b', border: '1px solid #334155',
               borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
-              resize: 'none', minHeight: 38, maxHeight: 120, overflow: 'auto',
+              resize: 'vertical', minHeight: 60, maxHeight: 200, overflow: 'auto',
               fontFamily: 'inherit', lineHeight: '1.4',
             }}
           />
