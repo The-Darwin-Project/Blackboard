@@ -1,4 +1,8 @@
 // BlackBoard/ui/src/contexts/WebSocketContext.tsx
+// @ai-rules:
+// 1. [Pattern]: Single shared WS connection via React context. All consumers use hooks.
+// 2. [Pattern]: Reconnect signal fires on onopen when retryRef > 0 (not initial connect).
+// 3. [Gotcha]: subscribersRef and reconnectSubscribersRef are Sets -- never recreate, only mutate.
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -12,11 +16,13 @@
  * Consumers:
  *   const { connected, reconnecting, send } = useWSConnection();
  *   useWSMessage((msg) => { ... }); // subscribe to messages
+ *   useWSReconnect(() => { ... });  // called once per reconnect (not initial connect)
  */
 import { createContext, useContext, useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
 import type { WSMessage } from '../hooks/useWebSocket';
 
 type MessageHandler = (msg: WSMessage) => void;
+type ReconnectHandler = () => void;
 
 interface WSConnectionState {
   connected: boolean;
@@ -32,8 +38,10 @@ const WSConnectionContext = createContext<WSConnectionState>({
 
 const WSSubscribersContext = createContext<{
   subscribe: (handler: MessageHandler) => () => void;
+  subscribeReconnect: (handler: ReconnectHandler) => () => void;
 }>({
   subscribe: () => () => {},
+  subscribeReconnect: () => () => {},
 });
 
 export function WebSocketProvider({ children }: { children: ReactNode }) {
@@ -43,6 +51,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const retryRef = useRef(0);
   const maxRetries = 10;
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
+  const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -53,6 +62,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        // Fire reconnect signal BEFORE resetting retryRef so consumers
+        // can distinguish reconnect from initial connect.
+        if (retryRef.current > 0) {
+          console.log('[WS] Reconnected -- notifying subscribers');
+          reconnectSubscribersRef.current.forEach((handler) => {
+            try { handler(); } catch (e) { console.error('[WS] Reconnect handler error:', e); }
+          });
+        }
         setConnected(true);
         setReconnecting(false);
         retryRef.current = 0;
@@ -117,9 +134,16 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const subscribeReconnect = useCallback((handler: ReconnectHandler) => {
+    reconnectSubscribersRef.current.add(handler);
+    return () => {
+      reconnectSubscribersRef.current.delete(handler);
+    };
+  }, []);
+
   return (
     <WSConnectionContext.Provider value={{ connected, reconnecting, send }}>
-      <WSSubscribersContext.Provider value={{ subscribe }}>
+      <WSSubscribersContext.Provider value={{ subscribe, subscribeReconnect }}>
         {children}
       </WSSubscribersContext.Provider>
     </WSConnectionContext.Provider>
@@ -141,4 +165,16 @@ export function useWSMessage(handler: MessageHandler) {
     const stableHandler: MessageHandler = (msg) => handlerRef.current(msg);
     return subscribe(stableHandler);
   }, [subscribe]);
+}
+
+/** Subscribe to WS reconnect events. Called once per reconnect (not initial connect). */
+export function useWSReconnect(handler: ReconnectHandler) {
+  const { subscribeReconnect } = useContext(WSSubscribersContext);
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
+  useEffect(() => {
+    const stableHandler: ReconnectHandler = () => handlerRef.current();
+    return subscribeReconnect(stableHandler);
+  }, [subscribeReconnect]);
 }

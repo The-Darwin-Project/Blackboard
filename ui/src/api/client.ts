@@ -1,4 +1,7 @@
 // BlackBoard/ui/src/api/client.ts
+// @ai-rules:
+// 1. [Pattern]: All API calls go through fetchApi() wrapper -- consistent error handling via ApiError.
+// 2. [Constraint]: closeEvent uses REST POST, not WebSocket -- ensures delivery even during WS reconnect.
 /**
  * Typed API client for Darwin Brain backend.
  */
@@ -140,6 +143,13 @@ export async function rejectEvent(eventId: string, reason: string, image?: strin
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason, ...(image ? { image } : {}) }),
+  });
+}
+
+export async function closeEvent(eventId: string, reason?: string): Promise<any> {
+  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/close`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason || 'User force-closed the event.' }),
   });
 }
 

@@ -12,6 +12,7 @@ export type EventStatus =
   | 'new'
   | 'active'
   | 'waiting_approval'
+  | 'deferred'
   | 'resolved'
   | 'closed';
 

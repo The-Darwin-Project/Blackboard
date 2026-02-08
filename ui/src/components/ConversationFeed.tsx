@@ -1,4 +1,9 @@
 // BlackBoard/ui/src/components/ConversationFeed.tsx
+// @ai-rules:
+// 1. [Pattern]: selectedEventId persisted in sessionStorage -- survives page refresh.
+// 2. [Pattern]: useWSReconnect invalidates all queries to catch missed WS messages.
+// 3. [Gotcha]: eventToMarkdown is client-side only -- mirrors Brain._event_to_markdown but without service metadata.
+// 4. [Constraint]: closeEvent via REST, not WS -- ensures request completes even if WS is flaky.
 /**
  * Unified group-chat view with real-time WebSocket updates.
  * Layout: Events panel (top) + Conversation stream (bottom) + Chat input
@@ -7,8 +12,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useEvents } from '../hooks/useEvents';
 import { useChat } from '../hooks/useChat';
-import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
-import { approveEvent, rejectEvent, getClosedEvents } from '../api/client';
+import { useWSConnection, useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
+import { approveEvent, rejectEvent, closeEvent, getClosedEvents } from '../api/client';
 import type { ConversationTurn } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
@@ -435,14 +440,54 @@ function TurnBubble({
 // Main Component
 // ============================================================================
 
+/** Convert an EventDocument to readable Markdown (client-side mirror of Brain._event_to_markdown). */
+function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: string; timeDate: string }; conversation: ConversationTurn[] }): string {
+  const lines: string[] = [
+    `# Event: ${event.id}`,
+    '',
+    `- **Source:** ${event.source}`,
+    `- **Service:** ${event.service}`,
+    `- **Status:** ${event.status}`,
+    `- **Reason:** ${event.event.reason}`,
+    `- **Evidence:** ${event.event.evidence}`,
+    `- **Time:** ${event.event.timeDate}`,
+    '',
+    '## Conversation',
+    '',
+  ];
+  for (const turn of event.conversation) {
+    lines.push(`### Turn ${turn.turn} - ${turn.actor} (${turn.action})`);
+    if (turn.thoughts) lines.push(`**Thoughts:** ${turn.thoughts}`);
+    if (turn.result) lines.push(`**Result:** ${turn.result}`);
+    if (turn.plan) lines.push(`**Plan:**\n${turn.plan}`);
+    if (turn.evidence) lines.push(`**Evidence:** ${turn.evidence}`);
+    if (turn.selectedAgents) lines.push(`**Selected Agents:** ${turn.selectedAgents.join(', ')}`);
+    if (turn.pendingApproval) lines.push('**Pending Approval:** YES');
+    if (turn.waitingFor) lines.push(`**Waiting For:** ${turn.waitingFor}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+const SESSION_KEY = 'darwin:selectedEventId';
+
 export function ConversationFeed() {
   const [inputMessage, setInputMessage] = useState('');
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(
+    () => sessionStorage.getItem(SESSION_KEY),
+  );
   const [activeAgents, setActiveAgents] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
   const [showClosed, setShowClosed] = useState(false);
   const [pendingImage, setPendingImage] = useState<string | null>(null); // base64 data URI
+  const [reportOpen, setReportOpen] = useState(false); // Event report markdown viewer
   const feedRef = useRef<HTMLDivElement>(null);
+
+  // Persist selected event across page refreshes
+  useEffect(() => {
+    if (selectedEventId) sessionStorage.setItem(SESSION_KEY, selectedEventId);
+    else sessionStorage.removeItem(SESSION_KEY);
+  }, [selectedEventId]);
 
   const { data: activeEvents } = useActiveEvents();
   const { data: closedEvents } = useQuery({
@@ -453,7 +498,7 @@ export function ConversationFeed() {
   });
   const { data: selectedEvent } = useEventDocument(selectedEventId);
   const { data: archEvents } = useEvents();
-  const { invalidateActive, invalidateEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll } = useQueueInvalidation();
 
   // WebSocket connection (from shared context provider)
   const { connected, reconnecting, send } = useWSConnection();
@@ -491,6 +536,12 @@ export function ConversationFeed() {
         }];
       });
     }
+  });
+
+  // On WS reconnect, invalidate all cached queries to catch turns/closures
+  // that arrived during the disconnect gap.
+  useWSReconnect(() => {
+    invalidateAll();
   });
 
   const { sendMessage, isPending } = useChat(connected ? send : undefined);
@@ -640,10 +691,43 @@ export function ConversationFeed() {
                 {selectedEvent.id}
               </span>
             </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <span style={{ fontSize: 11, color: '#64748b' }}>
                 {selectedEvent.source} | {selectedEvent.conversation.length} turns
               </span>
+              {/* Report button -- opens full event markdown in MarkdownViewer */}
+              <button
+                onClick={() => setReportOpen(true)}
+                style={{
+                  background: '#1e3a5f', border: '1px solid #2563eb44',
+                  borderRadius: 4, color: '#93c5fd', fontSize: 11,
+                  padding: '2px 8px', cursor: 'pointer', fontWeight: 600,
+                }}
+                title="View event report"
+              >
+                Report
+              </button>
+              {/* Force close -- only for non-closed events */}
+              {selectedEvent.status !== 'closed' && (
+                <button
+                  onClick={() => {
+                    if (window.confirm(`Force-close event ${selectedEvent.id}?\nThis will stop all Brain processing for this event.`)) {
+                      closeEvent(selectedEvent.id).then(() => {
+                        invalidateActive();
+                        invalidateEvent(selectedEvent.id);
+                      });
+                    }
+                  }}
+                  style={{
+                    background: '#7f1d1d', border: '1px solid #dc262644',
+                    borderRadius: 4, color: '#fca5a5', fontSize: 11,
+                    padding: '2px 8px', cursor: 'pointer', fontWeight: 600,
+                  }}
+                  title="Force close this event"
+                >
+                  Force Close
+                </button>
+              )}
               <button
                 onClick={() => setSelectedEventId(null)}
                 style={{
@@ -657,6 +741,15 @@ export function ConversationFeed() {
               </button>
             </div>
           </div>
+
+          {/* Event report markdown viewer */}
+          {reportOpen && (
+            <MarkdownViewer
+              filename={`event-${selectedEvent.id}.md`}
+              content={eventToMarkdown(selectedEvent)}
+              onClose={() => setReportOpen(false)}
+            />
+          )}
 
           {/* Scrollable conversation */}
           <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>

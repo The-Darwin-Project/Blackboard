@@ -1,4 +1,8 @@
 # BlackBoard/src/routes/queue.py
+# @ai-rules:
+# 1. [Gotcha]: GET /closed/list MUST stay before GET /{event_id} to avoid "closed" matching as event_id.
+# 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() -- same state machine as Brain.
+# 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 """
 Conversation Queue API - Event document management.
 
@@ -6,6 +10,7 @@ Provides endpoints for the unified group chat UI to:
 - List active events
 - Get event conversation timeline
 - Approve pending plans
+- Force-close events
 - View closed events
 """
 from __future__ import annotations
@@ -123,8 +128,31 @@ async def reject_event(
         event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
     )
 
-    logger.info(f"User rejected event {event_id}: {reason}")
+    logger.info(f"User rejected event {event_id}: {body.reason}")
     return {"status": "rejected", "event_id": event_id}
+
+
+class CloseRequest(BaseModel):
+    """Typed request body for user force-close."""
+    reason: str = Field("User force-closed the event.", description="Close reason")
+
+
+@router.post("/{event_id}/close")
+async def close_event_by_user(
+    event_id: str,
+    body: CloseRequest = CloseRequest(),
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Force-close an event from the UI. Uses existing close_event state machine."""
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    if event.status == EventStatus.CLOSED:
+        raise HTTPException(status_code=409, detail="Event already closed")
+
+    await blackboard.close_event(event_id, f"User force-closed: {body.reason}")
+    logger.info(f"User force-closed event {event_id}: {body.reason}")
+    return {"status": "closed", "event_id": event_id}
 
 
 @router.get("/closed/list")
