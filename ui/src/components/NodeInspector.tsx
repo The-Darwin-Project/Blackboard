@@ -15,6 +15,7 @@ const EVENT_LABELS: Record<string, string> = {
   high_error_rate_detected: 'High Error Rate',
   deployment_detected: 'Deployment',
   anomaly_resolved: 'Resolved',
+  aligner_observation: 'Observation',
   architect_analyzing: 'Analyzing',
   plan_created: 'Plan Created',
   plan_approved: 'Plan Approved',

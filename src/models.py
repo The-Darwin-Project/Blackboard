@@ -215,6 +215,7 @@ class EventType(str, Enum):
     HIGH_MEMORY_DETECTED = "high_memory_detected"
     HIGH_ERROR_RATE_DETECTED = "high_error_rate_detected"
     ANOMALY_RESOLVED = "anomaly_resolved"
+    ALIGNER_OBSERVATION = "aligner_observation"  # Generic: Flash describes what it sees
     # Plan lifecycle events
     PLAN_CREATED = "plan_created"
     PLAN_APPROVED = "plan_approved"

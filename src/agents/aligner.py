@@ -38,6 +38,150 @@ CPU_THRESHOLD = float(os.getenv("ALIGNER_CPU_THRESHOLD", "80.0"))
 MEMORY_THRESHOLD = float(os.getenv("ALIGNER_MEMORY_THRESHOLD", "85.0"))
 ERROR_RATE_THRESHOLD = float(os.getenv("ALIGNER_ERROR_RATE_THRESHOLD", "5.0"))
 
+# ---------------------------------------------------------------------------
+# Aligner System Prompt -- guides Flash's reasoning and tool usage
+# ---------------------------------------------------------------------------
+ALIGNER_SYSTEM_PROMPT = """You are the Aligner -- the eyes and ears of the Darwin autonomous operations system.
+
+Your job is to OBSERVE service metrics and REPORT anomalies to the Brain.
+You do NOT fix problems. You detect them and describe what you see.
+
+## Your Personality
+- Precise and evidence-based
+- First person: "I detected...", "I observed...", "I noticed..."
+- Always include the numbers: actual values, thresholds, trend direction
+- Be honest about uncertainty: "The CPU dropped briefly but may spike again"
+
+## Thresholds (for reference, not rigid rules)
+- CPU warning: {cpu_threshold}%
+- Memory warning: {memory_threshold}%
+- Error rate critical: {error_rate_threshold}%
+- Over-provisioned: multiple replicas with CPU < 10% and MEM < 20%
+
+## Cynefin Sense-Making Framework
+When creating events, classify the situation into a domain. This tells the Brain HOW to respond:
+
+| Domain      | Meaning                          | You see...                                                    | Response pattern              |
+|-------------|----------------------------------|---------------------------------------------------------------|-------------------------------|
+| clear       | Known problem, known fix         | CPU pegged, single replica, no errors -- just needs scaling   | sense-categorize-respond      |
+| complicated | Known unknowns, needs analysis   | Intermittent errors, unclear root cause, multiple symptoms     | sense-analyze-respond         |
+| complex     | Unknown unknowns, novel          | Cascading failures, never-seen-before pattern, contradictory data | probe-sense-respond       |
+| chaotic     | Crisis, system down              | All pods crashing, complete service outage, data loss risk     | act-sense-respond             |
+
+Most infrastructure anomalies are "clear" (known fix) or "complicated" (needs investigation).
+Use "complex" or "chaotic" only when the data is genuinely confusing or the system is in crisis.
+
+## When to call create_event
+- Sustained metrics above threshold across multiple observations (not a single spike)
+- A pattern that requires investigation or action
+- Set severity: warning (degraded but functional) or critical (service impacted)
+
+## When to call update_active_event
+- New metric data relevant to an event the Brain is already handling
+- Metrics getting worse or changing character (e.g. CPU resolved but error rate climbing)
+
+## When to call report_recovery
+- Metrics have dropped BELOW thresholds and stabilized
+- ONLY when the LATEST readings are clearly normal, not just trending down
+- A drop from 100% to 95% is NOT recovery -- still above the 80% threshold
+
+## When to do nothing (return text only)
+- Metrics are normal, nothing noteworthy
+- Transient blip that already normalized within the observation window
+""".format(
+    cpu_threshold=CPU_THRESHOLD,
+    memory_threshold=MEMORY_THRESHOLD,
+    error_rate_threshold=ERROR_RATE_THRESHOLD,
+)
+
+
+def _build_aligner_tools():
+    """Build function declarations for the Aligner Flash model."""
+    from google.genai import types
+
+    create_event = types.FunctionDeclaration(
+        name="create_event",
+        description=(
+            "Create a new event for the Brain to investigate. "
+            "Use when you detect a sustained anomaly that requires attention."
+        ),
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "Service name"},
+                "observation": {
+                    "type": "string",
+                    "description": "Your full observation in natural language -- what you saw, the numbers, the trend, and why it needs attention",
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["warning", "critical"],
+                    "description": "How urgent: warning (degraded but functional) or critical (service impacted)",
+                },
+                "domain": {
+                    "type": "string",
+                    "enum": ["clear", "complicated", "complex", "chaotic"],
+                    "description": "Cynefin domain: clear (known fix), complicated (needs analysis), complex (unknown cause), chaotic (system down)",
+                },
+                "execution_mode": {
+                    "type": "string",
+                    "description": "Cynefin response pattern: sense-categorize-respond, sense-analyze-respond, probe-sense-respond, or act-sense-respond",
+                },
+                "metrics": {
+                    "type": "object",
+                    "description": "Current metric snapshot",
+                    "properties": {
+                        "cpu": {"type": "number", "description": "CPU usage %"},
+                        "memory": {"type": "number", "description": "Memory usage %"},
+                        "error_rate": {"type": "number", "description": "Error rate %"},
+                        "replicas": {"type": "integer", "description": "Replica count"},
+                    },
+                },
+            },
+            "required": ["service", "observation", "severity", "domain"],
+        },
+    )
+
+    update_active_event = types.FunctionDeclaration(
+        name="update_active_event",
+        description=(
+            "Add new metric observations to an active event the Brain is already working on. "
+            "Use when you see new data relevant to an ongoing investigation."
+        ),
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "Service name"},
+                "observation": {
+                    "type": "string",
+                    "description": "Your updated observation -- new metrics, trend changes, or confirmation of ongoing issue",
+                },
+            },
+            "required": ["service", "observation"],
+        },
+    )
+
+    report_recovery = types.FunctionDeclaration(
+        name="report_recovery",
+        description=(
+            "Report that a service's metrics have returned to normal. "
+            "Use ONLY when the latest metrics are clearly below ALL thresholds."
+        ),
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "service": {"type": "string", "description": "Service name"},
+                "observation": {
+                    "type": "string",
+                    "description": "What you observed -- the peak values, current values, trend, and why you believe the anomaly is resolved",
+                },
+            },
+            "required": ["service", "observation"],
+        },
+    )
+
+    return types.Tool(function_declarations=[create_event, update_active_event, report_recovery])
+
 
 class FilterRule:
     """A filter rule for noise reduction."""
@@ -105,6 +249,7 @@ class Aligner:
         self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
+        self._aligner_tools = None  # Cached function declarations for Flash
     
     async def _get_client(self):
         """Lazy-load google-genai Client for Aligner LLM calls."""
@@ -514,97 +659,103 @@ class Aligner:
         max_err = max(m["error_rate"] for m in buffer)
         latest = buffer[-1]
 
+        # Check if there's an active event for this service (context for Flash)
+        has_active = await self._has_active_event_for(service)
+
         try:
             client = await self._get_client()
             if client:
+                from google.genai import types
+
+                # Build context prompt -- Flash reasons freely about the data
                 prompt = (
-                    f"You are an observability analyst. Service '{service}' metrics over the last 30+ seconds:\n"
+                    f"Service '{service}' metrics over the last 30+ seconds:\n"
                     f"{observations}\n\n"
                     f"Stats: avg_cpu={avg_cpu:.1f}% max_cpu={max_cpu:.1f}% avg_mem={avg_mem:.1f}% "
                     f"avg_err={avg_err:.2f}% max_err={max_err:.2f}% replicas={latest['replicas']}\n"
-                    f"Thresholds: CPU warning={CPU_THRESHOLD}% Memory warning={MEMORY_THRESHOLD}% Error critical={ERROR_RATE_THRESHOLD}%\n\n"
-                    f"Analyze this data. Respond with EXACTLY one of these on the first line:\n"
-                    f"- HIGH_CPU (sustained CPU above threshold -- not a transient spike)\n"
-                    f"- HIGH_MEMORY (sustained memory above threshold)\n"
-                    f"- HIGH_ERROR_RATE (sustained error rate above threshold)\n"
-                    f"- OVER_PROVISIONED (multiple replicas but very low resource usage -- waste)\n"
-                    f"- RECOVERING (was high, now trending down -- resolving on its own)\n"
-                    f"- TRANSIENT_SPIKE (brief spike that already normalized -- no action needed)\n"
-                    f"- NORMAL (everything within acceptable range)\n\n"
-                    f"Second line: brief explanation (one sentence)."
+                    f"Latest reading: CPU={latest['cpu']:.1f}% MEM={latest['memory']:.1f}% ERR={latest['error_rate']:.2f}%\n"
+                    f"Active event exists for this service: {'yes' if has_active else 'no'}\n\n"
+                    f"Analyze this data. Use your tools to report what you observe, or return text only if everything is normal."
                 )
 
+                if self._aligner_tools is None:
+                    self._aligner_tools = _build_aligner_tools()
+                aligner_tools = self._aligner_tools
                 response = await client.aio.models.generate_content(
-                    model=self._model_name, contents=prompt,
+                    model=self._model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=ALIGNER_SYSTEM_PROMPT,
+                        tools=[aligner_tools],
+                        tool_config=types.ToolConfig(
+                            function_calling_config=types.FunctionCallingConfig(mode="AUTO"),
+                        ),
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                        temperature=0.3,
+                    ),
                 )
-                result_text = response.text.strip() if response.text else "NORMAL"
-                lines = result_text.split("\n")
-                verdict = lines[0].strip().upper()
-                explanation = lines[1].strip() if len(lines) > 1 else ""
 
-                logger.info(f"Flash metrics analysis for {service}: {verdict} -- {explanation}")
+                # Handle function calls from Flash
+                if response.function_calls:
+                    fc = response.function_calls[0]
+                    func_name = fc.name
+                    args = fc.args if fc.args else {}
+                    observation = args.get("observation", "")
 
-                if verdict == "HIGH_CPU":
-                    await self.blackboard.record_event(
-                        EventType.HIGH_CPU_DETECTED,
-                        {"service": service, "cpu": avg_cpu, "max_cpu": max_cpu},
-                        narrative=f"Sustained high CPU on {service}: avg {avg_cpu:.1f}%, peak {max_cpu:.1f}%. {explanation}",
-                    )
-                    logger.warning(f"HIGH CPU (Flash): {service} avg={avg_cpu:.1f}% max={max_cpu:.1f}%")
-                    await self._trigger_architect(service, "high_cpu")
+                    logger.info(f"Flash {func_name} for {service}: {observation[:150]}")
 
-                elif verdict == "HIGH_MEMORY":
-                    await self.blackboard.record_event(
-                        EventType.HIGH_MEMORY_DETECTED,
-                        {"service": service, "memory": avg_mem},
-                        narrative=f"Sustained high memory on {service}: avg {avg_mem:.1f}%. {explanation}",
-                    )
-                    logger.warning(f"HIGH MEMORY (Flash): {service} avg={avg_mem:.1f}%")
-                    await self._trigger_architect(service, "high_memory")
+                    if func_name == "create_event":
+                        severity = args.get("severity", "warning")
+                        domain = args.get("domain", "complicated")
+                        execution_mode = args.get("execution_mode", "")
+                        metrics = args.get("metrics", {})
 
-                elif verdict == "HIGH_ERROR_RATE":
-                    await self.blackboard.record_event(
-                        EventType.HIGH_ERROR_RATE_DETECTED,
-                        {"service": service, "error_rate": avg_err, "max_error_rate": max_err},
-                        narrative=f"Sustained high error rate on {service}: avg {avg_err:.2f}%, peak {max_err:.2f}%. {explanation}",
-                    )
-                    logger.warning(f"HIGH ERROR RATE (Flash): {service} avg={avg_err:.2f}%")
-                    await self._trigger_architect(service, "high_error_rate")
+                        # Record to Blackboard timeline -- Flash's full structured analysis
+                        await self.blackboard.record_event(
+                            EventType.ALIGNER_OBSERVATION,
+                            {
+                                "service": service,
+                                "severity": severity,
+                                "domain": domain,
+                                "execution_mode": execution_mode,
+                                "metrics": metrics,
+                            },
+                            narrative=observation,
+                        )
+                        # Notify active events if one exists (dual path for ongoing investigations)
+                        if has_active:
+                            await self._notify_active_events(service, observation)
+                        # Dedup + create Brain event (anomaly_type used for dedup key only)
+                        await self._trigger_architect(service, f"{severity}_{domain}")
 
-                elif verdict == "OVER_PROVISIONED":
-                    await self.blackboard.record_event(
-                        EventType.ANOMALY_RESOLVED,
-                        {"service": service, "anomaly": "over_provisioned", "cpu": avg_cpu, "memory": avg_mem, "replicas": latest["replicas"]},
-                        narrative=f"Service {service} appears over-provisioned: {latest['replicas']} replicas with avg CPU={avg_cpu:.1f}%, MEM={avg_mem:.1f}%. {explanation}",
-                    )
-                    logger.info(f"OVER-PROVISIONED (Flash): {service} {latest['replicas']} replicas, avg cpu={avg_cpu:.1f}%")
-                    # Notify active events so the Brain sees the over-provisioned signal
-                    await self._notify_active_events(
-                        service,
-                        f"Over-provisioned: {service} has {latest['replicas']} replicas "
-                        f"with avg CPU={avg_cpu:.1f}%, MEM={avg_mem:.1f}%",
-                    )
-                    await self._trigger_architect(service, "over_provisioned")
+                    elif func_name == "update_active_event":
+                        await self._notify_active_events(service, observation)
 
-                elif verdict == "RECOVERING":
-                    await self.blackboard.record_event(
-                        EventType.ANOMALY_RESOLVED,
-                        {"service": service, "anomaly": "recovering", "cpu": latest["cpu"], "memory": latest["memory"]},
-                        narrative=f"Service {service} is recovering: metrics trending back to normal. {explanation}",
-                    )
-                    logger.info(f"RECOVERING (Flash): {service} -- {explanation}")
-                    # Notify active events so the Brain sees the resolution
-                    await self._notify_active_events(
-                        service,
-                        f"Anomaly resolved (recovering): {service} metrics trending to normal. "
-                        f"CPU={latest['cpu']:.1f}%, MEM={latest['memory']:.1f}%",
-                    )
+                    elif func_name == "report_recovery":
+                        # Hard guard: verify metrics are ACTUALLY below thresholds
+                        # Flash may still call report_recovery when values are borderline
+                        still_hot = (
+                            latest["cpu"] >= CPU_THRESHOLD
+                            or latest["memory"] >= MEMORY_THRESHOLD
+                            or latest["error_rate"] >= ERROR_RATE_THRESHOLD
+                        )
+                        if still_hot:
+                            logger.warning(
+                                f"Flash called report_recovery but metrics still above threshold: "
+                                f"CPU={latest['cpu']:.1f}%, MEM={latest['memory']:.1f}%, "
+                                f"ERR={latest['error_rate']:.1f}%. Ignoring recovery signal."
+                            )
+                        else:
+                            await self.blackboard.record_event(
+                                EventType.ANOMALY_RESOLVED,
+                                {"service": service},
+                                narrative=observation,
+                            )
+                            await self._notify_active_events(service, observation)
 
-                elif verdict == "TRANSIENT_SPIKE":
-                    logger.info(f"TRANSIENT SPIKE (Flash): {service} -- {explanation}. No action needed.")
-
-                else:  # NORMAL
-                    logger.debug(f"NORMAL (Flash): {service} -- {explanation}")
+                elif response.text:
+                    # Flash returned text only (no function call) -- normal state, log and skip
+                    logger.debug(f"Flash observation for {service}: {response.text.strip()[:100]}")
 
             else:
                 # Flash not available -- fallback to simple threshold check
@@ -625,6 +776,15 @@ class Aligner:
             self._last_analysis_time[service] = time.time()
             self._metrics_analysis_pending[service] = False
     
+    async def _has_active_event_for(self, service: str) -> bool:
+        """Check if an active event exists for this service."""
+        active_ids = await self.blackboard.get_active_events()
+        for eid in active_ids:
+            existing = await self.blackboard.get_event(eid)
+            if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
+                return True
+        return False
+
     async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
         """
         Create an event for the Brain to process -- with two-layer deduplication.

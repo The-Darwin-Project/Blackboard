@@ -25,6 +25,7 @@ export type EventType =
   | 'high_memory_detected'
   | 'high_error_rate_detected'
   | 'anomaly_resolved'
+  | 'aligner_observation'
   // Plan lifecycle
   | 'plan_created'
   | 'plan_approved'
@@ -227,6 +228,7 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     case 'high_memory_detected':
     case 'high_error_rate_detected':
     case 'anomaly_resolved':
+    case 'aligner_observation':
       return 'aligner';
     // Architect events (strategy)
     case 'plan_created':

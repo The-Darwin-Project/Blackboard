@@ -125,11 +125,12 @@ Before acting on infrastructure anomalies, check the "Related Active Events" sec
 - If you recently scaled a service, an "over-provisioned" event shortly after is expected once load normalizes. Defer or close it with a note that it's a consequence of the previous scaling action.
 - If a related event shows a developer.execute or sysadmin.execute action, the service is actively being modified -- wait for stabilization before reacting to anomalies.
 
-## Anomaly Resolution Signals
-If the latest Aligner turn in the conversation contains "anomaly resolved", "recovering", or confirms the metric is back to normal:
-- Do NOT escalate (no scaling, no investigation).
-- Close the event with a summary noting the anomaly was transient and self-resolved.
-- The original event evidence may show high values (e.g., CPU 100%) but the LATEST aligner confirmation is the current truth. Always trust the most recent Aligner data over the original event trigger.
+## Aligner Observations
+The Aligner reports what it observes in natural language with actual metric values.
+It speaks in first person ("I detected...", "I observed...") and always includes the numbers.
+- Read the metric values in aligner.confirm turns. If metrics are below thresholds (CPU <80%, error_rate <5%), close the event.
+- If metrics are still above thresholds, continue investigating regardless of the Aligner's wording.
+- The Aligner does not make decisions -- you do. It reports, you act.
 
 ## Architecture Awareness
 Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL services, their health, metrics, and dependency edges. USE this diagram actively:
