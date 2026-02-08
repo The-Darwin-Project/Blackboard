@@ -3,7 +3,7 @@
 Agent 1: The Aligner (The Listener)
 
 Role: Truth Maintenance & Noise Filtering
-Nature: Hybrid Daemon (Python + Vertex AI Flash for configuration)
+Nature: Hybrid Daemon (Python + Gemini Flash via google-genai for configuration)
 
 The Aligner processes incoming telemetry and updates the Blackboard layers.
 It can be configured via natural language (e.g., "Ignore errors for 1h").
@@ -11,10 +11,10 @@ It can be configured via natural language (e.g., "Ignore errors for 1h").
 CLOSED-LOOP: The Aligner detects anomalies and triggers the Architect
 for autonomous analysis, completing the observation → strategy loop.
 
-AIR GAP: This module may import vertexai (for Flash model) but NOT kubernetes or git.
+AIR GAP: This module may import google-genai (for Flash model) but NOT kubernetes or git.
 """
-# NOTE: Aligner keeps vertexai Flash for filter configuration
-# (independent of Brain's Vertex AI Pro). Do NOT remove vertexai imports.
+# NOTE: Aligner uses google-genai SDK for Flash model (filter config, signal analysis).
+# Independent of Brain's Pro model. Do NOT remove google.genai imports.
 from __future__ import annotations
 
 import logging
@@ -86,15 +86,16 @@ class Aligner:
     - Apply filter rules for noise reduction
     - Update Blackboard state layers
     - Detect anomalies and trigger Architect (closed-loop)
-    - Configurable via natural language (Vertex AI Flash)
+    - Configurable via natural language (Gemini Flash via google-genai)
     """
     
     def __init__(self, blackboard: "BlackboardState"):
         self.blackboard = blackboard
         self.filter_rules: list[FilterRule] = []
-        self._model = None
+        self._client = None
+        self._model_name = None
         
-        # Check if Vertex AI is configured
+        # Check if google-genai is configured
         self.vertex_enabled = bool(os.getenv("GCP_PROJECT"))
         
         # Closed-loop state tracking
@@ -110,26 +111,28 @@ class Aligner:
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
     
-    async def _get_model(self):
-        """Lazy-load Vertex AI Flash model for configuration parsing."""
-        if self._model is None and self.vertex_enabled:
+    async def _get_client(self):
+        """Lazy-load google-genai Client for Aligner LLM calls."""
+        if self._client is None and self.vertex_enabled:
             try:
-                import vertexai
-                from vertexai.generative_models import GenerativeModel
+                from google import genai
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
+                self._model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
                 
-                vertexai.init(project=project, location=location)
-                self._model = GenerativeModel(model_name)
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=project,
+                    location=location,
+                )
                 
-                logger.info(f"Aligner initialized with Vertex AI Flash: {model_name}")
+                logger.info(f"Aligner initialized with google-genai Flash: {self._model_name}")
             except Exception as e:
-                logger.warning(f"Vertex AI not available for Aligner: {e}")
-                self._model = None
+                logger.warning(f"google-genai not available for Aligner: {e}")
+                self._client = None
         
-        return self._model
+        return self._client
     
     async def configure_filter(self, instruction: str) -> Optional[FilterRule]:
         """
@@ -140,11 +143,11 @@ class Aligner:
         - "Ignore metrics from inventory-api for 30 minutes"
         - "Stop filtering errors"
         
-        Uses Vertex AI Flash to parse the instruction into a FilterRule.
+        Uses Gemini Flash (via google-genai) to parse the instruction into a FilterRule.
         """
-        model = await self._get_model()
+        client = await self._get_client()
         
-        if model is None:
+        if client is None:
             # Fallback: simple parsing without AI
             return self._parse_simple_filter(instruction)
         
@@ -164,9 +167,14 @@ class Aligner:
             {{"name": "Ignore errors for maintenance", "ignore_errors": true, "ignore_metrics": false, "duration_minutes": 60, "service": null}}
             """
             
-            response = await model.generate_content_async(prompt)
+            response = await client.aio.models.generate_content(
+                model=self._model_name, contents=prompt,
+            )
             
             import json
+            if not response.text:
+                logger.warning("Aligner LLM returned empty response for filter config")
+                return self._parse_simple_filter(instruction)
             data = json.loads(response.text.strip())
             
             until = None
@@ -321,7 +329,7 @@ class Aligner:
     
     async def _analyze_version_drift(self, service: str) -> None:
         """
-        Use Vertex AI Flash to interpret version observation patterns.
+        Use Gemini Flash (via google-genai) to interpret version observation patterns.
         
         Instead of hardcoded cooldowns, ask the LLM to reason about what's happening:
         rolling update, completed deployment, rollback, or noise.
@@ -339,8 +347,8 @@ class Aligner:
         versions_seen = list(set(ver for _, ver in buffer))
 
         try:
-            model = await self._get_model()
-            if model:
+            client = await self._get_client()
+            if client:
                 prompt = (
                     f"Service '{service}' reported these version observations over the last 30+ seconds:\n"
                     f"{observations}\n\n"
@@ -353,8 +361,9 @@ class Aligner:
                     f"Then on the second line, a brief explanation."
                 )
 
-                import asyncio
-                response = await asyncio.to_thread(model.generate_content, prompt)
+                response = await client.aio.models.generate_content(
+                    model=self._model_name, contents=prompt,
+                )
                 result_text = response.text.strip() if response.text else "NOISE"
                 first_line = result_text.split("\n")[0].strip().upper()
 
@@ -483,8 +492,8 @@ class Aligner:
         latest = buffer[-1]
 
         try:
-            model = await self._get_model()
-            if model:
+            client = await self._get_client()
+            if client:
                 prompt = (
                     f"You are an observability analyst. Service '{service}' metrics over the last 30+ seconds:\n"
                     f"{observations}\n\n"
@@ -502,8 +511,9 @@ class Aligner:
                     f"Second line: brief explanation (one sentence)."
                 )
 
-                import asyncio as _asyncio
-                response = await _asyncio.to_thread(model.generate_content, prompt)
+                response = await client.aio.models.generate_content(
+                    model=self._model_name, contents=prompt,
+                )
                 result_text = response.text.strip() if response.text else "NORMAL"
                 lines = result_text.split("\n")
                 verdict = lines[0].strip().upper()

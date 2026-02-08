@@ -14,8 +14,8 @@ pydantic
 # Redis (with hiredis for async performance)
 redis[hiredis]
 
-# Google Cloud AI Platform (Vertex AI)
-google-cloud-aiplatform
+# Google Gen AI SDK (Vertex AI) -- replaces deprecated google-cloud-aiplatform
+google-genai>=1.60.0
 
 # Git operations (for SysAdmin verification)
 gitpython

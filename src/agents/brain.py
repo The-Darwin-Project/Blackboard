@@ -127,14 +127,14 @@ VOLUME_PATHS = {
 
 
 def _build_brain_tools():
-    """Build Vertex AI function declarations for Brain's available actions."""
+    """Build google-genai function declarations for Brain's available actions."""
     try:
-        from vertexai.generative_models import FunctionDeclaration, Tool
+        from google.genai import types
 
-        select_agent = FunctionDeclaration(
+        select_agent = types.FunctionDeclaration(
             name="select_agent",
             description="Route work to an agent. Use this to assign a task to Architect, sysAdmin, or Developer.",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "agent_name": {
@@ -151,10 +151,10 @@ def _build_brain_tools():
             },
         )
 
-        close_event = FunctionDeclaration(
+        close_event = types.FunctionDeclaration(
             name="close_event",
             description="Close the event as resolved. Use when the issue is fixed and verified, or the request is complete.",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "summary": {
@@ -166,10 +166,10 @@ def _build_brain_tools():
             },
         )
 
-        request_user_approval = FunctionDeclaration(
+        request_user_approval = types.FunctionDeclaration(
             name="request_user_approval",
             description="Pause and ask the user to approve a plan. Use for structural changes (source code, templates).",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "plan_summary": {
@@ -181,10 +181,10 @@ def _build_brain_tools():
             },
         )
 
-        re_trigger_aligner = FunctionDeclaration(
+        re_trigger_aligner = types.FunctionDeclaration(
             name="re_trigger_aligner",
             description="Ask the Aligner to verify that a change took effect (e.g., replicas increased, CPU normalized).",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "service": {
@@ -200,10 +200,10 @@ def _build_brain_tools():
             },
         )
 
-        ask_agent_for_state = FunctionDeclaration(
+        ask_agent_for_state = types.FunctionDeclaration(
             name="ask_agent_for_state",
             description="Ask an agent for information (e.g., ask sysAdmin for kubectl logs, pod status).",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "agent_name": {
@@ -220,10 +220,10 @@ def _build_brain_tools():
             },
         )
 
-        wait_for_verification = FunctionDeclaration(
+        wait_for_verification = types.FunctionDeclaration(
             name="wait_for_verification",
             description="Mark that you are waiting for the Aligner to confirm a state change.",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "condition": {
@@ -235,10 +235,10 @@ def _build_brain_tools():
             },
         )
 
-        defer_event = FunctionDeclaration(
+        defer_event = types.FunctionDeclaration(
             name="defer_event",
             description="Defer an event for later processing. Use when an agent is busy, the issue is not urgent, or you want to retry after a cooldown period.",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "reason": {
@@ -254,10 +254,10 @@ def _build_brain_tools():
             },
         )
 
-        lookup_service = FunctionDeclaration(
+        lookup_service = types.FunctionDeclaration(
             name="lookup_service",
             description="Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, version, replicas, and current metrics. Use this BEFORE routing to an agent when you need a service's repository URL or deployment details.",
-            parameters={
+            parameters_json_schema={
                 "type": "object",
                 "properties": {
                     "service_name": {
@@ -269,7 +269,7 @@ def _build_brain_tools():
             },
         )
 
-        return Tool(function_declarations=[
+        return types.Tool(function_declarations=[
             select_agent,
             close_event,
             request_user_approval,
@@ -281,7 +281,7 @@ def _build_brain_tools():
         ])
 
     except ImportError:
-        logger.warning("vertexai not available - Brain running in probe mode")
+        logger.warning("google-genai not available - Brain running in probe mode")
         return None
 
 
@@ -303,7 +303,8 @@ class Brain:
         self.agents = agents or {}
         self.broadcast = broadcast  # async callable to push to UI WebSocket clients
         self._running = False
-        self._model = None
+        self._client = None
+        self._tools = None
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
@@ -313,37 +314,31 @@ class Brain:
         self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
         logger.info(f"Brain initialized (project={self.project}, model={self.model_name}, agents={list(self.agents.keys())})")
 
-    async def _get_model(self):
-        """Lazy-load Vertex AI Pro model with Brain tools."""
-        if self._model is None:
+    async def _get_client(self):
+        """Lazy-load google-genai Client with Brain tools."""
+        if self._client is None:
             try:
-                import vertexai
-                from vertexai.generative_models import GenerativeModel, GenerationConfig
+                from google import genai
 
                 tools = _build_brain_tools()
                 if not tools:
                     logger.warning("Brain tools not available - staying in probe mode")
                     return None
 
-                vertexai.init(project=self.project, location=self.location)
-
-                self._model = GenerativeModel(
-                    self.model_name,
-                    tools=[tools],
-                    generation_config=GenerationConfig(
-                        temperature=0.8,
-                        top_p=0.95,
-                    ),
-                    system_instruction=BRAIN_SYSTEM_PROMPT,
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=self.project,
+                    location=self.location,
                 )
+                self._tools = tools
                 self._llm_available = True
-                logger.info(f"Brain LLM initialized: {self.model_name}")
+                logger.info(f"Brain LLM initialized: {self.model_name} (google-genai)")
 
             except Exception as e:
-                logger.warning(f"Vertex AI not available: {e}. Brain stays in probe mode.")
-                self._model = None
+                logger.warning(f"google-genai not available: {e}. Brain stays in probe mode.")
+                self._client = None
 
-        return self._model
+        return self._client
 
     # =========================================================================
     # Event Processing
@@ -407,9 +402,9 @@ class Brain:
                 )
                 return
 
-        # Get LLM model; fall back to probe mode if unavailable
-        model = await self._get_model()
-        if not model:
+        # Get LLM client; fall back to probe mode if unavailable
+        client = await self._get_client()
+        if not client:
             # PROBE MODE fallback (no LLM available)
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
@@ -433,7 +428,7 @@ class Brain:
                 event = await self.blackboard.get_event(event_id)
                 if not event:
                     return
-            should_continue = await self._process_with_llm(event_id, event, model)
+            should_continue = await self._process_with_llm(event_id, event, client)
             if not should_continue:
                 break
             logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
@@ -444,45 +439,51 @@ class Brain:
         self,
         event_id: str,
         event: EventDocument,
-        model,
+        client,
     ) -> bool:
-        """Process event using Vertex AI LLM function calling.
+        """Process event using google-genai LLM function calling.
 
         Returns True if the caller should re-invoke immediately (e.g., after
         a lookup_service call that needs a follow-up LLM decision).
         """
+        from google.genai import types
+
         # Build prompt from event context
         prompt = await self._build_event_prompt(event)
 
         try:
-            response = await asyncio.to_thread(
-                model.generate_content, prompt
+            response = await client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=BRAIN_SYSTEM_PROMPT,
+                    temperature=0.8,
+                    top_p=0.95,
+                    tools=[self._tools],
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
             )
 
-            # Check for function call
-            if (response.candidates
-                    and response.candidates[0].content.parts):
-                part = response.candidates[0].content.parts[0]
+            # Check for function call (null-safety: can be None or [])
+            if response.function_calls:
+                fc = response.function_calls[0]
+                func_name = fc.name
+                func_args = fc.args if fc.args else {}
+                logger.info(f"Brain LLM decision for {event_id}: {func_name}({func_args})")
+                return await self._execute_function_call(event_id, func_name, func_args)
 
-                if hasattr(part, "function_call") and part.function_call:
-                    fc = part.function_call
-                    func_name = fc.name
-                    func_args = dict(fc.args) if fc.args else {}
-                    logger.info(f"Brain LLM decision for {event_id}: {func_name}({func_args})")
-                    return await self._execute_function_call(event_id, func_name, func_args)
-
-                # Text-only response (no function call) -- treat as brain thoughts
-                if hasattr(part, "text") and part.text:
-                    turn = ConversationTurn(
-                        turn=len(event.conversation) + 1,
-                        actor="brain",
-                        action="think",
-                        thoughts=part.text,
-                    )
-                    await self.blackboard.append_turn(event_id, turn)
-                    await self._broadcast_turn(event_id, turn)
-                    logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
-                    return False
+            # Text-only response (no function call) -- treat as brain thoughts
+            if response.text:
+                turn = ConversationTurn(
+                    turn=len(event.conversation) + 1,
+                    actor="brain",
+                    action="think",
+                    thoughts=response.text,
+                )
+                await self.blackboard.append_turn(event_id, turn)
+                await self._broadcast_turn(event_id, turn)
+                logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
+                return False
 
             logger.warning(f"Brain LLM returned empty response for {event_id}")
             return False
