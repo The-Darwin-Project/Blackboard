@@ -742,11 +742,16 @@ export function ConversationFeed() {
             disabled={isPending}
             style={{
               background: '#3b82f6', color: '#fff', border: 'none',
-              padding: '8px 16px', borderRadius: 8, cursor: 'pointer',
-              fontWeight: 600, opacity: isPending ? 0.5 : 1,
+              padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+              opacity: isPending ? 0.5 : 1, display: 'flex', alignItems: 'center',
+              justifyContent: 'center', alignSelf: 'flex-end',
             }}
+            title="Send (Enter)"
           >
-            Send
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
           </button>
         </div>
       </div>
