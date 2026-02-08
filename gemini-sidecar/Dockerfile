@@ -30,8 +30,19 @@ RUN \
       | grep '"tag_name"' | cut -d'"' -f4) && \
     curl -sL "https://github.com/tektoncd/cli/releases/download/${TKN_VERSION}/tkn_${TKN_VERSION#v}_Linux_x86_64.tar.gz" \
       | tar -xz -C /usr/local/bin/ tkn && \
+    # helm -- Helm CLI (template --dry-run, lint, validate charts before pushing)
+    curl -sL https://get.helm.sh/helm-$(curl -sL https://api.github.com/repos/helm/helm/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4)-linux-amd64.tar.gz \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ linux-amd64/helm && \
+    # jq -- JSON processor (parsing kubectl output, API responses)
+    curl -sL https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64 \
+      -o /usr/local/bin/jq && chmod +x /usr/local/bin/jq && \
+    # yq -- YAML processor (parsing/editing Helm values, K8s manifests)
+    curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+      -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq && \
     # Verify all CLIs installed
-    oc version --client && argocd version --client && kargo version && tkn version
+    oc version --client && argocd version --client && kargo version && tkn version && \
+    helm version --short && jq --version && yq --version
 
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
 # UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
