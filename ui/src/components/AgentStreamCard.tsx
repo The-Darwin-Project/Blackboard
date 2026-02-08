@@ -27,8 +27,9 @@ function FloatingWindow({
 }) {
   const color = ACTOR_COLORS[agentName] || '#6b7280';
   const [pos, setPos] = useState({ x: 120, y: 80 });
-  const [size] = useState({ width: 700, height: 500 });
+  const [size, setSize] = useState({ width: 700, height: 500 });
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -115,6 +116,33 @@ function FloatingWindow({
           ))
         )}
       </div>
+
+      {/* Resize handle (bottom-right corner) */}
+      <div
+        style={{
+          position: 'absolute', bottom: 0, right: 0, width: 16, height: 16,
+          cursor: 'nwse-resize', borderRight: `2px solid ${color}66`,
+          borderBottom: `2px solid ${color}66`, borderRadius: '0 0 10px 0',
+        }}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          resizeRef.current = { startX: e.clientX, startY: e.clientY, origW: size.width, origH: size.height };
+          const onMove = (ev: MouseEvent) => {
+            if (!resizeRef.current) return;
+            setSize({
+              width: Math.max(400, resizeRef.current.origW + ev.clientX - resizeRef.current.startX),
+              height: Math.max(250, resizeRef.current.origH + ev.clientY - resizeRef.current.startY),
+            });
+          };
+          const onUp = () => {
+            resizeRef.current = null;
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        }}
+      />
     </div>
   );
 }
