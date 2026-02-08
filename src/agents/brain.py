@@ -112,6 +112,12 @@ Before deciding how to respond to an event, classify it into a domain:
 ## GitOps Context
 Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
 When checking GitOps sync status, instruct sysAdmin to discover the GitOps tooling namespace first (e.g., search for ArgoCD or Flux namespaces) rather than assuming a specific namespace.
+
+## Cross-Event Awareness
+Before acting on infrastructure anomalies, check the "Related Active Events" section in the prompt.
+- If a code deployment or rollout is in progress for the same service, transient CPU/memory spikes are EXPECTED during pod rollout. Do NOT scale up during a rollout -- use defer_event to wait for it to complete.
+- If you recently scaled a service, an "over-provisioned" event shortly after is expected once load normalizes. Defer or close it with a note that it's a consequence of the previous scaling action.
+- If a related event shows a developer.execute or sysadmin.execute action, the service is actively being modified -- wait for stabilization before reacting to anomalies.
 """
 
 # Circuit breaker limits
@@ -308,6 +314,9 @@ class Brain:
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
+        # Per-agent locks -- prevents concurrent dispatch to the same agent
+        from collections import defaultdict
+        self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
@@ -500,8 +509,12 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             return False
 
-    async def _build_event_prompt(self, event: EventDocument) -> str:
-        """Serialize event document as prompt text for the LLM, including service metadata."""
+    async def _build_event_prompt(self, event: EventDocument) -> str | list:
+        """Serialize event document as prompt for the LLM.
+
+        Returns str when no images, or list[types.Part] for multimodal input.
+        The google-genai SDK accepts both types in generate_content(contents=...).
+        """
         lines = [
             f"Event ID: {event.id}",
             f"Source: {event.source}",
@@ -529,6 +542,33 @@ class Brain:
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
             lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
 
+        # Cross-event correlation: show other active events for the same service
+        active_event_ids = await self.blackboard.get_active_events()
+        related = []
+        for eid in active_event_ids:
+            if eid == event.id:
+                continue
+            other = await self.blackboard.get_event(eid)
+            if not other:
+                continue
+            if other.service == event.service:
+                last_action = other.conversation[-1] if other.conversation else None
+                summary = f"  - {eid} ({other.source}): {other.event.reason[:100]}"
+                if last_action:
+                    summary += f" [last: {last_action.actor}.{last_action.action}]"
+                related.append(summary)
+            elif other.service == "general":
+                # Check if chat events mention this service in recent turns
+                for turn in other.conversation[-3:]:
+                    if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
+                        related.append(f"  - {eid} (chat): {other.event.reason[:100]}")
+                        break
+
+        if related:
+            lines.append("")
+            lines.append("Related Active Events (same service -- consider before acting):")
+            lines.extend(related)
+
         lines.extend(["", "Conversation so far:"])
 
         if not event.conversation:
@@ -550,11 +590,37 @@ class Brain:
                     lines.append(f"    PENDING USER APPROVAL")
                 if turn.waitingFor:
                     lines.append(f"    Waiting for: {turn.waitingFor}")
+                if turn.image:
+                    lines.append(f"    [Image attached -- see below]")
 
         lines.append("")
         lines.append("What is the next action? Call one of your functions.")
 
-        return "\n".join(lines)
+        text_prompt = "\n".join(lines)
+
+        # If any turn has an image, return multimodal content (text + last image)
+        last_image = None
+        for t in reversed(event.conversation):
+            if t.image:
+                last_image = t.image
+                break
+
+        if last_image:
+            try:
+                import base64
+                from google.genai import types
+                # Parse data URI: "data:image/png;base64,iVBOR..."
+                header, b64data = last_image.split(",", 1)
+                mime_type = header.split(":")[1].split(";")[0]
+                image_bytes = base64.b64decode(b64data)
+                return [
+                    types.Part.from_text(text=text_prompt),
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                ]
+            except Exception as e:
+                logger.warning(f"Failed to parse image for multimodal prompt: {e}")
+
+        return text_prompt
 
     # =========================================================================
     # Function Call Dispatcher
@@ -779,12 +845,15 @@ class Brain:
                     })
 
             logger.info(f"Agent task started: {agent_name} for {event_id}")
-            result = await agent.process(
-                event_id=event_id,
-                task=task,
-                event_md_path=event_md_path,
-                on_progress=on_progress,
-            )
+            # Acquire per-agent lock to prevent concurrent WS calls to the same sidecar
+            async with self._agent_locks[agent_name]:
+                result = await agent.process(
+                    event_id=event_id,
+                    task=task,
+                    event_md_path=event_md_path,
+                    on_progress=on_progress,
+                )
+            # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
             try:
