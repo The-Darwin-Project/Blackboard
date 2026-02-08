@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from ..models import ConversationTurn, EventDocument, EventStatus
+from ..models import ConversationTurn, EventDocument, EventStatus, PlanAction, PlanCreate, PlanStatus
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -130,6 +130,13 @@ If the latest Aligner turn in the conversation contains "anomaly resolved", "rec
 - Do NOT escalate (no scaling, no investigation).
 - Close the event with a summary noting the anomaly was transient and self-resolved.
 - The original event evidence may show high values (e.g., CPU 100%) but the LATEST aligner confirmation is the current truth. Always trust the most recent Aligner data over the original event trigger.
+
+## Architecture Awareness
+Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL services, their health, metrics, and dependency edges. USE this diagram actively:
+- When routing tasks, include relevant architectural context in the task_instruction (e.g., "darwin-store depends on postgres via SQL; postgres is currently at 90% CPU -- investigate if this is the root cause").
+- When requesting user approval, describe the impact on connected services (e.g., "Scaling darwin-store will increase load on postgres which is already at high CPU").
+- When triaging anomalies, check if upstream/downstream services in the diagram are also degraded -- a root cause may be in a dependency, not the alerting service itself.
+- When closing events, summarize the architectural context that informed your decision.
 """
 
 # Circuit breaker limits
@@ -329,6 +336,8 @@ class Brain:
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
         self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Plan Layer: track event_id -> plan_id so ghost nodes appear on the graph
+        self._event_plans: dict[str, str] = {}  # event_id -> plan_id
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
@@ -554,6 +563,15 @@ class Brain:
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
             lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
 
+        # Architecture diagram: show the Brain the full topology with health,
+        # metrics, and dependency edges so it can correlate issues across services
+        # (e.g., darwin-store high CPU might be caused by postgres being slow).
+        mermaid = await self.blackboard.generate_mermaid()
+        if mermaid:
+            lines.append("")
+            lines.append("Architecture Diagram (Mermaid):")
+            lines.append(mermaid)
+
         # Cross-event correlation: show other active events for the same service
         active_event_ids = await self.blackboard.get_active_events()
         related = []
@@ -698,6 +716,14 @@ class Brain:
                     "content": self._event_to_markdown(event, svc_meta),
                 })
 
+            # Create a Plan (ghost node) for executing agents if none exists yet.
+            # ask_agent_for_state is info-gathering only -- no plan needed.
+            if function_name == "select_agent" and agent_name in ("sysadmin", "developer"):
+                if event_id not in self._event_plans:
+                    event = event or await self.blackboard.get_event(event_id)
+                    if event:
+                        await self._create_plan_for_event(event_id, event.service, task)
+
             # Launch agent task (non-blocking)
             agent = self.agents.get(agent_name)
             if agent:
@@ -732,6 +758,8 @@ class Brain:
                     f"{self.blackboard.EVENT_PREFIX}{event_id}",
                     json.dumps(event.model_dump()),
                 )
+                # Create Plan in the Blackboard Plan Layer (ghost node on graph)
+                await self._create_plan_for_event(event_id, event.service, plan_summary)
             return False
 
         elif function_name == "re_trigger_aligner":
@@ -962,6 +990,10 @@ class Brain:
         """Close an event and broadcast the closure to UI."""
         await self.blackboard.close_event(event_id, summary)
         self._routing_depth.pop(event_id, None)
+        # Complete any associated Plan (removes ghost node from graph)
+        plan_id = self._event_plans.pop(event_id, None)
+        if plan_id:
+            await self.blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=summary)
         if self.broadcast:
             await self.broadcast({
                 "type": "event_closed",
@@ -976,13 +1008,14 @@ class Brain:
     async def write_event_to_volume(
         self, event_id: str, agent_name: str
     ) -> None:
-        """Serialize event document as MD file to agent's volume, enriched with GitOps metadata."""
+        """Serialize event document as MD file to agent's volume, enriched with GitOps metadata and topology."""
         event = await self.blackboard.get_event(event_id)
         if not event:
             return
 
-        # Enrich with GitOps metadata from Blackboard
+        # Enrich with GitOps metadata + architecture diagram from Blackboard
         service_meta = await self.blackboard.get_service(event.service)
+        mermaid = await self.blackboard.generate_mermaid()
 
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
@@ -993,12 +1026,12 @@ class Brain:
         events_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = events_dir / f"event-{event_id}.md"
-        content = self._event_to_markdown(event, service_meta)
+        content = self._event_to_markdown(event, service_meta, mermaid)
         file_path.write_text(content)
         logger.debug(f"Wrote event MD to {file_path}")
 
-    def _event_to_markdown(self, event: EventDocument, service_meta=None) -> str:
-        """Convert event document to readable Markdown, enriched with service metadata."""
+    def _event_to_markdown(self, event: EventDocument, service_meta=None, mermaid: str = "") -> str:
+        """Convert event document to readable Markdown, enriched with service metadata and topology."""
         lines = [
             f"# Event: {event.id}",
             f"",
@@ -1009,6 +1042,14 @@ class Brain:
             f"- **Evidence:** {event.event.evidence}",
             f"- **Time:** {event.event.timeDate}",
         ]
+
+        # Include architecture diagram so agents see the full topology
+        if mermaid:
+            lines.append(f"")
+            lines.append(f"## Architecture Diagram")
+            lines.append(f"```mermaid")
+            lines.append(mermaid)
+            lines.append(f"```")
 
         # Include GitOps metadata so agents know where to make changes
         if service_meta:
@@ -1060,11 +1101,23 @@ class Brain:
 
     async def _cleanup_stale_events(self) -> None:
         """
-        Startup cleanup: close any stale active events from a previous Brain instance.
+        Startup cleanup: close stale events and orphaned plans from a previous Brain instance.
         
         On restart, active events may be orphaned (agent tasks were in-flight,
         WebSocket connections dropped). Close them so they don't block the system.
+        Also completes any PENDING plans so ghost nodes don't linger on the graph.
         """
+        # --- Clean up orphaned PENDING plans (ghost nodes from previous instance) ---
+        pending_plans = await self.blackboard.get_pending_plans()
+        if pending_plans:
+            for plan in pending_plans:
+                await self.blackboard.update_plan_status(
+                    plan.id, PlanStatus.FAILED,
+                    result="Stale: closed on Brain restart.",
+                )
+            logger.info(f"Startup cleanup: completed {len(pending_plans)} orphaned pending plans")
+
+        # --- Clean up stale active events ---
         active_ids = await self.blackboard.get_active_events()
         if not active_ids:
             return
@@ -1180,3 +1233,35 @@ class Brain:
         if event:
             return len(event.conversation) + 1
         return 1
+
+    @staticmethod
+    def _infer_plan_action(text: str) -> PlanAction:
+        """Infer PlanAction from a task description or plan summary."""
+        lower = text.lower()
+        if any(w in lower for w in ("scale", "replica", "hpa")):
+            return PlanAction.SCALE
+        if any(w in lower for w in ("rollback", "revert", "undo")):
+            return PlanAction.ROLLBACK
+        if any(w in lower for w in ("config", "env", "values", "helm", "setting")):
+            return PlanAction.RECONFIG
+        if any(w in lower for w in ("failover", "drain", "migrate")):
+            return PlanAction.FAILOVER
+        return PlanAction.OPTIMIZE  # default for code changes, perf, etc.
+
+    async def _create_plan_for_event(
+        self, event_id: str, service: str, description: str,
+    ) -> None:
+        """Create a Plan in the Blackboard so it appears as a ghost node on the graph."""
+        if event_id in self._event_plans:
+            return  # Already has a plan
+        try:
+            action = self._infer_plan_action(description)
+            plan = await self.blackboard.create_plan(PlanCreate(
+                action=action,
+                service=service,
+                reason=description[:300],
+            ))
+            self._event_plans[event_id] = plan.id
+            logger.info(f"Created plan {plan.id} ({action.value}) for event {event_id} -> {service}")
+        except Exception as e:
+            logger.warning(f"Failed to create plan for event {event_id}: {e}")
