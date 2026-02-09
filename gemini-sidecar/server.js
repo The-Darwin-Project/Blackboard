@@ -174,6 +174,64 @@ function wsSend(ws, data) {
 }
 
 /**
+ * Read agent findings from the results folder.
+ * Agents write their deliverable to ./results/findings.md.
+ * Falls back to stdout tail if no file found (LLM non-compliance).
+ *
+ * @param {string} workDir - Agent working directory
+ * @param {string} stdout - Full captured stdout (for fallback)
+ * @returns {string} Extracted findings or stdout tail
+ */
+function readFindings(workDir, stdout) {
+  const resultsDir = `${workDir}/results`;
+  const findingsPath = `${resultsDir}/findings.md`;
+
+  try {
+    if (fs.existsSync(findingsPath)) {
+      const content = fs.readFileSync(findingsPath, 'utf8').trim();
+      // Clean up after reading
+      fs.unlinkSync(findingsPath);
+      console.log(`[${new Date().toISOString()}] Read findings from ${findingsPath} (${content.length} chars)`);
+      if (content.length > 0) {
+        return content;
+      }
+      // Empty file = treat as non-compliance, fall through to fallback
+      console.log(`[${new Date().toISOString()}] Findings file was empty, falling back to stdout tail`);
+    }
+  } catch (err) {
+    console.log(`[${new Date().toISOString()}] Could not read findings file: ${err.message}`);
+  }
+
+  // Fallback: tail extraction (last 3000 chars of stdout)
+  console.log(`[${new Date().toISOString()}] No findings file, using stdout tail (${stdout.length} chars)`);
+  if (stdout.length > 3000) {
+    return '(truncated thinking...)\n' + stdout.slice(-3000);
+  }
+  return stdout;
+}
+
+/**
+ * Ensure results directory exists and is clean before a new task.
+ * Handles stale files from crashed previous runs.
+ */
+function prepareResultsDir(workDir) {
+  const resultsDir = `${workDir}/results`;
+  try {
+    if (fs.existsSync(resultsDir)) {
+      // Clean stale files from previous runs
+      const files = fs.readdirSync(resultsDir);
+      for (const f of files) {
+        fs.unlinkSync(`${resultsDir}/${f}`);
+      }
+    } else {
+      fs.mkdirSync(resultsDir, { recursive: true });
+    }
+  } catch (err) {
+    console.log(`[${new Date().toISOString()}] Results dir prep warning: ${err.message}`);
+  }
+}
+
+/**
  * Execute gemini CLI with given prompt and options
  */
 async function executeGemini(prompt, options = {}) {
@@ -191,6 +249,9 @@ async function executeGemini(prompt, options = {}) {
     
     console.log(`[${new Date().toISOString()}] Executing: gemini ${args[0]} ${args.length > 2 ? '...' : ''} (prompt length: ${prompt.length})`);
     
+    // Prepare results directory (clean stale files, ensure exists)
+    prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
+
     const child = spawn('gemini', args, {
       env: {
         ...process.env,
@@ -223,7 +284,8 @@ async function executeGemini(prompt, options = {}) {
           const result = JSON.parse(stdout);
           resolve({ status: 'success', exitCode: code, output: result });
         } catch (e) {
-          resolve({ status: 'success', exitCode: code, output: stdout, raw: true });
+          const findings = readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          resolve({ status: 'success', exitCode: code, output: findings, raw: true });
         }
       } else {
         resolve({ 
@@ -252,6 +314,9 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
     args.push('-p', prompt);
 
     console.log(`[${new Date().toISOString()}] Streaming exec: gemini ${args[0]} (prompt: ${prompt.length} chars)`);
+
+    // Prepare results directory (clean stale files, ensure exists)
+    prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
 
     const child = spawn('gemini', args, {
       env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
@@ -307,7 +372,9 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
           const result = JSON.parse(stdout);
           resolve({ status: 'success', output: result });
         } catch (e) {
-          resolve({ status: 'success', output: stdout, raw: true });
+          // Check results/ folder for agent deliverable, fall back to stdout tail
+          const findings = readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          resolve({ status: 'success', output: findings, raw: true });
         }
       } else {
         resolve({ status: 'failed', exitCode: code, stderr, stdout });

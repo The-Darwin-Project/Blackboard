@@ -87,14 +87,17 @@ When adding new fields to data models, APIs, or schemas:
 - Commit author should reflect the agent name (e.g., "Darwin Developer"), not "Gemini CLI"
 
 ## Completion Report
-When you finish implementing and pushing changes, your response MUST include:
+When you finish implementing and pushing changes, write your completion report to `./results/findings.md`.
+The Brain reads ONLY this file. Your stdout is streamed to the UI as working notes.
+
+Your report MUST include:
 - **Commit SHA**: The full or short SHA of the commit you pushed (run `git rev-parse --short HEAD`)
 - **Branch**: The branch you pushed to (e.g., `main`)
 - **Repository**: The repo URL you cloned
 - **Files changed**: List of files you modified
 - **Summary**: One-line description of what was implemented
 
-Example response format:
+Example `./results/findings.md`:
 ```
 Implementation complete.
 - Commit: 3a29b03 (pushed to main)

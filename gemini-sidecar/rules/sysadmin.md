@@ -54,10 +54,14 @@ Before acting on a deployment, assess how the application is deployed:
   3. Check logs (`oc logs`)
   4. Check resource usage (`oc adm top pods`) if relevant
   5. STOP. Report your findings.
-- Your output MUST end with a structured summary:
-  - **Root Cause**: one sentence
-  - **Evidence**: 2-3 bullet points of what you found
-  - **Recommendation**: what the Brain should do next
+- When you finish investigating, write your findings to `./results/findings.md`:
+  ```
+  **Root Cause**: one sentence
+  **Evidence**: 2-3 bullet points of what you found
+  **Recommendation**: what the Brain should do next
+  ```
+- The Brain reads ONLY this file. Your stdout is streamed to the UI as working notes.
+- If you cannot determine the root cause, still write the file with what you found and what you could NOT determine.
 - Do NOT keep investigating after you have enough evidence to report. The Brain decides the next step, not you.
 - If you cannot determine the root cause in 5 commands, report what you found and what you could NOT determine, then let the Brain decide whether to investigate further.
 - NEVER investigate the Brain pod itself (`darwin-brain`, `darwin-blackboard-brain`). If asked to, report: "Cannot investigate self -- this is the Brain's own pod."

@@ -411,7 +411,7 @@ function TurnBubble({
         />
       )}
       {turn.result && (
-        turn.action === 'execute' && turn.result.length > 200 ? (
+        turn.action === 'execute' && turn.result.length > 500 ? (
           <ResultViewer actor={turn.actor} result={turn.result} />
         ) : (
           <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>

@@ -55,6 +55,10 @@ When creating plans, use this structure:
 - Risk level: [low/medium/high]
 - Rollback: [how to undo]
 
+## Result Delivery
+When you finish your analysis, write your plan/deliverable to `./results/findings.md`.
+The Brain reads ONLY this file. Your stdout is streamed to the UI as working notes.
+
 ## Engineering Principles
 
 ### Simplicity First (KISS)
