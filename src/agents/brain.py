@@ -575,7 +575,7 @@ class Brain:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=BRAIN_SYSTEM_PROMPT,
-                    temperature=0.8,
+                    temperature=1.2,
                     top_p=0.95,
                     tools=[self._tools],
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
