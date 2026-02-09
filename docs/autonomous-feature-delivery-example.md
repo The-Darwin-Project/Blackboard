@@ -177,26 +177,26 @@ The Brain's temporal memory (ops journal) showed the event history:
 
 ## Architecture
 
-```text
-User (chat request)
-    |
-    v
-Brain (Gemini 3 Pro) -- classifies, plans, coordinates
-    |
-    +---> Architect (Gemini CLI) -- code review, plan creation
-    |         |
-    |         v
-    |     User Approval Gate
-    |         |
-    +---> Developer (Gemini CLI) -- implements code changes, pushes
-    |         |
-    |         v
-    |     CI/CD Pipeline (GitHub Actions -> ArgoCD)
-    |         |
-    +---> sysAdmin (Gemini CLI) -- verifies deployment, fixes infra gaps
-    |
-    +---> Aligner (Gemini Flash) -- detects rollout anomaly (parallel event)
-    |
-    v
-Brain (closes both events -- feature delivered + infra healed)
+```mermaid
+graph TD
+    subgraph featureEvent [evt-6e7e7f4c -- Feature Delivery]
+        User[User Chat Request] --> Brain1[Brain: Classify + Route]
+        Brain1 --> Architect[Architect: Code Review + Plan]
+        Architect --> Approval[User Approval Gate]
+        Approval --> Developer[Developer: Implement + Push]
+        Developer --> CICD[CI/CD: GitHub Actions + ArgoCD]
+        CICD --> SysAdmin1[SysAdmin: Verify Deployment]
+        SysAdmin1 --> SysAdmin1Fix[SysAdmin: Fix Missing DB Env Vars]
+        SysAdmin1Fix --> Brain1Close[Brain: Close Feature Event]
+    end
+
+    subgraph infraEvent [evt-9facfa5f -- Infrastructure Self-Healing]
+        Aligner[Aligner: Detects 4/5 Replicas] --> Brain2[Brain: Route Investigation]
+        Brain2 --> SysAdmin2[SysAdmin: Identify Stuck Rollout]
+        SysAdmin2 --> AlignerConfirm[Aligner: Confirms Recovery]
+        AlignerConfirm --> Brain2Close[Brain: Close Infra Event]
+    end
+
+    Developer -.->|Code push triggers rollout| Aligner
+    SysAdmin1Fix -.->|Same Helm fix resolves both| Brain2Close
 ```
