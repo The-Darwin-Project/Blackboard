@@ -53,6 +53,7 @@ This demonstrates two concurrent autonomous workflows: **feature delivery** and 
 **sysAdmin** discovers pods are crash-looping -- the new code requires `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` environment variables that aren't in the Helm deployment template.
 
 **sysAdmin** autonomously:
+
 1. Identified the missing env vars by reading the application code
 2. Updated `helm/templates/deployment.yaml` to inject the database configuration
 3. Committed and pushed the fix
@@ -109,6 +110,7 @@ This is the first end-to-end feature delivery completed autonomously (with one h
 ### Infrastructure Self-Healing During Deployment
 
 Two parallel event streams ran simultaneously:
+
 - **evt-6e7e7f4c** (feature): Brain coordinating the feature implementation
 - **evt-9facfa5f** (infra): Brain investigating why the deployment was stuck
 
@@ -117,6 +119,7 @@ The sysAdmin's fix (adding DB env vars) resolved both events. The Brain correctl
 ### Architect-Developer-SysAdmin Pipeline
 
 Each agent stayed in its lane:
+
 - **Architect**: Analyzed code, produced plan with risk assessment. Never executed.
 - **Developer**: Implemented code changes, pushed to repo. Never investigated infra.
 - **SysAdmin**: Verified deployment, identified missing config, fixed Helm template. Never modified application code.
@@ -124,6 +127,7 @@ Each agent stayed in its lane:
 ### Adaptive Problem Solving
 
 When the Developer's code required environment variables that weren't in the deployment:
+
 1. The sysAdmin didn't just report the error -- it read the application source code to understand what was needed
 2. Identified the specific env vars (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`)
 3. Updated the Helm template to inject them from the existing ConfigMap
@@ -132,20 +136,9 @@ When the Developer's code required environment variables that weren't in the dep
 ### User Interaction
 
 Only two human touchpoints in the entire flow:
+
 1. **Approval**: User approved the implementation plan (required for structural code changes)
 2. **Clarification**: User couldn't see the plan file, Brain retrieved and re-presented it
-
-### Lesson Learned: User Gets the Final Word
-
-After the SysAdmin verified deployment, the Brain immediately closed the event. The user then tested the feature and found the 100KB image limit was too restrictive -- but the message landed on a closed event. The Brain never saw it.
-
-**Root cause:** The Brain treated closure the same for `source: aligner` (autonomous) and `source: chat` (user-initiated) events. For infrastructure anomalies, closing after metric verification is correct. For user feature requests, the user should confirm the feature works before the event closes.
-
-**Fix applied:** Added a "When to Close" section to the Brain system prompt that checks the event `source` field. For `source: chat`, the Brain must use `wait_for_user` before closing: *"The change has been deployed. Please test and confirm it works as expected."*
-
-### Agent Concurrency Validation
-
-This session also validated the agent concurrency fix (per-agent `asyncio.Lock`). Both the feature event and the infrastructure event dispatched tasks to sysAdmin. The per-agent lock serialized these tasks on the same WebSocket connection -- no `cannot call recv while another coroutine is running` crashes.
 
 ### Ops Journal Context
 
@@ -161,27 +154,27 @@ The Brain's temporal memory (ops journal) showed the event history:
 ## Timeline
 
 | Time  | Actor     | Action                                                                                          |
-|-------|-----------|------------------------------------------------------------------------------------------------|
-| 21:57 | User      | Requests product image feature via chat                                                        |
-| 21:57 | Brain     | Looks up service metadata, routes to Architect                                                 |
-| 21:59 | Architect | Clones repo, analyzes codebase, produces implementation plan                                   |
-| 22:00 | Brain     | Presents plan summary, requests user approval                                                  |
-| 22:03 | User      | Can't see plan file, asks Brain to retrieve it                                                 |
-| 22:05 | Architect | Reads findings.md, outputs full plan                                                           |
-| 22:06 | Brain     | Re-presents full plan with all steps and risks                                                 |
-| 22:08 | User      | Approves the plan                                                                              |
-| 22:08 | Brain     | Routes to Developer with detailed implementation tasks                                         |
-| 22:10 | Developer | Implements all changes, pushes to repo                                                         |
-| 22:10 | Aligner   | Detects 4/5 replicas (concurrent infra event created)                                          |
-| 22:10 | Brain     | Routes sysAdmin to investigate replica mismatch (infra event)                                  |
-| 22:12 | sysAdmin  | Identifies stuck rolling update, missing DB env vars (infra event)                             |
-| 22:12 | Brain     | Defers feature event 120s for CI/CD                                                            |
-| 22:15 | Brain     | Routes sysAdmin to verify deployment (feature event)                                           |
-| 22:17 | sysAdmin  | Finds crash-looping pods, identifies missing env vars, updates Helm template, pushes fix       |
-| 22:19 | sysAdmin  | Verifies all 5 pods running, DB connection successful, schema initialized                      |
-| 22:21 | Brain     | Closes feature event -- implementation complete + infra fixed                                  |
-| 22:23 | Brain     | Closes infra event -- rolling update resolved by Revision 109                                  |
-| 22:23 | User      | Tests feature, notes 100KB image limit is restrictive                                          |
+|-------|-----------|-------------------------------------------------------------------------------------------------|
+| 21:57 | User      | Requests product image feature via chat                                                         |
+| 21:57 | Brain     | Looks up service metadata, routes to Architect                                                  |
+| 21:59 | Architect | Clones repo, analyzes codebase, produces implementation plan                                    |
+| 22:00 | Brain     | Presents plan summary, requests user approval                                                   |
+| 22:03 | User      | Can't see plan file, asks Brain to retrieve it                                                  |
+| 22:05 | Architect | Reads findings.md, outputs full plan                                                            |
+| 22:06 | Brain     | Re-presents full plan with all steps and risks                                                  |
+| 22:08 | User      | Approves the plan                                                                               |
+| 22:08 | Brain     | Routes to Developer with detailed implementation tasks                                          |
+| 22:10 | Developer | Implements all changes, pushes to repo                                                          |
+| 22:10 | Aligner   | Detects 4/5 replicas (concurrent infra event created)                                           |
+| 22:10 | Brain     | Routes sysAdmin to investigate replica mismatch (infra event)                                   |
+| 22:12 | sysAdmin  | Identifies stuck rolling update, missing DB env vars (infra event)                              |
+| 22:12 | Brain     | Defers feature event 120s for CI/CD                                                             |
+| 22:15 | Brain     | Routes sysAdmin to verify deployment (feature event)                                            |
+| 22:17 | sysAdmin  | Finds crash-looping pods, identifies missing env vars, updates Helm template, pushes fix        |
+| 22:19 | sysAdmin  | Verifies all 5 pods running, DB connection successful, schema initialized                       |
+| 22:21 | Brain     | Closes feature event -- implementation complete + infra fixed                                   |
+| 22:23 | Brain     | Closes infra event -- rolling update resolved by Revision 109                                   |
+| 22:23 | User      | Tests feature, notes 100KB image limit is restrictive                                           |
 
 ## Architecture
 
