@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Pattern]: check_active_verifications extracts target_service from evidence field (target_service:xxx).
 # 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
-# 3. [Gotcha]: _notify_active_events also has dedup guard -- prevents duplicate confirms during rapid metric cycles.
+# 3. [Gotcha]: _notify_active_events uses conversation-state gate: skips if Brain's last action is route/verify/defer/wait with no response yet.
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. Only google-genai for Flash model.
 """
 Agent 1: The Aligner (The Listener)
@@ -977,13 +977,44 @@ class Aligner:
         to see this in the event conversation -- otherwise it continues chasing
         a problem that no longer exists.
 
-        Dedup: skips if a previous confirm is still unprocessed (SENT or DELIVERED).
+        Noise suppression (conversation-state-aware):
+        1. Skip DEFERRED events (Brain explicitly chose to wait)
+        2. Skip if Brain is busy -- last brain turn is route/verify/defer/wait
+           with no subsequent agent/aligner response (Brain is waiting for something)
+        3. Skip if a previous confirm is still unprocessed (SENT/DELIVERED)
         """
         from ..models import ConversationTurn
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
             event = await self.blackboard.get_event(eid)
             if event and event.service == service:
+                # Skip DEFERRED events -- Brain explicitly chose to wait
+                if event.status.value == "deferred":
+                    logger.debug(f"Skipping notify for deferred event {eid}")
+                    continue
+                # Conversation-state gate: find the last brain turn and check
+                # if the Brain is waiting for something. If so, periodic
+                # observations are noise -- the Brain already knows and acted.
+                last_brain_turn = next(
+                    (t for t in reversed(event.conversation) if t.actor == "brain"),
+                    None,
+                )
+                if last_brain_turn and last_brain_turn.action in ("route", "verify", "defer", "wait"):
+                    # Check if an agent/aligner has responded AFTER this brain turn
+                    brain_idx = next(
+                        i for i, t in enumerate(event.conversation)
+                        if t is last_brain_turn
+                    )
+                    response_after = any(
+                        t.actor in ("architect", "sysadmin", "developer", "aligner")
+                        for t in event.conversation[brain_idx + 1:]
+                    )
+                    if not response_after:
+                        logger.debug(
+                            f"Skipping notify for {eid}: Brain is waiting "
+                            f"({last_brain_turn.action}), no response yet"
+                        )
+                        continue
                 # Dedup: skip if a previous confirm is still unprocessed
                 pending = [
                     t for t in event.conversation
