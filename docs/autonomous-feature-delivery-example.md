@@ -135,6 +135,18 @@ Only two human touchpoints in the entire flow:
 1. **Approval**: User approved the implementation plan (required for structural code changes)
 2. **Clarification**: User couldn't see the plan file, Brain retrieved and re-presented it
 
+### Lesson Learned: User Gets the Final Word
+
+After the SysAdmin verified deployment, the Brain immediately closed the event. The user then tested the feature and found the 100KB image limit was too restrictive -- but the message landed on a closed event. The Brain never saw it.
+
+**Root cause:** The Brain treated closure the same for `source: aligner` (autonomous) and `source: chat` (user-initiated) events. For infrastructure anomalies, closing after metric verification is correct. For user feature requests, the user should confirm the feature works before the event closes.
+
+**Fix applied:** Added a "When to Close" section to the Brain system prompt that checks the event `source` field. For `source: chat`, the Brain must use `wait_for_user` before closing: *"The change has been deployed. Please test and confirm it works as expected."*
+
+### Agent Concurrency Validation
+
+This session also validated the agent concurrency fix (per-agent `asyncio.Lock`). Both the feature event and the infrastructure event dispatched tasks to sysAdmin. The per-agent lock serialized these tasks on the same WebSocket connection -- no `cannot call recv while another coroutine is running` crashes.
+
 ### Ops Journal Context
 
 The Brain's temporal memory (ops journal) showed the event history:
