@@ -63,10 +63,6 @@ This demonstrates two concurrent autonomous workflows: **feature delivery** and 
 
 > **Brain** (22:23): *Implemented product image upload and preview features. SysAdmin identified missing DB env vars and updated the Helm deployment template. All 5 pods running and healthy.*
 
-### Postscript (Turn 20)
-
-User tested the feature and noted the 100KB image size limit was too restrictive -- a follow-up improvement opportunity.
-
 ---
 
 ## Concurrent Infrastructure Self-Healing (evt-9facfa5f)
