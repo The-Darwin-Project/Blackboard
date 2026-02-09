@@ -1,4 +1,8 @@
 # BlackBoard/src/main.py
+# @ai-rules:
+# 1. [Pattern]: clear_waiting(event_id) called in both user_message and approve WS branches.
+# 2. [Gotcha]: Brain instance accessed via app.state.brain, guarded by hasattr check.
+# 3. [Constraint]: Static files mount MUST be last -- API routes take precedence.
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -292,6 +296,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             image=image,
                         )
                         await _blackboard.append_turn(event_id, turn)
+                        # Clear wait_for_user state so Brain re-processes
+                        if hasattr(app.state, 'brain'):
+                            app.state.brain.clear_waiting(event_id)
                         await websocket.send_json({
                             "type": "turn",
                             "event_id": event_id,
@@ -313,6 +320,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             thoughts="User approved the plan.",
                         )
                         await _blackboard.append_turn(event_id, turn)
+                        # Clear wait_for_user state so Brain re-processes
+                        if hasattr(app.state, 'brain'):
+                            app.state.brain.clear_waiting(event_id)
                         await websocket.send_json({
                             "type": "turn",
                             "event_id": event_id,

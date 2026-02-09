@@ -1,4 +1,9 @@
 # BlackBoard/src/agents/aligner.py
+# @ai-rules:
+# 1. [Pattern]: check_active_verifications extracts target_service from evidence field (target_service:xxx).
+# 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
+# 3. [Gotcha]: _notify_active_events also has dedup guard -- prevents duplicate confirms during rapid metric cycles.
+# 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. Only google-genai for Flash model.
 """
 Agent 1: The Aligner (The Listener)
 
@@ -911,33 +916,59 @@ class Aligner:
         await self._trigger_architect(service, anomaly_type)
     
     async def check_active_verifications(self) -> None:
-        """Scan active events for verification requests from Brain."""
+        """Scan active events for unanswered verification requests from Brain.
+
+        Scans all turns (not just last) so a user message arriving after
+        brain.verify doesn't silently drop the verification request.
+        """
         active_ids = await self.blackboard.get_active_events()
         for event_id in active_ids:
             event = await self.blackboard.get_event(event_id)
             if not event or not event.conversation:
                 continue
-            last_turn = event.conversation[-1]
-            if last_turn.waitingFor == "aligner" and last_turn.actor == "brain":
-                # Check if the condition is met
-                svc = await self.blackboard.get_service(event.service)
-                if svc:
-                    from ..models import ConversationTurn
-                    confirm_turn = ConversationTurn(
-                        turn=len(event.conversation) + 1,
-                        actor="aligner",
-                        action="confirm",
-                        evidence=(
-                            f"Service: {event.service}, "
-                            f"CPU: {svc.metrics.cpu:.1f}%, "
-                            f"Memory: {svc.metrics.memory:.1f}%, "
-                            f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}"
-                            if svc.replicas_ready is not None else
-                            f"Service: {event.service}, CPU: {svc.metrics.cpu:.1f}%"
-                        ),
-                    )
-                    await self.blackboard.append_turn(event_id, confirm_turn)
-                    logger.info(f"Aligner confirmed verification for event {event_id}")
+            # Find the latest brain.verify turn waiting for aligner
+            verify_turn = None
+            for t in reversed(event.conversation):
+                if t.actor == "brain" and t.waitingFor == "aligner":
+                    verify_turn = t
+                    break
+                # Stop scanning if we hit an aligner confirm (already answered)
+                if t.actor == "aligner" and t.action == "confirm":
+                    break
+            if not verify_turn:
+                continue
+            # Dedup: skip if a previous confirm is still unprocessed
+            pending_confirms = [
+                t for t in event.conversation
+                if t.actor == "aligner" and t.action == "confirm"
+                and t.status.value in ("sent", "delivered")
+            ]
+            if pending_confirms:
+                logger.debug(f"Skipping confirm for {event_id}: previous confirm not yet evaluated")
+                continue
+            # Extract target service from verify turn (falls back to event.service)
+            target_service = event.service
+            if verify_turn.evidence and verify_turn.evidence.startswith("target_service:"):
+                target_service = verify_turn.evidence.split(":", 1)[1]
+            # Check if the condition is met
+            svc = await self.blackboard.get_service(target_service)
+            if svc:
+                from ..models import ConversationTurn
+                confirm_turn = ConversationTurn(
+                    turn=len(event.conversation) + 1,
+                    actor="aligner",
+                    action="confirm",
+                    evidence=(
+                        f"Service: {target_service}, "
+                        f"CPU: {svc.metrics.cpu:.1f}%, "
+                        f"Memory: {svc.metrics.memory:.1f}%, "
+                        f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}"
+                        if svc.replicas_ready is not None else
+                        f"Service: {target_service}, CPU: {svc.metrics.cpu:.1f}%"
+                    ),
+                )
+                await self.blackboard.append_turn(event_id, confirm_turn)
+                logger.info(f"Aligner confirmed verification for event {event_id}")
     
     async def _notify_active_events(self, service: str, message: str) -> None:
         """Append an aligner.confirm turn to any active events for this service.
@@ -945,12 +976,23 @@ class Aligner:
         When an anomaly resolves (e.g., CPU returns to normal), the Brain needs
         to see this in the event conversation -- otherwise it continues chasing
         a problem that no longer exists.
+
+        Dedup: skips if a previous confirm is still unprocessed (SENT or DELIVERED).
         """
         from ..models import ConversationTurn
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
             event = await self.blackboard.get_event(eid)
             if event and event.service == service:
+                # Dedup: skip if a previous confirm is still unprocessed
+                pending = [
+                    t for t in event.conversation
+                    if t.actor == "aligner" and t.action == "confirm"
+                    and t.status.value in ("sent", "delivered")
+                ]
+                if pending:
+                    logger.debug(f"Skipping confirm for {eid}: previous confirm not yet evaluated")
+                    continue
                 turn = ConversationTurn(
                     turn=len(event.conversation) + 1,
                     actor="aligner",

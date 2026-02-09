@@ -1,4 +1,8 @@
 # BlackBoard/src/models.py
+# @ai-rules:
+# 1. [Constraint]: All models are Pydantic BaseModel. Use Field() for defaults and descriptions.
+# 2. [Pattern]: MessageStatus enum gates the read-receipt protocol (SENT -> DELIVERED -> EVALUATED).
+# 3. [Gotcha]: ConversationTurn.status defaults to SENT for backward compat with existing Redis data.
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -302,6 +306,13 @@ class EventInput(BaseModel):
     )
 
 
+class MessageStatus(str, Enum):
+    """Message delivery status (read receipt protocol)."""
+    SENT = "sent"
+    DELIVERED = "delivered"
+    EVALUATED = "evaluated"
+
+
 class ConversationTurn(BaseModel):
     """A single turn in an event conversation."""
     turn: int = Field(..., description="Turn number in conversation")
@@ -321,6 +332,7 @@ class ConversationTurn(BaseModel):
     waitingFor: Optional[str] = None
     pendingApproval: Optional[bool] = None
     image: Optional[str] = Field(None, description="Base64 data URI of an attached image")
+    status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
     timestamp: float = Field(default_factory=time.time)
 
 

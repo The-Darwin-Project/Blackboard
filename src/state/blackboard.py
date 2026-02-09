@@ -1,4 +1,8 @@
 # BlackBoard/src/state/blackboard.py
+# @ai-rules:
+# 1. [Constraint]: All Redis mutations use WATCH/MULTI/EXEC. Catch redis.WatchError specifically -- NEVER bare Exception.
+# 2. [Pattern]: mark_turns_delivered/evaluated/mark_turn_status follow the pipeline pattern from append_turn.
+# 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -27,6 +31,8 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
+from redis.exceptions import WatchError
+
 from ..models import (
     ConversationMessage,
     ConversationTurn,
@@ -41,6 +47,7 @@ from ..models import (
     GraphNode,
     GraphResponse,
     HealthStatus,
+    MessageStatus,
     MetricPoint,
     MetricSeries,
     NodeType,
@@ -1358,9 +1365,118 @@ class BlackboardState:
                     pipe.set(key, json.dumps(event.model_dump()))
                     await pipe.execute()
                     break
-                except Exception:
+                except WatchError:
                     continue
         logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
+
+    async def mark_turns_delivered(
+        self,
+        event_id: str,
+        up_to_turn: int,
+    ) -> int:
+        """Mark all SENT turns as DELIVERED up to index (exclusive).
+
+        Uses WATCH/MULTI/EXEC for safe concurrent mutation.
+        Returns count of turns updated.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return 0
+                    event = EventDocument(**json.loads(data))
+                    changed = 0
+                    for t in event.conversation[:up_to_turn]:
+                        if t.status == MessageStatus.SENT:
+                            t.status = MessageStatus.DELIVERED
+                            changed += 1
+                    if changed == 0:
+                        return 0
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    logger.debug(f"Marked {changed} turns DELIVERED for event {event_id}")
+                    return changed
+                except WatchError:
+                    continue
+
+    async def mark_turns_evaluated(
+        self,
+        event_id: str,
+        up_to_turn: Optional[int] = None,
+    ) -> int:
+        """Mark SENT/DELIVERED turns as EVALUATED.
+
+        If up_to_turn is given, only marks turns up to that index (exclusive).
+        If None, marks all turns. This prevents marking turns that arrive
+        during process_event as EVALUATED before the Brain reads them.
+
+        Uses WATCH/MULTI/EXEC for safe concurrent mutation.
+        Returns count of turns updated.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return 0
+                    event = EventDocument(**json.loads(data))
+                    scope = event.conversation[:up_to_turn] if up_to_turn is not None else event.conversation
+                    changed = 0
+                    for t in scope:
+                        if t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
+                            t.status = MessageStatus.EVALUATED
+                            changed += 1
+                    if changed == 0:
+                        return 0
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    logger.debug(f"Marked {changed} turns EVALUATED for event {event_id}")
+                    return changed
+                except WatchError:
+                    continue
+
+    async def mark_turn_status(
+        self,
+        event_id: str,
+        turn_number: int,
+        status: "MessageStatus",
+    ) -> bool:
+        """Update a single turn's status by turn number.
+
+        Used for agent-side tracking of brain.route turns.
+        Returns True if updated, False if turn not found.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return False
+                    event = EventDocument(**json.loads(data))
+                    found = False
+                    for t in event.conversation:
+                        if t.turn == turn_number:
+                            t.status = status
+                            found = True
+                            break
+                    if not found:
+                        return False
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    logger.debug(f"Marked turn {turn_number} as {status.value} for event {event_id}")
+                    return True
+                except WatchError:
+                    continue
 
     async def transition_event_status(
         self,
@@ -1391,7 +1507,7 @@ class BlackboardState:
                     pipe.set(key, json.dumps(event.model_dump()))
                     await pipe.execute()
                     break
-                except Exception:
+                except WatchError:
                     continue
         logger.info(f"Event {event_id} status: {from_status} -> {to_status.value}")
         return True
@@ -1414,21 +1530,35 @@ class BlackboardState:
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
 
     async def close_event(self, event_id: str, summary: str) -> None:
-        """Close an event with summary. Move from active to closed."""
+        """Close an event with summary. Move from active to closed.
+
+        Uses WATCH/MULTI/EXEC to prevent losing turns appended between
+        GET and SET by concurrent writers (mark_turns_*, append_turn).
+        """
         key = f"{self.EVENT_PREFIX}{event_id}"
-        data = await self.redis.get(key)
-        if data:
-            event = EventDocument(**json.loads(data))
-            event.status = EventStatus.CLOSED
-            # Append closing turn
-            close_turn = ConversationTurn(
-                turn=len(event.conversation) + 1,
-                actor="brain",
-                action="close",
-                thoughts=summary,
-            )
-            event.conversation.append(close_turn)
-            await self.redis.set(key, json.dumps(event.model_dump()))
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        break
+                    event = EventDocument(**json.loads(data))
+                    event.status = EventStatus.CLOSED
+                    # Append closing turn
+                    close_turn = ConversationTurn(
+                        turn=len(event.conversation) + 1,
+                        actor="brain",
+                        action="close",
+                        thoughts=summary,
+                    )
+                    event.conversation.append(close_turn)
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
         # Move from active to closed
         await self.redis.srem(self.EVENT_ACTIVE, event_id)
         await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})

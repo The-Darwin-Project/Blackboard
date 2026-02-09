@@ -14,7 +14,7 @@ import { useEvents } from '../hooks/useEvents';
 import { useChat } from '../hooks/useChat';
 import { useWSConnection, useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
 import { approveEvent, rejectEvent, closeEvent, getClosedEvents } from '../api/client';
-import type { ConversationTurn } from '../api/types';
+import type { ConversationTurn, MessageStatus } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
@@ -359,6 +359,18 @@ function ResultViewer({ actor, result }: { actor: string; result: string }) {
   );
 }
 
+/** Message status indicator: single check (sent), double check (delivered), blue double check (evaluated) */
+function StatusCheck({ status }: { status?: MessageStatus }) {
+  if (!status || status === 'sent') {
+    return <span title="Sent" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓</span>;
+  }
+  if (status === 'delivered') {
+    return <span title="Delivered" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓✓</span>;
+  }
+  // evaluated
+  return <span title="Evaluated" style={{ fontSize: 11, color: '#3b82f6', marginLeft: 4 }}>✓✓</span>;
+}
+
 function TurnBubble({
   turn,
   eventId,
@@ -384,6 +396,7 @@ function TurnBubble({
         <span style={{ fontSize: 11, color: '#666' }}>
           {new Date(turn.timestamp * 1000).toLocaleTimeString()}
         </span>
+        {turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {attachment && (
           <AttachmentIcon filename={attachment.filename} content={attachment.content} />
         )}
@@ -525,6 +538,9 @@ export function ConversationFeed() {
         ...prev,
         [msg.actor as string]: msg.message as string,
       }));
+    } else if (msg.type === 'message_status') {
+      // Status update for turns (delivered/evaluated) -- invalidate to refresh
+      if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'attachment') {
       // Replace attachment per event (always show latest version)
       setAttachments((prev) => {

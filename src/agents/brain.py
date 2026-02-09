@@ -1,4 +1,11 @@
 # BlackBoard/src/agents/brain.py
+# @ai-rules:
+# 1. [Constraint]: ALL decision logic in BRAIN_SYSTEM_PROMPT + function declarations. Python = plumbing only.
+# 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
+# 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
+# 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
+# 5. [Gotcha]: _waiting_for_user is cleared by main.py WS handler (clear_waiting), not by Brain internally.
+# 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -23,7 +30,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from ..models import ConversationTurn, EventDocument, EventStatus, PlanAction, PlanCreate, PlanStatus
+from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus, PlanAction, PlanCreate, PlanStatus
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -58,6 +65,12 @@ You coordinate three AI agents via a shared conversation queue:
 - If an agent asks for another agent's help (requestingAgent field), route to that agent.
 - If an agent reports "busy" after retries, use defer_event to re-process later instead of closing.
 
+## Agent Recommendations
+- When an agent's response includes an explicit recommendation or unresolved issue, you MUST either:
+  1. Act on it immediately (route to the recommended agent), OR
+  2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
+- NEVER silently drop an agent's recommendation.
+
 ## Execution Method
 - ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
 - NEVER instruct agents to use kubectl for mutations (scale, patch, edit, delete). kubectl is for investigation ONLY (get, list, describe, logs).
@@ -65,9 +78,10 @@ You coordinate three AI agents via a shared conversation queue:
 - Agents should ONLY modify EXISTING values in Helm charts. If a new feature is needed (HPA, PDB, etc.), route to Architect for planning first.
 
 ## Post-Execution: When to Close vs Verify
-- After a **code change** (developer pushes a commit with SHA): wait for CI to build the new image and CD to deploy it, then route sysAdmin to verify the running pod's image tag matches the commit SHA. Close the event only after sysAdmin confirms the new image is running, without any errors
-- After an **infrastructure change** (sysAdmin modifies helm values): wait for CD sync, then re_trigger_aligner to verify the new state (e.g., replicas, CPU).
-- re_trigger_aligner is for verifying **metric-observable** changes (replicas, CPU, memory). For code/image changes, use sysAdmin to check the pod's image tag instead.
+- After a **code change** (developer pushes a commit with SHA): wait for CI/CD, then route sysAdmin to verify the pod's image tag matches the commit SHA.
+- After a **metric-observable infrastructure change** (scaling replicas, adjusting resource limits): use re_trigger_aligner to verify the new state.
+- After a **non-metric config change** (removing secrets, updating annotations, labels, imagePullSecrets): route sysAdmin to verify via kubectl/oc (check events, pod YAML). Do NOT use re_trigger_aligner -- these changes are not observable via metrics.
+- re_trigger_aligner is ONLY for metric-observable changes (replicas, CPU, memory).
 
 ## Safety
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
@@ -113,7 +127,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - The system's current state is the Process Variable (PV)
 - Your decisions are the Controller minimizing the error between SP and PV
 - Agent responses and Aligner verification are the Feedback Loop
-- ALWAYS verify after execution: use re_trigger_aligner to close the feedback loop
+- ALWAYS verify after execution using the appropriate method (see §Post-Execution)
 
 ## GitOps Context
 Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
@@ -142,7 +156,7 @@ Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL ser
 
 # Circuit breaker limits
 MAX_TURNS_PER_EVENT = 30
-MAX_EVENT_DURATION_SECONDS = 1800  # 30 minutes
+MAX_EVENT_DURATION_SECONDS = 2700  # 45 minutes
 
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
@@ -280,6 +294,22 @@ def _build_brain_tools():
             },
         )
 
+        wait_for_user = types.FunctionDeclaration(
+            name="wait_for_user",
+            description="Signal that the current question is answered but agent recommendations exist. "
+                        "Summarize findings and available next actions for the user.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Summary of findings and available actions",
+                    },
+                },
+                "required": ["summary"],
+            },
+        )
+
         lookup_service = types.FunctionDeclaration(
             name="lookup_service",
             description="Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, version, replicas, and current metrics. Use this BEFORE routing to an agent when you need a service's repository URL or deployment details.",
@@ -302,6 +332,7 @@ def _build_brain_tools():
             re_trigger_aligner,
             ask_agent_for_state,
             wait_for_verification,
+            wait_for_user,
             defer_event,
             lookup_service,
         ])
@@ -337,8 +368,14 @@ class Brain:
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
         self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Per-event locks -- prevents concurrent process_event calls for same event
+        self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Plan Layer: track event_id -> plan_id so ghost nodes appear on the graph
         self._event_plans: dict[str, str] = {}  # event_id -> plan_id
+        # Wait-for-user state: events where LLM called wait_for_user
+        self._waiting_for_user: set[str] = set()
+        # Last process_event timestamp per event (for idle safety net)
+        self._last_processed: dict[str, float] = {}
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
@@ -375,16 +412,41 @@ class Brain:
     # Event Processing
     # =========================================================================
 
-    async def process_event(self, event_id: str) -> None:
+    async def process_event(
+        self, event_id: str, prefetched_event: Optional[EventDocument] = None,
+    ) -> None:
+        """
+        Process an event with per-event lock to prevent concurrent calls.
+        
+        Args:
+            event_id: Event ID to process.
+            prefetched_event: If provided, skip the initial Redis GET.
+                Only pass from the event loop scan where the event was
+                just fetched. All other callers should use the default None.
+        """
+        async with self._event_locks[event_id]:
+            await self._process_event_inner(event_id, prefetched_event)
+
+    async def _process_event_inner(
+        self, event_id: str, prefetched_event: Optional[EventDocument] = None,
+    ) -> None:
         """
         Process an event. Reads from Redis, decides next action, writes back.
         
         Includes deduplication: if another active event exists for the same
         service, close this one as a duplicate.
         """
-        event = await self.blackboard.get_event(event_id)
+        self._last_processed[event_id] = time.time()
+
+        # Use prefetched event if available (from loop scan), otherwise fetch fresh
+        event = prefetched_event or await self.blackboard.get_event(event_id)
         if not event:
             logger.warning(f"Event {event_id} not found")
+            return
+
+        # CLOSED guard: skip events that were closed concurrently
+        if event.status == EventStatus.CLOSED:
+            logger.debug(f"Skipping closed event {event_id}")
             return
 
         # Dedup: if this is a new event (no turns yet), check for existing active events
@@ -422,16 +484,32 @@ class Brain:
             )
             return
 
-        # Circuit breaker: max duration
+        # Circuit breaker: max duration with grace period
         if event.conversation:
             first_turn_time = event.conversation[0].timestamp
-            if time.time() - first_turn_time > MAX_EVENT_DURATION_SECONDS:
+            deadline = MAX_EVENT_DURATION_SECONDS
+
+            # Grace period: if an agent just returned, give the LLM time to evaluate
+            last_agent_turn = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor in ("architect", "sysadmin", "developer")),
+                None,
+            )
+            if last_agent_turn and (time.time() - last_agent_turn.timestamp) < 60:
+                deadline += 120  # 2-minute grace for LLM evaluation
+
+            if time.time() - first_turn_time > deadline:
                 logger.warning(f"Event {event_id} exceeded max duration")
                 await self._close_and_broadcast(
                     event_id,
                     f"TIMEOUT: Event exceeded {MAX_EVENT_DURATION_SECONDS}s. Force closed.",
                 )
                 return
+
+        # Snapshot turn count BEFORE LLM call -- any turns appended during processing
+        # (e.g., Aligner confirm arriving mid-evaluation) will have index > turn_snapshot
+        # and stay SENT/DELIVERED for the next event loop iteration.
+        turn_snapshot = len(event.conversation)
 
         # Get LLM client; fall back to probe mode if unavailable
         client = await self._get_client()
@@ -465,6 +543,15 @@ class Brain:
             logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
         else:
             logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
+
+        # After LLM loop exits -- only mark turns the Brain actually saw.
+        # Turns appended during LLM processing (e.g., Aligner confirm) stay SENT/DELIVERED
+        # and will trigger re-processing on the next event loop scan.
+        await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
+        await self._broadcast_status_update(
+            event_id, "evaluated",
+            turns=list(range(1, turn_snapshot + 1)),  # Scoped to snapshot, not "all"
+        )
 
     async def _process_with_llm(
         self,
@@ -733,7 +820,10 @@ class Brain:
             agent = self.agents.get(agent_name)
             if agent:
                 event_md_path = f"./events/event-{event_id}.md"
-                task_coro = self._run_agent_task(event_id, agent_name, agent, task, event_md_path)
+                task_coro = self._run_agent_task(
+                    event_id, agent_name, agent, task, event_md_path,
+                    routing_turn_num=turn.turn,
+                )
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
@@ -776,6 +866,7 @@ class Brain:
                 action="verify",
                 thoughts=f"Re-triggering Aligner to check: {condition}",
                 waitingFor="aligner",
+                evidence=f"target_service:{service}",  # Store target service for Aligner
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -821,6 +912,20 @@ class Brain:
                     ex=delay + 60,  # Auto-expire the key after delay + buffer
                 )
             logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
+            return False
+
+        elif function_name == "wait_for_user":
+            summary = args.get("summary", "")
+            self._waiting_for_user.add(event_id)  # State flag (plumbing)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="wait",
+                thoughts=summary,
+                waitingFor="user",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
             return False
 
         elif function_name == "lookup_service":
@@ -872,15 +977,29 @@ class Brain:
         agent: Any,
         task: str,
         event_md_path: str,
+        routing_turn_num: int = 0,
     ) -> None:
         """
         Run agent.process() with progress streaming. Non-blocking via create_task.
         
         On completion: appends result turn, broadcasts, triggers next Brain decision.
+        Tracks bidirectional message status for the brain.route turn.
         """
         try:
+            agent_acked = False  # Track first progress (= agent received task)
+
             async def on_progress(progress_data: dict) -> None:
                 """Broadcast agent progress to UI in real-time."""
+                nonlocal agent_acked
+                # First progress = agent received and is working (DELIVERED)
+                if not agent_acked and routing_turn_num:
+                    agent_acked = True
+                    await self.blackboard.mark_turn_status(
+                        event_id, routing_turn_num, MessageStatus.DELIVERED
+                    )
+                    await self._broadcast_status_update(
+                        event_id, "delivered", turns=[routing_turn_num],
+                    )
                 if self.broadcast:
                     await self.broadcast({
                         "type": "progress",
@@ -960,6 +1079,15 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Agent task completed: {agent_name} for {event_id}")
 
+            # Mark routing turn as EVALUATED (agent completed its work)
+            if routing_turn_num:
+                await self.blackboard.mark_turn_status(
+                    event_id, routing_turn_num, MessageStatus.EVALUATED
+                )
+                await self._broadcast_status_update(
+                    event_id, "evaluated", turns=[routing_turn_num],
+                )
+
             # Trigger next Brain decision
             await self.process_event(event_id)
 
@@ -973,6 +1101,12 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            # Mark routing turn as EVALUATED so the orphaned SENT/DELIVERED turn
+            # doesn't trigger the unread-message scan and re-dispatch to a failing agent.
+            if routing_turn_num:
+                await self.blackboard.mark_turn_status(
+                    event_id, routing_turn_num, MessageStatus.EVALUATED
+                )
 
         finally:
             # Clean up active task tracking
@@ -991,10 +1125,43 @@ class Brain:
                 "turn": turn.model_dump(),
             })
 
+    async def _broadcast_status_update(
+        self, event_id: str, status: str, turns=None,
+    ) -> None:
+        """Broadcast message status change to UI.
+
+        Args:
+            event_id: Event ID
+            status: "delivered" or "evaluated"
+            turns: list of ConversationTurn objects, list of int turn numbers,
+                   or None for "all"
+        """
+        if self.broadcast:
+            if turns is None:
+                turn_list = "all"
+            elif turns and hasattr(turns[0], "turn"):
+                turn_list = [t.turn for t in turns]
+            else:
+                turn_list = turns  # Already int list
+            await self.broadcast({
+                "type": "message_status",
+                "event_id": event_id,
+                "status": status,
+                "turns": turn_list,
+            })
+
+    def clear_waiting(self, event_id: str) -> None:
+        """Clear the wait_for_user state for an event (called when user responds)."""
+        self._waiting_for_user.discard(event_id)
+
     async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
         """Close an event and broadcast the closure to UI."""
         await self.blackboard.close_event(event_id, summary)
+        # Clean up all per-event state to prevent memory leaks
         self._routing_depth.pop(event_id, None)
+        self._waiting_for_user.discard(event_id)
+        self._last_processed.pop(event_id, None)
+        self._event_locks.pop(event_id, None)
         # Complete any associated Plan (removes ghost node from graph)
         plan_id = self._event_plans.pop(event_id, None)
         if plan_id:
@@ -1119,6 +1286,17 @@ class Brain:
         WebSocket connections dropped). Close them so they don't block the system.
         Also completes any PENDING plans so ghost nodes don't linger on the graph.
         """
+        # --- Migrate pre-MessageStatus events: mark all existing turns as EVALUATED ---
+        # Prevents mass re-processing on first deploy with the new unread-message scan.
+        try:
+            migrate_ids = await self.blackboard.get_active_events()
+            for eid in migrate_ids:
+                await self.blackboard.mark_turns_evaluated(eid)
+            if migrate_ids:
+                logger.info(f"Startup migration: marked turns EVALUATED for {len(migrate_ids)} active events")
+        except Exception as e:
+            logger.warning(f"Startup migration failed (non-fatal): {e}")
+
         # --- Clean up orphaned PENDING plans (ghost nodes from previous instance) ---
         try:
             pending_plans = await self.blackboard.get_pending_plans()
@@ -1189,12 +1367,18 @@ class Brain:
                     logger.info(f"New event from queue: {event_id}")
                     await self.process_event(event_id)
 
-                # 2. Scan active events for user approvals + deferred events
+                # 2. Scan active events: status-driven two-phase scan
                 active = await self.blackboard.get_active_events()
                 for eid in active:
-                    # Skip events with active agent tasks
+                    # Phase 1: Even if an agent task is running, acknowledge new turns
                     if eid in self._active_tasks and not self._active_tasks[eid].done():
-                        continue
+                        event = await self.blackboard.get_event(eid)
+                        if event:
+                            unseen = [t for t in event.conversation if t.status.value == "sent"]
+                            if unseen:
+                                await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
+                                await self._broadcast_status_update(eid, "delivered", turns=unseen)
+                        continue  # Still skip LLM evaluation -- agent is running
 
                     event = await self.blackboard.get_event(eid)
                     if not event or not event.conversation:
@@ -1206,32 +1390,48 @@ class Brain:
                         defer_until = await self.blackboard.redis.get(defer_key)
                         if defer_until and time.time() < float(defer_until):
                             continue  # Still deferred, skip
-                        # Delay expired -- re-activate and process
-                        event.status = EventStatus.ACTIVE
-                        await self.blackboard.redis.set(
-                            f"{self.blackboard.EVENT_PREFIX}{eid}",
-                            json.dumps(event.model_dump()),
+                        # Delay expired -- atomically re-activate (WATCH/MULTI/EXEC)
+                        # to avoid losing turns appended during the defer window.
+                        transitioned = await self.blackboard.transition_event_status(
+                            eid, "deferred", EventStatus.ACTIVE,
                         )
                         await self.blackboard.redis.delete(defer_key)
-                        logger.info(f"Deferred event {eid} re-activated")
-                        await self.process_event(eid)
+                        if transitioned:
+                            logger.info(f"Deferred event {eid} re-activated")
+                            # Re-fetch post-transition so prefetch carries clean state
+                            event = await self.blackboard.get_event(eid)
+                            if event:
+                                await self.process_event(eid, prefetched_event=event)
                         continue
 
-                    last_turn = event.conversation[-1]
-                    # Re-process if:
-                    # 1. User approved or Aligner confirmed
-                    # 2. Agent completed (last turn from agent, no active task) -- pick up stalled events
-                    if last_turn.actor in ("user", "aligner") and last_turn.action in ("approve", "reject", "confirm", "message"):
-                        logger.info(f"User/Aligner action on event {eid}: {last_turn.actor}.{last_turn.action}")
-                        await self.process_event(eid)
-                    elif last_turn.actor in ("architect", "sysadmin", "developer") and last_turn.action not in ("busy",):
-                        # Agent completed but Brain hasn't continued -- re-process
-                        logger.info(f"Resuming stalled event {eid}: agent {last_turn.actor} completed, Brain continuing")
-                        await self.process_event(eid)
+                    # Mark all SENT turns as DELIVERED (Brain has seen them)
+                    unseen = [t for t in event.conversation if t.status.value == "sent"]
+                    if unseen:
+                        await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
+                        await self._broadcast_status_update(eid, "delivered", turns=unseen)
+
+                    # Re-process if there are DELIVERED (unread) turns the Brain hasn't evaluated
+                    has_unread = any(t.status.value == "delivered" for t in event.conversation)
+                    if has_unread:
+                        await self.process_event(eid, prefetched_event=event)
+                    else:
+                        # Idle safety net: re-process if not waiting for user
+                        # and hasn't been processed recently.
+                        # Active-task events already hit `continue` in Phase 1 above.
+                        is_waiting = eid in self._waiting_for_user
+                        time_since_process = time.time() - self._last_processed.get(eid, 0)
+                        if not is_waiting and time_since_process > 240:
+                            logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")
+                            await self.process_event(eid, prefetched_event=event)
 
             except Exception as e:
                 logger.error(f"Brain event loop error: {e}", exc_info=True)
                 await asyncio.sleep(2)
+
+            # Prevent tight spinning when many active events exist.
+            # brpop in dequeue_event() blocks up to 5s when queue is empty,
+            # but the active-event scan runs without blocking.
+            await asyncio.sleep(1)
 
     async def stop_event_loop(self) -> None:
         """Stop the event loop."""

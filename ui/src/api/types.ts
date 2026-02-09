@@ -120,6 +120,12 @@ export interface GraphResponse {
 }
 
 // =============================================================================
+// Message Status (read receipt protocol)
+// =============================================================================
+
+export type MessageStatus = 'sent' | 'delivered' | 'evaluated';
+
+// =============================================================================
 // Event Queue (Brain conversation documents)
 // =============================================================================
 
@@ -144,6 +150,7 @@ export interface ConversationTurn {
   waitingFor?: string;
   pendingApproval?: boolean;
   image?: string;
+  status?: MessageStatus;
   timestamp: number;
 }
 
