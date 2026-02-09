@@ -3,6 +3,8 @@
 # 1. [Constraint]: All Redis mutations use WATCH/MULTI/EXEC. Catch redis.WatchError specifically -- NEVER bare Exception.
 # 2. [Pattern]: mark_turns_delivered/evaluated/mark_turn_status follow the pipeline pattern from append_turn.
 # 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
+# 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
+# 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -1306,6 +1308,10 @@ class BlackboardState:
     EVENT_CLOSED = "darwin:event:closed"
     # AGENT_NOTIFY_PREFIX removed -- WebSocket replaces Redis agent notifications
 
+    # Ops journal -- per-service temporal memory for pattern recognition
+    JOURNAL_PREFIX = "darwin:journal:"
+    JOURNAL_MAX_ENTRIES = 20
+
     async def create_event(
         self,
         source: str,
@@ -1528,6 +1534,56 @@ class BlackboardState:
     async def get_active_events(self) -> list[str]:
         """Get all active event IDs."""
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
+
+    async def get_recent_closed_for_service(
+        self, service: str, minutes: int = 15
+    ) -> list[tuple[str, float, str]]:
+        """Get recently closed events for a service.
+        Returns list of (event_id, close_timestamp, closing_summary).
+
+        Uses withscores + pipeline to avoid N+1 Redis roundtrips.
+        """
+        cutoff = time.time() - (minutes * 60)
+        # Single ZRANGEBYSCORE with scores -- no separate zscore() calls needed
+        closed_with_scores: list[tuple[str, float]] = await self.redis.zrangebyscore(
+            self.EVENT_CLOSED, cutoff, time.time(), withscores=True
+        )
+        if not closed_with_scores:
+            return []
+
+        # Pipeline: batch-GET all event documents in one roundtrip
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for eid, _ in closed_with_scores:
+                pipe.get(f"{self.EVENT_PREFIX}{eid}")
+            docs = await pipe.execute()
+
+        results = []
+        for (eid, close_time), raw in zip(closed_with_scores, docs):
+            if not raw:
+                continue
+            event = EventDocument(**json.loads(raw))
+            if event.service != service:
+                continue
+            # Get closing summary from last turn
+            summary = ""
+            if event.conversation:
+                last = event.conversation[-1]
+                summary = (last.thoughts or last.result or "")[:150]
+            results.append((eid, close_time, summary))
+        return results
+
+    async def append_journal(self, service: str, entry: str) -> None:
+        """Append a one-line ops journal entry for a service."""
+        from datetime import datetime
+        key = f"{self.JOURNAL_PREFIX}{service}"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        await self.redis.rpush(key, f"[{timestamp}] {entry}")
+        await self.redis.ltrim(key, -self.JOURNAL_MAX_ENTRIES, -1)
+
+    async def get_journal(self, service: str) -> list[str]:
+        """Get all ops journal entries for a service (newest last)."""
+        key = f"{self.JOURNAL_PREFIX}{service}"
+        return await self.redis.lrange(key, 0, -1)
 
     async def close_event(self, event_id: str, summary: str) -> None:
         """Close an event with summary. Move from active to closed.

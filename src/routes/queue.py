@@ -3,6 +3,7 @@
 # 1. [Gotcha]: GET /closed/list MUST stay before GET /{event_id} to avoid "closed" matching as event_id.
 # 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() -- same state machine as Brain.
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
+# 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
 """
 Conversation Queue API - Event document management.
 
@@ -150,9 +151,46 @@ async def close_event_by_user(
     if event.status == EventStatus.CLOSED:
         raise HTTPException(status_code=409, detail="Event already closed")
 
-    await blackboard.close_event(event_id, f"User force-closed: {body.reason}")
+    close_summary = f"User force-closed: {body.reason}"
+    await blackboard.close_event(event_id, close_summary)
+    # Write to ops journal so Brain has temporal context for this closure
+    await blackboard.append_journal(
+        event.service,
+        f"{event.event.reason[:80]} -- user force-closed. {body.reason[:80]}"
+    )
     logger.info(f"User force-closed event {event_id}: {body.reason}")
     return {"status": "closed", "event_id": event_id}
+
+
+@router.get("/{event_id}/report")
+async def get_event_report(
+    event_id: str,
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Get full event report as Markdown with service metadata and architecture."""
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    service_meta = await blackboard.get_service(event.service)
+    mermaid = ""
+    try:
+        mermaid = await blackboard.generate_mermaid()
+    except Exception:
+        pass
+
+    # Reuse Brain's markdown format (extracted as @staticmethod)
+    from ..agents.brain import Brain
+    content = Brain._event_to_markdown(event, service_meta, mermaid)
+
+    # Add journal context
+    journal = await blackboard.get_journal(event.service)
+    if journal:
+        content += "\n\n## Service Ops Journal\n\n"
+        for entry in journal:
+            content += f"- {entry}\n"
+
+    return {"markdown": content, "event_id": event_id}
 
 
 @router.get("/closed/list")

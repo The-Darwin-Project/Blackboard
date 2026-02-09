@@ -4,6 +4,7 @@
 # 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
 # 3. [Gotcha]: _notify_active_events uses conversation-state gate: skips if Brain's last action is route/verify/defer/wait with no response yet.
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. Only google-genai for Flash model.
+# 5. [Constraint]: All generate_content() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
 """
 Agent 1: The Aligner (The Listener)
 
@@ -312,8 +313,10 @@ class Aligner:
             {{"name": "Ignore errors for maintenance", "ignore_errors": true, "ignore_metrics": false, "duration_minutes": 60, "service": null}}
             """
             
+            from google.genai import types as genai_types
             response = await client.aio.models.generate_content(
                 model=self._model_name, contents=prompt,
+                config=genai_types.GenerateContentConfig(max_output_tokens=1024),
             )
             
             import json
@@ -506,8 +509,10 @@ class Aligner:
                     f"Then on the second line, a brief explanation."
                 )
 
+                from google.genai import types as genai_types
                 response = await client.aio.models.generate_content(
                     model=self._model_name, contents=prompt,
+                    config=genai_types.GenerateContentConfig(max_output_tokens=1024),
                 )
                 result_text = response.text.strip() if response.text else "NOISE"
                 first_line = result_text.split("\n")[0].strip().upper()
@@ -691,6 +696,7 @@ class Aligner:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=ALIGNER_SYSTEM_PROMPT,
+                        max_output_tokens=4096,
                         tools=[aligner_tools],
                         tool_config=types.ToolConfig(
                             function_calling_config=types.FunctionCallingConfig(mode="AUTO"),

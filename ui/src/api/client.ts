@@ -2,6 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: All API calls go through fetchApi() wrapper -- consistent error handling via ApiError.
 // 2. [Constraint]: closeEvent uses REST POST, not WebSocket -- ensures delivery even during WS reconnect.
+// 3. [Pattern]: getEventReport fetches server-side markdown -- ConversationFeed falls back to client-side eventToMarkdown on failure.
 /**
  * Typed API client for Darwin Brain backend.
  */
@@ -156,6 +157,14 @@ export async function closeEvent(eventId: string, reason?: string): Promise<any>
 export async function getClosedEvents(limit?: number): Promise<any[]> {
   const params = limit ? `?limit=${limit}` : '';
   return fetchApi<any[]>(`/queue/closed/list${params}`);
+}
+
+export async function getEventReport(
+  eventId: string
+): Promise<{ markdown: string; event_id: string }> {
+  return fetchApi<{ markdown: string; event_id: string }>(
+    `/queue/${encodeURIComponent(eventId)}/report`
+  );
 }
 
 // =============================================================================

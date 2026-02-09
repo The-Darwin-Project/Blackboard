@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: selectedEventId persisted in sessionStorage -- survives page refresh.
 // 2. [Pattern]: useWSReconnect invalidates all queries to catch missed WS messages.
-// 3. [Gotcha]: eventToMarkdown is client-side only -- mirrors Brain._event_to_markdown but without service metadata.
+// 3. [Pattern]: Report button fetches server-side report via getEventReport(); falls back to client-side eventToMarkdown on failure.
 // 4. [Constraint]: closeEvent via REST, not WS -- ensures request completes even if WS is flaky.
 /**
  * Unified group-chat view with real-time WebSocket updates.
@@ -13,7 +13,7 @@ import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../hook
 import { useEvents } from '../hooks/useEvents';
 import { useChat } from '../hooks/useChat';
 import { useWSConnection, useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
-import { approveEvent, rejectEvent, closeEvent, getClosedEvents } from '../api/client';
+import { approveEvent, rejectEvent, closeEvent, getClosedEvents, getEventReport } from '../api/client';
 import type { ConversationTurn, MessageStatus } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
@@ -494,6 +494,7 @@ export function ConversationFeed() {
   const [showClosed, setShowClosed] = useState(false);
   const [pendingImage, setPendingImage] = useState<string | null>(null); // base64 data URI
   const [reportOpen, setReportOpen] = useState(false); // Event report markdown viewer
+  const [reportContent, setReportContent] = useState<string>(''); // Server-side report markdown
   const feedRef = useRef<HTMLDivElement>(null);
 
   // Persist selected event across page refreshes
@@ -711,9 +712,18 @@ export function ConversationFeed() {
               <span style={{ fontSize: 11, color: '#64748b' }}>
                 {selectedEvent.source} | {selectedEvent.conversation.length} turns
               </span>
-              {/* Report button -- opens full event markdown in MarkdownViewer */}
+              {/* Report button -- fetches full event report from server */}
               <button
-                onClick={() => setReportOpen(true)}
+                onClick={async () => {
+                  try {
+                    const data = await getEventReport(selectedEvent.id);
+                    setReportContent(data.markdown);
+                  } catch {
+                    // Fallback to client-side if API fails
+                    setReportContent(eventToMarkdown(selectedEvent));
+                  }
+                  setReportOpen(true);
+                }}
                 style={{
                   background: '#1e3a5f', border: '1px solid #2563eb44',
                   borderRadius: 4, color: '#93c5fd', fontSize: 11,
@@ -758,11 +768,11 @@ export function ConversationFeed() {
             </div>
           </div>
 
-          {/* Event report markdown viewer */}
+          {/* Event report markdown viewer (server-side with fallback) */}
           {reportOpen && (
             <MarkdownViewer
               filename={`event-${selectedEvent.id}.md`}
-              content={eventToMarkdown(selectedEvent)}
+              content={reportContent}
               onClose={() => setReportOpen(false)}
             />
           )}

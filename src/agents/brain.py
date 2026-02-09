@@ -6,6 +6,8 @@
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
 # 5. [Gotcha]: _waiting_for_user is cleared by main.py WS handler (clear_waiting), not by Brain internally.
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
+# 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
+# 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -134,16 +136,16 @@ Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
 When checking GitOps sync status, instruct sysAdmin to discover the GitOps tooling namespace first (e.g., search for ArgoCD or Flux namespaces) rather than assuming a specific namespace.
 
 ## Cross-Event Awareness
-Before acting on infrastructure anomalies, check the "Related Active Events" section in the prompt.
-- If a code deployment or rollout is in progress for the same service, transient CPU/memory spikes are EXPECTED during pod rollout. Do NOT scale up during a rollout -- use defer_event to wait for it to complete.
-- If you recently scaled a service, an "over-provisioned" event shortly after is expected once load normalizes. Defer or close it with a note that it's a consequence of the previous scaling action.
-- If a related event shows a developer.execute or sysadmin.execute action, the service is actively being modified -- wait for stabilization before reacting to anomalies.
+Before acting on infrastructure anomalies, check the "Related Active Events" and "Recently Closed Events" sections in the prompt.
+- If a related ACTIVE event shows a deployment or code change in progress (developer.execute, sysadmin.execute), use defer_event to wait for stabilization.
+- If the "Recently Closed Events" show you JUST scaled this service (within 5 minutes), and the current event is "over-provisioned," that is expected post-scaling normalization -- defer for 5 minutes.
+- If the "Recently Closed Events" show a PATTERN of repeated same-reason events (3+ closures of the same type), investigate the root cause instead of applying the same fix again.
+- For "over-provisioned" events: low metrics are the PROBLEM, not a sign of resolution. Route to sysAdmin to scale down via GitOps unless actively deferring per the rules above.
 
 ## Aligner Observations
 The Aligner reports what it observes in natural language with actual metric values.
-It speaks in first person ("I detected...", "I observed...") and always includes the numbers.
-- Read the metric values in aligner.confirm turns. If metrics are below thresholds (CPU <80%, error_rate <5%), close the event.
-- If metrics are still above thresholds, continue investigating regardless of the Aligner's wording.
+- For anomaly events (high CPU, high memory, high error rate): if latest metrics are below thresholds, close the event.
+- For "over-provisioned" events: low metrics mean the service has too many replicas. Route to sysAdmin to reduce replicas. Do NOT close just because metrics are low.
 - The Aligner does not make decisions -- you do. It reports, you act.
 
 ## Architecture Awareness
@@ -325,6 +327,23 @@ def _build_brain_tools():
             },
         )
 
+        lookup_journal = types.FunctionDeclaration(
+            name="lookup_journal",
+            description="Look up the ops journal for any service. Returns recent event history "
+                        "(closures, scaling actions, fixes). Use to check what happened recently "
+                        "to a service or its dependencies before making decisions.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "service_name": {
+                        "type": "string",
+                        "description": "Service name to look up (e.g., 'darwin-store', 'postgres')",
+                    },
+                },
+                "required": ["service_name"],
+            },
+        )
+
         return types.Tool(function_declarations=[
             select_agent,
             close_event,
@@ -335,6 +354,7 @@ def _build_brain_tools():
             wait_for_user,
             defer_event,
             lookup_service,
+            lookup_journal,
         ])
 
     except ImportError:
@@ -376,11 +396,25 @@ class Brain:
         self._waiting_for_user: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
         self._last_processed: dict[str, float] = {}
+        # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
+        self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
         self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
         logger.info(f"Brain initialized (project={self.project}, model={self.model_name}, agents={list(self.agents.keys())})")
+
+    JOURNAL_CACHE_TTL = 60  # seconds
+
+    async def _get_journal_cached(self, service: str) -> list[str]:
+        """Get journal with 60s in-memory cache. Invalidated on close_event."""
+        now = time.time()
+        cached = self._journal_cache.get(service)
+        if cached and (now - cached[0]) < self.JOURNAL_CACHE_TTL:
+            return cached[1]
+        entries = await self.blackboard.get_journal(service)
+        self._journal_cache[service] = (now, entries)
+        return entries
 
     async def _get_client(self):
         """Lazy-load google-genai Client with Brain tools."""
@@ -577,6 +611,7 @@ class Brain:
                     system_instruction=BRAIN_SYSTEM_PROMPT,
                     temperature=1.2,
                     top_p=0.95,
+                    max_output_tokens=65000,
                     tools=[self._tools],
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 ),
@@ -633,6 +668,12 @@ class Brain:
             f"Evidence: {event.event.evidence}",
             f"Time: {event.event.timeDate}",
         ]
+
+        # Event age (how long since first turn)
+        event_created = event.conversation[0].timestamp if event.conversation else time.time()
+        age_seconds = int(time.time() - event_created)
+        age_min, age_sec = divmod(age_seconds, 60)
+        lines.append(f"Event Age: {age_min}m {age_sec}s")
 
         # Include service metadata so the LLM knows the GitOps coordinates
         svc = await self.blackboard.get_service(event.service)
@@ -691,13 +732,41 @@ class Brain:
             lines.append("Related Active Events (same service -- consider before acting):")
             lines.extend(related)
 
+        # Recently closed events for same service (temporal memory)
+        recent_closed = await self.blackboard.get_recent_closed_for_service(
+            event.service, minutes=15
+        )
+        if recent_closed:
+            lines.append("")
+            lines.append("Recently Closed Events (same service, last 15 min):")
+            for cid, close_time, csummary in recent_closed:
+                ago = int(time.time() - close_time)
+                ago_min = ago // 60
+                lines.append(f"  - {cid} (closed {ago_min}m ago): {csummary}")
+
+        # Service ops journal (persistent temporal memory)
+        journal = await self._get_journal_cached(event.service)
+        if journal:
+            lines.append("")
+            lines.append(f"Service Ops Journal (last {len(journal)} actions):")
+            for entry in journal[-10:]:  # Show last 10 entries in prompt
+                lines.append(f"  {entry}")
+            lines.append("  (Use lookup_journal to check other services' history)")
+
         lines.extend(["", "Conversation so far:"])
 
         if not event.conversation:
             lines.append("(No turns yet -- this is a new event. Triage it.)")
         else:
             for turn in event.conversation:
-                lines.append(f"  Turn {turn.turn} [{turn.actor}.{turn.action}]:")
+                turn_ago = int(time.time() - turn.timestamp)
+                if turn_ago < 60:
+                    time_label = f"{turn_ago}s ago"
+                elif turn_ago < 3600:
+                    time_label = f"{turn_ago // 60}m {turn_ago % 60}s ago"
+                else:
+                    time_label = f"{turn_ago // 3600}h {(turn_ago % 3600) // 60}m ago"
+                lines.append(f"  Turn {turn.turn} [{turn.actor}.{turn.action}] ({time_label}):")
                 if turn.thoughts:
                     lines.append(f"    Thoughts: {turn.thoughts}")
                 if turn.result:
@@ -962,6 +1031,24 @@ class Brain:
             # Signal caller to re-invoke LLM so it can act on the lookup result
             return True
 
+        elif function_name == "lookup_journal":
+            service_name = args.get("service_name", "")
+            entries = await self._get_journal_cached(service_name)
+            if entries:
+                journal_text = f"Ops journal for {service_name} (last {len(entries)} entries):\n"
+                journal_text += "\n".join(f"  {e}" for e in entries)
+            else:
+                journal_text = f"No ops journal entries for {service_name}."
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="think",
+                evidence=journal_text,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return True
+
         else:
             logger.warning(f"Unknown function call: {function_name}")
             return False
@@ -1156,7 +1243,18 @@ class Brain:
 
     async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
         """Close an event and broadcast the closure to UI."""
+        # Fetch event BEFORE close to get service name for journal
+        event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary)
+        # Append to service ops journal (temporal memory)
+        if event:
+            turns = len(event.conversation)
+            await self.blackboard.append_journal(
+                event.service,
+                f"{event.event.reason[:80]} -- closed in {turns} turns. {summary[:80]}"
+            )
+            # Invalidate journal cache for this service (immediate freshness)
+            self._journal_cache.pop(event.service, None)
         # Clean up all per-event state to prevent memory leaks
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.discard(event_id)
@@ -1209,7 +1307,8 @@ class Brain:
         file_path.write_text(content)
         logger.debug(f"Wrote event MD to {file_path}")
 
-    def _event_to_markdown(self, event: EventDocument, service_meta=None, mermaid: str = "") -> str:
+    @staticmethod
+    def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:
         """Convert event document to readable Markdown, enriched with service metadata and topology."""
         lines = [
             f"# Event: {event.id}",
@@ -1326,10 +1425,15 @@ class Brain:
 
             # Close events that have turns (were being processed) -- they're stale from the previous instance
             if event.conversation:
-                await self.blackboard.close_event(
-                    eid,
+                stale_summary = (
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
-                    f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}",
+                    f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
+                )
+                await self.blackboard.close_event(eid, stale_summary)
+                # Write to ops journal so Brain has temporal context for stale closures
+                await self.blackboard.append_journal(
+                    event.service,
+                    f"{event.event.reason[:80]} -- stale closure on restart ({len(event.conversation)} turns)"
                 )
                 stale_count += 1
             else:
