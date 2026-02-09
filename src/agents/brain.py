@@ -4,7 +4,7 @@
 # 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
 # 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
-# 5. [Gotcha]: _waiting_for_user is cleared by main.py WS handler (clear_waiting), not by Brain internally.
+# 5. [Gotcha]: _waiting_for_user is cleared by main.py WS handler AND queue.py REST endpoints (clear_waiting), not by Brain internally.
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
@@ -76,9 +76,10 @@ You coordinate three AI agents via a shared conversation queue:
 - NEVER silently drop an agent's recommendation.
 
 ## Wait-for-User Protocol
-- After calling wait_for_user, the system automatically pauses the event until the user responds.
-- Do NOT call defer_event after wait_for_user. The wait is handled by the system.
+- After calling wait_for_user OR request_user_approval, the system automatically pauses the event until the user responds.
+- Do NOT call defer_event after wait_for_user or request_user_approval. The wait is handled by the system.
 - The event will resume ONLY when the user sends a message, approves, or rejects.
+- NEVER defer while waiting for user input. The system handles the pause automatically.
 
 ## Execution Method
 - ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
@@ -918,12 +919,14 @@ class Brain:
 
         elif function_name == "request_user_approval":
             plan_summary = args.get("plan_summary", "")
+            self._waiting_for_user.add(event_id)  # Block re-processing until user responds
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="request_approval",
                 thoughts=plan_summary,
                 pendingApproval=True,
+                waitingFor="user",
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)

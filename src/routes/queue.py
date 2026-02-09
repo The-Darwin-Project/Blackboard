@@ -24,7 +24,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..dependencies import get_blackboard
+from ..dependencies import get_blackboard, get_brain
 from ..models import ConversationTurn, EventDocument, EventStatus
 from ..state.blackboard import BlackboardState
 
@@ -96,6 +96,13 @@ async def approve_event(
         event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
     )
 
+    # Clear wait_for_user state so Brain re-processes with approval
+    try:
+        brain = await get_brain()
+        brain.clear_waiting(event_id)
+    except RuntimeError:
+        pass  # Brain not initialized (unlikely in normal operation)
+
     logger.info(f"User approved event {event_id}")
     return {"status": "approved", "event_id": event_id}
 
@@ -128,6 +135,13 @@ async def reject_event(
     await blackboard.transition_event_status(
         event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
     )
+
+    # Clear wait_for_user state so Brain re-processes with rejection
+    try:
+        brain = await get_brain()
+        brain.clear_waiting(event_id)
+    except RuntimeError:
+        pass  # Brain not initialized (unlikely in normal operation)
 
     logger.info(f"User rejected event {event_id}: {body.reason}")
     return {"status": "rejected", "event_id": event_id}
