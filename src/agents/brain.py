@@ -8,6 +8,8 @@
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
+# 9. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak.
+# 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -72,6 +74,11 @@ You coordinate three AI agents via a shared conversation queue:
   1. Act on it immediately (route to the recommended agent), OR
   2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
 - NEVER silently drop an agent's recommendation.
+
+## Wait-for-User Protocol
+- After calling wait_for_user, the system automatically pauses the event until the user responds.
+- Do NOT call defer_event after wait_for_user. The wait is handled by the system.
+- The event will resume ONLY when the user sends a message, approves, or rejects.
 
 ## Execution Method
 - ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
@@ -955,6 +962,10 @@ class Brain:
             return False
 
         elif function_name == "defer_event":
+            # Guard: never defer when waiting for user response
+            if event_id in self._waiting_for_user:
+                logger.warning(f"Ignoring defer_event for {event_id}: waiting for user response")
+                return False
             reason = args.get("reason", "Deferred by Brain")
             delay = max(30, min(int(args.get("delay_seconds", 60)), 300))  # Clamp 30-300s
             defer_until = time.time() + delay
@@ -1501,11 +1512,14 @@ class Brain:
                         )
                         await self.blackboard.redis.delete(defer_key)
                         if transitioned:
-                            logger.info(f"Deferred event {eid} re-activated")
-                            # Re-fetch post-transition so prefetch carries clean state
-                            event = await self.blackboard.get_event(eid)
-                            if event:
-                                await self.process_event(eid, prefetched_event=event)
+                            if eid in self._waiting_for_user:
+                                logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
+                            else:
+                                logger.info(f"Deferred event {eid} re-activated")
+                                # Re-fetch post-transition so prefetch carries clean state
+                                event = await self.blackboard.get_event(eid)
+                                if event:
+                                    await self.process_event(eid, prefetched_event=event)
                         continue
 
                     # Mark all SENT turns as DELIVERED (Brain has seen them)
@@ -1515,14 +1529,16 @@ class Brain:
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
                     # Re-process if there are DELIVERED (unread) turns the Brain hasn't evaluated
+                    # But skip if waiting for user -- only user response should resume
                     has_unread = any(t.status.value == "delivered" for t in event.conversation)
-                    if has_unread:
+                    is_waiting = eid in self._waiting_for_user
+                    if has_unread and not is_waiting:
                         await self.process_event(eid, prefetched_event=event)
-                    else:
+                    elif not has_unread:
                         # Idle safety net: re-process if not waiting for user
                         # and hasn't been processed recently.
                         # Active-task events already hit `continue` in Phase 1 above.
-                        is_waiting = eid in self._waiting_for_user
+                        # (is_waiting already computed above)
                         time_since_process = time.time() - self._last_processed.get(eid, 0)
                         if not is_waiting and time_since_process > 240:
                             logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")

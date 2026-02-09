@@ -4,6 +4,8 @@
 // 2. [Pattern]: useWSReconnect invalidates all queries to catch missed WS messages.
 // 3. [Pattern]: Report button fetches server-side report via getEventReport(); falls back to client-side eventToMarkdown on failure.
 // 4. [Constraint]: closeEvent via REST, not WS -- ensures request completes even if WS is flaky.
+// 5. [Pattern]: MarkdownViewer uses @uiw/react-markdown-preview with custom MermaidBlock for fenced mermaid code blocks.
+// 6. [Gotcha]: mermaid.initialize() called once at module scope -- NOT inside useEffect. MermaidBlock only calls mermaid.render().
 /**
  * Unified group-chat view with real-time WebSocket updates.
  * Layout: Events panel (top) + Conversation stream (bottom) + Chat input
@@ -18,6 +20,12 @@ import type { ConversationTurn, MessageStatus } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
+import MarkdownPreview from '@uiw/react-markdown-preview';
+import mermaid from 'mermaid';
+import { getCodeString } from 'rehype-rewrite';
+
+// Initialize mermaid once at module scope (not per-render)
+mermaid.initialize({ startOnLoad: false, theme: 'dark' });
 
 // ============================================================================
 // Sub-components
@@ -69,6 +77,24 @@ function EventCard({
       </div>
     </div>
   );
+}
+
+/** Renders a single Mermaid diagram inside MarkdownPreview */
+function MermaidBlock({ code }: { code: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2, 8)}`);
+
+  useEffect(() => {
+    if (ref.current) {
+      mermaid.render(idRef.current, code).then(({ svg }) => {
+        if (ref.current) ref.current.innerHTML = svg;
+      }).catch((err) => {
+        if (ref.current) ref.current.textContent = String(err);
+      });
+    }
+  }, [code]);
+
+  return <div ref={ref} style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }} />;
 }
 
 /** Floating resizable Markdown preview window */
@@ -128,17 +154,6 @@ function MarkdownViewer({
     document.addEventListener('mouseup', onUp);
   };
 
-  // Simple markdown-to-HTML (headers, bold, lists, code blocks)
-  const renderMarkdown = (md: string) => {
-    return md
-      .replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 4px;color:#e2e8f0">$1</h4>')
-      .replace(/^## (.+)$/gm, '<h3 style="margin:16px 0 6px;color:#e2e8f0">$1</h3>')
-      .replace(/^# (.+)$/gm, '<h2 style="margin:20px 0 8px;color:#e2e8f0">$1</h2>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#e2e8f0">$1</strong>')
-      .replace(/^- (.+)$/gm, '<li style="margin:2px 0;color:#cbd5e1">$1</li>')
-      .replace(/^(\d+)\. (.+)$/gm, '<li style="margin:2px 0;color:#cbd5e1">$2</li>')
-      .replace(/\n/g, '<br/>');
-  };
 
   const windowStyle: React.CSSProperties = maximized
     ? { position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', zIndex: 1000 }
@@ -192,11 +207,25 @@ function MarkdownViewer({
           </div>
         </div>
         {/* Content */}
-        <div style={{
-          flex: 1, overflow: 'auto', padding: 16, fontSize: 13, lineHeight: 1.6, color: '#cbd5e1',
-        }}
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
-        />
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <MarkdownPreview
+            source={content}
+            style={{ padding: 16, background: 'transparent', fontSize: 13, lineHeight: 1.6 }}
+            wrapperElement={{ 'data-color-mode': 'dark' }}
+            components={{
+              code: ({ children, className, ...props }) => {
+                const code = props.node?.children
+                  ? getCodeString(props.node.children)
+                  : (Array.isArray(children) ? String(children[0] ?? '') : String(children ?? ''));
+                if (typeof code === 'string' && typeof className === 'string'
+                    && /^language-mermaid/.test(className.toLowerCase())) {
+                  return <MermaidBlock code={code} />;
+                }
+                return <code className={String(className ?? '')}>{children}</code>;
+              },
+            }}
+          />
+        </div>
         {/* Resize handle */}
         {!maximized && (
           <div

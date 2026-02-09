@@ -1,4 +1,9 @@
 // gemini-sidecar/server.js
+// @ai-rules:
+// 1. [Pattern]: executeGemini + executeGeminiStreaming use fs.watch preemptive read for findings.md to avoid PVC flush race.
+// 2. [Pattern]: readFindings() is fallback only -- watcher caches content on file creation; close handler uses cached value first.
+// 3. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
+// 4. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
 // HTTP wrapper for Gemini CLI with GitHub App authentication
 // Exposes POST /execute endpoint for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
@@ -252,6 +257,28 @@ async function executeGemini(prompt, options = {}) {
     // Prepare results directory (clean stale files, ensure exists)
     prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
 
+    // Watch for findings file (preemptive read to avoid race with PVC flush)
+    const resultsDir = `${options.cwd || DEFAULT_WORK_DIR}/results`;
+    const findingsPath = `${resultsDir}/findings.md`;
+    let cachedFindings = null;
+    let watcher = null;
+    try {
+      watcher = fs.watch(resultsDir, (eventType, filename) => {
+        if (filename === 'findings.md' && (eventType === 'rename' || eventType === 'change')) {
+          try {
+            if (fs.existsSync(findingsPath)) {
+              cachedFindings = fs.readFileSync(findingsPath, 'utf8').trim();
+              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${cachedFindings.length} chars)`);
+            }
+          } catch (err) {
+            console.log(`[${new Date().toISOString()}] Preemptive read failed: ${err.message}`);
+          }
+        }
+      });
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] fs.watch setup failed: ${err.message}`);
+    }
+
     const child = spawn('gemini', args, {
       env: {
         ...process.env,
@@ -273,6 +300,9 @@ async function executeGemini(prompt, options = {}) {
     });
     
     child.on('close', (code) => {
+      // Close the watcher
+      if (watcher) { try { watcher.close(); } catch(e) {} }
+
       console.log(`[${new Date().toISOString()}] Gemini exited with code ${code}`);
       console.log(`[${new Date().toISOString()}] stdout (${stdout.length} chars): ${stdout.slice(0, 500)}${stdout.length > 500 ? '...' : ''}`);
       if (stderr) {
@@ -284,7 +314,13 @@ async function executeGemini(prompt, options = {}) {
           const result = JSON.parse(stdout);
           resolve({ status: 'success', exitCode: code, output: result });
         } catch (e) {
-          const findings = readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          // Use cached findings from watcher, or fall back to readFindings()
+          // Note: readFindings() already deletes the file internally
+          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          // Clean up only if watcher cached (readFindings already deleted otherwise)
+          if (cachedFindings) {
+            try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}
+          }
           resolve({ status: 'success', exitCode: code, output: findings, raw: true });
         }
       } else {
@@ -317,6 +353,28 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
 
     // Prepare results directory (clean stale files, ensure exists)
     prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
+
+    // Watch for findings file (preemptive read to avoid race with PVC flush)
+    const resultsDir = `${options.cwd || DEFAULT_WORK_DIR}/results`;
+    const findingsPath = `${resultsDir}/findings.md`;
+    let cachedFindings = null;
+    let watcher = null;
+    try {
+      watcher = fs.watch(resultsDir, (eventType, filename) => {
+        if (filename === 'findings.md' && (eventType === 'rename' || eventType === 'change')) {
+          try {
+            if (fs.existsSync(findingsPath)) {
+              cachedFindings = fs.readFileSync(findingsPath, 'utf8').trim();
+              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${cachedFindings.length} chars)`);
+            }
+          } catch (err) {
+            console.log(`[${new Date().toISOString()}] Preemptive read failed: ${err.message}`);
+          }
+        }
+      });
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] fs.watch setup failed: ${err.message}`);
+    }
 
     const child = spawn('gemini', args, {
       env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
@@ -352,6 +410,9 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
     });
 
     child.on('close', (code) => {
+      // Close the watcher
+      if (watcher) { try { watcher.close(); } catch(e) {} }
+
       // Flush remaining buffer
       if (lineBuffer.trim()) {
         wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
@@ -372,8 +433,13 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
           const result = JSON.parse(stdout);
           resolve({ status: 'success', output: result });
         } catch (e) {
-          // Check results/ folder for agent deliverable, fall back to stdout tail
-          const findings = readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          // Use cached findings from watcher, or fall back to readFindings()
+          // Note: readFindings() already deletes the file internally
+          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          // Clean up only if watcher cached (readFindings already deleted otherwise)
+          if (cachedFindings) {
+            try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}
+          }
           resolve({ status: 'success', output: findings, raw: true });
         }
       } else {
