@@ -75,13 +75,13 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: VERTEX_MODEL_FLASH
-            # SysAdmin configuration
+            # Agent dispatch configuration (Brain-level)
             - name: SYSADMIN_DRY_RUN
-              value: "{{ .Values.sysadmin.dryRun }}"
+              value: "{{ .Values.app.dryRun }}"
             - name: SYSADMIN_AUTO_APPROVE
-              value: "{{ .Values.sysadmin.autoApprove }}"
+              value: "{{ .Values.app.autoApprove }}"
             - name: GIT_REPO_PATH
-              value: "{{ .Values.sysadmin.gitRepoPath }}"
+              value: "{{ .Values.app.gitRepoPath }}"
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs
             - name: ARCHITECT_SIDECAR_URL
@@ -135,13 +135,16 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            # GitOps data volumes - one per agent sidecar
-            - name: gitops-architect
+            # GitOps data volumes - shared PVC with subPaths per agent
+            - name: gitops-data
               mountPath: /data/gitops-architect
-            - name: gitops-sysadmin
+              subPath: architect
+            - name: gitops-data
               mountPath: /data/gitops-sysadmin
-            - name: gitops-developer
+              subPath: sysadmin
+            - name: gitops-data
               mountPath: /data/gitops-developer
+              subPath: developer
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -166,12 +169,16 @@ spec:
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
           imagePullPolicy: IfNotPresent
           # Override command to bypass Red Hat entrypoint and configure Redis directly
-          # Disables RDB saves to prevent "MISCONF" errors on ephemeral storage
           command:
             - redis-server
           args:
+            {{- if .Values.redis.persistence.enabled }}
             - --save
-            - ""
+            - "60 1"           # RDB snapshot every 60s if at least 1 key changed
+            {{- else }}
+            - --save
+            - ""               # No persistence on ephemeral storage
+            {{- end }}
             - --stop-writes-on-bgsave-error
             - "no"
             - --requirepass
@@ -252,8 +259,9 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            - name: gitops-architect
+            - name: gitops-data
               mountPath: /data/gitops-architect
+              subPath: architect
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: architect.md
@@ -345,8 +353,9 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            - name: gitops-sysadmin
+            - name: gitops-data
               mountPath: /data/gitops-sysadmin
+              subPath: sysadmin
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: sysadmin.md
@@ -426,8 +435,9 @@ spec:
               mountPath: /var/secrets/google
               readOnly: true
             {{- end }}
-            - name: gitops-developer
+            - name: gitops-data
               mountPath: /data/gitops-developer
+              subPath: developer
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: developer.md
@@ -469,13 +479,15 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
         {{- end }}
-        # GitOps data volumes - one per agent sidecar
-        - name: gitops-architect
+        # GitOps data volumes - shared PVC with subPaths per agent
+        {{- if .Values.sidecars.persistence.enabled }}
+        - name: gitops-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-gitops-data
+        {{- else }}
+        - name: gitops-data
           emptyDir: {}
-        - name: gitops-sysadmin
-          emptyDir: {}
-        - name: gitops-developer
-          emptyDir: {}
+        {{- end }}
         # Gemini rules ConfigMap (GEMINI.md per agent)
         - name: gemini-rules
           configMap:

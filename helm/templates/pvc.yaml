@@ -18,7 +18,7 @@ spec:
     requests:
       storage: {{ .Values.redis.persistence.size }}
 {{- end }}
-{{- if .Values.sysadmin.persistence.enabled }}
+{{- if .Values.sidecars.persistence.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -30,11 +30,11 @@ metadata:
     app.kubernetes.io/component: gitops
 spec:
   accessModes:
-{{ toYaml .Values.sysadmin.persistence.accessModes | indent 4 }}
-  {{- if .Values.sysadmin.persistence.storageClassName }}
-  storageClassName: {{ .Values.sysadmin.persistence.storageClassName }}
+{{ toYaml .Values.sidecars.persistence.accessModes | indent 4 }}
+  {{- if .Values.sidecars.persistence.storageClassName }}
+  storageClassName: {{ .Values.sidecars.persistence.storageClassName }}
   {{- end }}
   resources:
     requests:
-      storage: {{ .Values.sysadmin.persistence.size }}
+      storage: {{ .Values.sidecars.persistence.size }}
 {{- end }}
