@@ -29,6 +29,11 @@ export function useEventDocument(eventId: string | null) {
     enabled: !!eventId,
     // No refetchInterval -- WebSocket pushes updates
     refetchOnWindowFocus: true,
+    // Don't retry 404s -- event was cleaned up (pod restart, Redis flush)
+    retry: (failureCount, error) => {
+      if (error && 'status' in error && (error as any).status === 404) return false;
+      return failureCount < 2;
+    },
   });
 }
 

@@ -539,7 +539,15 @@ export function ConversationFeed() {
     refetchOnWindowFocus: true,
     refetchInterval: 10000, // Check for newly closed events every 10s
   });
-  const { data: selectedEvent } = useEventDocument(selectedEventId);
+  const { data: selectedEvent, isError: selectedEventError } = useEventDocument(selectedEventId);
+
+  // Auto-clear stale event selection (e.g., event cleaned up after pod restart)
+  useEffect(() => {
+    if (selectedEventError && selectedEventId) {
+      sessionStorage.removeItem(SESSION_KEY);
+      setSelectedEventId(null);
+    }
+  }, [selectedEventError, selectedEventId]);
   const { data: archEvents } = useEvents();
   const { invalidateActive, invalidateEvent, invalidateAll } = useQueueInvalidation();
 

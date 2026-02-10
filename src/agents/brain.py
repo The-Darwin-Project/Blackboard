@@ -1271,7 +1271,7 @@ class Brain:
             turns = len(event.conversation)
             await self.blackboard.append_journal(
                 event.service,
-                f"{event.event.reason[:80]} -- closed in {turns} turns. {summary[:80]}"
+                f"{event.event.reason[:200]} -- closed in {turns} turns. {summary[:300]}"
             )
             # Invalidate journal cache for this service (immediate freshness)
             self._journal_cache.pop(event.service, None)
@@ -1453,7 +1453,7 @@ class Brain:
                 # Write to ops journal so Brain has temporal context for stale closures
                 await self.blackboard.append_journal(
                     event.service,
-                    f"{event.event.reason[:80]} -- stale closure on restart ({len(event.conversation)} turns)"
+                    f"{event.event.reason[:200]} -- stale closure on restart ({len(event.conversation)} turns)"
                 )
                 stale_count += 1
             else:
