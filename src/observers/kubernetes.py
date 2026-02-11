@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Suppress debug noise from metrics polling
 
 # Environment variable configuration
 K8S_OBSERVER_ENABLED = os.getenv("K8S_OBSERVER_ENABLED", "false").lower() == "true"
