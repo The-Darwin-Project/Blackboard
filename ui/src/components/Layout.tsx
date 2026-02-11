@@ -6,6 +6,7 @@
 import { Outlet } from 'react-router-dom';
 import { Activity, AlertCircle, CheckCircle2, Wifi, WifiOff } from 'lucide-react';
 import { useTopology } from '../hooks';
+import WaitingBell from './WaitingBell';
 
 function Layout() {
   const { isError, isFetching } = useTopology();
@@ -31,13 +32,20 @@ function Layout() {
           </div>
         </div>
 
-        {/* Status Badge */}
-        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
-          isOnline ? 'border-status-healthy/30 bg-status-healthy/10' : 'border-status-critical/30 bg-status-critical/10'
-        }`}>
-          <ConnectionIcon className={`w-4 h-4 ${statusColor}`} />
-          <StatusIcon className={`w-4 h-4 ${statusColor} ${isFetching ? 'animate-pulse' : ''}`} />
-          <span className={`text-sm font-medium ${statusColor}`}>{statusText}</span>
+        {/* Right side: Waiting Bell + Status Badge */}
+        <div className="flex items-center gap-4">
+          <WaitingBell onEventClick={(eventId) => {
+            window.dispatchEvent(new CustomEvent('darwin:selectEvent', { detail: eventId }));
+          }} />
+
+          {/* Status Badge */}
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
+            isOnline ? 'border-status-healthy/30 bg-status-healthy/10' : 'border-status-critical/30 bg-status-critical/10'
+          }`}>
+            <ConnectionIcon className={`w-4 h-4 ${statusColor}`} />
+            <StatusIcon className={`w-4 h-4 ${statusColor} ${isFetching ? 'animate-pulse' : ''}`} />
+            <span className={`text-sm font-medium ${statusColor}`}>{statusText}</span>
+          </div>
         </div>
       </header>
 

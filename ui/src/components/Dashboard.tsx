@@ -12,7 +12,6 @@ import MetricChart from './MetricChart';
 import ConversationFeed from './ConversationFeed';
 import AgentStreamCard from './AgentStreamCard';
 import { WebSocketProvider, useWSMessage } from '../contexts/WebSocketContext';
-import WaitingBell from './WaitingBell';
 
 interface ContextMenuState {
   serviceName: string;
@@ -155,15 +154,9 @@ function DashboardInner() {
         style={{ width: sidebarWidth }}
       >
         <div className="flex-shrink-0 px-4 py-3 border-b border-border">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <h2 className="text-sm font-semibold text-text-primary">Agent Activity</h2>
-              <p className="text-xs text-text-muted">Thought stream & plan management</p>
-            </div>
-            <WaitingBell onEventClick={(eventId) => {
-              // Dispatch a custom event that ConversationFeed listens for
-              window.dispatchEvent(new CustomEvent('darwin:selectEvent', { detail: eventId }));
-            }} />
+          <div>
+            <h2 className="text-sm font-semibold text-text-primary">Agent Activity</h2>
+            <p className="text-xs text-text-muted">Thought stream & plan management</p>
           </div>
         </div>
         <div className="flex-1 overflow-hidden flex flex-col min-h-0">
