@@ -1,10 +1,13 @@
 // gemini-sidecar/server.js
 // @ai-rules:
-// 1. [Pattern]: executeCLI + executeCLIStreaming use fs.watch preemptive read for findings.md to avoid PVC flush race.
-// 2. [Pattern]: readFindings() is fallback only -- watcher caches content on file creation; close handler uses cached value first.
-// 3. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
-// 4. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
+// 1. [Pattern]: executeCLI + executeCLIStreaming use fs.watch preemptive read for findings.md with {content, timestamp} cache.
+// 2. [Pattern]: readFindings() checks freshness (FINDINGS_FRESHNESS_MS). Returns null if stale/missing.
+// 3. [Pattern]: requestFindings() spawns a retry prompt if no fresh findings. 60s timeout, never rejects.
+// 4. [Pattern]: Close handler chain: cached -> readFindings -> requestFindings -> stdoutFallback. Wrapped in async try-catch.
 // 5. [Pattern]: AGENT_CLI env var routes spawn() to 'gemini' or 'claude' binary via buildCLICommand().
+// 6. [Gotcha]: cachedFindings is {content, timestamp} not a string. Use .content and .content.length.
+// 7. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
+// 8. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
 // HTTP wrapper for Gemini/Claude Code CLIs with GitHub App authentication
 // Exposes POST /execute endpoint for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
@@ -17,6 +20,7 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 9090;
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
+const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 const DEFAULT_WORK_DIR = '/data/gitops';
 
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
@@ -300,40 +304,91 @@ function wsSend(ws, data) {
 }
 
 /**
- * Read agent findings from the results folder.
+ * Read agent findings from the results folder with freshness check.
  * Agents write their deliverable to ./results/findings.md.
- * Falls back to stdout tail if no file found (LLM non-compliance).
+ * Returns null if file is missing, stale, or empty -- caller decides fallback.
  *
  * @param {string} workDir - Agent working directory
- * @param {string} stdout - Full captured stdout (for fallback)
- * @returns {string} Extracted findings or stdout tail
+ * @returns {string|null} Extracted findings or null
  */
-function readFindings(workDir, stdout) {
-  const resultsDir = `${workDir}/results`;
-  const findingsPath = `${resultsDir}/findings.md`;
-
+function readFindings(workDir) {
+  const findingsPath = `${workDir}/results/findings.md`;
   try {
     if (fs.existsSync(findingsPath)) {
+      const stats = fs.statSync(findingsPath);
+      const ageMs = Date.now() - stats.mtimeMs;
+      if (ageMs > FINDINGS_FRESHNESS_MS) {
+        console.log(`[${new Date().toISOString()}] findings.md is stale (${Math.round(ageMs/1000)}s old), ignoring`);
+        return null;
+      }
       const content = fs.readFileSync(findingsPath, 'utf8').trim();
-      // Clean up after reading
       fs.unlinkSync(findingsPath);
       console.log(`[${new Date().toISOString()}] Read findings from ${findingsPath} (${content.length} chars)`);
-      if (content.length > 0) {
-        return content;
-      }
-      // Empty file = treat as non-compliance, fall through to fallback
-      console.log(`[${new Date().toISOString()}] Findings file was empty, falling back to stdout tail`);
+      if (content.length > 0) return content;
+      console.log(`[${new Date().toISOString()}] Findings file was empty`);
     }
   } catch (err) {
     console.log(`[${new Date().toISOString()}] Could not read findings file: ${err.message}`);
   }
+  return null;
+}
 
-  // Fallback: tail extraction (last 3000 chars of stdout)
-  console.log(`[${new Date().toISOString()}] No findings file, using stdout tail (${stdout.length} chars)`);
-  if (stdout.length > 3000) {
-    return '(truncated thinking...)\n' + stdout.slice(-3000);
+/**
+ * Fallback: extract tail of stdout when no findings file is available.
+ * @param {string} effectiveOutput - Full captured stdout (or Claude parsed text)
+ * @returns {string} Truncated stdout tail
+ */
+function stdoutFallback(effectiveOutput) {
+  console.log(`[${new Date().toISOString()}] No findings, using stdout tail (${effectiveOutput.length} chars)`);
+  if (effectiveOutput.length > 3000) {
+    return '(truncated thinking...)\n' + effectiveOutput.slice(-3000);
   }
-  return stdout;
+  return effectiveOutput;
+}
+
+/**
+ * Retry: spawn agent CLI to write a findings report when none was produced.
+ * Returns the report content or null on failure/timeout.
+ * Never rejects -- resolve(null) on all error paths.
+ *
+ * @param {string} workDir - Agent working directory
+ * @param {boolean} autoApprove - Pass --yolo / --dangerously-skip-permissions
+ * @returns {Promise<string|null>}
+ */
+async function requestFindings(workDir, autoApprove) {
+  const prompt = 'You completed your task but did not write a completion report. '
+    + 'Write a brief summary of what you did to ./results/findings.md now. '
+    + 'Include: files changed, what was implemented or verified, and the outcome.';
+  const { binary, args } = buildCLICommand(prompt, { autoApprove });
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), 60000);
+    const child = spawn(binary, args, {
+      env: { ...process.env, ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}) },
+      cwd: workDir,
+      timeout: 60000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.on('close', () => {
+      clearTimeout(timeout);
+      // Read findings -- no freshness check needed (just written)
+      const findingsPath = `${workDir}/results/findings.md`;
+      try {
+        if (fs.existsSync(findingsPath)) {
+          const content = fs.readFileSync(findingsPath, 'utf8').trim();
+          fs.unlinkSync(findingsPath);
+          if (content.length > 0) { resolve(content); return; }
+        }
+      } catch (e) {
+        console.log(`[${new Date().toISOString()}] Retry findings read failed: ${e.message}`);
+      }
+      resolve(null);
+    });
+    child.on('error', (err) => {
+      console.log(`[${new Date().toISOString()}] Retry spawn error: ${err.message}`);
+      clearTimeout(timeout);
+      resolve(null);
+    });
+  });
 }
 
 /**
@@ -372,15 +427,16 @@ async function executeCLI(prompt, options = {}) {
     // Watch for findings file (preemptive read to avoid race with PVC flush)
     const resultsDir = `${options.cwd || DEFAULT_WORK_DIR}/results`;
     const findingsPath = `${resultsDir}/findings.md`;
-    let cachedFindings = null;
+    let cachedFindings = null;  // { content: string, timestamp: number } | null
     let watcher = null;
     try {
       watcher = fs.watch(resultsDir, (eventType, filename) => {
         if (filename === 'findings.md' && (eventType === 'rename' || eventType === 'change')) {
           try {
             if (fs.existsSync(findingsPath)) {
-              cachedFindings = fs.readFileSync(findingsPath, 'utf8').trim();
-              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${cachedFindings.length} chars)`);
+              const raw = fs.readFileSync(findingsPath, 'utf8').trim();
+              cachedFindings = { content: raw, timestamp: Date.now() };
+              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${raw.length} chars)`);
             }
           } catch (err) {
             console.log(`[${new Date().toISOString()}] Preemptive read failed: ${err.message}`);
@@ -436,26 +492,48 @@ async function executeCLI(prompt, options = {}) {
       }
       
       if (code === 0) {
+        // Try JSON parse first (structured output)
         try {
           const result = JSON.parse(effectiveOutput);
           resolve({ status: 'success', exitCode: code, output: result });
-        } catch (e) {
-          // Use cached findings from watcher, or fall back to readFindings()
-          // Note: readFindings() already deletes the file internally
-          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, effectiveOutput);
-          // Clean up only if watcher cached (readFindings already deleted otherwise)
-          if (cachedFindings) {
-            try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}
+          return;
+        } catch (e) {}
+
+        // Findings chain: cached -> file -> retry -> stdout
+        (async () => {
+          try {
+            // 1. Cached findings from watcher (with freshness)
+            if (cachedFindings && cachedFindings.content.length > 0
+                && (Date.now() - cachedFindings.timestamp) < FINDINGS_FRESHNESS_MS) {
+              try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
+              resolve({ status: 'success', exitCode: code, output: cachedFindings.content, raw: true });
+              return;
+            }
+            // 2. Read findings file (with freshness)
+            const findings = readFindings(options.cwd || DEFAULT_WORK_DIR);
+            if (findings) {
+              resolve({ status: 'success', exitCode: code, output: findings, raw: true });
+              return;
+            }
+            // 3. Retry: ask agent to write report
+            console.log(`[${new Date().toISOString()}] No fresh findings, requesting report from agent`);
+            const retryFindings = await requestFindings(
+              options.cwd || DEFAULT_WORK_DIR, options.autoApprove !== false
+            );
+            if (retryFindings) {
+              resolve({ status: 'success', exitCode: code, output: retryFindings, raw: true });
+              return;
+            }
+            // 4. Final fallback: stdout tail
+            resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), raw: true });
+          } catch (err) {
+            // Safety net: never hang
+            console.error(`[${new Date().toISOString()}] Findings chain error: ${err.message}`);
+            resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), raw: true });
           }
-          resolve({ status: 'success', exitCode: code, output: findings, raw: true });
-        }
+        })();
       } else {
-        resolve({ 
-          status: 'failed', 
-          exitCode: code, 
-          stderr: stderr,
-          stdout: effectiveOutput 
-        });
+        resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput });
       }
     });
     
@@ -481,15 +559,16 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
     // Watch for findings file (preemptive read to avoid race with PVC flush)
     const resultsDir = `${options.cwd || DEFAULT_WORK_DIR}/results`;
     const findingsPath = `${resultsDir}/findings.md`;
-    let cachedFindings = null;
+    let cachedFindings = null;  // { content: string, timestamp: number } | null
     let watcher = null;
     try {
       watcher = fs.watch(resultsDir, (eventType, filename) => {
         if (filename === 'findings.md' && (eventType === 'rename' || eventType === 'change')) {
           try {
             if (fs.existsSync(findingsPath)) {
-              cachedFindings = fs.readFileSync(findingsPath, 'utf8').trim();
-              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${cachedFindings.length} chars)`);
+              const raw = fs.readFileSync(findingsPath, 'utf8').trim();
+              cachedFindings = { content: raw, timestamp: Date.now() };
+              console.log(`[${new Date().toISOString()}] Preemptive read: findings.md (${raw.length} chars)`);
             }
           } catch (err) {
             console.log(`[${new Date().toISOString()}] Preemptive read failed: ${err.message}`);
@@ -579,21 +658,48 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       }
 
       if (code === 0) {
+        // Try JSON parse first (structured output)
         try {
           const result = JSON.parse(effectiveOutput);
           resolve({ status: 'success', output: result });
-        } catch (e) {
-          // Use cached findings from watcher, or fall back to readFindings()
-          // Note: readFindings() already deletes the file internally
-          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, effectiveOutput);
-          // Clean up only if watcher cached (readFindings already deleted otherwise)
-          if (cachedFindings) {
-            try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}
+          return;
+        } catch (e) {}
+
+        // Findings chain: cached -> file -> retry -> stdout
+        (async () => {
+          try {
+            // 1. Cached findings from watcher (with freshness)
+            if (cachedFindings && cachedFindings.content.length > 0
+                && (Date.now() - cachedFindings.timestamp) < FINDINGS_FRESHNESS_MS) {
+              try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
+              resolve({ status: 'success', output: cachedFindings.content, raw: true });
+              return;
+            }
+            // 2. Read findings file (with freshness)
+            const findings = readFindings(options.cwd || DEFAULT_WORK_DIR);
+            if (findings) {
+              resolve({ status: 'success', output: findings, raw: true });
+              return;
+            }
+            // 3. Retry: ask agent to write report
+            console.log(`[${new Date().toISOString()}] No fresh findings, requesting report from agent`);
+            const retryFindings = await requestFindings(
+              options.cwd || DEFAULT_WORK_DIR, options.autoApprove !== false
+            );
+            if (retryFindings) {
+              resolve({ status: 'success', output: retryFindings, raw: true });
+              return;
+            }
+            // 4. Final fallback: stdout tail
+            resolve({ status: 'success', output: stdoutFallback(effectiveOutput), raw: true });
+          } catch (err) {
+            // Safety net: never hang
+            console.error(`[${new Date().toISOString()}] Findings chain error: ${err.message}`);
+            resolve({ status: 'success', output: stdoutFallback(effectiveOutput), raw: true });
           }
-          resolve({ status: 'success', output: findings, raw: true });
-        }
+        })();
       } else {
-        resolve({ status: 'failed', exitCode: code, stderr, stdout });
+        resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput });
       }
     });
 
