@@ -162,6 +162,9 @@ class BlackboardState:
     
     async def add_service(self, name: str) -> None:
         """Add a service node to the topology."""
+        if not name or not name.strip():
+            logger.debug("Skipping empty/whitespace service name")
+            return
         # Don't add IP addresses as services - they should only be used for edge resolution
         if self._is_ip_address(name):
             logger.debug(f"Skipping IP address from service set: {name}")
@@ -171,6 +174,9 @@ class BlackboardState:
     
     async def add_edge(self, source: str, target: str) -> None:
         """Add a dependency edge from source to target."""
+        if not source or not source.strip() or not target or not target.strip():
+            logger.debug(f"Skipping edge with empty source/target: '{source}' -> '{target}'")
+            return
         await self.redis.sadd(f"darwin:edges:{source}", target)
         logger.debug(f"Added edge: {source} -> {target}")
     
@@ -192,6 +198,9 @@ class BlackboardState:
             dep_type: Dependency type ('hard' or 'async')
             env_var: Environment variable name for this dependency
         """
+        if not source or not source.strip() or not target or not target.strip():
+            logger.debug(f"Skipping edge_with_metadata with empty source/target: '{source}' -> '{target}'")
+            return
         # Keep backward-compat SET for listing
         await self.redis.sadd(f"darwin:edges:{source}", target)
         
@@ -364,6 +373,10 @@ class BlackboardState:
         # Filter out IP addresses and external domains - they should not appear as nodes
         nodes: list[GraphNode] = []
         for service_name in topology.services:
+            # Skip empty/whitespace service names -- prevents Cytoscape empty ID crash
+            if not service_name or not service_name.strip():
+                logger.debug("Skipping empty service name in graph node loop")
+                continue
             # Skip IP addresses - they should not be displayed as nodes
             if self._is_ip_address(service_name):
                 logger.debug(f"Skipping IP address node: {service_name}")
@@ -423,14 +436,26 @@ class BlackboardState:
         known_service_ids = {n.id for n in nodes}  # Set of valid service node IDs
         
         for source, targets in topology.edges.items():
+            # Skip empty source -- prevents Cytoscape empty ID crash
+            if not source or not source.strip():
+                logger.debug("Skipping edge with empty source in graph edge loop")
+                continue
             # Skip edges from IP addresses
             if self._is_ip_address(source):
                 logger.debug(f"Skipping edge from IP address: {source}")
                 continue
             
             for target in targets:
+                if not target or not target.strip():
+                    logger.debug("Skipping edge with empty target in graph edge loop")
+                    continue
                 # Resolve IP to service name if possible
                 resolved_target = await self.resolve_ip_to_service(target)
+                
+                # Skip empty resolved targets -- prevents Cytoscape empty ID crash
+                if not resolved_target or not resolved_target.strip():
+                    logger.debug(f"Skipping edge with empty resolved target for: {target}")
+                    continue
                 
                 # Skip edges to IP addresses that couldn't be resolved
                 if self._is_ip_address(resolved_target):

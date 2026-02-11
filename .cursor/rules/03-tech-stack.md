@@ -1,0 +1,18 @@
+# Tech Stack & Standards
+
+## Backend (The Brain)
+
+* **Language:** Python (Latest Stable)
+* **API:** FastAPI (Async is mandatory)
+* **AI SDK:** `google-genai` (NOT google-cloud-aiplatform, which is deprecated)
+
+## Executor (The Hands)
+
+* **Base Image:** Red Hat UBI 9 Node.js 22 (`registry.access.redhat.com/ubi9/nodejs-22:latest`)
+* **CLI Tools:** `@google/gemini-cli` + `@anthropic-ai/claude-code` (routed by `AGENT_CLI` env var)
+* **Runtime:** Node.js 22, Python 3.12 (pytest, httpx), Playwright + Chromium
+
+## Infrastructure
+
+* **Target:** OpenShift 4.x
+* **Auth:** Vertex AI Workload Identity (ADC).

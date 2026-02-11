@@ -441,6 +441,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
 
     // Add nodes (with 'service' class to distinguish from ghost nodes)
     data.nodes.forEach((node) => {
+      if (!node.id) return;  // Skip nodes with empty/undefined ID -- prevents Cytoscape crash
       elements.push({
         data: {
           id: node.id,
@@ -454,6 +455,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
 
     // Add edges
     data.edges.forEach((edge, idx) => {
+      if (!edge.source || !edge.target) return;  // Skip edges with missing endpoints
       elements.push({
         data: {
           id: `edge-${idx}`,

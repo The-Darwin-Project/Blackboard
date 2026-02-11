@@ -55,12 +55,16 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
-# Install Playwright + Chromium for headless browser testing (QE agent)
-# UBI9 uses dnf, not apt -- install Chromium deps manually, then Playwright without --with-deps
+# Install Python 3.12 + pip + test tools (QE agent needs pytest/httpx)
+# Also install Chromium deps for Playwright headless browser testing
 RUN dnf install -y \
+    python3.12 python3.12-pip \
     nss atk at-spi2-atk cups-libs libdrm libXcomposite libXdamage \
     libXrandr mesa-libgbm pango alsa-lib libxkbcommon \
     && dnf clean all && \
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
+    python3 -m pip install pytest httpx && \
+    python3 --version && python3 -m pytest --version && \
     npm install -g playwright@latest && \
     npx playwright install chromium && \
     npx playwright --version

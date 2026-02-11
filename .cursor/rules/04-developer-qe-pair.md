@@ -1,0 +1,63 @@
+# Developer + QE Pair Programming Protocol
+
+## The Pair Architecture
+
+The Developer agent is NOT a single agent. It is a **pair programming team** managed by `developer.py`:
+
+- **Developer sidecar** (Claude Opus): Implements source code changes
+- **QE sidecar** (Gemini Pro): Independently verifies quality, writes tests
+- **Flash Manager** (Gemini Flash, in-process): Moderates the pair, reviews outputs, triggers fix/verify rounds
+
+When Brain routes to "developer", the Developer Manager (`src/agents/developer.py`) fires BOTH sidecars concurrently via `asyncio.gather()`. The Flash Manager reviews outputs and may trigger follow-up rounds.
+
+## Critical Invariants -- DO NOT BREAK
+
+1. **No file-based coordination between agents.** The agents do NOT communicate via `./huddle/` directories, status files, or any file-polling protocol. The Developer Manager handles all coordination via WebSocket results and Flash API calls.
+
+2. **No `[HUDDLE]` tag.** There is no "standalone" vs "huddle" mode. QE is enabled automatically when `QE_SIDECAR_URL` is set. The rules files must NOT reference `[HUDDLE]`, `dev-status.md`, `qe-status.md`, or polling loops.
+
+3. **Both agents receive the same task.** The Developer Manager sends the same `event_md_path` and `task` to both sidecars. Both work independently on the same shared workspace.
+
+4. **Brain is unaware of QE.** Brain calls `developer.process()` as a single unit. The pair coordination is invisible to Brain. Brain's system prompt describes the pair but never routes to "qe" directly.
+
+5. **Shared workspace, not separate directories.** Both Dev and QE mount the same PVC subPath (`developer`). QE sees Dev's code changes in real-time. The Helm deployment mounts `subPath: developer` at both `/data/gitops-developer` and `/data/gitops-qe`.
+
+6. **Agent rules describe WHAT, not HOW.** Rules files (`helm/files/developer.md`, `helm/files/qe.md`) describe the agent's role and capabilities. They must NOT contain literal CLI commands, polling loops, or coordination protocols. The CLI agents are smart enough to figure out HOW.
+
+## Code Contract
+
+```bash
+developer.py:
+  - QE enabled: os.getenv("QE_SIDECAR_URL") -> bool
+  - Phase 1: asyncio.gather(dev_sidecar, qe_sidecar)
+  - Phase 2: flash_decide(dev_result, qe_result) -> review rounds
+  - Returns: "## Developer Result\n...\n## QE Assessment\n..."
+
+brain.py:
+  - Routes to "developer" only (never "qe")
+  - progress callback passes actor field through: progress_data.get("actor", agent_name)
+  - _archivist_memory registered in agents dict for deep memory
+  - consult_deep_memory tool in _build_brain_tools()
+
+deployment.yaml:
+  - QE sidecar: subPath: developer (shared workspace)
+  - Brain env: QE_SIDECAR_URL, QDRANT_URL
+  - Strategy: Recreate (Qdrant WAL exclusive lock)
+```
+
+## Rules Files Location
+
+Agent rules are stored in TWO places (must always be in sync):
+
+- `BlackBoard/helm/files/*.md` -- used by Helm ConfigMap, deployed to K8s
+- `BlackBoard/gemini-sidecar/rules/*.md` -- used for local development
+
+When editing rules, ALWAYS update both locations.
+
+## What NOT to Put in Agent Rules
+
+- No literal shell commands (agents discover tools themselves)
+- No polling loops or file-watching instructions
+- No coordination protocols between agents
+- No model names (agents don't need to know which LLM they are)
+- No `[HUDDLE]` tags or mode switches
