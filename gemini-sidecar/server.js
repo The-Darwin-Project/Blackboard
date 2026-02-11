@@ -69,19 +69,18 @@ function buildCLICommand(prompt, options = {}) {
         if (options.autoApprove) args.push('--dangerously-skip-permissions');
         args.push('--output-format', 'stream-json');  // Stream JSON events (tokens + tool calls)
         args.push('--verbose');
-        // Architect: read-only tools only (no code modification)
+        // Architect: can prototype locally but CANNOT push to git
         if (AGENT_ROLE === 'architect') {
-            args.push('--tools', 'Read,Grep,Glob,Bash,Task');
-            args.push('--disallowedTools', 'Edit,MultiEdit,Write');
+            args.push('--disallowedTools', '"Bash(git commit *)" "Bash(git push *)" "Bash(git add *)"');
         }
         args.push('-p', prompt);
         return { binary: 'claude', args };
     } else {
         const args = [];
         if (options.autoApprove) args.push('--yolo');
-        // Architect: disable file modification tools (Gemini CLI uses --disallowedTools)
+        // Architect: can prototype locally but CANNOT push to git
         if (AGENT_ROLE === 'architect') {
-            args.push('--disallowedTools', 'EditFile,WriteFile,ReplaceInFile,CreateFile');
+            args.push('--disallowedTools', 'Bash(git commit),Bash(git push),Bash(git add)');
         }
         args.push('-p', prompt);
         return { binary: 'gemini', args };
