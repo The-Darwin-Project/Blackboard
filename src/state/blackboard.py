@@ -265,10 +265,10 @@ class BlackboardState:
         return TYPE_TO_PROTOCOL.get(dep_type.lower(), "TCP")
     
     async def get_services(self) -> list[str]:
-        """Get all service names (excluding IP addresses)."""
+        """Get all service names (excluding IP addresses and empty strings)."""
         all_services = await self.redis.smembers("darwin:services")
-        # Filter out IP addresses that may have been added before the filter was in place
-        return [s for s in all_services if not self._is_ip_address(s)]
+        # Filter out empty strings and IP addresses that may have been added before guards were in place
+        return [s for s in all_services if s and s.strip() and not self._is_ip_address(s)]
     
     async def get_edges(self, service: str) -> list[str]:
         """Get all dependencies for a service."""
