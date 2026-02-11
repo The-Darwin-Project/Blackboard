@@ -77,10 +77,33 @@ The Brain reads ONLY this file. Your stdout is streamed to the UI as working not
 - Every plan MUST include a Verification section: how will we know the change worked?
 - Every plan MUST include a Feedback mechanism: what metric or signal confirms success?
 
-### Architectural Boundaries
-- Respect hexagonal architecture: changes to core logic go through defined interfaces
-- Do not bypass ports/adapters patterns in the target codebase
-- If the change requires crossing an architectural boundary, flag it explicitly
+### Hexagonal Architecture (Ports & Adapters)
+
+When reviewing or planning code changes, enforce these structural patterns:
+
+- **Core domain isolation**: Business logic MUST have zero import dependencies on infrastructure. No `import redis`, `import kubernetes`, `import requests` in domain modules. If you see this, flag it as a coupling violation.
+- **Ports**: Interfaces defined BY the core domain (e.g., `class EventStore(Protocol)`, `class MetricsProvider(Protocol)`). The core says what it needs; adapters provide it.
+- **Adapters**: Implementations of ports for specific technologies (e.g., `RedisEventStore`, `K8sMetricsProvider`). Adapters import infrastructure libraries; the core never does.
+- **Dependency direction**: Always inward. Adapters depend on ports. Core depends on nothing external.
+- **When reviewing code**: Flag any business logic file that directly imports a database client, HTTP library, or cloud SDK. Recommend extracting a port.
+- **When planning new features**: Always specify which port the new code enters through and which adapter will implement it.
+- **Boundary crossings**: If a change requires modifying both a port interface and its adapter, flag it explicitly in the risk assessment.
+
+### Microservice Technical Patterns
+
+Apply these infrastructure-level patterns when planning service changes:
+
+- **Independently deployable units**: Each service MUST be deployable without coordinating with other services. If a plan requires deploying Service A and Service B simultaneously, redesign with backward-compatible contracts first.
+- **Backward-compatible API changes**: Always additive. New fields are optional. Old fields are never removed in the same release. If breaking changes are unavoidable, version the API (`/v1/`, `/v2/`).
+- **Database schema independence**: Each service owns its data store. No shared databases across services. Schema migrations must be backward-compatible (add columns, never rename/drop in the same deploy).
+- **API contracts first**: Every service change must specify the API contract (REST endpoint, event schema) before implementation details.
+- **Circuit breakers**: Any inter-service call should have timeout + retry + fallback. Flag plans that add service-to-service calls without resilience patterns.
+- **Health endpoints**: Every service must expose `/health` (liveness) and `/ready` (readiness) with meaningful checks -- not just "return 200".
+- **Observability**: Plans must include how changes will be monitored (metrics, logs, alerts). Not just what the code does, but how you'll know it's working.
+- **Idempotency**: Any operation that modifies state must be safe to retry. If a plan includes a write operation, specify how duplicate calls are handled.
+- **Configuration via environment**: No hardcoded URLs, credentials, or feature flags in code. Everything via env vars or ConfigMaps. Flag any hardcoded values in code reviews.
+- **Stateless services**: Flag any in-process state that would break horizontal scaling (caches without TTL, sessions, in-memory queues). If state is required, it must be externalized (Redis, DB).
+- **Feature flags over deploy coordination**: If a feature spans multiple services, use feature flags to enable it progressively rather than requiring a synchronized rollout.
 
 ### Domain Classification
 - If the task is CLEAR (known fix): produce a minimal 2-3 step plan
