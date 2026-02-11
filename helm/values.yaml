@@ -37,7 +37,7 @@ qdrant:
   enabled: true
   image:
     repository: ghcr.io/qdrant/qdrant
-    tag: "v1.16.3-unprivileged"  # Non-root image for OpenShift SCC
+    tag: "v1.16.3-unprivileged" # Non-root image for OpenShift SCC
   persistence:
     enabled: true
     storageClassName: "ocs-storagecluster-cephfs"
@@ -49,8 +49,8 @@ qdrant:
     limits:
       memory: 8Gi
       cpu: "2"
-  port: 6333       # HTTP API
-  grpcPort: 6334   # gRPC API
+  port: 6333 # HTTP API
+  grpcPort: 6334 # gRPC API
 # =============================================================================
 # Agent Sidecars Configuration (same base image, per-agent CLI type and rules)
 # =============================================================================
@@ -82,11 +82,11 @@ sidecars:
     cliType: "gemini"
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
-    modelName: "gemini-3-pro-preview"  # Pro for thorough verification
+    modelName: "gemini-3-pro-preview" # Pro for thorough verification
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "f0070f3" # Updated by CI to commit SHA
+    tag: "e5c6cd3" # Updated by CI to commit SHA
   resources:
     requests:
       memory: 256Mi
