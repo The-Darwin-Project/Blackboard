@@ -301,6 +301,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.architect.port }}"
+            - name: AGENT_ROLE
+              value: "architect"
             - name: GIT_USER_NAME
               value: "{{ .Values.sidecars.architect.gitUserName }}"
             - name: GIT_USER_EMAIL

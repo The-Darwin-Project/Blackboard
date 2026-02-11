@@ -22,6 +22,8 @@ const DEFAULT_WORK_DIR = '/data/gitops';
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
 const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
+// Agent role -- used to restrict tools (e.g., architect can't write code files)
+const AGENT_ROLE = process.env.AGENT_ROLE || '';
 
 /**
  * Parse a Claude stream-json line and extract displayable text.
@@ -67,11 +69,20 @@ function buildCLICommand(prompt, options = {}) {
         if (options.autoApprove) args.push('--dangerously-skip-permissions');
         args.push('--output-format', 'stream-json');  // Stream JSON events (tokens + tool calls)
         args.push('--verbose');
+        // Architect: read-only tools only (no code modification)
+        if (AGENT_ROLE === 'architect') {
+            args.push('--tools', 'Read,Grep,Glob,Bash,Task');
+            args.push('--disallowedTools', 'Edit,MultiEdit,Write');
+        }
         args.push('-p', prompt);
         return { binary: 'claude', args };
     } else {
         const args = [];
         if (options.autoApprove) args.push('--yolo');
+        // Architect: disable file modification tools (Gemini CLI uses --disallowedTools)
+        if (AGENT_ROLE === 'architect') {
+            args.push('--disallowedTools', 'EditFile,WriteFile,ReplaceInFile,CreateFile');
+        }
         args.push('-p', prompt);
         return { binary: 'gemini', args };
     }
@@ -574,6 +585,8 @@ async function handleRequest(req, res) {
       service: 'agent-sidecar',
       cliType: AGENT_CLI,
       cliModel: AGENT_MODEL,
+      agentRole: AGENT_ROLE || 'default',
+      toolRestrictions: AGENT_ROLE === 'architect' ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
       hasKargoCredentials: fs.existsSync('/secrets/kargo/auth-token'),
