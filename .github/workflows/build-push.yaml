@@ -2,12 +2,12 @@
 # Build and push Docker image to GitHub Container Registry on every push
 # After push, updates helm/values.yaml with the new image tag (commit SHA)
 #
-# Authentication Options:
-#   1. GITHUB_TOKEN (default) - No setup required
-#   2. GitHub App - Set USE_GITHUB_APP=true variable and add secrets
+# Token Strategy (split-token):
+#   - GITHUB_TOKEN: used for Docker login + GHCR push (has inherited package write)
+#   - GitHub App token: used for git commit/push (bypasses anti-recursion, triggers downstream workflows)
 #
-# To use GitHub App (Darwin CI):
-#   1. Create a GitHub App with "packages:write" and "contents:write" permissions
+# To enable GitHub App for git operations:
+#   1. Create a GitHub App with "contents:write" permission
 #   2. Install it on the org/repo
 #   3. Add secrets: DARWIN_APP_ID, DARWIN_APP_PRIVATE_KEY
 #   4. Add variable: USE_GITHUB_APP=true
@@ -46,11 +46,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
-      # GitHub App authentication (optional)
-      # Only runs if USE_GITHUB_APP variable is set to 'true'
+      # GitHub App token -- used ONLY for git push (bypasses anti-recursion)
+      # GHCR push uses GITHUB_TOKEN (App tokens can't write org packages)
       - name: Generate GitHub App Token
         id: app-token
         if: vars.USE_GITHUB_APP == 'true'
@@ -60,7 +58,7 @@ jobs:
           private-key: ${{ secrets.DARWIN_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
-      # Re-checkout with app token if using GitHub App
+      # Re-checkout with app token so git push uses App identity
       - name: Re-checkout with App Token
         if: vars.USE_GITHUB_APP == 'true'
         uses: actions/checkout@v4
@@ -74,14 +72,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login with GitHub App token if configured, otherwise GITHUB_TOKEN
+      # Always use GITHUB_TOKEN for GHCR (App tokens can't write org packages)
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ vars.USE_GITHUB_APP == 'true' && 'x-access-token' || github.actor }}
-          password: ${{ vars.USE_GITHUB_APP == 'true' && steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (tags, labels)
         id: meta
