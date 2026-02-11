@@ -334,9 +334,9 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
             {{- end }}
-            {{- if .Values.gcp.existingSecret }}
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/service-account.json"
+              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.argocd.enabled }}
             - name: ARGOCD_SERVER
@@ -353,7 +353,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.existingSecret }}
+            {{- if .Values.gcp.agentExistingSecret }}
+            - name: gcp-agent-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -452,9 +456,9 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
             {{- end }}
-            {{- if .Values.gcp.existingSecret }}
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/service-account.json"
+              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.argocd.enabled }}
             - name: ARGOCD_SERVER
@@ -471,7 +475,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.existingSecret }}
+            {{- if .Values.gcp.agentExistingSecret }}
+            - name: gcp-agent-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -573,14 +581,18 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
             {{- end }}
-            {{- if .Values.gcp.existingSecret }}
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/service-account.json"
+              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.existingSecret }}
+            {{- if .Values.gcp.agentExistingSecret }}
+            - name: gcp-agent-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -658,14 +670,18 @@ spec:
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
             {{- end }}
-            {{- if .Values.gcp.existingSecret }}
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/service-account.json"
+              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.existingSecret }}
+            {{- if .Values.gcp.agentExistingSecret }}
+            - name: gcp-agent-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.existingSecret }}
             - name: gcp-sa-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -714,6 +730,11 @@ spec:
         - name: gcp-sa-key
           secret:
             secretName: {{ .Values.gcp.existingSecret }}
+        {{- end }}
+        {{- if .Values.gcp.agentExistingSecret }}
+        - name: gcp-agent-key
+          secret:
+            secretName: {{ .Values.gcp.agentExistingSecret }}
         {{- end }}
         {{- if and .Values.redis.enabled .Values.redis.persistence.enabled }}
         - name: redis-data

@@ -116,9 +116,11 @@ gcp:
   temperature:
     brain: "0.8" # Brain orchestrator decisions
     aligner: "0.3" # Aligner metrics analysis (Flash)
-  # Service account JSON can be mounted via secret
-  # Set existingSecret to use a pre-created secret
-  existingSecret: ""
+  # Service account JSON secrets
+  # Brain SA -- for Brain orchestrator Vertex AI calls
+  existingSecret: "gcp-sa-key"
+  # Agent SA -- separate SA for agent sidecars (avoids sharing 429 quota with Brain)
+  agentExistingSecret: "gcp-agent-key"
 # =============================================================================
 # Service Configuration
 # =============================================================================
