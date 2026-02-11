@@ -226,15 +226,33 @@ spec:
               value: "{{ .Values.sidecars.architect.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.architect.gitUserEmail }}"
-            # GCP/Vertex AI configuration (required for gemini-cli)
+            # CLI routing (gemini or claude)
+            - name: AGENT_CLI
+              value: "{{ .Values.sidecars.architect.cliType | default "gemini" }}"
+            - name: AGENT_MODEL
+              value: "{{ .Values.sidecars.architect.modelName }}"
+            # GCP/Vertex AI configuration
             - name: GOOGLE_CLOUD_PROJECT
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            {{- if ne (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
             - name: GOOGLE_GENAI_USE_VERTEXAI
               value: "true"
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
+            {{- end }}
+            {{- if eq (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
+            # Claude Code CLI -- Vertex AI configuration
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "{{ .Values.gcp.project }}"
+            - name: CLOUD_ML_REGION
+              value: "{{ .Values.gcp.location }}"
+            - name: ANTHROPIC_MODEL
+              value: "{{ .Values.sidecars.architect.modelName }}"
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
@@ -262,9 +280,15 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-architect
               subPath: architect
+            {{- if eq (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
+            - name: gemini-rules
+              mountPath: /home/default/.claude/CLAUDE.md
+              subPath: architect.md
+            {{- else }}
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: architect.md
+            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -320,15 +344,33 @@ spec:
               value: "{{ .Values.sidecars.sysadmin.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.sysadmin.gitUserEmail }}"
-            # GCP/Vertex AI configuration (required for gemini-cli)
+            # CLI routing (gemini or claude)
+            - name: AGENT_CLI
+              value: "{{ .Values.sidecars.sysadmin.cliType | default "gemini" }}"
+            - name: AGENT_MODEL
+              value: "{{ .Values.sidecars.sysadmin.modelName }}"
+            # GCP/Vertex AI configuration
             - name: GOOGLE_CLOUD_PROJECT
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            {{- if ne (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
             - name: GOOGLE_GENAI_USE_VERTEXAI
               value: "true"
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
+            {{- end }}
+            {{- if eq (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
+            # Claude Code CLI -- Vertex AI configuration
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "{{ .Values.gcp.project }}"
+            - name: CLOUD_ML_REGION
+              value: "{{ .Values.gcp.location }}"
+            - name: ANTHROPIC_MODEL
+              value: "{{ .Values.sidecars.sysadmin.modelName }}"
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
@@ -356,9 +398,15 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-sysadmin
               subPath: sysadmin
+            {{- if eq (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
+            - name: gemini-rules
+              mountPath: /home/default/.claude/CLAUDE.md
+              subPath: sysadmin.md
+            {{- else }}
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: sysadmin.md
+            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -398,6 +446,9 @@ spec:
         
         # =================================================================
         # Developer Agent Sidecar
+        # NOTE: Developer intentionally omits ArgoCD/Kargo env vars and
+        # secret mounts. Developer is code-only (git clone/commit/push).
+        # Architect and SysAdmin handle infra CLI access (argocd, kargo).
         # =================================================================
         {{- if .Values.sidecars.developer.enabled }}
         - name: developer-sidecar
@@ -414,15 +465,33 @@ spec:
               value: "{{ .Values.sidecars.developer.gitUserName }}"
             - name: GIT_USER_EMAIL
               value: "{{ .Values.sidecars.developer.gitUserEmail }}"
-            # GCP/Vertex AI configuration (required for gemini-cli)
+            # CLI routing (gemini or claude)
+            - name: AGENT_CLI
+              value: "{{ .Values.sidecars.developer.cliType | default "gemini" }}"
+            - name: AGENT_MODEL
+              value: "{{ .Values.sidecars.developer.modelName }}"
+            # GCP/Vertex AI configuration
             - name: GOOGLE_CLOUD_PROJECT
               value: "{{ .Values.gcp.project }}"
             - name: GOOGLE_CLOUD_LOCATION
               value: "{{ .Values.gcp.location }}"
+            {{- if ne (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
             - name: GOOGLE_GENAI_USE_VERTEXAI
               value: "true"
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
+            {{- end }}
+            {{- if eq (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
+            # Claude Code CLI -- Vertex AI configuration
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "{{ .Values.gcp.project }}"
+            - name: CLOUD_ML_REGION
+              value: "{{ .Values.gcp.location }}"
+            - name: ANTHROPIC_MODEL
+              value: "{{ .Values.sidecars.developer.modelName }}"
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/service-account.json"
@@ -438,9 +507,15 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-developer
               subPath: developer
+            {{- if eq (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
+            - name: gemini-rules
+              mountPath: /home/default/.claude/CLAUDE.md
+              subPath: developer.md
+            {{- else }}
             - name: gemini-rules
               mountPath: /home/default/.gemini/GEMINI.md
               subPath: developer.md
+            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -488,7 +563,7 @@ spec:
         - name: gitops-data
           emptyDir: {}
         {{- end }}
-        # Gemini rules ConfigMap (GEMINI.md per agent)
+        # Agent rules ConfigMap (GEMINI.md or CLAUDE.md per agent)
         - name: gemini-rules
           configMap:
             name: {{ .Release.Name }}-gemini-rules

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentClient:
-    """WebSocket client to a Gemini CLI sidecar container."""
+    """WebSocket client to an agent CLI sidecar container (Gemini or Claude Code)."""
 
     def __init__(
         self,

@@ -1,4 +1,4 @@
-# Darwin Developer Agent - Gemini CLI Context
+# Darwin Developer Agent - CLI Context
 
 You are the Developer agent in the Darwin autonomous infrastructure system.
 You operate inside a Kubernetes pod as a sidecar container.
@@ -84,7 +84,7 @@ When adding new fields to data models, APIs, or schemas:
 - Use the pre-configured `GIT_USER_NAME` and `GIT_USER_EMAIL` environment variables for commits
 - Before committing, verify your git identity with `git config user.name` and `git config user.email`
 - If they are not set, run: `git config user.name "$GIT_USER_NAME"` and `git config user.email "$GIT_USER_EMAIL"`
-- Commit author should reflect the agent name (e.g., "Darwin Developer"), not "Gemini CLI"
+- Commit author should reflect the agent name (e.g., "Darwin Developer"), not the CLI tool name
 
 ## Completion Report
 When you finish implementing and pushing changes, write your completion report to `./results/findings.md`.

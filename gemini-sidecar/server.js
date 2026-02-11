@@ -1,10 +1,11 @@
 // gemini-sidecar/server.js
 // @ai-rules:
-// 1. [Pattern]: executeGemini + executeGeminiStreaming use fs.watch preemptive read for findings.md to avoid PVC flush race.
+// 1. [Pattern]: executeCLI + executeCLIStreaming use fs.watch preemptive read for findings.md to avoid PVC flush race.
 // 2. [Pattern]: readFindings() is fallback only -- watcher caches content on file creation; close handler uses cached value first.
 // 3. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
 // 4. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
-// HTTP wrapper for Gemini CLI with GitHub App authentication
+// 5. [Pattern]: AGENT_CLI env var routes spawn() to 'gemini' or 'claude' binary via buildCLICommand().
+// HTTP wrapper for Gemini/Claude Code CLIs with GitHub App authentication
 // Exposes POST /execute endpoint for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
 
@@ -17,6 +18,28 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 9090;
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
 const DEFAULT_WORK_DIR = '/data/gitops';
+
+// CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
+const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
+const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
+
+/**
+ * Build CLI command based on AGENT_CLI env var.
+ * Routes to 'gemini' or 'claude' binary with appropriate flags.
+ */
+function buildCLICommand(prompt, options = {}) {
+    if (AGENT_CLI === 'claude') {
+        const args = [];
+        if (options.autoApprove) args.push('--dangerously-skip-permissions');
+        args.push('-p', prompt);
+        return { binary: 'claude', args };
+    } else {
+        const args = [];
+        if (options.autoApprove) args.push('--yolo');
+        args.push('-p', prompt);
+        return { binary: 'gemini', args };
+    }
+}
 
 // GitHub App secret paths (mounted from K8s secret)
 const SECRETS_PATH = '/secrets/github';
@@ -92,7 +115,7 @@ async function generateInstallationToken() {
 
 /**
  * Configure git credentials for GitHub operations
- * Gemini will handle clone/pull/push itself
+ * Agent CLI will handle clone/pull/push itself
  * @param {string} token - Installation access token
  * @param {string} workDir - Working directory for git operations
  */
@@ -105,7 +128,7 @@ function setupGitCredentials(token, workDir) {
       fs.mkdirSync(workDir, { recursive: true });
     }
 
-    // Configure git user globally (for any repo Gemini clones)
+    // Configure git user globally (for any repo the agent clones)
     execSync(`git config --global user.name "${process.env.GIT_USER_NAME || 'Darwin Agent'}"`, { encoding: 'utf8' });
     execSync(`git config --global user.email "${process.env.GIT_USER_EMAIL || 'darwin-agent@darwin-project.io'}"`, { encoding: 'utf8' });
     
@@ -128,7 +151,7 @@ function setupGitCredentials(token, workDir) {
 
 /**
  * Login to ArgoCD/Kargo CLIs in the background (non-blocking).
- * Spawns login processes that run concurrently with Gemini CLI execution.
+ * Spawns login processes that run concurrently with agent CLI execution.
  * The CLI sessions become available within ~2s; if the agent uses argocd/kargo
  * before login completes, the command fails gracefully (agent retries or
  * falls back to kubectl/oc).
@@ -237,22 +260,13 @@ function prepareResultsDir(workDir) {
 }
 
 /**
- * Execute gemini CLI with given prompt and options
+ * Execute agent CLI with given prompt and options
  */
-async function executeGemini(prompt, options = {}) {
+async function executeCLI(prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    // Using -p/--prompt triggers non-interactive (headless) mode
-    const args = [];
+    const { binary, args } = buildCLICommand(prompt, { autoApprove: options.autoApprove });
     
-    // Add auto-approve (yolo) flag if requested
-    if (options.autoApprove) {
-      args.push('--yolo');
-    }
-    
-    // Add the prompt (this makes it non-interactive)
-    args.push('-p', prompt);
-    
-    console.log(`[${new Date().toISOString()}] Executing: gemini ${args[0]} ${args.length > 2 ? '...' : ''} (prompt length: ${prompt.length})`);
+    console.log(`[${new Date().toISOString()}] Executing: ${AGENT_CLI} (prompt length: ${prompt.length})`);
     
     // Prepare results directory (clean stale files, ensure exists)
     prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
@@ -279,10 +293,10 @@ async function executeGemini(prompt, options = {}) {
       console.log(`[${new Date().toISOString()}] fs.watch setup failed: ${err.message}`);
     }
 
-    const child = spawn('gemini', args, {
+    const child = spawn(binary, args, {
       env: {
         ...process.env,
-        GOOGLE_GENAI_USE_VERTEXAI: 'true',
+        ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
       },
       cwd: options.cwd || DEFAULT_WORK_DIR,
       timeout: TIMEOUT_MS,
@@ -303,7 +317,7 @@ async function executeGemini(prompt, options = {}) {
       // Close the watcher
       if (watcher) { try { watcher.close(); } catch(e) {} }
 
-      console.log(`[${new Date().toISOString()}] Gemini exited with code ${code}`);
+      console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
       console.log(`[${new Date().toISOString()}] stdout (${stdout.length} chars): ${stdout.slice(0, 500)}${stdout.length > 500 ? '...' : ''}`);
       if (stderr) {
         console.log(`[${new Date().toISOString()}] stderr: ${stderr.slice(0, 500)}${stderr.length > 500 ? '...' : ''}`);
@@ -341,15 +355,13 @@ async function executeGemini(prompt, options = {}) {
 }
 
 /**
- * Execute gemini CLI with streaming progress over WebSocket
+ * Execute agent CLI with streaming progress over WebSocket
  */
-async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
+async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    const args = [];
-    if (options.autoApprove) args.push('--yolo');
-    args.push('-p', prompt);
+    const { binary, args } = buildCLICommand(prompt, { autoApprove: options.autoApprove });
 
-    console.log(`[${new Date().toISOString()}] Streaming exec: gemini ${args[0]} (prompt: ${prompt.length} chars)`);
+    console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
 
     // Prepare results directory (clean stale files, ensure exists)
     prepareResultsDir(options.cwd || DEFAULT_WORK_DIR);
@@ -376,8 +388,11 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
       console.log(`[${new Date().toISOString()}] fs.watch setup failed: ${err.message}`);
     }
 
-    const child = spawn('gemini', args, {
-      env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
+    const child = spawn(binary, args, {
+      env: {
+        ...process.env,
+        ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
+      },
       cwd: options.cwd || DEFAULT_WORK_DIR,
       timeout: TIMEOUT_MS,
     });
@@ -418,14 +433,14 @@ async function executeGeminiStreaming(ws, eventId, prompt, options = {}) {
         wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
       }
 
-      console.log(`[${new Date().toISOString()}] Gemini exited code ${code} (${stdout.length} chars)`);
+      console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited code ${code} (${stdout.length} chars)`);
       if (stdout.length > 0) {
-        console.log(`[${new Date().toISOString()}] Gemini stdout: ${stdout.slice(0, 1000)}${stdout.length > 1000 ? '...' : ''}`);
+        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stdout: ${stdout.slice(0, 1000)}${stdout.length > 1000 ? '...' : ''}`);
       } else {
-        console.log(`[${new Date().toISOString()}] WARNING: Gemini produced EMPTY stdout`);
+        console.log(`[${new Date().toISOString()}] WARNING: ${AGENT_CLI} produced EMPTY stdout`);
       }
       if (stderr) {
-        console.log(`[${new Date().toISOString()}] Gemini stderr: ${stderr.slice(0, 500)}`);
+        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stderr: ${stderr.slice(0, 500)}`);
       }
 
       if (code === 0) {
@@ -483,7 +498,9 @@ async function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
       status: 'healthy', 
-      service: 'gemini-sidecar',
+      service: 'agent-sidecar',
+      cliType: AGENT_CLI,
+      cliModel: AGENT_MODEL,
       hasGitHubCredentials: hasGitHubCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
       hasKargoCredentials: fs.existsSync('/secrets/kargo/auth-token'),
@@ -505,14 +522,14 @@ async function handleRequest(req, res) {
       const workDir = body.cwd || DEFAULT_WORK_DIR;
       
       // Setup git credentials if GitHub App is configured
-      // Gemini will handle clone/pull/push itself
+      // Agent CLI will handle clone/pull/push itself
       if (hasGitHubCredentials()) {
         try {
           const token = await generateInstallationToken();
           setupGitCredentials(token, workDir);
         } catch (err) {
           console.error(`[${new Date().toISOString()}] Git credential setup failed:`, err.message);
-          // Continue anyway - Gemini might not need git for this operation
+          // Continue anyway - agent might not need git for this operation
           console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
         }
       }
@@ -520,8 +537,8 @@ async function handleRequest(req, res) {
       // Login to ArgoCD/Kargo CLIs in background (non-blocking)
       setupCLILoginsBackground();
       
-      // Execute gemini CLI
-      const result = await executeGemini(body.prompt, {
+      // Execute agent CLI
+      const result = await executeCLI(body.prompt, {
         autoApprove: body.autoApprove || false,
         cwd: workDir,
       });
@@ -600,12 +617,12 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // Login to ArgoCD/Kargo CLIs in background (non-blocking, runs concurrent with Gemini)
+      // Login to ArgoCD/Kargo CLIs in background (non-blocking, runs concurrent with agent CLI)
       setupCLILoginsBackground();
 
-      // Execute Gemini CLI with streaming progress
+      // Execute agent CLI with streaming progress
       try {
-        const result = await executeGeminiStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
+        const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
         wsSend(ws, {
           type: 'result',
           event_id: eventId,
@@ -646,7 +663,7 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] Gemini sidecar listening on port ${PORT}`);
+  console.log(`[${new Date().toISOString()}] Agent sidecar (${AGENT_CLI}) listening on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute, WS /ws`);
   console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
   console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);

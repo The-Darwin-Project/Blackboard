@@ -1,5 +1,5 @@
 # gemini-sidecar/Dockerfile
-# Gemini CLI sidecar - HTTP wrapper for gemini-cli with GitHub App auth
+# Agent CLI sidecar - HTTP wrapper for Gemini + Claude Code CLIs with GitHub App auth
 # Uses Node.js 22 (required by @google/gemini-cli)
 
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest
@@ -50,6 +50,11 @@ RUN npm install -g @google/gemini-cli@latest && \
     ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
     /usr/local/bin/gemini --version || echo "Gemini CLI linked"
 
+# Install Claude Code CLI (for agents using Claude models via Vertex AI)
+RUN npm install -g @anthropic-ai/claude-code@latest && \
+    ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
+    /usr/local/bin/claude --version || echo "Claude CLI linked"
+
 # Create app directory
 WORKDIR /app
 
@@ -60,8 +65,9 @@ RUN npm install --omit=dev
 # Copy server code
 COPY server.js .
 
-# Create Gemini CLI config directory (GEMINI.md comes from ConfigMap mount)
-RUN mkdir -p /home/default/.gemini
+# Create CLI config directories (rules come from ConfigMap mount)
+RUN mkdir -p /home/default/.gemini && \
+    mkdir -p /home/default/.claude
 
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \

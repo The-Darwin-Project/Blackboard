@@ -1,5 +1,5 @@
 # BlackBoard/helm/templates/configmap-gemini-rules.yaml
-# GEMINI.md rules for each agent sidecar - mounted via subPath
+# Agent rules for each sidecar (GEMINI.md or CLAUDE.md) - mounted via subPath
 apiVersion: v1
 kind: ConfigMap
 metadata:
