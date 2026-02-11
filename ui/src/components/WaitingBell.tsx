@@ -63,7 +63,6 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
   }, [activeEvents]);
 
   const count = waitingEvents.length;
-  if (count === 0) return null;
 
   // Urgency classification
   const getUrgency = (waitingSince: number) => {
@@ -106,7 +105,7 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
       <div style={{ position: 'relative', display: 'inline-block' }}>
         {/* Bell icon */}
         <button
-          onClick={() => setIsOpen(!isOpen)}
+          onClick={() => count > 0 && setIsOpen(!isOpen)}
           style={{
             background: 'transparent',
             border: 'none',
@@ -115,30 +114,32 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
             fontSize: 20,
             ...shakeStyle,
           }}
-          title={`${count} event${count > 1 ? 's' : ''} waiting for you`}
+          title={count > 0 ? `${count} event${count > 1 ? 's' : ''} waiting for you` : 'No events waiting'}
         >
           🔔
         </button>
 
-        {/* Badge */}
-        <span style={{
-          position: 'absolute',
-          top: 0,
-          right: 2,
-          background: badgeColor,
-          color: '#fff',
-          fontSize: 10,
-          fontWeight: 700,
-          width: 18,
-          height: 18,
-          borderRadius: '50%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          pointerEvents: 'none',
-        }}>
-          {count}
-        </span>
+        {/* Badge -- only shown when events are waiting */}
+        {count > 0 && (
+          <span style={{
+            position: 'absolute',
+            top: 0,
+            right: 2,
+            background: badgeColor,
+            color: '#fff',
+            fontSize: 10,
+            fontWeight: 700,
+            width: 18,
+            height: 18,
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+          }}>
+            {count}
+          </span>
+        )}
 
         {/* Dropdown */}
         {isOpen && (
