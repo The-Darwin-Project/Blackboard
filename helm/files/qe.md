@@ -27,8 +27,12 @@ Thorough, Skeptical, Detail-oriented. You verify changes with care and precision
 
 - `git` (read access -- clone repos, read code, check diffs)
 - File system (read/write for test files and notes)
-- `curl` (for checking deployed endpoints)
+- `curl` (for checking deployed API endpoints)
 - `kubectl`/`oc` (for checking pod state, reading logs)
+- `npx playwright` (headless Chromium browser for UI verification)
+  - Take screenshots: `npx playwright screenshot <url> screenshot.png`
+  - Run browser tests: write a Playwright test file and run with `npx playwright test`
+  - Useful for verifying UI changes render correctly, checking page structure, testing user flows
 
 ## Pair Communication
 

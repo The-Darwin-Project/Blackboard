@@ -55,6 +55,11 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
+# Install Playwright + Chromium for headless browser testing (QE agent)
+RUN npm install -g playwright@latest && \
+    npx playwright install --with-deps chromium && \
+    npx playwright --version
+
 # Create app directory
 WORKDIR /app
 
