@@ -179,6 +179,7 @@ VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
     "sysadmin": "/data/gitops-sysadmin",
     "developer": "/data/gitops-developer",
+    "qe": "/data/gitops-qe",
 }
 
 
@@ -358,6 +359,21 @@ def _build_brain_tools():
             },
         )
 
+        consult_deep_memory = types.FunctionDeclaration(
+            name="consult_deep_memory",
+            description="Search operational history for similar past events. Returns symptoms, root causes, and fixes from past incidents. Use before acting on unfamiliar issues.",
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for (e.g., 'high CPU on darwin-store')",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+
         return types.Tool(function_declarations=[
             select_agent,
             close_event,
@@ -369,6 +385,7 @@ def _build_brain_tools():
             defer_event,
             lookup_service,
             lookup_journal,
+            consult_deep_memory,
         ])
 
     except ImportError:
@@ -1051,6 +1068,35 @@ class Brain:
             # Signal caller to re-invoke LLM so it can act on the lookup result
             return True
 
+        elif function_name == "consult_deep_memory":
+            query = args.get("query", "")
+            archivist = self.agents.get("_archivist_memory")
+            results = []
+            if archivist and hasattr(archivist, "search"):
+                results = await archivist.search(query, limit=5)
+            if results:
+                memory_text = f"Deep memory results for '{query}':\n"
+                for i, r in enumerate(results, 1):
+                    p = r.get("payload", {})
+                    memory_text += (
+                        f"  {i}. [{p.get('service', '?')}] "
+                        f"Symptom: {p.get('symptom', '?')} | "
+                        f"Root cause: {p.get('root_cause', '?')} | "
+                        f"Fix: {p.get('fix_action', '?')} "
+                        f"(score: {r.get('score', 0):.2f})\n"
+                    )
+            else:
+                memory_text = f"No deep memory results for '{query}'."
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="think",
+                evidence=memory_text,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return True
+
         elif function_name == "lookup_journal":
             service_name = args.get("service_name", "")
             entries = await self._get_journal_cached(service_name)
@@ -1275,6 +1321,13 @@ class Brain:
             )
             # Invalidate journal cache for this service (immediate freshness)
             self._journal_cache.pop(event.service, None)
+            # Archive to deep memory (fire-and-forget, non-blocking)
+            archivist = self.agents.get("_archivist_memory")
+            if archivist and hasattr(archivist, "archive_event"):
+                try:
+                    await archivist.archive_event(event)
+                except Exception as e:
+                    logger.warning(f"Deep memory archive failed (non-fatal): {e}")
         # Clean up all per-event state to prevent memory leaks
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.discard(event_id)

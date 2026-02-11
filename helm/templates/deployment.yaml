@@ -90,6 +90,14 @@ spec:
               value: "http://localhost:{{ .Values.sidecars.sysadmin.port }}"
             - name: DEVELOPER_SIDECAR_URL
               value: "http://localhost:{{ .Values.sidecars.developer.port }}"
+            {{- if .Values.sidecars.qe.enabled }}
+            - name: QE_SIDECAR_URL
+              value: "http://localhost:{{ .Values.sidecars.qe.port }}"
+            {{- end }}
+            {{- end }}
+            {{- if .Values.qdrant.enabled }}
+            - name: QDRANT_URL
+              value: "http://localhost:{{ .Values.qdrant.port }}"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
@@ -142,6 +150,9 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-sysadmin
               subPath: sysadmin
+            - name: gitops-data
+              mountPath: /data/gitops-qe
+              subPath: developer
             - name: gitops-data
               mountPath: /data/gitops-developer
               subPath: developer
@@ -200,6 +211,51 @@ spec:
             - name: redis-data
               mountPath: /var/lib/redis/data
           {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        
+        # =================================================================
+        # Qdrant Vector DB Sidecar (Deep Memory)
+        # =================================================================
+        {{- if .Values.qdrant.enabled }}
+        - name: qdrant
+          image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: qdrant-http
+              containerPort: {{ .Values.qdrant.port }}
+              protocol: TCP
+            - name: qdrant-grpc
+              containerPort: {{ .Values.qdrant.grpcPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+          {{- if .Values.qdrant.persistence.enabled }}
+          volumeMounts:
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+              subPath: storage
+            - name: qdrant-data
+              mountPath: /qdrant/snapshots
+              subPath: snapshots
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.qdrant.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.qdrant.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
@@ -542,6 +598,91 @@ spec:
               drop:
                 - ALL
         {{- end }}
+        
+        # =================================================================
+        # QE Agent Sidecar (Quality Engineering -- shares Developer workspace)
+        # =================================================================
+        {{- if .Values.sidecars.qe.enabled }}
+        - name: qe-sidecar
+          image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: qe
+              containerPort: {{ .Values.sidecars.qe.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "{{ .Values.sidecars.qe.port }}"
+            - name: GIT_USER_NAME
+              value: "{{ .Values.sidecars.qe.gitUserName }}"
+            - name: GIT_USER_EMAIL
+              value: "{{ .Values.sidecars.qe.gitUserEmail }}"
+            # CLI routing (gemini or claude)
+            - name: AGENT_CLI
+              value: "{{ .Values.sidecars.qe.cliType | default "gemini" }}"
+            - name: AGENT_MODEL
+              value: "{{ .Values.sidecars.qe.modelName }}"
+            # GCP/Vertex AI configuration
+            - name: GOOGLE_CLOUD_PROJECT
+              value: "{{ .Values.gcp.project }}"
+            - name: GOOGLE_CLOUD_LOCATION
+              value: "{{ .Values.gcp.location }}"
+            {{- if ne (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: "true"
+            - name: GEMINI_MODEL
+              value: "{{ .Values.sidecars.qe.modelName }}"
+            {{- end }}
+            {{- if .Values.gcp.existingSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/secrets/google/service-account.json"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.sidecars.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- end }}
+            - name: gitops-data
+              mountPath: /data/gitops-qe
+              subPath: developer
+            {{- if eq (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
+            - name: gemini-rules
+              mountPath: /home/default/.claude/CLAUDE.md
+              subPath: qe.md
+            {{- else }}
+            - name: gemini-rules
+              mountPath: /home/default/.gemini/GEMINI.md
+              subPath: qe.md
+            {{- end }}
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            - name: git-credentials
+              mountPath: /tmp/git-creds
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.qe.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.sidecars.qe.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
       
       volumes:
         {{- if .Values.gcp.existingSecret }}
@@ -553,6 +694,11 @@ spec:
         - name: redis-data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
+        {{- end }}
+        {{- if and .Values.qdrant.enabled .Values.qdrant.persistence.enabled }}
+        - name: qdrant-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-qdrant-data
         {{- end }}
         # GitOps data volumes - shared PVC with subPaths per agent
         {{- if .Values.sidecars.persistence.enabled }}

@@ -43,3 +43,4 @@ ui/dist/
 
 # Logs
 *.log
+probe-data/**

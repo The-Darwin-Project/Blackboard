@@ -31,6 +31,27 @@ redis:
       memory: 6Gi
       cpu: 6
 # =============================================================================
+# Qdrant Vector DB Sidecar (Deep Memory)
+# =============================================================================
+qdrant:
+  enabled: true
+  image:
+    repository: ghcr.io/qdrant/qdrant
+    tag: "v1.16.3-unprivileged"  # Non-root image for OpenShift SCC
+  persistence:
+    enabled: true
+    storageClassName: "ocs-storagecluster-cephfs"
+    size: 10Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 8Gi
+      cpu: "2"
+  port: 6333       # HTTP API
+  grpcPort: 6334   # gRPC API
+# =============================================================================
 # Agent Sidecars Configuration (same base image, per-agent CLI type and rules)
 # =============================================================================
 sidecars:
@@ -55,6 +76,13 @@ sidecars:
     gitUserName: "Darwin Developer"
     gitUserEmail: "darwin-developer@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI
+  qe:
+    enabled: true
+    port: 9094
+    cliType: "gemini"
+    gitUserName: "Darwin QE"
+    gitUserEmail: "darwin-qe@darwin-project.io"
+    modelName: "gemini-3-pro-preview"  # Pro for thorough verification
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar

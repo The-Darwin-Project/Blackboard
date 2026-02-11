@@ -440,7 +440,27 @@ function TurnBubble({
         />
       )}
       {turn.result && (
-        turn.action === 'execute' && turn.result.length > 500 ? (
+        // Developer huddle result: split into Dev + QE sections
+        turn.actor === 'developer' && turn.result.includes('## Developer Result') && turn.result.includes('## QE Assessment') ? (
+          <div style={{ margin: '4px 0' }}>
+            {turn.result.split('## QE Assessment').map((section, idx) => (
+              <div key={idx} style={{
+                padding: '8px 12px',
+                borderLeft: `3px solid ${idx === 0 ? '#22c55e' : '#8b5cf6'}`,
+                marginBottom: idx === 0 ? 8 : 0,
+                background: idx === 0 ? 'rgba(16, 185, 129, 0.06)' : 'rgba(168, 85, 247, 0.06)',
+                borderRadius: 4,
+              }}>
+                <div style={{ fontSize: 10, fontWeight: 600, color: idx === 0 ? '#22c55e' : '#8b5cf6', marginBottom: 4 }}>
+                  {idx === 0 ? 'DEVELOPER' : 'QE ASSESSMENT'}
+                </div>
+                <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
+                  {(idx === 0 ? section.replace('## Developer Result', '').trim() : section.trim()).slice(0, 2000)}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : turn.action === 'execute' && turn.result.length > 500 ? (
           <ResultViewer actor={turn.actor} result={turn.result} />
         ) : (
           <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>

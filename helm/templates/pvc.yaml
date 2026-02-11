@@ -38,3 +38,23 @@ spec:
     requests:
       storage: {{ .Values.sidecars.persistence.size }}
 {{- end }}
+{{- if and .Values.qdrant.enabled .Values.qdrant.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-qdrant-data
+  labels:
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: qdrant
+spec:
+  accessModes:
+    - ReadWriteMany
+  {{- if .Values.qdrant.persistence.storageClassName }}
+  storageClassName: {{ .Values.qdrant.persistence.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.qdrant.persistence.size }}
+{{- end }}

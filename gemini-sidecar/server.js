@@ -24,6 +24,40 @@ const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
 
 /**
+ * Parse a Claude stream-json line and extract displayable text.
+ * Returns the text to display, or null if the line is not user-facing.
+ *
+ * Claude stream-json emits lines like:
+ *   {"type":"content_block_delta","delta":{"type":"text_delta","text":"token"}}
+ *   {"type":"assistant","message":{...,"content":[{"type":"text","text":"full"}]}}
+ *   {"type":"result","result":"final text",...}
+ */
+function parseClaudeStreamLine(line) {
+    try {
+        const obj = JSON.parse(line);
+        // content_block_delta -- incremental token
+        if (obj.type === 'content_block_delta' && obj.delta?.text) {
+            return obj.delta.text;
+        }
+        // assistant message -- summarized narration
+        if (obj.type === 'assistant' && obj.message?.content) {
+            const texts = obj.message.content
+                .filter(c => c.type === 'text')
+                .map(c => c.text);
+            return texts.join('\n') || null;
+        }
+        // result -- final output
+        if (obj.type === 'result' && obj.result) {
+            return typeof obj.result === 'string' ? obj.result : JSON.stringify(obj.result);
+        }
+    } catch (e) {
+        // Not JSON or unknown format -- return raw line for Gemini compatibility
+        return line;
+    }
+    return null;
+}
+
+/**
  * Build CLI command based on AGENT_CLI env var.
  * Routes to 'gemini' or 'claude' binary with appropriate flags.
  */
@@ -31,6 +65,8 @@ function buildCLICommand(prompt, options = {}) {
     if (AGENT_CLI === 'claude') {
         const args = [];
         if (options.autoApprove) args.push('--dangerously-skip-permissions');
+        args.push('--output-format', 'stream-json');  // Stream JSON events (tokens + tool calls)
+        args.push('--verbose');
         args.push('-p', prompt);
         return { binary: 'claude', args };
     } else {
@@ -300,6 +336,7 @@ async function executeCLI(prompt, options = {}) {
       },
       cwd: options.cwd || DEFAULT_WORK_DIR,
       timeout: TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],  // Close stdin -- Claude CLI blocks on open pipe
     });
     
     let stdout = '';
@@ -395,6 +432,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       },
       cwd: options.cwd || DEFAULT_WORK_DIR,
       timeout: TIMEOUT_MS,
+      stdio: ['ignore', 'pipe', 'pipe'],  // Close stdin -- Claude CLI blocks on open pipe
     });
 
     currentTask = { eventId, child };
@@ -402,6 +440,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
     let stdout = '';
     let stderr = '';
     let lineBuffer = '';
+    let claudeTextAccum = '';  // Accumulate parsed text from Claude stream-json
 
     // Stream stdout line-by-line as progress
     child.stdout.on('data', (data) => {
@@ -413,7 +452,17 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       const lines = lineBuffer.split('\n');
       lineBuffer = lines.pop(); // Keep incomplete line in buffer
       for (const line of lines) {
-        if (line.trim()) {
+        if (!line.trim()) continue;
+        if (AGENT_CLI === 'claude') {
+          // Parse Claude stream-json -- extract displayable text
+          const parsed = parseClaudeStreamLine(line);
+          if (parsed) {
+            claudeTextAccum += parsed;
+            console.log(`[${new Date().toISOString()}] [${eventId}] >> ${parsed.slice(0, 200)}`);
+            wsSend(ws, { type: 'progress', event_id: eventId, message: parsed });
+          }
+        } else {
+          // Gemini -- raw text lines
           console.log(`[${new Date().toISOString()}] [${eventId}] >> ${line.slice(0, 200)}`);
           wsSend(ws, { type: 'progress', event_id: eventId, message: line });
         }
@@ -428,14 +477,25 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       // Close the watcher
       if (watcher) { try { watcher.close(); } catch(e) {} }
 
-      // Flush remaining buffer
+      // Flush remaining buffer (parse for Claude, raw for Gemini)
       if (lineBuffer.trim()) {
-        wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
+        if (AGENT_CLI === 'claude') {
+          const parsed = parseClaudeStreamLine(lineBuffer);
+          if (parsed) {
+            claudeTextAccum += parsed;
+            wsSend(ws, { type: 'progress', event_id: eventId, message: parsed });
+          }
+        } else {
+          wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
+        }
       }
 
-      console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited code ${code} (${stdout.length} chars)`);
-      if (stdout.length > 0) {
-        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stdout: ${stdout.slice(0, 1000)}${stdout.length > 1000 ? '...' : ''}`);
+      // For Claude stream-json, the readable output is in claudeTextAccum, not raw stdout
+      const effectiveOutput = (AGENT_CLI === 'claude' && claudeTextAccum) ? claudeTextAccum : stdout;
+
+      console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited code ${code} (${effectiveOutput.length} chars)`);
+      if (effectiveOutput.length > 0) {
+        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stdout: ${effectiveOutput.slice(0, 1000)}${effectiveOutput.length > 1000 ? '...' : ''}`);
       } else {
         console.log(`[${new Date().toISOString()}] WARNING: ${AGENT_CLI} produced EMPTY stdout`);
       }
@@ -445,12 +505,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
 
       if (code === 0) {
         try {
-          const result = JSON.parse(stdout);
+          const result = JSON.parse(effectiveOutput);
           resolve({ status: 'success', output: result });
         } catch (e) {
           // Use cached findings from watcher, or fall back to readFindings()
           // Note: readFindings() already deletes the file internally
-          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, effectiveOutput);
           // Clean up only if watcher cached (readFindings already deleted otherwise)
           if (cachedFindings) {
             try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}

@@ -23,14 +23,23 @@ const MIN_SIDEBAR_WIDTH = 280;
 const MAX_SIDEBAR_WIDTH = 600;
 const DEFAULT_SIDEBAR_WIDTH = 400;
 
+// Huddle chat message (for developer card pair programming view)
+export interface HuddleMessage {
+  text: string;
+  actor: 'developer' | 'qe' | 'flash';
+  timestamp: number;
+}
+
 // Agent stream state -- per-agent message buffers
 interface AgentStreamState {
   messages: string[];
+  huddleMessages: HuddleMessage[];  // Chat bubbles (developer only)
   eventId: string | null;
   isActive: boolean;
 }
 
 const AGENTS = ['architect', 'sysadmin', 'developer'] as const;
+const HUDDLE_ACTORS = ['developer', 'qe', 'flash'] as const;
 const MAX_BUFFER = 100;
 
 function DashboardInner() {
@@ -43,19 +52,41 @@ function DashboardInner() {
   // Agent streaming card state
   const [agentStreams, setAgentStreams] = useState<Record<string, AgentStreamState>>(() => {
     const init: Record<string, AgentStreamState> = {};
-    for (const a of AGENTS) init[a] = { messages: [], eventId: null, isActive: false };
+    for (const a of AGENTS) init[a] = { messages: [], huddleMessages: [], eventId: null, isActive: false };
     return init;
   });
 
   // Route WS messages to agent stream cards
   useWSMessage((msg) => {
-    if (msg.type === 'progress' && msg.actor && AGENTS.includes(msg.actor as typeof AGENTS[number])) {
-      setAgentStreams((prev) => {
-        const agent = msg.actor as string;
-        const current = prev[agent] || { messages: [], eventId: null, isActive: false };
-        const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
-        return { ...prev, [agent]: { messages, eventId: (msg.event_id as string) || current.eventId, isActive: true } };
-      });
+    if (msg.type === 'progress' && msg.actor) {
+      const actor = msg.actor as string;
+
+      // Huddle actors (qe, flash) route to the developer card as chat bubbles
+      if (actor === 'qe' || actor === 'flash') {
+        setAgentStreams((prev) => {
+          const dev = prev['developer'] || { messages: [], huddleMessages: [], eventId: null, isActive: false };
+          const huddle = [...dev.huddleMessages, {
+            text: msg.message as string,
+            actor: actor as 'qe' | 'flash',
+            timestamp: Date.now(),
+          }].slice(-MAX_BUFFER);
+          return { ...prev, developer: { ...dev, huddleMessages: huddle, isActive: true, eventId: (msg.event_id as string) || dev.eventId } };
+        });
+        return;
+      }
+
+      // Standard agent progress
+      if (AGENTS.includes(actor as typeof AGENTS[number])) {
+        setAgentStreams((prev) => {
+          const current = prev[actor] || { messages: [], huddleMessages: [], eventId: null, isActive: false };
+          const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
+          // Developer progress also goes to huddle chat
+          const huddleMessages = actor === 'developer'
+            ? [...current.huddleMessages, { text: msg.message as string, actor: 'developer' as const, timestamp: Date.now() }].slice(-MAX_BUFFER)
+            : current.huddleMessages;
+          return { ...prev, [actor]: { ...current, messages, huddleMessages, eventId: (msg.event_id as string) || current.eventId, isActive: true } };
+        });
+      }
     } else if (msg.type === 'turn') {
       const turn = msg.turn as Record<string, unknown>;
       const actor = turn?.actor as string;
@@ -154,6 +185,7 @@ function DashboardInner() {
               agentName={agent}
               eventId={agentStreams[agent]?.eventId || null}
               messages={agentStreams[agent]?.messages || []}
+              huddleMessages={agentStreams[agent]?.huddleMessages || []}
               isActive={agentStreams[agent]?.isActive || false}
             />
           ))}

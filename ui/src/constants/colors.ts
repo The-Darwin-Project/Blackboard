@@ -5,6 +5,8 @@ export const ACTOR_COLORS: Record<string, string> = {
   architect: '#3b82f6',
   sysadmin: '#f59e0b',
   developer: '#10b981',
+  qe: '#a855f7',      // Purple -- QE pair partner
+  flash: '#64748b',    // Slate gray -- Flash Manager moderator
   aligner: '#6b7280',
   user: '#ec4899',
 };

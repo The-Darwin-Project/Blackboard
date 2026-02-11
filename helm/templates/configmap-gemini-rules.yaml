@@ -14,3 +14,5 @@ data:
 {{ .Files.Get "files/sysadmin.md" | indent 4 }}
   developer.md: |
 {{ .Files.Get "files/developer.md" | indent 4 }}
+  qe.md: |
+{{ .Files.Get "files/qe.md" | indent 4 }}
