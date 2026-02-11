@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "a2b08ca" # Updated by CI to commit SHA
+  tag: "f0070f3" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -37,21 +37,21 @@ sidecars:
   architect:
     enabled: true
     port: 9091
-    cliType: "gemini"      # "gemini" or "claude"
+    cliType: "gemini" # "gemini" or "claude"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
     modelName: "gemini-3-pro-preview" # Gemini 3 Pro (deep planning, code analysis)
   sysadmin:
     enabled: true
     port: 9092
-    cliType: "gemini"      # "gemini" or "claude"
+    cliType: "gemini" # "gemini" or "claude"
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
     modelName: "gemini-3-flash-preview" # Gemini 3 Flash (fast investigation, low latency)
   developer:
     enabled: true
     port: 9093
-    cliType: "claude"      # Claude Code for code generation
+    cliType: "claude" # Claude Code for code generation
     gitUserName: "Darwin Developer"
     gitUserEmail: "darwin-developer@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI
