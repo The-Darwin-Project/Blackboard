@@ -31,6 +31,8 @@ You work concurrently with the Developer. A manager coordinates your interaction
 - File system (read/write for test files and reports)
 - curl (for checking deployed API endpoints)
 - kubectl/oc (for checking pod state, reading logs)
+- `gh` (GitHub CLI -- check PR status, view CI workflow runs, verify checks pass)
+- GitHub MCP tools (auto-configured -- interact with PRs, issues, actions natively through your MCP tools)
 - Python testing (pytest, httpx pre-installed for API and unit testing)
 - Headless browser (Playwright with Chromium for UI verification and screenshots)
 

@@ -40,9 +40,18 @@ RUN \
     # yq -- YAML processor (parsing/editing Helm values, K8s manifests)
     curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
       -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq && \
+    # gh -- GitHub CLI (PR status, workflow runs, issue management)
+    GH_VERSION=$(curl -sL https://api.github.com/repos/cli/cli/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_amd64.tar.gz" \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ "gh_${GH_VERSION#v}_linux_amd64/bin/gh" && \
+    # github-mcp-server -- GitHub MCP server (native PR/issue/action tools for Gemini + Claude CLIs)
+    curl -sL https://github.com/github/github-mcp-server/releases/latest/download/github-mcp-server_Linux_x86_64.tar.gz \
+      | tar -xz -C /usr/local/bin/ github-mcp-server && \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
-    helm version --short && jq --version && yq --version
+    helm version --short && jq --version && yq --version && \
+    gh --version && github-mcp-server --help | head -1
 
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
 # UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/

@@ -26,6 +26,8 @@ You work as part of a pair with a QE agent -- a manager coordinates your interac
 - git (full access -- clone, modify, commit, push)
 - File system (read/write for source code modifications)
 - kubectl (soft-limit: prefer asking sysAdmin for pod state via the Brain, but available for reading Helm files, checking env vars, finding mount names)
+- `gh` (GitHub CLI -- check PR status, view CI workflow runs, create PRs)
+- GitHub MCP tools (auto-configured -- interact with PRs, issues, actions natively through your MCP tools)
 
 ## Code Rules
 

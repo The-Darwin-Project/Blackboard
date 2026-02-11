@@ -233,6 +233,64 @@ function setupCLILoginsBackground() {
 }
 
 /**
+ * Configure GitHub MCP server + gh CLI auth with a fresh installation token.
+ * Both Gemini CLI and Claude Code use the MCP server for structured GitHub interaction.
+ * The gh CLI uses GH_TOKEN env var for direct commands.
+ *
+ * @param {string} token - GitHub App installation token
+ */
+function setupGitHubTooling(token) {
+    // 1. Set GH_TOKEN for gh CLI (persists in process env for child processes)
+    process.env.GH_TOKEN = token;
+
+    // 2. Configure GitHub MCP server for Gemini CLI
+    const geminiSettingsDir = `${process.env.HOME}/.gemini`;
+    const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
+    try {
+        fs.mkdirSync(geminiSettingsDir, { recursive: true });
+        // Read existing settings (may have other config)
+        let settings = {};
+        if (fs.existsSync(geminiSettingsPath)) {
+            try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
+        }
+        // Add/update GitHub MCP server config (stdio transport -- CLI spawns server as child)
+        settings.mcpServers = settings.mcpServers || {};
+        settings.mcpServers.GitHub = {
+            command: 'github-mcp-server',
+            args: ['stdio'],
+            env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
+        };
+        fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+        console.log(`[${new Date().toISOString()}] GitHub MCP configured for Gemini CLI`);
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] GitHub MCP config (Gemini) failed: ${err.message}`);
+    }
+
+    // 3. Configure GitHub MCP server for Claude Code
+    const claudeSettingsDir = `${process.env.HOME}/.claude`;
+    const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
+    try {
+        fs.mkdirSync(claudeSettingsDir, { recursive: true });
+        let claudeSettings = {};
+        if (fs.existsSync(claudeSettingsPath)) {
+            try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
+        }
+        claudeSettings.mcpServers = claudeSettings.mcpServers || {};
+        claudeSettings.mcpServers.GitHub = {
+            command: 'github-mcp-server',
+            args: ['stdio'],
+            env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
+        };
+        fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+        console.log(`[${new Date().toISOString()}] GitHub MCP configured for Claude Code`);
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] GitHub MCP config (Claude) failed: ${err.message}`);
+    }
+
+    console.log(`[${new Date().toISOString()}] gh CLI + GitHub MCP server ready`);
+}
+
+/**
  * Safe WebSocket send - only sends if connection is open
  */
 function wsSend(ws, data) {
@@ -583,6 +641,7 @@ async function handleRequest(req, res) {
       hasGitHubCredentials: hasGitHubCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
       hasKargoCredentials: fs.existsSync('/secrets/kargo/auth-token'),
+      hasGitHubMCP: !!process.env.GH_TOKEN,
     }));
     return;
   }
@@ -600,15 +659,14 @@ async function handleRequest(req, res) {
       
       const workDir = body.cwd || DEFAULT_WORK_DIR;
       
-      // Setup git credentials if GitHub App is configured
-      // Agent CLI will handle clone/pull/push itself
+      // Setup git credentials + GitHub tooling if GitHub App is configured
       if (hasGitHubCredentials()) {
         try {
           const token = await generateInstallationToken();
           setupGitCredentials(token, workDir);
+          setupGitHubTooling(token);
         } catch (err) {
           console.error(`[${new Date().toISOString()}] Git credential setup failed:`, err.message);
-          // Continue anyway - agent might not need git for this operation
           console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
         }
       }
@@ -685,11 +743,12 @@ wss.on('connection', (ws) => {
 
       console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars)`);
 
-      // Setup git credentials
+      // Setup git credentials + GitHub tooling
       if (hasGitHubCredentials()) {
         try {
           const token = await generateInstallationToken();
           setupGitCredentials(token, workDir);
+          setupGitHubTooling(token);
           wsSend(ws, { type: 'progress', event_id: eventId, message: 'Git credentials configured' });
         } catch (err) {
           wsSend(ws, { type: 'progress', event_id: eventId, message: `Git credentials failed: ${err.message}, continuing...` });
