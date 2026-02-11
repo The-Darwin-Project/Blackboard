@@ -20,6 +20,7 @@ import type { ConversationTurn, MessageStatus } from '../api/types';
 import { useQuery } from '@tanstack/react-query';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
+import { RefreshCw } from 'lucide-react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import mermaid from 'mermaid';
 import { getCodeString } from 'rehype-rewrite';
@@ -463,6 +464,23 @@ function TurnBubble({
   onStatusChange?: () => void;
 }) {
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
+
+  // Transient errors (429 rate limit, 503 unavailable) -- show retry spinner instead of scary error text
+  const isTransientError = turn.action === 'error' && turn.thoughts &&
+    (/429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|rate.limit|quota/i.test(turn.thoughts));
+  if (isTransientError) {
+    return (
+      <div style={{
+        borderLeft: '3px solid #64748b', paddingLeft: 12, marginBottom: 8,
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 12px', color: '#64748b', fontSize: 12, fontStyle: 'italic',
+      }}>
+        <RefreshCw size={14} className="animate-spin" />
+        Brain retrying...
+      </div>
+    );
+  }
+
   return (
     <div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12, marginBottom: 12 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
