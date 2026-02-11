@@ -587,6 +587,16 @@ export function ConversationFeed() {
     else sessionStorage.removeItem(SESSION_KEY);
   }, [selectedEventId]);
 
+  // Listen for external navigation (e.g., WaitingBell click)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const eventId = (e as CustomEvent).detail;
+      if (eventId) setSelectedEventId(eventId);
+    };
+    window.addEventListener('darwin:selectEvent', handler);
+    return () => window.removeEventListener('darwin:selectEvent', handler);
+  }, []);
+
   const { data: activeEvents } = useActiveEvents();
   const { data: closedEvents } = useQuery({
     queryKey: ['closedEvents'],

@@ -183,8 +183,8 @@ Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL ser
 """
 
 # Circuit breaker limits
-MAX_TURNS_PER_EVENT = 30
-MAX_EVENT_DURATION_SECONDS = 2700  # 45 minutes
+MAX_TURNS_PER_EVENT = 100
+MAX_INACTIVITY_SECONDS = 1800  # 30 minutes with no new turns = stale
 
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
@@ -352,25 +352,18 @@ class Brain:
             )
             return
 
-        # Circuit breaker: max duration with grace period
-        if event.conversation:
-            first_turn_time = event.conversation[0].timestamp
-            deadline = MAX_EVENT_DURATION_SECONDS
+        # Circuit breaker: inactivity timeout (no new turns for 30 min = stale)
+        # Active events with recent turns never time out, regardless of total duration.
+        # Events waiting for user (approval/response) are exempt -- they're intentionally idle.
+        if event.conversation and event_id not in self._waiting_for_user:
+            last_turn_time = event.conversation[-1].timestamp
+            inactivity = time.time() - last_turn_time
 
-            # Grace period: if an agent just returned, give the LLM time to evaluate
-            last_agent_turn = next(
-                (t for t in reversed(event.conversation)
-                 if t.actor in ("architect", "sysadmin", "developer")),
-                None,
-            )
-            if last_agent_turn and (time.time() - last_agent_turn.timestamp) < 60:
-                deadline += 120  # 2-minute grace for LLM evaluation
-
-            if time.time() - first_turn_time > deadline:
-                logger.warning(f"Event {event_id} exceeded max duration")
+            if inactivity > MAX_INACTIVITY_SECONDS:
+                logger.warning(f"Event {event_id} inactive for {inactivity:.0f}s (max {MAX_INACTIVITY_SECONDS}s)")
                 await self._close_and_broadcast(
                     event_id,
-                    f"TIMEOUT: Event exceeded {MAX_EVENT_DURATION_SECONDS}s. Force closed.",
+                    f"STALE: No activity for {int(inactivity // 60)} minutes. Force closed.",
                 )
                 return
 
