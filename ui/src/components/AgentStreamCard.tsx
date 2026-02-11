@@ -117,8 +117,13 @@ function FloatingWindow({
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ background: color, color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
-            {isChatMode ? 'dev + qe' : agentName}
+            {agentName}
           </span>
+          {agentName === 'developer' && (
+            <span style={{ background: ACTOR_COLORS['qe'] || '#a855f7', color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
+              qe
+            </span>
+          )}
           {eventId && <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>[{eventId}]</span>}
         </div>
         <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 18, cursor: 'pointer', lineHeight: 1, padding: '0 4px' }}>×</button>
@@ -175,12 +180,19 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
           padding: '6px 10px', borderBottom: `1px solid ${isActive ? color + '33' : '#1e293b'}`,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
             <span style={{ background: color, color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
-              {isChatMode ? 'dev + qe' : agentName}
+              {agentName}
             </span>
-            {eventId && <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>[{eventId.slice(0, 12)}]</span>}
-            {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />}
+            <span style={{ flex: 1, textAlign: 'center' }}>
+              {eventId && <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>[{eventId.slice(0, 12)}]</span>}
+              {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}
+            </span>
+            {agentName === 'developer' && (
+              <span style={{ background: ACTOR_COLORS['qe'] || '#a855f7', color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
+                qe
+              </span>
+            )}
           </div>
           <button onClick={() => setPoppedOut(true)} title="Pop out" style={{
             background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
