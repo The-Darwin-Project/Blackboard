@@ -73,10 +73,11 @@ async def lifespan(app: FastAPI):
         logger.info("Blackboard state initialized")
         
         # Initialize agents (WebSocket clients to sidecars)
-        from .agents import Aligner, Architect, SysAdmin, Developer, Brain
+        from .agents import Aligner, Archivist, Architect, SysAdmin, Developer, Brain
         import asyncio
         
         aligner = Aligner(blackboard)
+        archivist = Archivist()
         architect = Architect()
         sysadmin = SysAdmin()
         developer = Developer()
@@ -115,6 +116,7 @@ async def lifespan(app: FastAPI):
                 "sysadmin": sysadmin,
                 "developer": developer,
                 "_aligner": aligner,  # In-process agent for verification checks
+                "_archivist_memory": archivist,  # Deep memory archiver (Qdrant)
             },
             broadcast=broadcast_to_ui,
         )

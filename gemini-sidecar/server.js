@@ -341,9 +341,19 @@ async function executeCLI(prompt, options = {}) {
     
     let stdout = '';
     let stderr = '';
+    let claudeTextAccum = '';  // Accumulate parsed text from Claude stream-json
     
     child.stdout.on('data', (data) => {
-      stdout += data.toString();
+      const text = data.toString();
+      stdout += text;
+      // Parse Claude stream-json lines to extract readable text
+      if (AGENT_CLI === 'claude') {
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
+          const parsed = parseClaudeStreamLine(line);
+          if (parsed) claudeTextAccum += parsed;
+        }
+      }
     });
     
     child.stderr.on('data', (data) => {
@@ -354,20 +364,23 @@ async function executeCLI(prompt, options = {}) {
       // Close the watcher
       if (watcher) { try { watcher.close(); } catch(e) {} }
 
+      // For Claude stream-json, the readable output is in claudeTextAccum, not raw stdout
+      const effectiveOutput = (AGENT_CLI === 'claude' && claudeTextAccum) ? claudeTextAccum : stdout;
+
       console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
-      console.log(`[${new Date().toISOString()}] stdout (${stdout.length} chars): ${stdout.slice(0, 500)}${stdout.length > 500 ? '...' : ''}`);
+      console.log(`[${new Date().toISOString()}] stdout (${effectiveOutput.length} chars): ${effectiveOutput.slice(0, 500)}${effectiveOutput.length > 500 ? '...' : ''}`);
       if (stderr) {
         console.log(`[${new Date().toISOString()}] stderr: ${stderr.slice(0, 500)}${stderr.length > 500 ? '...' : ''}`);
       }
       
       if (code === 0) {
         try {
-          const result = JSON.parse(stdout);
+          const result = JSON.parse(effectiveOutput);
           resolve({ status: 'success', exitCode: code, output: result });
         } catch (e) {
           // Use cached findings from watcher, or fall back to readFindings()
           // Note: readFindings() already deletes the file internally
-          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, stdout);
+          const findings = cachedFindings || readFindings(options.cwd || DEFAULT_WORK_DIR, effectiveOutput);
           // Clean up only if watcher cached (readFindings already deleted otherwise)
           if (cachedFindings) {
             try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(err) {}
@@ -379,7 +392,7 @@ async function executeCLI(prompt, options = {}) {
           status: 'failed', 
           exitCode: code, 
           stderr: stderr,
-          stdout: stdout 
+          stdout: effectiveOutput 
         });
       }
     });

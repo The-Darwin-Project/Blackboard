@@ -39,7 +39,6 @@ interface AgentStreamState {
 }
 
 const AGENTS = ['architect', 'sysadmin', 'developer'] as const;
-const HUDDLE_ACTORS = ['developer', 'qe', 'flash'] as const;
 const MAX_BUFFER = 100;
 
 function DashboardInner() {
