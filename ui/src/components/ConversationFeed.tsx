@@ -464,6 +464,8 @@ function TurnBubble({
   onStatusChange?: () => void;
 }) {
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
+  // Human actors render right-aligned (user, future: slack_user, etc.)
+  const isHuman = turn.actor === 'user';
 
   // Transient errors (429 rate limit, 503 unavailable) -- show retry spinner instead of scary error text
   const isTransientError = turn.action === 'error' && turn.thoughts &&
@@ -482,20 +484,29 @@ function TurnBubble({
   }
 
   return (
-    <div style={{ borderLeft: `3px solid ${color}`, paddingLeft: 12, marginBottom: 12 }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+    <div style={{
+      ...(isHuman
+        ? { borderRight: `3px solid ${color}`, paddingRight: 12, marginLeft: 'auto', maxWidth: '85%', textAlign: 'right' as const }
+        : { borderLeft: `3px solid ${color}`, paddingLeft: 12 }),
+      marginBottom: 12,
+    }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, ...(isHuman ? { justifyContent: 'flex-end' } : {}) }}>
+        {isHuman && attachment && (
+          <AttachmentIcon filename={attachment.filename} content={attachment.content} />
+        )}
+        {isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
+        <span style={{ fontSize: 11, color: '#666' }}>
+          {new Date(turn.timestamp * 1000).toLocaleTimeString()}
+        </span>
+        <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
         <span style={{
           background: color, color: '#fff', padding: '2px 8px',
           borderRadius: 12, fontSize: 12, fontWeight: 600,
         }}>
           {turn.actor}
         </span>
-        <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
-        <span style={{ fontSize: 11, color: '#666' }}>
-          {new Date(turn.timestamp * 1000).toLocaleTimeString()}
-        </span>
-        {turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
-        {attachment && (
+        {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
+        {!isHuman && attachment && (
           <AttachmentIcon filename={attachment.filename} content={attachment.content} />
         )}
       </div>
@@ -504,7 +515,7 @@ function TurnBubble({
         <img
           src={turn.image}
           alt="User attachment"
-          style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer' }}
+          style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }}
           onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')}
         />
       )}
