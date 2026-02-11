@@ -139,11 +139,12 @@ class GeminiAdapter:
     ) -> AsyncIterator[LLMChunk]:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens)
 
-        async for chunk in self._client.aio.models.generate_content_stream(
+        stream = await self._client.aio.models.generate_content_stream(
             model=self._model_name,
             contents=self._convert_contents(contents),
             config=config,
-        ):
+        )
+        async for chunk in stream:
             if chunk.text:
                 yield LLMChunk(text=chunk.text)
             if chunk.function_calls:
