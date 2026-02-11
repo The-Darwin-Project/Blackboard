@@ -3,6 +3,7 @@
 # 1. [Constraint]: Only import google.genai inside this file. Never leak SDK types outside.
 # 2. [Pattern]: _build_config() shared by generate() and generate_stream(). tools=None omits tool config.
 # 3. [Gotcha]: generate_content_stream chunk may have .text AND .function_calls -- process both.
+# 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 4. [Pattern]: _convert_tools() converts plain dict schemas to google.genai FunctionDeclaration objects.
 # 5. [Gotcha]: Temperature range 0.0-2.0 -- passthrough, no normalization needed.
 """
@@ -54,6 +55,8 @@ class GeminiAdapter:
             "temperature": temperature,
             "top_p": top_p,
             "max_output_tokens": max_output_tokens,
+            # Enable thinking tokens -- streamed as part.thought=True before the response
+            "thinking_config": types.ThinkingConfig(include_thoughts=True),
         }
         if system_prompt:
             kwargs["system_instruction"] = system_prompt
@@ -145,8 +148,19 @@ class GeminiAdapter:
             config=config,
         )
         async for chunk in stream:
+            # Check for thinking tokens (part.thought=True) in candidates
+            if chunk.candidates:
+                for candidate in chunk.candidates:
+                    if candidate.content and candidate.content.parts:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'thought') and part.thought and hasattr(part, 'text') and part.text:
+                                yield LLMChunk(text=part.text, is_thought=True)
+
+            # Regular text chunks (non-thought)
             if chunk.text:
                 yield LLMChunk(text=chunk.text)
+
+            # Function call (final chunk)
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
                 yield LLMChunk(

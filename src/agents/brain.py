@@ -454,6 +454,7 @@ class Brain:
                             "event_id": event_id,
                             "text": chunk.text,
                             "accumulated": accumulated_text,
+                            "is_thought": chunk.is_thought,  # True for reasoning tokens
                         })
 
                 if chunk.function_call:

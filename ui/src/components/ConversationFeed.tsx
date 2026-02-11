@@ -591,7 +591,7 @@ export function ConversationFeed() {
     () => sessionStorage.getItem(SESSION_KEY),
   );
   const [activeAgents, setActiveAgents] = useState<Record<string, string>>({});
-  const [brainThinking, setBrainThinking] = useState<{ eventId: string; text: string } | null>(null);
+  const [brainThinking, setBrainThinking] = useState<{ eventId: string; text: string; isThought: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
   const [showClosed, setShowClosed] = useState(false);
   const [pendingImage, setPendingImage] = useState<string | null>(null); // base64 data URI
@@ -641,6 +641,7 @@ export function ConversationFeed() {
       setBrainThinking({
         eventId: msg.event_id as string,
         text: msg.accumulated as string,
+        isThought: (msg.is_thought as boolean) || false,
       });
     } else if (msg.type === 'brain_thinking_done') {
       setBrainThinking(null);
@@ -931,15 +932,17 @@ export function ConversationFeed() {
               <div style={{
                 padding: '8px 12px',
                 margin: '4px 0',
-                borderLeft: '3px solid #3b82f6',
-                background: '#1e3a5f15',
+                borderLeft: `3px solid ${brainThinking.isThought ? '#8b5cf6' : '#3b82f6'}`,
+                background: brainThinking.isThought ? '#7c3aed10' : '#1e3a5f15',
                 borderRadius: 4,
                 fontSize: 13,
                 color: '#94a3b8',
                 fontStyle: 'italic',
                 animation: 'pulse 2s infinite',
               }}>
-                <span style={{ color: '#3b82f6', fontWeight: 600, fontSize: 11 }}>Brain thinking...</span>
+                <span style={{ color: brainThinking.isThought ? '#8b5cf6' : '#3b82f6', fontWeight: 600, fontSize: 11 }}>
+                  {brainThinking.isThought ? '🧠 Brain reasoning...' : 'Brain thinking...'}
+                </span>
                 <p style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap' }}>{brainThinking.text}</p>
               </div>
             )}

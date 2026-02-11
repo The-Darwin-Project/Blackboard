@@ -41,6 +41,7 @@ class LLMChunk:
     text: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     done: bool = False
+    is_thought: bool = False  # True for thinking/reasoning tokens (Gemini ThinkingConfig)
 
 
 # =============================================================================
