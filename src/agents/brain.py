@@ -1167,7 +1167,7 @@ class Brain:
                     await self.broadcast({
                         "type": "progress",
                         "event_id": event_id,
-                        "actor": agent_name,
+                        "actor": progress_data.get("actor", agent_name),
                         "message": progress_data.get("message", ""),
                     })
 
