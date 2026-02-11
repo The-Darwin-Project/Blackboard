@@ -15,6 +15,12 @@ data:
   # Vertex AI Models
   VERTEX_MODEL_PRO: "{{ .Values.gcp.models.pro }}"
   VERTEX_MODEL_FLASH: "{{ .Values.gcp.models.flash }}"
+  VERTEX_MODEL_CLAUDE: "{{ .Values.gcp.models.claude }}"
+  
+  # LLM Provider & Temperature
+  LLM_PROVIDER: "{{ .Values.gcp.provider }}"
+  LLM_TEMPERATURE_BRAIN: "{{ .Values.gcp.temperature.brain }}"
+  LLM_TEMPERATURE_ALIGNER: "{{ .Values.gcp.temperature.aligner }}"
   
   # Application Info
   APP_NAME: "{{ .Values.app.name }}"

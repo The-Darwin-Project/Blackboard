@@ -107,9 +107,15 @@ sidecars:
 gcp:
   project: "cnv-ai-insights" # Required: GCP project ID
   location: "global"
+  provider: "gemini"          # Brain LLM provider: "gemini" or "claude"
   models:
     pro: "gemini-3-pro-preview"
     flash: "gemini-3-flash-preview"
+    claude: "claude-opus-4-6" # Claude model ID (used when provider=claude)
+  # LLM sampling parameters (0.0-2.0 range, normalized per provider)
+  temperature:
+    brain: "0.8"              # Brain orchestrator decisions
+    aligner: "0.3"            # Aligner metrics analysis (Flash)
   # Service account JSON can be mounted via secret
   # Set existingSecret to use a pre-created secret
   existingSecret: ""

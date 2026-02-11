@@ -10,6 +10,8 @@
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
 # 9. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak.
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
+# 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
+# 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -193,215 +195,6 @@ VOLUME_PATHS = {
 }
 
 
-def _build_brain_tools():
-    """Build google-genai function declarations for Brain's available actions."""
-    try:
-        from google.genai import types
-
-        select_agent = types.FunctionDeclaration(
-            name="select_agent",
-            description="Route work to an agent. Use this to assign a task to Architect, sysAdmin, or Developer.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "agent_name": {
-                        "type": "string",
-                        "enum": ["architect", "sysadmin", "developer"],
-                        "description": "Which agent to route to",
-                    },
-                    "task_instruction": {
-                        "type": "string",
-                        "description": "What the agent should do (be specific and actionable)",
-                    },
-                },
-                "required": ["agent_name", "task_instruction"],
-            },
-        )
-
-        close_event = types.FunctionDeclaration(
-            name="close_event",
-            description="Close the event as resolved. Use when the issue is fixed and verified, or the request is complete.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Summary of what was done and the outcome",
-                    },
-                },
-                "required": ["summary"],
-            },
-        )
-
-        request_user_approval = types.FunctionDeclaration(
-            name="request_user_approval",
-            description="Pause and ask the user to approve a plan. Use for structural changes (source code, templates).",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "plan_summary": {
-                        "type": "string",
-                        "description": "Summary of the plan for the user to review",
-                    },
-                },
-                "required": ["plan_summary"],
-            },
-        )
-
-        re_trigger_aligner = types.FunctionDeclaration(
-            name="re_trigger_aligner",
-            description="Ask the Aligner to verify that a change took effect (e.g., replicas increased, CPU normalized).",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "service": {
-                        "type": "string",
-                        "description": "Service to check",
-                    },
-                    "check_condition": {
-                        "type": "string",
-                        "description": "What condition to verify (e.g., 'replicas == 2', 'CPU < 80%')",
-                    },
-                },
-                "required": ["service", "check_condition"],
-            },
-        )
-
-        ask_agent_for_state = types.FunctionDeclaration(
-            name="ask_agent_for_state",
-            description="Ask an agent for information (e.g., ask sysAdmin for kubectl logs, pod status).",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "agent_name": {
-                        "type": "string",
-                        "enum": ["architect", "sysadmin", "developer"],
-                        "description": "Which agent to ask",
-                    },
-                    "question": {
-                        "type": "string",
-                        "description": "What information you need",
-                    },
-                },
-                "required": ["agent_name", "question"],
-            },
-        )
-
-        wait_for_verification = types.FunctionDeclaration(
-            name="wait_for_verification",
-            description="Mark that you are waiting for the Aligner to confirm a state change.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "condition": {
-                        "type": "string",
-                        "description": "What you are waiting for",
-                    },
-                },
-                "required": ["condition"],
-            },
-        )
-
-        defer_event = types.FunctionDeclaration(
-            name="defer_event",
-            description="Defer an event for later processing. Use when an agent is busy, the issue is not urgent, or you want to retry after a cooldown period.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Why this event is being deferred (e.g., 'agent busy', 'waiting for cooldown')",
-                    },
-                    "delay_seconds": {
-                        "type": "integer",
-                        "description": "How many seconds to wait before re-processing (30-300)",
-                    },
-                },
-                "required": ["reason", "delay_seconds"],
-            },
-        )
-
-        wait_for_user = types.FunctionDeclaration(
-            name="wait_for_user",
-            description="Signal that the current question is answered but agent recommendations exist. "
-                        "Summarize findings and available next actions for the user.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "Summary of findings and available actions",
-                    },
-                },
-                "required": ["summary"],
-            },
-        )
-
-        lookup_service = types.FunctionDeclaration(
-            name="lookup_service",
-            description="Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, version, replicas, and current metrics. Use this BEFORE routing to an agent when you need a service's repository URL or deployment details.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "service_name": {
-                        "type": "string",
-                        "description": "Service name to look up (e.g., 'darwin-store')",
-                    },
-                },
-                "required": ["service_name"],
-            },
-        )
-
-        lookup_journal = types.FunctionDeclaration(
-            name="lookup_journal",
-            description="Look up the ops journal for any service. Returns recent event history "
-                        "(closures, scaling actions, fixes). Use to check what happened recently "
-                        "to a service or its dependencies before making decisions.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "service_name": {
-                        "type": "string",
-                        "description": "Service name to look up (e.g., 'darwin-store', 'postgres')",
-                    },
-                },
-                "required": ["service_name"],
-            },
-        )
-
-        consult_deep_memory = types.FunctionDeclaration(
-            name="consult_deep_memory",
-            description="Search operational history for similar past events. Returns symptoms, root causes, and fixes from past incidents. Use before acting on unfamiliar issues.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to search for (e.g., 'high CPU on darwin-store')",
-                    },
-                },
-                "required": ["query"],
-            },
-        )
-
-        return types.Tool(function_declarations=[
-            select_agent,
-            close_event,
-            request_user_approval,
-            re_trigger_aligner,
-            ask_agent_for_state,
-            wait_for_verification,
-            wait_for_user,
-            defer_event,
-            lookup_service,
-            lookup_journal,
-            consult_deep_memory,
-        ])
-
-    except ImportError:
-        logger.warning("google-genai not available - Brain running in probe mode")
-        return None
-
 
 class Brain:
     """
@@ -421,8 +214,6 @@ class Brain:
         self.agents = agents or {}
         self.broadcast = broadcast  # async callable to push to UI WebSocket clients
         self._running = False
-        self._client = None
-        self._tools = None
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
@@ -442,8 +233,15 @@ class Brain:
         # LLM config from environment
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
-        self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
-        logger.info(f"Brain initialized (project={self.project}, model={self.model_name}, agents={list(self.agents.keys())})")
+        self.provider = os.getenv("LLM_PROVIDER", "gemini")
+        self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
+        # Model selection based on provider
+        if self.provider == "claude":
+            self.model_name = os.getenv("VERTEX_MODEL_CLAUDE", "claude-opus-4-6")
+        else:
+            self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
+        self._adapter = None  # Lazy-loaded via _get_adapter()
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, agents={list(self.agents.keys())})")
 
     JOURNAL_CACHE_TTL = 60  # seconds
 
@@ -457,31 +255,26 @@ class Brain:
         self._journal_cache[service] = (now, entries)
         return entries
 
-    async def _get_client(self):
-        """Lazy-load google-genai Client with Brain tools."""
-        if self._client is None:
+    async def _get_adapter(self):
+        """Lazy-load LLM adapter (Gemini or Claude based on LLM_PROVIDER)."""
+        if self._adapter is None:
             try:
-                from google import genai
+                from .llm import create_adapter
 
-                tools = _build_brain_tools()
-                if not tools:
-                    logger.warning("Brain tools not available - staying in probe mode")
-                    return None
-
-                self._client = genai.Client(
-                    vertexai=True,
+                self._adapter = create_adapter(
+                    provider=self.provider,
                     project=self.project,
                     location=self.location,
+                    model_name=self.model_name,
                 )
-                self._tools = tools
                 self._llm_available = True
-                logger.info(f"Brain LLM initialized: {self.model_name} (google-genai)")
+                logger.info(f"Brain LLM adapter initialized: {self.provider}/{self.model_name}")
 
             except Exception as e:
-                logger.warning(f"google-genai not available: {e}. Brain stays in probe mode.")
-                self._client = None
+                logger.warning(f"LLM adapter not available: {e}. Brain stays in probe mode.")
+                self._adapter = None
 
-        return self._client
+        return self._adapter
 
     # =========================================================================
     # Event Processing
@@ -586,9 +379,9 @@ class Brain:
         # and stay SENT/DELIVERED for the next event loop iteration.
         turn_snapshot = len(event.conversation)
 
-        # Get LLM client; fall back to probe mode if unavailable
-        client = await self._get_client()
-        if not client:
+        # Get LLM adapter; fall back to probe mode if unavailable
+        adapter = await self._get_adapter()
+        if not adapter:
             # PROBE MODE fallback (no LLM available)
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
@@ -612,7 +405,7 @@ class Brain:
                 event = await self.blackboard.get_event(event_id)
                 if not event:
                     return
-            should_continue = await self._process_with_llm(event_id, event, client)
+            should_continue = await self._process_with_llm(event_id, event)
             if not should_continue:
                 break
             logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
@@ -632,58 +425,55 @@ class Brain:
         self,
         event_id: str,
         event: EventDocument,
-        client,
     ) -> bool:
-        """Process event using google-genai LLM function calling.
+        """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
         Returns True if the caller should re-invoke immediately (e.g., after
         a lookup_service call that needs a follow-up LLM decision).
+
+        Precondition: self._adapter is not None (caller checks via _get_adapter()).
         """
-        from google.genai import types
+        from .llm import BRAIN_TOOL_SCHEMAS
+
+        if not self._adapter:
+            logger.error(f"_process_with_llm called without adapter for {event_id}")
+            return False
 
         # Build prompt from event context
         prompt = await self._build_event_prompt(event)
+        accumulated_text = ""
+        function_call = None
 
         try:
-            response = await client.aio.models.generate_content(
-                model=self.model_name,
+            async for chunk in self._adapter.generate_stream(
+                system_prompt=BRAIN_SYSTEM_PROMPT,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=BRAIN_SYSTEM_PROMPT,
-                    temperature=1.2,
-                    top_p=0.95,
-                    max_output_tokens=65000,
-                    tools=[self._tools],
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                ),
-            )
+                tools=BRAIN_TOOL_SCHEMAS,
+                temperature=self.temperature,
+                max_output_tokens=65000,
+            ):
+                if chunk.text:
+                    accumulated_text += chunk.text
+                    # Stream thinking to UI in real-time
+                    if self.broadcast:
+                        await self.broadcast({
+                            "type": "brain_thinking",
+                            "event_id": event_id,
+                            "text": chunk.text,
+                            "accumulated": accumulated_text,
+                        })
 
-            # Check for function call (null-safety: can be None or [])
-            if response.function_calls:
-                fc = response.function_calls[0]
-                func_name = fc.name
-                func_args = fc.args if fc.args else {}
-                logger.info(f"Brain LLM decision for {event_id}: {func_name}({func_args})")
-                return await self._execute_function_call(event_id, func_name, func_args)
-
-            # Text-only response (no function call) -- treat as brain thoughts
-            if response.text:
-                turn = ConversationTurn(
-                    turn=len(event.conversation) + 1,
-                    actor="brain",
-                    action="think",
-                    thoughts=response.text,
-                )
-                await self.blackboard.append_turn(event_id, turn)
-                await self._broadcast_turn(event_id, turn)
-                logger.info(f"Brain LLM produced thoughts (no function call) for {event_id}")
-                return False
-
-            logger.warning(f"Brain LLM returned empty response for {event_id}")
-            return False
+                if chunk.function_call:
+                    function_call = chunk.function_call
 
         except Exception as e:
-            logger.error(f"Brain LLM call failed for {event_id}: {e}", exc_info=True)
+            logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+            # Clear thinking indicator on error
+            if self.broadcast:
+                await self.broadcast({
+                    "type": "brain_thinking_done",
+                    "event_id": event_id,
+                })
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -694,11 +484,38 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             return False
 
+        # Clear thinking indicator (committed turn replaces it)
+        if self.broadcast:
+            await self.broadcast({
+                "type": "brain_thinking_done",
+                "event_id": event_id,
+            })
+
+        # Process the final result
+        if function_call:
+            logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
+            return await self._execute_function_call(event_id, function_call.name, function_call.args)
+
+        if accumulated_text:
+            turn = ConversationTurn(
+                turn=len(event.conversation) + 1,
+                actor="brain",
+                action="think",
+                thoughts=accumulated_text,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return False
+
+        logger.warning(f"Brain LLM returned empty response for {event_id}")
+        return False
+
     async def _build_event_prompt(self, event: EventDocument) -> str | list:
         """Serialize event document as prompt for the LLM.
 
-        Returns str when no images, or list[types.Part] for multimodal input.
-        The google-genai SDK accepts both types in generate_content(contents=...).
+        Returns str when no images, or list for multimodal input:
+        [text_str, {"bytes": bytes, "mime_type": str}]
+        Each LLM adapter converts to its SDK's native format.
         """
         lines = [
             f"Event ID: {event.id}",
@@ -840,15 +657,12 @@ class Brain:
         if last_image:
             try:
                 import base64
-                from google.genai import types
                 # Parse data URI: "data:image/png;base64,iVBOR..."
                 header, b64data = last_image.split(",", 1)
                 mime_type = header.split(":")[1].split(";")[0]
                 image_bytes = base64.b64decode(b64data)
-                return [
-                    types.Part.from_text(text=text_prompt),
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ]
+                # Provider-agnostic multimodal: each adapter converts to SDK format
+                return [text_prompt, {"bytes": image_bytes, "mime_type": mime_type}]
             except Exception as e:
                 logger.warning(f"Failed to parse image for multimodal prompt: {e}")
 

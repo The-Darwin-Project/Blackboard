@@ -3,8 +3,9 @@
 # 1. [Pattern]: check_active_verifications extracts target_service from evidence field (target_service:xxx).
 # 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
 # 3. [Gotcha]: _notify_active_events uses conversation-state gate: skips if Brain's last action is route/verify/defer/wait with no response yet.
-# 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. Only google-genai for Flash model.
-# 5. [Constraint]: All generate_content() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
+# 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
+# 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
+# 6. [Pattern]: Aligner always uses GeminiAdapter (Flash) -- never Claude. Provider is hardcoded to "gemini".
 """
 Agent 1: The Aligner (The Listener)
 
@@ -19,8 +20,8 @@ for autonomous analysis, completing the observation → strategy loop.
 
 AIR GAP: This module may import google-genai (for Flash model) but NOT kubernetes or git.
 """
-# NOTE: Aligner uses google-genai SDK for Flash model (filter config, signal analysis).
-# Independent of Brain's Pro model. Do NOT remove google.genai imports.
+# NOTE: Aligner uses GeminiAdapter (Flash model) via .llm subpackage.
+# Independent of Brain's Pro model. Always uses "gemini" provider.
 from __future__ import annotations
 
 import logging
@@ -101,93 +102,6 @@ Use "complex" or "chaotic" only when the data is genuinely confusing or the syst
 )
 
 
-def _build_aligner_tools():
-    """Build function declarations for the Aligner Flash model."""
-    from google.genai import types
-
-    create_event = types.FunctionDeclaration(
-        name="create_event",
-        description=(
-            "Create a new event for the Brain to investigate. "
-            "Use when you detect a sustained anomaly that requires attention."
-        ),
-        parameters_json_schema={
-            "type": "object",
-            "properties": {
-                "service": {"type": "string", "description": "Service name"},
-                "observation": {
-                    "type": "string",
-                    "description": "Your full observation in natural language -- what you saw, the numbers, the trend, and why it needs attention",
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": ["warning", "critical"],
-                    "description": "How urgent: warning (degraded but functional) or critical (service impacted)",
-                },
-                "domain": {
-                    "type": "string",
-                    "enum": ["clear", "complicated", "complex", "chaotic"],
-                    "description": "Cynefin domain: clear (known fix), complicated (needs analysis), complex (unknown cause), chaotic (system down)",
-                },
-                "execution_mode": {
-                    "type": "string",
-                    "description": "Cynefin response pattern: sense-categorize-respond, sense-analyze-respond, probe-sense-respond, or act-sense-respond",
-                },
-                "metrics": {
-                    "type": "object",
-                    "description": "Current metric snapshot",
-                    "properties": {
-                        "cpu": {"type": "number", "description": "CPU usage %"},
-                        "memory": {"type": "number", "description": "Memory usage %"},
-                        "error_rate": {"type": "number", "description": "Error rate %"},
-                        "replicas": {"type": "integer", "description": "Replica count"},
-                    },
-                },
-            },
-            "required": ["service", "observation", "severity", "domain"],
-        },
-    )
-
-    update_active_event = types.FunctionDeclaration(
-        name="update_active_event",
-        description=(
-            "Add new metric observations to an active event the Brain is already working on. "
-            "Use when you see new data relevant to an ongoing investigation."
-        ),
-        parameters_json_schema={
-            "type": "object",
-            "properties": {
-                "service": {"type": "string", "description": "Service name"},
-                "observation": {
-                    "type": "string",
-                    "description": "Your updated observation -- new metrics, trend changes, or confirmation of ongoing issue",
-                },
-            },
-            "required": ["service", "observation"],
-        },
-    )
-
-    report_recovery = types.FunctionDeclaration(
-        name="report_recovery",
-        description=(
-            "Report that a service's metrics have returned to normal. "
-            "Use ONLY when the latest metrics are clearly below ALL thresholds."
-        ),
-        parameters_json_schema={
-            "type": "object",
-            "properties": {
-                "service": {"type": "string", "description": "Service name"},
-                "observation": {
-                    "type": "string",
-                    "description": "What you observed -- the peak values, current values, trend, and why you believe the anomaly is resolved",
-                },
-            },
-            "required": ["service", "observation"],
-        },
-    )
-
-    return types.Tool(function_declarations=[create_event, update_active_event, report_recovery])
-
 
 class FilterRule:
     """A filter rule for noise reduction."""
@@ -228,17 +142,17 @@ class Aligner:
     - Apply filter rules for noise reduction
     - Update Blackboard state layers
     - Detect anomalies and trigger Architect (closed-loop)
-    - Configurable via natural language (Gemini Flash via google-genai)
+    - Configurable via natural language (Gemini Flash via LLM adapter)
     """
     
     def __init__(self, blackboard: "BlackboardState"):
         self.blackboard = blackboard
         self.filter_rules: list[FilterRule] = []
-        self._client = None
-        self._model_name = None
+        self._adapter = None
         
-        # Check if google-genai is configured
-        self.vertex_enabled = bool(os.getenv("GCP_PROJECT"))
+        # LLM config -- Aligner always uses Gemini Flash
+        self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
+        self.temperature = float(os.getenv("LLM_TEMPERATURE_ALIGNER", "0.3"))
         
         # Closed-loop state tracking
         self._known_services: set[str] = set()
@@ -255,30 +169,24 @@ class Aligner:
         self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
-        self._aligner_tools = None  # Cached function declarations for Flash
     
-    async def _get_client(self):
-        """Lazy-load google-genai Client for Aligner LLM calls."""
-        if self._client is None and self.vertex_enabled:
+    async def _get_adapter(self):
+        """Lazy-load LLM adapter (always Gemini Flash for Aligner)."""
+        if self._adapter is None and self._llm_enabled:
             try:
-                from google import genai
+                from .llm import create_adapter
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                self._model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
+                model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
                 
-                self._client = genai.Client(
-                    vertexai=True,
-                    project=project,
-                    location=location,
-                )
-                
-                logger.info(f"Aligner initialized with google-genai Flash: {self._model_name}")
+                self._adapter = create_adapter("gemini", project, location, model_name)
+                logger.info(f"Aligner LLM adapter initialized: gemini/{model_name}")
             except Exception as e:
-                logger.warning(f"google-genai not available for Aligner: {e}")
-                self._client = None
+                logger.warning(f"LLM adapter not available for Aligner: {e}")
+                self._adapter = None
         
-        return self._client
+        return self._adapter
     
     async def configure_filter(self, instruction: str) -> Optional[FilterRule]:
         """
@@ -289,11 +197,11 @@ class Aligner:
         - "Ignore metrics from inventory-api for 30 minutes"
         - "Stop filtering errors"
         
-        Uses Gemini Flash (via google-genai) to parse the instruction into a FilterRule.
+        Uses Gemini Flash (via LLM adapter) to parse the instruction into a FilterRule.
         """
-        client = await self._get_client()
+        adapter = await self._get_adapter()
         
-        if client is None:
+        if adapter is None:
             # Fallback: simple parsing without AI
             return self._parse_simple_filter(instruction)
         
@@ -313,10 +221,8 @@ class Aligner:
             {{"name": "Ignore errors for maintenance", "ignore_errors": true, "ignore_metrics": false, "duration_minutes": 60, "service": null}}
             """
             
-            from google.genai import types as genai_types
-            response = await client.aio.models.generate_content(
-                model=self._model_name, contents=prompt,
-                config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+            response = await adapter.generate(
+                system_prompt="", contents=prompt, max_output_tokens=1024,
             )
             
             import json
@@ -495,8 +401,8 @@ class Aligner:
         versions_seen = list(set(ver for _, ver in buffer))
 
         try:
-            client = await self._get_client()
-            if client:
+            adapter = await self._get_adapter()
+            if adapter:
                 prompt = (
                     f"Service '{service}' reported these version observations over the last 30+ seconds:\n"
                     f"{observations}\n\n"
@@ -509,10 +415,8 @@ class Aligner:
                     f"Then on the second line, a brief explanation."
                 )
 
-                from google.genai import types as genai_types
-                response = await client.aio.models.generate_content(
-                    model=self._model_name, contents=prompt,
-                    config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+                response = await adapter.generate(
+                    system_prompt="", contents=prompt, max_output_tokens=1024,
                 )
                 result_text = response.text.strip() if response.text else "NOISE"
                 first_line = result_text.split("\n")[0].strip().upper()
@@ -673,9 +577,9 @@ class Aligner:
         has_active = await self._has_active_event_for(service)
 
         try:
-            client = await self._get_client()
-            if client:
-                from google.genai import types
+            adapter = await self._get_adapter()
+            if adapter:
+                from .llm import ALIGNER_TOOL_SCHEMAS
 
                 # Build context prompt -- Flash reasons freely about the data
                 prompt = (
@@ -688,29 +592,18 @@ class Aligner:
                     f"Analyze this data. Use your tools to report what you observe, or return text only if everything is normal."
                 )
 
-                if self._aligner_tools is None:
-                    self._aligner_tools = _build_aligner_tools()
-                aligner_tools = self._aligner_tools
-                response = await client.aio.models.generate_content(
-                    model=self._model_name,
+                response = await adapter.generate(
+                    system_prompt=ALIGNER_SYSTEM_PROMPT,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=ALIGNER_SYSTEM_PROMPT,
-                        max_output_tokens=4096,
-                        tools=[aligner_tools],
-                        tool_config=types.ToolConfig(
-                            function_calling_config=types.FunctionCallingConfig(mode="AUTO"),
-                        ),
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                        temperature=0.3,
-                    ),
+                    tools=ALIGNER_TOOL_SCHEMAS,
+                    temperature=self.temperature,
+                    max_output_tokens=4096,
                 )
 
                 # Handle function calls from Flash
-                if response.function_calls:
-                    fc = response.function_calls[0]
-                    func_name = fc.name
-                    args = fc.args if fc.args else {}
+                if response.function_call:
+                    func_name = response.function_call.name
+                    args = response.function_call.args
                     observation = args.get("observation", "")
 
                     logger.info(f"Flash {func_name} for {service}: {observation[:150]}")

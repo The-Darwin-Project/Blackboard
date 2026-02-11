@@ -58,3 +58,8 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   @apply bg-text-muted;
 }
+
+/* Brain thinking indicator pulse (used by inline animation in ConversationFeed) */
+@keyframes pulse {
+  50% { opacity: 0.5; }
+}

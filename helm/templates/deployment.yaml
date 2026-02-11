@@ -78,6 +78,26 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: VERTEX_MODEL_FLASH
+            - name: VERTEX_MODEL_CLAUDE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: VERTEX_MODEL_CLAUDE
+            - name: LLM_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_PROVIDER
+            - name: LLM_TEMPERATURE_BRAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_BRAIN
+            - name: LLM_TEMPERATURE_ALIGNER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_ALIGNER
             # Agent dispatch configuration (Brain-level)
             - name: SYSADMIN_DRY_RUN
               value: "{{ .Values.app.dryRun }}"
