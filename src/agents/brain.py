@@ -1236,7 +1236,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
                 action="execute",
-                result=result_str[:5000],  # Cap result length
+                result=result_str[:15000],  # Cap result length (raised for Dev+QE merged output)
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)

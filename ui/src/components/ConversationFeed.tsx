@@ -359,6 +359,57 @@ function RejectButton({ eventId, onStatusChange }: { eventId: string; onStatusCh
 }
 
 /** Collapsible viewer for long agent execute results */
+/** Huddle result: Dev + QE split view with expand/collapse per section. */
+function HuddleResultViewer({ result }: { result: string }) {
+  const [devExpanded, setDevExpanded] = useState(false);
+  const [qeExpanded, setQeExpanded] = useState(false);
+  const parts = result.split('## QE Assessment');
+  const devText = (parts[0] || '').replace('## Developer Result', '').trim();
+  const qeText = (parts[1] || '').trim();
+  const PREVIEW_LEN = 300;
+
+  return (
+    <div style={{ margin: '4px 0' }}>
+      {/* Developer section */}
+      <div style={{
+        padding: '8px 12px', borderLeft: '3px solid #22c55e',
+        marginBottom: 8, background: 'rgba(16, 185, 129, 0.06)', borderRadius: 4,
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 600, color: '#22c55e', marginBottom: 4 }}>DEVELOPER</div>
+        <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
+          {devExpanded ? devText : devText.slice(0, PREVIEW_LEN)}{!devExpanded && devText.length > PREVIEW_LEN ? '...' : ''}
+        </div>
+        {devText.length > PREVIEW_LEN && (
+          <button onClick={() => setDevExpanded(!devExpanded)} style={{
+            background: '#22c55e22', color: '#22c55e', border: '1px solid #22c55e44',
+            padding: '2px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', marginTop: 4,
+          }}>
+            {devExpanded ? 'Collapse' : 'View full'}
+          </button>
+        )}
+      </div>
+      {/* QE section */}
+      <div style={{
+        padding: '8px 12px', borderLeft: '3px solid #8b5cf6',
+        background: 'rgba(168, 85, 247, 0.06)', borderRadius: 4,
+      }}>
+        <div style={{ fontSize: 10, fontWeight: 600, color: '#8b5cf6', marginBottom: 4 }}>QE ASSESSMENT</div>
+        <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
+          {qeExpanded ? qeText : qeText.slice(0, PREVIEW_LEN)}{!qeExpanded && qeText.length > PREVIEW_LEN ? '...' : ''}
+        </div>
+        {qeText.length > PREVIEW_LEN && (
+          <button onClick={() => setQeExpanded(!qeExpanded)} style={{
+            background: '#8b5cf622', color: '#8b5cf6', border: '1px solid #8b5cf644',
+            padding: '2px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', marginTop: 4,
+          }}>
+            {qeExpanded ? 'Collapse' : 'View full'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ResultViewer({ actor, result }: { actor: string; result: string }) {
   const [expanded, setExpanded] = useState(false);
   const color = ACTOR_COLORS[actor] || '#6b7280';
@@ -440,26 +491,9 @@ function TurnBubble({
         />
       )}
       {turn.result && (
-        // Developer huddle result: split into Dev + QE sections
+        // Developer huddle result: split into Dev + QE sections with expand
         turn.actor === 'developer' && turn.result.includes('## Developer Result') && turn.result.includes('## QE Assessment') ? (
-          <div style={{ margin: '4px 0' }}>
-            {turn.result.split('## QE Assessment').map((section, idx) => (
-              <div key={idx} style={{
-                padding: '8px 12px',
-                borderLeft: `3px solid ${idx === 0 ? '#22c55e' : '#8b5cf6'}`,
-                marginBottom: idx === 0 ? 8 : 0,
-                background: idx === 0 ? 'rgba(16, 185, 129, 0.06)' : 'rgba(168, 85, 247, 0.06)',
-                borderRadius: 4,
-              }}>
-                <div style={{ fontSize: 10, fontWeight: 600, color: idx === 0 ? '#22c55e' : '#8b5cf6', marginBottom: 4 }}>
-                  {idx === 0 ? 'DEVELOPER' : 'QE ASSESSMENT'}
-                </div>
-                <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>
-                  {(idx === 0 ? section.replace('## Developer Result', '').trim() : section.trim()).slice(0, 2000)}
-                </div>
-              </div>
-            ))}
-          </div>
+          <HuddleResultViewer result={turn.result} />
         ) : turn.action === 'execute' && turn.result.length > 500 ? (
           <ResultViewer actor={turn.actor} result={turn.result} />
         ) : (
