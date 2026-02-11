@@ -56,8 +56,13 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
 # Install Playwright + Chromium for headless browser testing (QE agent)
-RUN npm install -g playwright@latest && \
-    npx playwright install --with-deps chromium && \
+# UBI9 uses dnf, not apt -- install Chromium deps manually, then Playwright without --with-deps
+RUN dnf install -y \
+    nss atk at-spi2-atk cups-libs libdrm libXcomposite libXdamage \
+    libXrandr mesa-libgbm pango alsa-lib libxkbcommon \
+    && dnf clean all && \
+    npm install -g playwright@latest && \
+    npx playwright install chromium && \
     npx playwright --version
 
 # Create app directory

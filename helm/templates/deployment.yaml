@@ -10,6 +10,8 @@ metadata:
 spec:
   replicas: {{ .Values.replicaCount }}
   revisionHistoryLimit: 1
+  strategy:
+    type: Recreate  # Qdrant WAL requires exclusive PVC access -- no rolling overlap
   selector:
     matchLabels:
       app: darwin-brain
