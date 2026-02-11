@@ -5,6 +5,7 @@
 # 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
+# 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Keep them in sync.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -265,14 +266,18 @@ class BlackboardState:
         return TYPE_TO_PROTOCOL.get(dep_type.lower(), "TCP")
     
     async def get_services(self) -> list[str]:
-        """Get all service names (excluding IP addresses)."""
+        """Get all service names (excluding IPs, empty strings, bare ports)."""
         all_services = await self.redis.smembers("darwin:services")
-        # Filter out IP addresses that may have been added before the filter was in place
-        return [s for s in all_services if not self._is_ip_address(s)]
+        # Filter out phantom entries that may exist in Redis from before ingestion guards
+        return [s for s in all_services
+                if s and s.strip()
+                and not self._is_ip_address(s)
+                and not self._is_bare_port(s)]
     
     async def get_edges(self, service: str) -> list[str]:
-        """Get all dependencies for a service."""
-        return list(await self.redis.smembers(f"darwin:edges:{service}"))
+        """Get all dependencies for a service (excluding empty strings, bare ports)."""
+        raw = await self.redis.smembers(f"darwin:edges:{service}")
+        return [t for t in raw if t and t.strip() and not self._is_bare_port(t)]
     
     # =========================================================================
     # IP-to-Service Mapping (for graph deduplication)
@@ -311,6 +316,10 @@ class BlackboardState:
         import re
         return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', value))
     
+    def _is_bare_port(self, value: str) -> bool:
+        """Check if value is a bare port number (e.g., '5432', '6379')."""
+        return value.isdigit() and 0 < int(value) <= 65535
+    
     def _is_external_service(self, name: str, metadata: Optional[Service]) -> bool:
         """
         Check if service is external (dependency target but never sent telemetry).
@@ -338,6 +347,26 @@ class BlackboardState:
             if age_seconds < 3600:  # Has sent telemetry in last hour
                 return False
         
+        return True
+    
+    def _should_include_service(self, name: str, metadata: Optional[Service]) -> bool:
+        """
+        Shared filter for topology graph consumers.
+        
+        Returns True if the service should appear as a node in both the
+        Cytoscape graph and Mermaid diagram.  Centralises the filtering
+        logic so get_graph_data() and generate_mermaid() stay in sync.
+        """
+        if not name or not name.strip():
+            return False
+        if self._is_ip_address(name):
+            return False
+        if self._is_bare_port(name):
+            return False
+        if name in ("darwin-brain", "darwin-blackboard-brain"):
+            return False
+        if self._is_external_service(name, metadata):
+            return False
         return True
     
     async def get_topology(self) -> TopologySnapshot:
@@ -370,28 +399,12 @@ class BlackboardState:
         logger.debug(f"Building graph with {len(topology.services)} services: {sorted(topology.services)}")
         
         # Build nodes with health status
-        # Filter out IP addresses and external domains - they should not appear as nodes
+        # Filter using shared _should_include_service() predicate
         nodes: list[GraphNode] = []
         for service_name in topology.services:
-            # Skip empty/whitespace service names -- prevents Cytoscape empty ID crash
-            if not service_name or not service_name.strip():
-                logger.debug("Skipping empty service name in graph node loop")
-                continue
-            # Skip IP addresses - they should not be displayed as nodes
-            if self._is_ip_address(service_name):
-                logger.debug(f"Skipping IP address node: {service_name}")
-                continue
-            
-            # Skip Brain self-monitoring -- Brain should not appear in its own topology
-            if service_name in ("darwin-brain", "darwin-blackboard-brain"):
-                logger.debug(f"Skipping Brain self-monitoring node: {service_name}")
-                continue
-
-            # Skip external domains (services that never sent telemetry)
-            # External services like github.com, api.stripe.com only appear as dependency targets
             metadata = await self.get_service(service_name)
-            if self._is_external_service(service_name, metadata):
-                logger.debug(f"Skipping external service node: {service_name}")
+            if not self._should_include_service(service_name, metadata):
+                logger.debug(f"Skipping filtered service node: {service_name}")
                 continue
             metrics = await self.get_current_metrics(service_name)
             
@@ -443,6 +456,10 @@ class BlackboardState:
             # Skip edges from IP addresses
             if self._is_ip_address(source):
                 logger.debug(f"Skipping edge from IP address: {source}")
+                continue
+            # Only include edge if source exists as a node in the graph
+            if source not in known_service_ids:
+                logger.debug(f"Skipping edge from filtered-out source: {source}")
                 continue
             
             for target in targets:
@@ -508,6 +525,10 @@ class BlackboardState:
         """
         Generate Mermaid diagram from topology with health-based colors.
         
+        Applies the same filtering as get_graph_data() via
+        _should_include_service() so phantom nodes (empty strings,
+        bare ports, IPs, Brain, externals) never appear in Mermaid output.
+        
         Returns a graph TD syntax string with:
         - Node labels showing service name and version
         - Node colors based on CPU/memory load (green/yellow/red)
@@ -517,14 +538,22 @@ class BlackboardState:
         if not topology.services:
             return "graph TD\n    Empty[No services registered]"
         
-        # Get metrics and metadata for all services
+        # ── Filter services using the shared predicate ──
+        # Fetch metadata first (needed by the filter) then build
+        # service_data only for included services.
+        filtered_services: set[str] = set()
         service_data: dict[str, dict] = {}
+        
         for service in topology.services:
-            metrics = await self.get_current_metrics(service)
             metadata = await self.get_service(service)
+            if not self._should_include_service(service, metadata):
+                logger.debug(f"Mermaid: skipping filtered service: {service}")
+                continue
+            
+            filtered_services.add(service)
+            metrics = await self.get_current_metrics(service)
             version = metadata.version if metadata else "?"
             
-            # Use shared health calculation
             cpu = metrics.get("cpu", 0)
             memory = metrics.get("memory", 0)
             error_rate = metrics.get("error_rate", 0)
@@ -538,6 +567,9 @@ class BlackboardState:
                 "status": status,
             }
         
+        if not filtered_services:
+            return "graph TD\n    Empty[No services registered]"
+        
         lines = ["graph TD"]
         
         # Track which nodes we've defined (to avoid duplicates)
@@ -550,13 +582,16 @@ class BlackboardState:
             version = data["version"]
             cpu = data["cpu"]
             memory = data["memory"]
-            # Show version and current load
             label = f"{service}<br/>v{version}<br/>CPU:{cpu:.0f}% MEM:{memory:.0f}%"
             return f"{svc_id}[\"{label}\"]"
         
-        # Add edges with node definitions
+        # ── Add edges -- only where both source and target are included ──
         for source, targets in topology.edges.items():
+            if source not in filtered_services:
+                continue
             for target in targets:
+                if target not in filtered_services:
+                    continue
                 src_def = get_node_def(source) if source not in defined_nodes else source.replace("-", "_")
                 tgt_def = get_node_def(target) if target not in defined_nodes else target.replace("-", "_")
                 
@@ -564,13 +599,14 @@ class BlackboardState:
                 defined_nodes.add(source)
                 defined_nodes.add(target)
         
-        # Add isolated nodes (services with no edges)
+        # Add isolated nodes (filtered services with no edges)
         connected = set()
         for source, targets in topology.edges.items():
-            connected.add(source)
-            connected.update(targets)
+            if source in filtered_services:
+                connected.add(source)
+                connected.update(t for t in targets if t in filtered_services)
         
-        for service in topology.services:
+        for service in filtered_services:
             if service not in connected and service not in defined_nodes:
                 lines.append(f"    {get_node_def(service)}")
                 defined_nodes.add(service)
@@ -583,8 +619,8 @@ class BlackboardState:
         lines.append("    classDef critical fill:#ef4444,stroke:#dc2626,color:#fff")
         lines.append("    classDef unknown fill:#64748b,stroke:#475569,color:#fff")
         
-        # Apply classes to nodes
-        for service in topology.services:
+        # Apply classes only to filtered nodes
+        for service in filtered_services:
             svc_id = service.replace("-", "_")
             data = service_data.get(service, {"status": "unknown"})
             status = data.get("status", "unknown")
