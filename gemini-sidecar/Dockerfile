@@ -44,10 +44,14 @@ RUN \
     GH_VERSION=$(curl -sL https://api.github.com/repos/cli/cli/releases/latest \
       | grep '"tag_name"' | cut -d'"' -f4) && \
     curl -sL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_amd64.tar.gz" \
-      | tar -xz --strip-components=1 -C /usr/local/bin/ "gh_${GH_VERSION#v}_linux_amd64/bin/gh" && \
+      -o /tmp/gh.tar.gz && tar -xzf /tmp/gh.tar.gz -C /tmp/ && \
+    cp /tmp/gh_${GH_VERSION#v}_linux_amd64/bin/gh /usr/local/bin/gh && chmod +x /usr/local/bin/gh && \
+    rm -rf /tmp/gh* && \
     # github-mcp-server -- GitHub MCP server (native PR/issue/action tools for Gemini + Claude CLIs)
     curl -sL https://github.com/github/github-mcp-server/releases/latest/download/github-mcp-server_Linux_x86_64.tar.gz \
-      | tar -xz -C /usr/local/bin/ github-mcp-server && \
+      -o /tmp/mcp.tar.gz && tar -xzf /tmp/mcp.tar.gz -C /tmp/ && \
+    cp /tmp/github-mcp-server /usr/local/bin/github-mcp-server && chmod +x /usr/local/bin/github-mcp-server && \
+    rm -rf /tmp/mcp* /tmp/github-mcp-server* && \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
     helm version --short && jq --version && yq --version && \
