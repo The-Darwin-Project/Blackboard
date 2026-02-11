@@ -36,7 +36,7 @@ redis:
 qdrant:
   enabled: true
   image:
-    repository: ghcr.io/qdrant/qdrant
+    repository: ghcr.io/qdrant/qdrant/qdrant
     tag: "v1.16.3-unprivileged" # Non-root image for OpenShift SCC
   persistence:
     enabled: true
