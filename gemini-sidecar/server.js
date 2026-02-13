@@ -8,59 +8,114 @@
 // 6. [Gotcha]: cachedFindings is {content, timestamp} not a string. Use .content and .content.length.
 // 7. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
 // 8. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
+// 9. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. "plan" -> --permission-mode plan; else autoApprove -> --dangerously-skip-permissions.
+// 10. [Pattern]: Claude session_id extracted from stream-json init event (type=system, subtype=init) and stored on currentTask.sessionId.
+// 11. [Pattern]: Claude settings.json pre-created at startup (~/.claude/settings.json) to skip onboarding flow.
+// 12. [Pattern]: spawnInteractiveGemini uses node-pty for Gemini -i mode. PTY child has .write for followup; /quit before SIGTERM for graceful exit.
 // HTTP wrapper for Gemini/Claude Code CLIs with GitHub App authentication
 // Exposes POST /execute endpoint for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
 
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { spawn, execSync } = require('child_process');
 const jwt = require('jsonwebtoken');
 const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 9090;
-const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || 300000; // 5 minutes
+const ROLE_TIMEOUTS = {
+    architect: 600000,   // 10 min
+    sysadmin: 300000,    // 5 min
+    developer: 900000,   // 15 min
+    qe: 600000,          // 10 min
+    default: 300000,     // 5 min fallback
+};
+const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[process.env.AGENT_ROLE || 'default'] || ROLE_TIMEOUTS.default;
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 const DEFAULT_WORK_DIR = '/data/gitops';
 
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
 const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
+// Gemini interactive mode (PTY) -- opt-in via env var. When enabled, Gemini uses
+// node-pty with `-i` flag for multi-turn sessions instead of one-shot `-p`.
+const GEMINI_INTERACTIVE = process.env.GEMINI_INTERACTIVE === 'true' && AGENT_CLI === 'gemini';
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';
 
+// Pre-create Claude settings to skip first-run onboarding
+const claudeDir = path.join(os.homedir(), '.claude');
+fs.mkdirSync(claudeDir, { recursive: true });
+const claudeSettingsPath = path.join(claudeDir, 'settings.json');
+if (!fs.existsSync(claudeSettingsPath)) {
+  fs.writeFileSync(claudeSettingsPath, JSON.stringify({ theme: 'dark', hasCompletedOnboarding: true }));
+  console.log('Claude settings.json created (skip onboarding)');
+}
+
 /**
- * Parse a Claude stream-json line and extract displayable text.
- * Returns the text to display, or null if the line is not user-facing.
+ * Unified stream-json line parser for both Gemini and Claude CLIs.
+ * Returns { text, sessionId, toolCalls, done } or null if not user-facing.
  *
- * Claude stream-json emits lines like:
- *   {"type":"content_block_delta","delta":{"type":"text_delta","text":"token"}}
- *   {"type":"assistant","message":{...,"content":[{"type":"text","text":"full"}]}}
- *   {"type":"result","result":"final text",...}
+ * Gemini stream-json schema (probed 2026-02-13):
+ *   {"type":"init","session_id":"...","model":"auto-gemini-2.5"}
+ *   {"type":"message","role":"assistant","content":"...","delta":true}
+ *   {"type":"result","status":"success","stats":{"tool_calls":0,...}}
+ *
+ * Claude stream-json schema:
+ *   {"type":"system","subtype":"init","session_id":"..."}
+ *   {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+ *   {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+ *   {"type":"result","result":"..."}
  */
-function parseClaudeStreamLine(line) {
+function parseStreamLine(line) {
     try {
         const obj = JSON.parse(line);
-        // content_block_delta -- incremental token
-        if (obj.type === 'content_block_delta' && obj.delta?.text) {
-            return obj.delta.text;
+
+        // --- Init events (both CLIs emit session_id) ---
+        if (obj.type === 'init' || (obj.type === 'system' && obj.subtype === 'init')) {
+            return { text: null, sessionId: obj.session_id || null, toolCalls: null, done: false };
         }
-        // assistant message -- summarized narration
+
+        // --- Gemini: assistant message ---
+        if (obj.type === 'message' && obj.role === 'assistant' && obj.content) {
+            return { text: obj.content, sessionId: null, toolCalls: null, done: false };
+        }
+
+        // --- Claude: content_block_delta (incremental token) ---
+        if (obj.type === 'content_block_delta' && obj.delta?.text) {
+            return { text: obj.delta.text, sessionId: null, toolCalls: null, done: false };
+        }
+
+        // --- Claude: assistant message (summarized) ---
         if (obj.type === 'assistant' && obj.message?.content) {
             const texts = obj.message.content
                 .filter(c => c.type === 'text')
                 .map(c => c.text);
-            return texts.join('\n') || null;
+            return { text: texts.join('\n') || null, sessionId: null, toolCalls: null, done: false };
         }
-        // result -- final output
-        if (obj.type === 'result' && obj.result) {
-            return typeof obj.result === 'string' ? obj.result : JSON.stringify(obj.result);
+
+        // --- Result events (both CLIs) ---
+        if (obj.type === 'result') {
+            const toolCalls = obj.stats?.tool_calls ?? null;
+            let text = null;
+            if (obj.result) {
+                text = typeof obj.result === 'string' ? obj.result : JSON.stringify(obj.result);
+            }
+            return { text, sessionId: null, toolCalls, done: true };
         }
     } catch (e) {
-        // Not JSON or unknown format -- return raw line for Gemini compatibility
-        return line;
+        // Not JSON -- return raw line as text
+        return { text: line, sessionId: null, toolCalls: null, done: false };
     }
     return null;
+}
+
+// Backward compat wrapper -- existing code calls parseClaudeStreamLine()
+function parseClaudeStreamLine(line) {
+    const parsed = parseStreamLine(line);
+    return parsed?.text || null;
 }
 
 /**
@@ -68,21 +123,66 @@ function parseClaudeStreamLine(line) {
  * Routes to 'gemini' or 'claude' binary with appropriate flags.
  */
 function buildCLICommand(prompt, options = {}) {
+    const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
     if (AGENT_CLI === 'claude') {
         const args = [];
-        if (options.autoApprove) args.push('--dangerously-skip-permissions');
-        args.push('--output-format', 'stream-json');  // Stream JSON events (tokens + tool calls)
-        args.push('--verbose');
-        // Architect git restrictions enforced via GEMINI.md rules (no CLI flag)
+        if (permissionMode === 'plan') {
+            args.push('--permission-mode', 'plan');
+        } else if (options.autoApprove) {
+            args.push('--dangerously-skip-permissions');
+        }
+        args.push('--output-format', 'stream-json', '--verbose');
+        args.push('--model', AGENT_MODEL || 'claude-opus-4-6');
+        if (options.sessionId) {
+            args.push('--resume', options.sessionId);
+        }
         args.push('-p', prompt);
         return { binary: 'claude', args };
     } else {
+        // Gemini path -- stream-json for unified parsing + tool call counting
         const args = [];
         if (options.autoApprove) args.push('--yolo');
-        // Architect git restrictions enforced via GEMINI.md rules (no CLI flag available)
+        args.push('-o', 'stream-json');
         args.push('-p', prompt);
         return { binary: 'gemini', args };
     }
+}
+
+let pty;
+try {
+  pty = require('node-pty');
+} catch (e) {
+  console.warn('node-pty not available -- Gemini interactive mode disabled');
+}
+
+function spawnInteractiveGemini(prompt, options = {}) {
+    if (!pty) throw new Error('node-pty not installed');
+    const child = pty.spawn('gemini', ['-i', prompt, '--yolo'], {
+        name: 'xterm-256color',
+        cols: 120, rows: 30,
+        cwd: options.cwd || DEFAULT_WORK_DIR,
+        env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
+    });
+    // Auto-handle first-run prompts (trust + auth)
+    // These fire once per container lifecycle, then cached
+    let initPhase = true;
+    child.onData((data) => {
+        if (initPhase) {
+            if (data.includes('Do you trust this folder')) {
+                setTimeout(() => child.write('\r'), 500);
+            }
+            if (data.includes('How would you like to authenticate')) {
+                setTimeout(() => {
+                    child.write('\x1b[B');
+                    setTimeout(() => { child.write('\x1b[B');
+                        setTimeout(() => child.write('\r'), 300);
+                    }, 300);
+                }, 500);
+            }
+            if (data.includes('YOLO mode')) initPhase = false;
+        }
+    });
+    return child;
 }
 
 // GitHub App secret paths (mounted from K8s secret)
@@ -459,18 +559,17 @@ async function executeCLI(prompt, options = {}) {
     
     let stdout = '';
     let stderr = '';
-    let claudeTextAccum = '';  // Accumulate parsed text from Claude stream-json
+    let streamTextAccum = '';  // Accumulate parsed text from stream-json (both CLIs)
     
     child.stdout.on('data', (data) => {
       const text = data.toString();
       stdout += text;
-      // Parse Claude stream-json lines to extract readable text
-      if (AGENT_CLI === 'claude') {
-        for (const line of text.split('\n')) {
-          if (!line.trim()) continue;
-          const parsed = parseClaudeStreamLine(line);
-          if (parsed) claudeTextAccum += parsed;
-        }
+      // Unified stream-json parsing (both Gemini and Claude emit stream-json now)
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        const parsed = parseStreamLine(line);
+        if (parsed?.text) streamTextAccum += parsed.text;
+        if (parsed?.sessionId && currentTask) currentTask.sessionId = parsed.sessionId;
       }
     });
     
@@ -482,8 +581,8 @@ async function executeCLI(prompt, options = {}) {
       // Close the watcher
       if (watcher) { try { watcher.close(); } catch(e) {} }
 
-      // For Claude stream-json, the readable output is in claudeTextAccum, not raw stdout
-      const effectiveOutput = (AGENT_CLI === 'claude' && claudeTextAccum) ? claudeTextAccum : stdout;
+      // Stream-json parsed output (both CLIs) takes precedence over raw stdout
+      const effectiveOutput = streamTextAccum || stdout;
 
       console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
       console.log(`[${new Date().toISOString()}] stdout (${effectiveOutput.length} chars): ${effectiveOutput.slice(0, 500)}${effectiveOutput.length > 500 ? '...' : ''}`);
@@ -549,7 +648,10 @@ async function executeCLI(prompt, options = {}) {
  */
 async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
   return new Promise((resolve, reject) => {
-    const { binary, args } = buildCLICommand(prompt, { autoApprove: options.autoApprove });
+    const { binary, args } = buildCLICommand(prompt, {
+      autoApprove: options.autoApprove,
+      sessionId: options.sessionId,
+    });
 
     console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
 
@@ -594,9 +696,9 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
     let stdout = '';
     let stderr = '';
     let lineBuffer = '';
-    let claudeTextAccum = '';  // Accumulate parsed text from Claude stream-json
+    let streamTextAccum = '';  // Accumulate parsed text from stream-json (both CLIs)
 
-    // Stream stdout line-by-line as progress
+    // Stream stdout line-by-line as progress (unified parser for both CLIs)
     child.stdout.on('data', (data) => {
       const text = data.toString();
       stdout += text;
@@ -607,18 +709,18 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       lineBuffer = lines.pop(); // Keep incomplete line in buffer
       for (const line of lines) {
         if (!line.trim()) continue;
-        if (AGENT_CLI === 'claude') {
-          // Parse Claude stream-json -- extract displayable text
-          const parsed = parseClaudeStreamLine(line);
-          if (parsed) {
-            claudeTextAccum += parsed;
-            console.log(`[${new Date().toISOString()}] [${eventId}] >> ${parsed.slice(0, 200)}`);
-            wsSend(ws, { type: 'progress', event_id: eventId, message: parsed });
-          }
-        } else {
-          // Gemini -- raw text lines
-          console.log(`[${new Date().toISOString()}] [${eventId}] >> ${line.slice(0, 200)}`);
-          wsSend(ws, { type: 'progress', event_id: eventId, message: line });
+        const parsed = parseStreamLine(line);
+        if (!parsed) continue;
+        // Session ID extraction (both CLIs)
+        if (parsed.sessionId && currentTask) {
+          currentTask.sessionId = parsed.sessionId;
+          console.log(`[${new Date().toISOString()}] [${eventId}] Session: ${parsed.sessionId}`);
+        }
+        // Displayable text -> progress + accumulate
+        if (parsed.text) {
+          streamTextAccum += parsed.text;
+          console.log(`[${new Date().toISOString()}] [${eventId}] >> ${parsed.text.slice(0, 200)}`);
+          wsSend(ws, { type: 'progress', event_id: eventId, message: parsed.text });
         }
       }
     });
@@ -631,21 +733,20 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
       // Close the watcher
       if (watcher) { try { watcher.close(); } catch(e) {} }
 
-      // Flush remaining buffer (parse for Claude, raw for Gemini)
+      // Capture session ID before currentTask is cleared
+      const capturedSessionId = currentTask?.sessionId || null;
+
+      // Flush remaining buffer
       if (lineBuffer.trim()) {
-        if (AGENT_CLI === 'claude') {
-          const parsed = parseClaudeStreamLine(lineBuffer);
-          if (parsed) {
-            claudeTextAccum += parsed;
-            wsSend(ws, { type: 'progress', event_id: eventId, message: parsed });
-          }
-        } else {
-          wsSend(ws, { type: 'progress', event_id: eventId, message: lineBuffer });
+        const parsed = parseStreamLine(lineBuffer);
+        if (parsed?.text) {
+          streamTextAccum += parsed.text;
+          wsSend(ws, { type: 'progress', event_id: eventId, message: parsed.text });
         }
       }
 
-      // For Claude stream-json, the readable output is in claudeTextAccum, not raw stdout
-      const effectiveOutput = (AGENT_CLI === 'claude' && claudeTextAccum) ? claudeTextAccum : stdout;
+      // Stream-json parsed output takes precedence over raw stdout
+      const effectiveOutput = streamTextAccum || stdout;
 
       console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited code ${code} (${effectiveOutput.length} chars)`);
       if (effectiveOutput.length > 0) {
@@ -661,7 +762,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         // Try JSON parse first (structured output)
         try {
           const result = JSON.parse(effectiveOutput);
-          resolve({ status: 'success', output: result });
+          resolve({ status: 'success', sessionId: capturedSessionId, output: result });
           return;
         } catch (e) {}
 
@@ -672,13 +773,13 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             if (cachedFindings && cachedFindings.content.length > 0
                 && (Date.now() - cachedFindings.timestamp) < FINDINGS_FRESHNESS_MS) {
               try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
-              resolve({ status: 'success', output: cachedFindings.content, raw: true });
+              resolve({ status: 'success', sessionId: capturedSessionId, output: cachedFindings.content, raw: true });
               return;
             }
             // 2. Read findings file (with freshness)
             const findings = readFindings(options.cwd || DEFAULT_WORK_DIR);
             if (findings) {
-              resolve({ status: 'success', output: findings, raw: true });
+              resolve({ status: 'success', sessionId: capturedSessionId, output: findings, raw: true });
               return;
             }
             // 3. Retry: ask agent to write report
@@ -687,19 +788,19 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
               options.cwd || DEFAULT_WORK_DIR, options.autoApprove !== false
             );
             if (retryFindings) {
-              resolve({ status: 'success', output: retryFindings, raw: true });
+              resolve({ status: 'success', sessionId: capturedSessionId, output: retryFindings, raw: true });
               return;
             }
             // 4. Final fallback: stdout tail
-            resolve({ status: 'success', output: stdoutFallback(effectiveOutput), raw: true });
+            resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), raw: true });
           } catch (err) {
             // Safety net: never hang
             console.error(`[${new Date().toISOString()}] Findings chain error: ${err.message}`);
-            resolve({ status: 'success', output: stdoutFallback(effectiveOutput), raw: true });
+            resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), raw: true });
           }
         })();
       } else {
-        resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput });
+        resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput });
       }
     });
 
@@ -865,27 +966,135 @@ wss.on('connection', (ws) => {
       setupCLILoginsBackground();
 
       // Execute agent CLI with streaming progress
-      try {
-        const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
-        wsSend(ws, {
-          type: 'result',
-          event_id: eventId,
-          status: result.status,
-          output: result.output || result.stdout || '',
-        });
-      } catch (err) {
-        wsSend(ws, {
-          type: 'error',
-          event_id: eventId,
-          message: err.message,
-        });
+      if (GEMINI_INTERACTIVE && pty) {
+        // Gemini interactive mode: spawn PTY session, stream output via WS.
+        // PTY stays alive for follow-ups (stdin writes). Session ID is generated
+        // locally since Gemini -i doesn't report one like Claude.
+        try {
+          const child = spawnInteractiveGemini(prompt, { cwd: workDir });
+          const geminiSessionId = `gemini-pty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          // Store ws on currentTask so PTY handlers use the current socket,
+          // not a stale closure reference after Brain reconnects (L1 fix).
+          currentTask = { eventId, child, ws, cwd: workDir, sessionId: geminiSessionId, ptyOutput: '' };
+
+          // Accumulate output and stream progress. When the prompt response ends
+          // (Gemini prints a new prompt marker), send a result message.
+          let responseBuffer = '';
+          let responseTimer = null;
+          child.onData((data) => {
+            if (!currentTask) return;
+            currentTask.ptyOutput += data;
+            responseBuffer += data;
+            wsSend(currentTask.ws, { type: 'progress', event_id: eventId, message: data });
+            // Debounce: after 2s of no new data, treat accumulated buffer as result
+            if (responseTimer) clearTimeout(responseTimer);
+            responseTimer = setTimeout(() => {
+              if (responseBuffer.trim() && currentTask) {
+                wsSend(currentTask.ws, {
+                  type: 'result',
+                  event_id: eventId,
+                  session_id: geminiSessionId,
+                  status: 'success',
+                  output: responseBuffer.trim(),
+                });
+                responseBuffer = '';
+              }
+            }, 2000);
+          });
+
+          child.onExit(({ exitCode }) => {
+            if (responseTimer) clearTimeout(responseTimer);
+            const activeWs = currentTask?.ws || ws;
+            // Send final result if there's remaining output
+            if (responseBuffer.trim()) {
+              wsSend(activeWs, {
+                type: 'result',
+                event_id: eventId,
+                session_id: geminiSessionId,
+                status: exitCode === 0 ? 'success' : 'error',
+                output: responseBuffer.trim(),
+              });
+            }
+            currentTask = null;
+          });
+          // Don't clear currentTask here -- PTY stays alive for followups
+        } catch (err) {
+          wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
+          currentTask = null;
+        }
+      } else {
+        // Standard mode: one-shot CLI execution with streaming
+        try {
+          const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
+          wsSend(ws, {
+            type: 'result',
+            event_id: eventId,
+            session_id: result.sessionId || null,
+            status: result.status,
+            output: result.output || result.stdout || '',
+          });
+        } catch (err) {
+          wsSend(ws, {
+            type: 'error',
+            event_id: eventId,
+            message: err.message,
+          });
+        }
+        currentTask = null;
       }
-      currentTask = null;
+
+    } else if (msg.type === 'followup') {
+      // Phase 2: Forward follow-up message to an active or resumable session
+      const sessionId = msg.session_id || '';
+      const followupMsg = msg.message || '';
+      const eventId = msg.event_id || 'unknown';
+      console.log(`[${new Date().toISOString()}] Followup for session ${sessionId} (event: ${eventId})`);
+
+      if (AGENT_CLI === 'claude' && sessionId) {
+        // Claude: spawn a new process with --resume to chain context
+        try {
+          const result = await executeCLIStreaming(ws, eventId, followupMsg, {
+            autoApprove: true,
+            cwd: currentTask?.cwd || DEFAULT_WORK_DIR,
+            sessionId: sessionId,
+          });
+          wsSend(ws, {
+            type: 'result',
+            event_id: eventId,
+            session_id: result.sessionId || sessionId,
+            output: result.output || result.stdout || '',
+          });
+        } catch (err) {
+          wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
+        }
+        currentTask = null;  // Prevent permanent "busy" state after followup
+      } else if (currentTask && currentTask.child && currentTask.child.write) {
+        // Gemini: write follow-up to PTY stdin (live session)
+        // Refresh ws reference so debounced results go to the current connection
+        currentTask.ws = ws;
+        console.log(`[${new Date().toISOString()}] Gemini PTY followup for ${eventId}`);
+        currentTask.child.write(followupMsg + '\r');
+      } else {
+        wsSend(ws, { type: 'error', event_id: eventId, message: 'No active session for followup' });
+      }
 
     } else if (msg.type === 'cancel') {
       if (currentTask && currentTask.child) {
         console.log(`[${new Date().toISOString()}] Cancelling task: ${currentTask.eventId}`);
-        currentTask.child.kill('SIGTERM');
+        const child = currentTask.child;
+        // Graceful PTY exit (Gemini -i accepts /quit)
+        if (typeof child.write === 'function') {
+          child.write('/quit\r');
+        }
+        child.kill('SIGTERM');
+        // SIGKILL escalation: if SIGTERM doesn't work after 5s, force kill
+        const killTimer = setTimeout(() => {
+          if (!child.killed) {
+            console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL for ${currentTask?.eventId || 'unknown'}`);
+            child.kill('SIGKILL');
+          }
+        }, 5000);
+        child.on('exit', () => clearTimeout(killTimer));
         currentTask = null;
       }
     }
@@ -896,7 +1105,20 @@ wss.on('connection', (ws) => {
     // Kill running process on disconnect
     if (currentTask && currentTask.child) {
       console.log(`[${new Date().toISOString()}] Killing orphaned process for ${currentTask.eventId}`);
-      currentTask.child.kill('SIGTERM');
+      const child = currentTask.child;
+      // Graceful PTY exit (Gemini -i accepts /quit)
+      if (typeof child.write === 'function') {
+        child.write('/quit\r');
+      }
+      child.kill('SIGTERM');
+      // SIGKILL escalation: if SIGTERM doesn't work after 5s, force kill
+      const killTimer = setTimeout(() => {
+        if (!child.killed) {
+          console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL`);
+          child.kill('SIGKILL');
+        }
+      }, 5000);
+      child.on('exit', () => clearTimeout(killTimer));
       currentTask = null;
     }
   });

@@ -1,0 +1,44 @@
+---
+description: Architectural constraints -- Blackboard pattern, separation of concerns, conversation queue, passive discovery
+alwaysApply: true
+---
+
+# Architectural Constraints
+
+## 1. The Blackboard Pattern
+
+* **Rule:** Agents NEVER communicate directly.
+* **Implementation:** Agents communicate via shared event documents in Redis. The Conversation Queue (`darwin:queue`, `darwin:event:{id}`) replaces the old per-agent task queues.
+
+## 2. Separation of Concerns (The "Air Gap")
+
+* **Rule:** Enforcement via architectural patterns and CLI-level constraints:
+  * **Brain** (`brain.py`) uses Vertex AI SDK. May access Redis. Contains ZERO routing logic.
+  * **Architect** (`architect.py`) is a thin HTTP client. Sidecar runs Claude with `--permission-mode plan` (cannot write files, push code, or run shell commands).
+  * **SysAdmin** (`sysadmin.py`) is a thin HTTP client. Sidecar has full git + kubectl. Safety via FORBIDDEN_PATTERNS in security.py.
+  * **Developer** (`developer.py`) is the pair programming manager. Fires Dev + QE sidecars concurrently via `asyncio.gather()`. Flash Manager (Gemini Flash) reviews outputs. See `04-developer-qe-pair.mdc` for invariants.
+  * **Aligner** (`aligner.py`) keeps Vertex AI Flash for filter config. Creates events, does NOT route to agents.
+
+## 3. The Conversation Queue Protocol
+
+* **Event Creation:** Events are created by Aligner (anomaly) or Chat (user request)
+* **Triage:** Brain triages events via LLM function calling
+* **Conversation:** Conversation is an append-only log of turns in the event document
+* **Plans:** Plans are Markdown turns, not JSON
+* **Event Lifecycle:** `new` -> `active` -> `waiting_approval` -> `resolved` -> `closed`
+
+## 4. Passive Discovery (K8s Native)
+
+* **Pattern:** Brain discovers services via K8s annotations on Deployments:
+
+    ```yaml
+    metadata:
+      annotations:
+        darwin.io/monitored: "true"
+        darwin.io/gitops-repo: "https://github.com/org/repo.git"
+        darwin.io/helm-path: "helm/values.yaml"
+        darwin.io/service-name: "my-service"
+    ```
+
+* **Metrics:** K8s Observer polls metrics-server for CPU/memory. Dependencies inferred from Service endpoints and env vars.
+* **Legacy:** The `/telemetry` push endpoint (DarwinClient) is deprecated. Use annotations instead.

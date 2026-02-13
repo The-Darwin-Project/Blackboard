@@ -1,15 +1,31 @@
 // BlackBoard/ui/src/components/Layout.tsx
+// @ai-rules:
+// 1. [Pattern]: Header uses useTopology, useWSConnection, useActiveEvents for status and Emergency Stop.
+// 2. [Pattern]: Emergency Stop sends { type: "emergency_stop" } via WS; handles emergency_stop_ack to show cancelled count.
 /**
  * 3-pane "War Room" layout for Darwin Brain Dashboard.
  * Header with status badge, main content area with responsive grid.
  */
 import { Outlet } from 'react-router-dom';
-import { Activity, AlertCircle, CheckCircle2, Wifi, WifiOff } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle2, Square, Wifi, WifiOff } from 'lucide-react';
 import { useTopology } from '../hooks';
+import { useActiveEvents } from '../hooks/useQueue';
+import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
 import WaitingBell from './WaitingBell';
 
 function Layout() {
   const { isError, isFetching } = useTopology();
+  const { connected, send } = useWSConnection();
+  const { data: activeEvents } = useActiveEvents();
+  const activeCount = activeEvents?.length ?? 0;
+  const canEmergencyStop = connected && activeCount > 0;
+
+  useWSMessage((msg) => {
+    if (msg.type === 'emergency_stop_ack') {
+      const cancelled = (msg as { cancelled?: number }).cancelled ?? 0;
+      window.alert(`Emergency stop completed. ${cancelled} task(s) cancelled.`);
+    }
+  });
 
   // Determine system status based on API connectivity
   const isOnline = !isError;
@@ -32,8 +48,25 @@ function Layout() {
           </div>
         </div>
 
-        {/* Right side: Waiting Bell + Status Badge */}
+        {/* Right side: Emergency Stop + Waiting Bell + Status Badge */}
         <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => {
+              if (!window.confirm('Emergency stop will cancel all active tasks. Continue?')) return;
+              send({ type: 'emergency_stop' });
+            }}
+            disabled={!canEmergencyStop}
+            title={!canEmergencyStop ? (activeCount === 0 ? 'No active events' : 'Not connected') : 'Cancel all active tasks'}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold transition-colors ${
+              canEmergencyStop
+                ? 'bg-red-600 text-white hover:bg-red-700 cursor-pointer'
+                : 'bg-red-600/50 text-white/70 opacity-50 cursor-not-allowed'
+            }`}
+          >
+            <Square className="w-3.5 h-3.5 fill-current" />
+            STOP
+          </button>
           <WaitingBell onEventClick={(eventId) => {
             window.dispatchEvent(new CustomEvent('darwin:selectEvent', { detail: eventId }));
           }} />

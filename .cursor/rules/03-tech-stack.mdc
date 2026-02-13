@@ -1,3 +1,8 @@
+---
+description: Tech stack and standards -- Python backend, Node.js sidecars, OpenShift infrastructure
+alwaysApply: true
+---
+
 # Tech Stack & Standards
 
 ## Backend (The Brain)
@@ -15,4 +20,6 @@
 ## Infrastructure
 
 * **Target:** OpenShift 4.x
-* **Auth:** Vertex AI Workload Identity (ADC).
+* **Auth:** Vertex AI Workload Identity (ADC) via GCP service account key.
+* **GitOps:** ArgoCD (namespace-scoped) + Helm charts.
+* **CI/CD:** GitHub Actions (GitHub App token for git, GITHUB_TOKEN for GHCR push).

@@ -58,10 +58,11 @@ sidecars:
   architect:
     enabled: true
     port: 9091
-    cliType: "gemini" # "gemini" or "claude"
+    cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
-    modelName: "gemini-3-pro-preview" # Gemini 3 Pro (deep planning, code analysis)
+    modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI (deep planning, code analysis)
+    permissionMode: "plan" # Claude permission mode: "plan" restricts to read-only planning
   sysadmin:
     enabled: true
     port: 9092
@@ -69,6 +70,7 @@ sidecars:
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
     modelName: "gemini-3-flash-preview" # Gemini 3 Flash (fast investigation, low latency)
+    permissionMode: "" # No permission mode for gemini
   developer:
     enabled: true
     port: 9093
@@ -76,6 +78,7 @@ sidecars:
     gitUserName: "Darwin Developer"
     gitUserEmail: "darwin-developer@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI
+    permissionMode: "bypassPermissions" # Skip permission prompts for autonomous code changes
   qe:
     enabled: true
     port: 9094
@@ -83,6 +86,7 @@ sidecars:
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
     modelName: "gemini-3-pro-preview" # Pro for thorough verification
+    permissionMode: "" # No permission mode for gemini
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
@@ -233,7 +237,8 @@ readinessProbe:
 # =============================================================================
 observer:
   enabled: true # Enable K8s metrics observer
-  namespace: "darwin" # Namespace to watch for pods
+  namespaces:
+    - darwin
   interval: 30 # Poll interval in seconds
   labelSelector: "" # Optional: filter pods by label (e.g., "app=darwin-store")
 # =============================================================================

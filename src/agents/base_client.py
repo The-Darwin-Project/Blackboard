@@ -1,4 +1,12 @@
 # BlackBoard/src/agents/base_client.py
+# @ai-rules:
+# 1. [Pattern]: process() serialized via _lock. _process_inner() does the actual WS send/recv.
+# 2. [Pattern]: CancelledError in WS recv loop triggers finally -> WS close -> sidecar SIGTERM chain.
+# 3. [Gotcha]: busy retry loop re-sends the task. Max 5 retries with exponential backoff (5s-60s).
+# 4. [Constraint]: Security check on prompt before sending. FORBIDDEN_PATTERNS from security.py.
+# 5. [Pattern]: connect() retries 5 times with exponential backoff (1-16s). _ensure_connected() pings first.
+# 6. [Pattern]: process() returns tuple[str, Optional[str]] = (result, session_id). session_id is None until Phase 2 sessions are wired.
+# 7. [Pattern]: followup() sends a follow-up message to an active/resumable session. Same recv loop as process().
 """
 Base agent client -- shared WebSocket logic for all Darwin agent sidecars.
 
@@ -39,6 +47,7 @@ class AgentClient:
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
         self._busy_retries: dict[str, int] = {}
+        self._active_sessions: dict[str, str] = {}  # event_id -> session_id (Phase 2)
         # Defense-in-depth lock: serializes process() calls on this agent instance.
         # Brain also holds per-agent locks (_agent_locks) to prevent concurrent dispatch.
         # This client lock ensures safety if the agent is used outside the Brain context
@@ -90,10 +99,12 @@ class AgentClient:
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
-    ) -> str:
+    ) -> tuple[str, Optional[str]]:
         """
-        Send task to sidecar via WebSocket, stream progress, return result.
+        Send task to sidecar via WebSocket, stream progress, return (result, session_id).
 
+        session_id is returned when the sidecar reports one (Phase 2 sessions).
+        Returns (result, None) when sessions are unavailable.
         Serialized via asyncio.Lock to prevent concurrent WS recv conflicts.
         """
         async with self._lock:
@@ -105,8 +116,8 @@ class AgentClient:
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
-    ) -> str:
-        """Inner process logic (called under lock)."""
+    ) -> tuple[str, Optional[str]]:
+        """Inner process logic (called under lock). Returns (result, session_id)."""
         # Build prompt
         if event_md_path:
             prompt = f"Read the event document at {event_md_path} and execute this task:\n\n{task}"
@@ -122,7 +133,7 @@ class AgentClient:
 
         # Ensure connected
         if not await self._ensure_connected():
-            return f"Error: Cannot connect to {self.agent_name} sidecar WebSocket"
+            return f"Error: Cannot connect to {self.agent_name} sidecar WebSocket", None
 
         # Send task
         try:
@@ -135,9 +146,12 @@ class AgentClient:
             }))
         except Exception as e:
             self._connected = False
-            return f"Error: Failed to send task: {e}"
+            return f"Error: Failed to send task: {e}", None
 
-        # Receive messages until result or error
+        # Receive messages until result or error.
+        # CancelledError propagates up to Brain.cancel_active_task().
+        # Finally block ensures WS close -> sidecar SIGTERM chain fires.
+        session_id: Optional[str] = None
         try:
             async for raw_msg in self._ws:
                 msg = json.loads(raw_msg)
@@ -157,15 +171,20 @@ class AgentClient:
                     output = msg.get("output", "")
                     if isinstance(output, dict):
                         output = json.dumps(output, indent=2)
-                    logger.info(f"{self.agent_name} completed [{event_id}]: {len(str(output))} chars")
+                    # Capture session_id if sidecar reports one (Phase 2)
+                    session_id = msg.get("session_id") or session_id
+                    if session_id:
+                        self._active_sessions[event_id] = session_id
+                    logger.info(f"{self.agent_name} completed [{event_id}]: {len(str(output))} chars"
+                                + (f" (session: {session_id})" if session_id else ""))
                     self._busy_retries.pop(event_id, None)
-                    return str(output)
+                    return str(output), session_id
 
                 elif msg_type == "error":
                     error_msg = msg.get("message", "Unknown error")
                     logger.error(f"{self.agent_name} error [{event_id}]: {error_msg}")
                     self._busy_retries.pop(event_id, None)
-                    return f"Error: {error_msg}"
+                    return f"Error: {error_msg}", session_id
 
                 elif msg_type == "busy":
                     retries = self._busy_retries.get(event_id, 0) + 1
@@ -177,7 +196,7 @@ class AgentClient:
                             "agent": self.agent_name,
                             "event_id": event_id,
                             "message": f"{self.agent_name} busy after 5 retries. Returning to Brain for decision.",
-                        })
+                        }), None
                     delay = min(5 * (2 ** (retries - 1)), 60)
                     logger.warning(f"{self.agent_name} busy [{event_id}], retry {retries}/5 in {delay}s...")
                     await asyncio.sleep(delay)
@@ -196,22 +215,107 @@ class AgentClient:
                             "agent": self.agent_name,
                             "event_id": event_id,
                             "message": f"{self.agent_name} busy and retry send failed.",
-                        })
+                        }), None
 
                 elif msg_type == "question":
                     return json.dumps({
                         "type": "question",
                         "message": msg.get("message", ""),
                         "requestingAgent": msg.get("requestingAgent", ""),
-                    })
+                    }), session_id
 
+        except asyncio.CancelledError:
+            logger.info(f"{self.agent_name} task cancelled for {event_id}")
+            raise
         except websockets.exceptions.ConnectionClosed:
             self._connected = False
-            return "Error: WebSocket connection closed during execution"
+            return "Error: WebSocket connection closed during execution", session_id
         except Exception as e:
-            return f"Error: {e}"
+            return f"Error: {e}", session_id
+        finally:
+            # Close WS on any exit path -- triggers sidecar SIGTERM on the CLI process
+            if self._ws and self._connected:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._connected = False
 
-        return "Error: No result received"
+        return "Error: No result received", None
+
+    async def followup(
+        self,
+        event_id: str,
+        session_id: str,
+        message: str,
+        on_progress: Optional[Callable] = None,
+    ) -> str:
+        """Send follow-up message to an active or resumable agent session.
+
+        Used in Phase 2 to forward user messages to running agents
+        instead of killing and re-spawning them.
+        Serialized via the same _lock as process() to prevent WS conflicts.
+        """
+        async with self._lock:
+            return await self._followup_inner(event_id, session_id, message, on_progress)
+
+    async def _followup_inner(
+        self,
+        event_id: str,
+        session_id: str,
+        message: str,
+        on_progress: Optional[Callable] = None,
+    ) -> str:
+        """Inner followup logic (called under lock)."""
+        if not await self._ensure_connected():
+            return "Error: Cannot connect to sidecar"
+
+        try:
+            await self._ws.send(json.dumps({
+                "type": "followup",
+                "event_id": event_id,
+                "session_id": session_id,
+                "message": message,
+            }))
+        except Exception as e:
+            self._connected = False
+            return f"Error: Failed to send followup: {e}"
+
+        # Same receive loop as process() -- progress, result, error
+        try:
+            async for raw_msg in self._ws:
+                msg = json.loads(raw_msg)
+                msg_type = msg.get("type")
+
+                if msg_type == "progress":
+                    if on_progress:
+                        await on_progress({
+                            "actor": self.agent_name,
+                            "event_id": event_id,
+                            "message": msg.get("message", ""),
+                        })
+                elif msg_type == "result":
+                    output = msg.get("output", "")
+                    if isinstance(output, dict):
+                        output = json.dumps(output, indent=2)
+                    return str(output)
+                elif msg_type == "error":
+                    return f"Error: {msg.get('message', 'Unknown error')}"
+        except asyncio.CancelledError:
+            logger.info(f"{self.agent_name} followup cancelled for {event_id}")
+            raise
+        except websockets.exceptions.ConnectionClosed:
+            self._connected = False
+            return "Error: WebSocket connection closed during followup"
+        finally:
+            if self._ws and self._connected:
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                self._connected = False
+
+        return "Error: No followup result received"
 
     async def health(self) -> bool:
         """Check sidecar health via HTTP (K8s probes use HTTP)."""

@@ -12,6 +12,9 @@
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 # 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
+# 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
+# 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
+# 15. [Pattern]: _agent_sessions tracks session_id per event (Phase 2). Persists across task invocations, cleaned in cancel/close paths only.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -216,6 +219,8 @@ class Brain:
         self._running = False
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
+        self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
+        self._agent_sessions: dict[str, str] = {}  # event_id -> session_id (Phase 2)
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
@@ -980,14 +985,18 @@ class Brain:
                     })
 
             logger.info(f"Agent task started: {agent_name} for {event_id}")
+            self._active_agent_for_event[event_id] = agent_name
             # Acquire per-agent lock to prevent concurrent WS calls to the same sidecar
             async with self._agent_locks[agent_name]:
-                result = await agent.process(
+                result, session_id = await agent.process(
                     event_id=event_id,
                     task=task,
                     event_md_path=event_md_path,
                     on_progress=on_progress,
                 )
+            # Track session for Phase 2 follow-ups (forward user messages instead of cancel)
+            if session_id:
+                self._agent_sessions[event_id] = session_id
             # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
@@ -1082,6 +1091,9 @@ class Brain:
         finally:
             # Clean up active task tracking
             self._active_tasks.pop(event_id, None)
+            self._active_agent_for_event.pop(event_id, None)
+            # Note: _agent_sessions is NOT cleaned here -- sessions persist across
+            # task invocations for Phase 2 follow-ups. Cleaned in cancel/close paths.
 
     # =========================================================================
     # Broadcast Helpers
@@ -1127,6 +1139,8 @@ class Brain:
 
     async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
         """Close an event and broadcast the closure to UI."""
+        # Cancel any running agent task for this event (prevents orphaned CLI processes)
+        await self.cancel_active_task(event_id, f"Event closing: {summary[:100]}")
         # Fetch event BEFORE close to get service name for journal
         event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary)
@@ -1151,6 +1165,8 @@ class Brain:
         self._waiting_for_user.discard(event_id)
         self._last_processed.pop(event_id, None)
         self._event_locks.pop(event_id, None)
+        self._active_agent_for_event.pop(event_id, None)
+        self._agent_sessions.pop(event_id, None)
         # Complete any associated Plan (removes ghost node from graph)
         plan_id = self._event_plans.pop(event_id, None)
         if plan_id:
@@ -1164,6 +1180,86 @@ class Brain:
                 "event_id": event_id,
                 "summary": summary,
             })
+
+    # =========================================================================
+    # Active Task Cancellation
+    # =========================================================================
+
+    async def cancel_active_task(self, event_id: str, reason: str = "cancelled") -> bool:
+        """Cancel a running agent task for an event. Single kill path for all layers.
+
+        Cancels the asyncio.Task, which triggers CancelledError in base_client.process(),
+        which closes the WS to the sidecar, which SIGTERMs the CLI process.
+        Waits up to 3s for graceful cleanup before giving up.
+
+        Returns True if a task was cancelled, False if no active task existed.
+        """
+        task = self._active_tasks.get(event_id)
+        if not task or task.done():
+            return False
+        logger.warning(f"Cancelling active task for {event_id}: {reason}")
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        self._active_tasks.pop(event_id, None)
+        self._active_agent_for_event.pop(event_id, None)
+        self._agent_sessions.pop(event_id, None)
+        self._event_locks.pop(event_id, None)
+        return True
+
+    async def emergency_stop(self) -> int:
+        """Cancel ALL active agent tasks and close their events. Master kill switch.
+
+        Returns the number of tasks cancelled.
+        """
+        cancelled = 0
+        for eid in list(self._active_tasks.keys()):
+            if await self.cancel_active_task(eid, "Emergency stop by user"):
+                await self._close_and_broadcast(eid, "Emergency stop: all agents terminated.")
+                cancelled += 1
+        logger.critical(f"EMERGENCY STOP: {cancelled} tasks cancelled")
+        return cancelled
+
+    async def send_to_agent(self, event_id: str, agent_name: str, message: str) -> str:
+        """Send a follow-up message to a running agent session.
+
+        Used in Phase 2 to forward user messages to agents instead of killing them.
+        The agent's followup() handles routing internally (e.g., Developer routes through Flash Manager).
+        """
+        session_id = self._agent_sessions.get(event_id)
+        if not session_id:
+            return "No active session"
+        agent = self.agents.get(agent_name)
+        if not agent:
+            return "Agent not found"
+        return await agent.followup(event_id, session_id, message)
+
+    async def _forward_user_to_agent(
+        self, event_id: str, agent_name: str, user_text: str
+    ) -> None:
+        """Forward a user message to an active agent session and persist the response.
+
+        Runs as a fire-and-forget task (asyncio.create_task) so the event loop
+        is not blocked waiting for the agent to respond.
+        """
+        try:
+            followup_result = await self.send_to_agent(
+                event_id, agent_name, f"The user says: {user_text}")
+            if followup_result and not followup_result.startswith("Error:"):
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=agent_name,
+                    action="followup",
+                    result=followup_result[:15000],
+                )
+                await self.blackboard.append_turn(event_id, turn)
+                await self._broadcast_turn(event_id, turn)
+        except asyncio.CancelledError:
+            pass  # Task was cancelled (event closed or emergency stop)
+        except Exception as e:
+            logger.warning(f"Follow-up forwarding failed for {event_id}: {e}")
 
     # =========================================================================
     # Volume Writer
@@ -1365,7 +1461,7 @@ class Brain:
                 # 2. Scan active events: status-driven two-phase scan
                 active = await self.blackboard.get_active_events()
                 for eid in active:
-                    # Phase 1: Even if an agent task is running, acknowledge new turns
+                    # Agent task running: acknowledge turns, forward user messages or cancel
                     if eid in self._active_tasks and not self._active_tasks[eid].done():
                         event = await self.blackboard.get_event(eid)
                         if event:
@@ -1373,7 +1469,34 @@ class Brain:
                             if unseen:
                                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                        continue  # Still skip LLM evaluation -- agent is running
+                            user_turns = [t for t in unseen if t.actor == "user"]
+                            if user_turns:
+                                session_id = self._agent_sessions.get(eid)
+                                if session_id:
+                                    # Phase 2: Forward user message to agent via session.
+                                    # Brain calls send_to_agent() uniformly for all agents.
+                                    # Developer.followup() handles Huddle routing internally.
+                                    user_text = " ".join(
+                                        t.thoughts for t in user_turns if t.thoughts
+                                    )
+                                    if not user_text:
+                                        continue  # Empty user message -- skip forwarding
+                                    agent_name = self._active_agent_for_event.get(eid)
+                                    if agent_name:
+                                        # Fire-and-forget: don't block the event loop waiting
+                                        # for the agent to respond. Same pattern as _run_agent_task.
+                                        asyncio.create_task(
+                                            self._forward_user_to_agent(eid, agent_name, user_text)
+                                        )
+                                    continue
+                                else:
+                                    # No session -- fall back to Phase 1 cancel behavior
+                                    await self.cancel_active_task(eid, "User message received")
+                                    # Fall through to process_event (don't continue)
+                            else:
+                                continue
+                        else:
+                            continue
 
                     event = await self.blackboard.get_event(eid)
                     if not event or not event.conversation:

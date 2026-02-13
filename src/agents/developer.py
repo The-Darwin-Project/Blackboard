@@ -1,10 +1,11 @@
 # BlackBoard/src/agents/developer.py
 # @ai-rules:
 # 1. [Pattern]: QE is opt-in via QE_SIDECAR_URL. Without it, behavior is pre-probe baseline.
-# 2. [Pattern]: asyncio.gather runs dev+qe concurrently. Flash Manager moderates.
+# 2. [Pattern]: asyncio.wait(FIRST_COMPLETED) runs dev+qe concurrently. Flash Manager moderates.
 # 3. [Pattern]: as_completed processes first finisher immediately (flash_note).
 # 4. [Constraint]: Brain is unaware of QE. developer.process() returns merged result.
 # 5. [Gotcha]: flash_decide may fail to parse JSON. Fallback: done=True with raw text.
+# 6. [Pattern]: CancelledError propagation: cancels both dev_task + qe_task to prevent orphaned CLI processes.
 """
 Developer agent with optional concurrent QE pair + Flash Manager moderation.
 
@@ -66,6 +67,8 @@ class Developer(AgentClient):
         qe_url = os.getenv("QE_SIDECAR_URL", "")
         self._qe_enabled = bool(qe_url)
         self._flash_client = None
+        self._dev_sessions: dict[str, str] = {}   # event_id -> dev CLI session_id
+        self._qe_sessions: dict[str, str] = {}    # event_id -> qe CLI session_id
         if self._qe_enabled:
             self.qe = AgentClient(
                 agent_name="qe",
@@ -142,8 +145,12 @@ class Developer(AgentClient):
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
-    ) -> str:
-        """Dev + optional QE pair with Flash Manager moderation."""
+    ) -> tuple[str, Optional[str]]:
+        """Dev + optional QE pair with Flash Manager moderation.
+
+        Returns (merged_result, dev_session_id). Brain sees the developer session;
+        QE session is internal to the Huddle.
+        """
         if not self._qe_enabled:
             return await super().process(event_id, task, event_md_path, on_progress)
 
@@ -162,74 +169,128 @@ class Developer(AgentClient):
         )
 
         dev_result = None
+        dev_session_id: Optional[str] = None
         qe_result = None
 
-        # Collect results as they arrive
-        done, pending = await asyncio.wait(
-            [dev_task, qe_task], return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in done:
-            result = t.result() if not t.cancelled() else "Error: cancelled"
-            if isinstance(result, Exception):
-                result = f"Error: {result}"
-            if t is dev_task:
-                dev_result = str(result)
-                first_agent = "Developer"
-            else:
-                qe_result = str(result)
-                first_agent = "QE"
+        try:
+            # Collect results as they arrive
+            done, pending = await asyncio.wait(
+                [dev_task, qe_task], return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in done:
+                raw = t.result() if not t.cancelled() else ("Error: cancelled", None)
+                if isinstance(raw, Exception):
+                    raw = (f"Error: {raw}", None)
+                result_text, sid = raw if isinstance(raw, tuple) else (str(raw), None)
+                if t is dev_task:
+                    dev_result = str(result_text)
+                    dev_session_id = sid
+                    first_agent = "Developer"
+                else:
+                    qe_result = str(result_text)
+                    if sid:
+                        self._qe_sessions[event_id] = sid
+                    first_agent = "QE"
 
-        # Flash quick note on first finisher
-        note = await self._flash_note(first_agent, dev_result or qe_result or "")
-        if note and on_progress:
-            await on_progress({"actor": "flash", "message": note, "event_id": event_id})
-        logger.info(f"Huddle {event_id}: {first_agent} finished first. Flash: {note[:100]}")
+            # Flash quick note on first finisher
+            note = await self._flash_note(first_agent, dev_result or qe_result or "")
+            if note and on_progress:
+                await on_progress({"actor": "flash", "message": note, "event_id": event_id})
+            logger.info(f"Huddle {event_id}: {first_agent} finished first. Flash: {note[:100]}")
 
-        # Wait for second finisher
-        for t in pending:
-            result = await t
-            if isinstance(result, Exception):
-                result = f"Error: {result}"
-            if t is dev_task:
-                dev_result = str(result)
-            else:
-                qe_result = str(result)
+            # Wait for second finisher
+            for t in pending:
+                raw = await t
+                if isinstance(raw, Exception):
+                    raw = (f"Error: {raw}", None)
+                result_text, sid = raw if isinstance(raw, tuple) else (str(raw), None)
+                if t is dev_task:
+                    dev_result = str(result_text)
+                    dev_session_id = sid
+                else:
+                    qe_result = str(result_text)
+                    if sid:
+                        self._qe_sessions[event_id] = sid
 
-        # Phase 2: Flash Manager review + rounds
-        for round_num in range(1, MAX_REVIEW_ROUNDS + 1):
-            decision = await self._flash_decide(dev_result, qe_result, round_num)
-            summary = decision.get("summary", "")
-            dev_act = decision.get("dev_action", "none")
-            qe_act = decision.get("qe_action", "none")
+            # Track dev session
+            if dev_session_id:
+                self._dev_sessions[event_id] = dev_session_id
 
-            if on_progress:
-                await on_progress({"actor": "flash", "message": summary, "event_id": event_id})
-            logger.info(f"Huddle {event_id} R{round_num}: {summary} (dev={dev_act}, qe={qe_act})")
+            # Phase 2: Flash Manager review + rounds
+            for round_num in range(1, MAX_REVIEW_ROUNDS + 1):
+                decision = await self._flash_decide(dev_result, qe_result, round_num)
+                summary = decision.get("summary", "")
+                dev_act = decision.get("dev_action", "none")
+                qe_act = decision.get("qe_action", "none")
 
-            if decision.get("done", False):
-                break
+                if on_progress:
+                    await on_progress({"actor": "flash", "message": summary, "event_id": event_id})
+                logger.info(f"Huddle {event_id} R{round_num}: {summary} (dev={dev_act}, qe={qe_act})")
 
-            # Follow-up: Dev fix
-            if dev_act in ("fix", "review"):
-                msg = decision.get("dev_message", "Review QE findings.")
-                dev_result = await super().process(
-                    event_id,
-                    f"Your QE partner has feedback:\n\n{msg}\n\nAddress the issues.",
-                    event_md_path,
-                    on_progress,
-                )
+                if decision.get("done", False):
+                    break
 
-            # Follow-up: QE verify
-            if qe_act in ("verify", "review"):
-                msg = decision.get("qe_message", "Verify Dev changes.")
-                qe_result = await self.qe.process(
-                    event_id,
-                    f"The Developer has updated their work:\n\n{msg}\n\nVerify and report.",
-                    event_md_path,
-                    qe_on_progress,
-                )
+                # Follow-up: Dev fix
+                if dev_act in ("fix", "review"):
+                    msg = decision.get("dev_message", "Review QE findings.")
+                    dev_result, dev_session_id = await super().process(
+                        event_id,
+                        f"Your QE partner has feedback:\n\n{msg}\n\nAddress the issues.",
+                        event_md_path,
+                        on_progress,
+                    )
+                    if dev_session_id:
+                        self._dev_sessions[event_id] = dev_session_id
 
-        return (
+                # Follow-up: QE verify
+                if qe_act in ("verify", "review"):
+                    msg = decision.get("qe_message", "Verify Dev changes.")
+                    qe_result, qe_sid = await self.qe.process(
+                        event_id,
+                        f"The Developer has updated their work:\n\n{msg}\n\nVerify and report.",
+                        event_md_path,
+                        qe_on_progress,
+                    )
+                    if qe_sid:
+                        self._qe_sessions[event_id] = qe_sid
+
+        except asyncio.CancelledError:
+            # Cancel BOTH sub-tasks to prevent orphaned CLI processes
+            dev_task.cancel()
+            qe_task.cancel()
+            # Wait briefly for cleanup to propagate (WS close -> SIGTERM)
+            await asyncio.gather(dev_task, qe_task, return_exceptions=True)
+            logger.info(f"Huddle cancelled for {event_id}: dev+qe tasks killed")
+            raise  # Re-raise so Brain sees the cancellation
+
+        merged = (
             f"## Developer Result\n{dev_result}\n\n"
             f"## QE Assessment\n{qe_result}"
         )
+        return merged, dev_session_id
+
+    async def followup(
+        self,
+        event_id: str,
+        session_id: str,
+        message: str,
+        on_progress: Optional[Callable] = None,
+    ) -> str:
+        """Follow-up with Flash Manager routing for Huddle sessions.
+
+        When QE is enabled, Flash Manager decides whether the follow-up goes to
+        Dev, QE, or both. Brain calls this uniformly -- Huddle complexity stays encapsulated.
+        """
+        if not self._qe_enabled:
+            return await super().followup(event_id, session_id, message, on_progress)
+
+        # Flash Manager decides routing to Dev, QE, or both
+        decision = await self._flash_decide(
+            f"User says: {message}", "Huddle active (dev+qe working)", round_num=0)
+        results = []
+        if decision.get("dev_action", "none") != "none":
+            results.append(await super().followup(event_id, session_id, message, on_progress))
+        if decision.get("qe_action", "none") != "none":
+            qe_sid = self._qe_sessions.get(event_id, "")
+            results.append(await self.qe.followup(event_id, qe_sid, message))
+        return "\n".join(results) if results else decision.get("summary", "No action")

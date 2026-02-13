@@ -166,6 +166,12 @@ async def close_event_by_user(
         raise HTTPException(status_code=409, detail="Event already closed")
 
     close_summary = f"User force-closed: {body.reason}"
+    # Cancel any running agent task before closing (prevents orphaned CLI processes)
+    try:
+        brain = await get_brain()
+        await brain.cancel_active_task(event_id, f"User force-close: {body.reason}")
+    except RuntimeError:
+        pass  # Brain not initialized
     await blackboard.close_event(event_id, close_summary)
     # Write to ops journal so Brain has temporal context for this closure
     await blackboard.append_journal(

@@ -11,7 +11,7 @@ import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
 import ConversationFeed from './ConversationFeed';
 import AgentStreamCard from './AgentStreamCard';
-import { WebSocketProvider, useWSMessage } from '../contexts/WebSocketContext';
+import { useWSMessage } from '../contexts/WebSocketContext';
 
 interface ContextMenuState {
   serviceName: string;
@@ -238,13 +238,4 @@ function DashboardInner() {
   );
 }
 
-/** Wrapper that provides WebSocket context to DashboardInner + children. */
-function Dashboard() {
-  return (
-    <WebSocketProvider>
-      <DashboardInner />
-    </WebSocketProvider>
-  );
-}
-
-export default Dashboard;
+export default DashboardInner;

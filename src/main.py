@@ -3,6 +3,7 @@
 # 1. [Pattern]: clear_waiting(event_id) called in both user_message and approve WS branches.
 # 2. [Gotcha]: Brain instance accessed via app.state.brain, guarded by hasattr check.
 # 3. [Constraint]: Static files mount MUST be last -- API routes take precedence.
+# 4. [Pattern]: emergency_stop WS handler cancels all active tasks and responds with cancelled count.
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -331,7 +332,22 @@ async def websocket_endpoint(websocket: WebSocket):
                             "turn": turn.model_dump(),
                         })
                         logger.info(f"WS approval for event: {event_id}")
-                        
+
+            elif msg_type == "emergency_stop":
+                # Master kill switch: cancel ALL active agent tasks
+                if hasattr(app.state, 'brain'):
+                    cancelled = await app.state.brain.emergency_stop()
+                    await websocket.send_json({
+                        "type": "emergency_stop_ack",
+                        "cancelled": cancelled,
+                    })
+                    logger.critical(f"WS emergency stop: {cancelled} tasks cancelled")
+                else:
+                    await websocket.send_json({
+                        "type": "emergency_stop_ack",
+                        "cancelled": 0,
+                    })
+
     except WebSocketDisconnect:
         pass
     except Exception as e:

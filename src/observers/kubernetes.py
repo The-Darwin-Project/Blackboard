@@ -1,4 +1,8 @@
 # BlackBoard/src/observers/kubernetes.py
+# @ai-rules:
+# 1. [Constraint]: Agents (Aligner/Architect) cannot import kubernetes; this module is the only K8s touchpoint.
+# 2. [Pattern]: Darwin annotation discovery (darwin.io/*) is additive; label-based discovery remains the fallback.
+# 3. [Gotcha]: update_service_metadata requires version/cpu/memory/error_rate; K8s discovery supplies version (image tag), deps (env vars), error_rate (restart counts).
 """
 Kubernetes Metrics Observer.
 
@@ -26,6 +30,13 @@ K8S_OBSERVER_ENABLED = os.getenv("K8S_OBSERVER_ENABLED", "false").lower() == "tr
 K8S_OBSERVER_NAMESPACE = os.getenv("K8S_OBSERVER_NAMESPACE", "darwin")
 K8S_OBSERVER_INTERVAL = int(os.getenv("K8S_OBSERVER_INTERVAL", "5"))  # Match darwin-client interval
 K8S_OBSERVER_LABEL_SELECTOR = os.getenv("K8S_OBSERVER_LABEL_SELECTOR", "")
+
+# Darwin annotation schema for Deployment-based service discovery
+DARWIN_ANNOTATION_PREFIX = "darwin.io/"
+DARWIN_MONITORED = f"{DARWIN_ANNOTATION_PREFIX}monitored"
+DARWIN_GITOPS_REPO = f"{DARWIN_ANNOTATION_PREFIX}gitops-repo"
+DARWIN_HELM_PATH = f"{DARWIN_ANNOTATION_PREFIX}helm-path"
+DARWIN_SERVICE_NAME = f"{DARWIN_ANNOTATION_PREFIX}service-name"
 
 
 class KubernetesObserver:
@@ -68,6 +79,7 @@ class KubernetesObserver:
         self.anomaly_callback = anomaly_callback
         self.pod_health_callback = pod_health_callback
         self.namespace = namespace
+        self.namespaces = [n.strip() for n in namespace.split(",") if n.strip()] if namespace else ["default"]
         self.interval = interval
         self.label_selector = label_selector
         
@@ -144,6 +156,7 @@ class KubernetesObserver:
             # Store clients for later use
             self._core_api = client.CoreV1Api()
             self._custom_api = client.CustomObjectsApi()
+            self._apps_api = client.AppsV1Api()
             self._k8s_available = True
             return True
             
@@ -158,6 +171,7 @@ class KubernetesObserver:
         """Main polling loop - runs until stopped."""
         while self._running:
             try:
+                await self._poll_deployment_annotations()
                 await self._poll_metrics()
                 await self._poll_pod_health()
                 await self._poll_warning_events()
@@ -170,89 +184,224 @@ class KubernetesObserver:
             except asyncio.CancelledError:
                 break
     
+    async def _poll_deployment_annotations(self) -> None:
+        """
+        Poll Deployments for darwin.io/* annotations and register/update services.
+
+        When a Deployment has darwin.io/monitored: "true", extract service name,
+        version from image tag, dependencies from env vars, gitops-repo, and helm-path,
+        then register the service and its metadata in the Blackboard.
+        """
+        if not self._k8s_available:
+            return
+
+        for namespace in self.namespaces:
+            try:
+                deployments = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda ns=namespace: self._apps_api.list_namespaced_deployment(
+                        ns,
+                        label_selector=self.label_selector or None,
+                    )
+                )
+
+                for deploy in deployments.items:
+                    annotations = deploy.metadata.annotations or {}
+                    if annotations.get(DARWIN_MONITORED, "").lower() != "true":
+                        continue
+
+                    service_name = annotations.get(DARWIN_SERVICE_NAME) or deploy.metadata.name
+                    if not service_name:
+                        continue
+
+                    gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO)
+                    helm_path = annotations.get(DARWIN_HELM_PATH)
+
+                    gitops_repo = self._parse_gitops_repo_from_url(gitops_repo_url) if gitops_repo_url else None
+
+                    # Extract version from first container image tag
+                    containers = deploy.spec.template.spec.containers if deploy.spec and deploy.spec.template and deploy.spec.template.spec else []
+                    if containers:
+                        image = containers[0].image or ""
+                        version = image.split(":")[-1] if ":" in image else "latest"
+                        if len(version) >= 7 and all(c in "0123456789abcdef" for c in version.lower()):
+                            version = version[:7]
+                    else:
+                        version = "k8s"
+
+                    # Extract dependencies from env vars (SERVICE_URL, DB_HOST, etc.)
+                    deps = self._extract_dependencies(containers)
+
+                    await self.blackboard.redis.sadd("darwin:services", service_name)
+                    for dep in deps:
+                        await self.blackboard.add_edge(service_name, dep)
+
+                    await self.blackboard.update_service_metadata(
+                        name=service_name,
+                        version=version,
+                        cpu=0.0,
+                        memory=0.0,
+                        error_rate=0.0,
+                        gitops_repo=gitops_repo,
+                        gitops_repo_url=gitops_repo_url,
+                        gitops_helm_path=helm_path,
+                    )
+                    logger.debug(
+                        f"Registered service from annotations: {service_name} "
+                        f"(version={version}, deps={deps}, gitops={gitops_repo}, helm_path={helm_path})"
+                    )
+
+            except Exception as e:
+                logger.debug(f"Failed to poll deployment annotations in {namespace}: {e}")
+
+    @staticmethod
+    def _parse_gitops_repo_from_url(url: Optional[str]) -> Optional[str]:
+        """Parse owner/repo from Git URL (e.g. https://github.com/owner/repo.git -> owner/repo)."""
+        if not url:
+            return None
+        try:
+            url = url.rstrip("/")
+            if url.endswith(".git"):
+                url = url[:-4]
+            parts = url.split("/")
+            if len(parts) >= 2:
+                return "/".join(parts[-2:])
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_dependencies(containers: list) -> list[str]:
+        """
+        Extract dependency names from env vars that look like service references.
+
+        Looks for env vars with names containing _URL, _HOST, _SERVICE, _ADDR.
+        Parses values like "http://darwin-store:8080" -> "darwin-store".
+        """
+        deps: set[str] = set()
+        service_patterns = ["_URL", "_HOST", "_SERVICE", "_ADDR"]
+        for container in containers or []:
+            if not container.env:
+                continue
+            for env_var in container.env:
+                if not hasattr(env_var, "value") or not env_var.value:
+                    continue
+                if not any(p in env_var.name for p in service_patterns):
+                    continue
+                value = env_var.value
+                if "://" in value:
+                    value = value.split("://", 1)[1]
+                host = value.split(":")[0].split("/")[0]
+                if host and host not in ("localhost", "127.0.0.1", "0.0.0.0"):
+                    deps.add(host)
+        return list(deps)
+
     async def _poll_metrics(self) -> None:
         """Fetch pod metrics from metrics-server and process them."""
         if not self._k8s_available:
             return
         
-        try:
-            # Get pod metrics from metrics.k8s.io API
-            # This is an async-wrapped sync call
-            metrics = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._custom_api.list_namespaced_custom_object(
-                    group="metrics.k8s.io",
-                    version="v1beta1",
-                    namespace=self.namespace,
-                    plural="pods",
-                    label_selector=self.label_selector or None,
+        for ns in self.namespaces:
+            try:
+                # Get pod metrics from metrics.k8s.io API
+                # This is an async-wrapped sync call
+                metrics = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda n=ns: self._custom_api.list_namespaced_custom_object(
+                        group="metrics.k8s.io",
+                        version="v1beta1",
+                        namespace=n,
+                        plural="pods",
+                        label_selector=self.label_selector or None,
+                    )
                 )
-            )
-            
-            items = metrics.get("items", [])
-            logger.debug(f"Got metrics for {len(items)} pods in {self.namespace}")
-            
-            for pod_metrics in items:
-                await self._process_pod_metrics(pod_metrics)
                 
-        except Exception as e:
-            # Don't crash on metrics-server errors (it might be temporarily unavailable)
-            logger.warning(f"Failed to fetch pod metrics: {e}")
+                items = metrics.get("items", [])
+                logger.debug(f"Got metrics for {len(items)} pods in {ns}")
+                
+                for pod_metrics in items:
+                    await self._process_pod_metrics(pod_metrics)
+                    
+            except Exception as e:
+                # Don't crash on metrics-server errors (it might be temporarily unavailable)
+                logger.warning(f"Failed to fetch pod metrics in {ns}: {e}")
     
+    def _pod_key(self, namespace: str, pod_name: str) -> str:
+        """Unique key for pod across namespaces."""
+        return f"{namespace}/{pod_name}"
+
     async def _poll_pod_health(self) -> None:
         """
         Check pod container states for unhealthy conditions.
-        
+
         Detects: ImagePullBackOff, CrashLoopBackOff, OOMKilled, Error, etc.
         Pods in these states won't report metrics, so _poll_metrics misses them.
+
+        Also aggregates container restart counts per service and stores as error_rate
+        in the Blackboard (passive K8s-native replacement for DarwinClient error telemetry).
         """
-        if not self._k8s_available or not self.pod_health_callback:
+        if not self._k8s_available:
             return
-        
-        try:
-            pods = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._core_api.list_namespaced_pod(
-                    self.namespace,
-                    label_selector=self.label_selector or None,
+
+        healthy_keys: set[str] = set()
+        service_restarts: dict[str, int] = {}
+
+        for namespace in self.namespaces:
+            try:
+                pods = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda ns=namespace: self._core_api.list_namespaced_pod(
+                        ns,
+                        label_selector=self.label_selector or None,
+                    )
                 )
-            )
-            
-            # Track which pods are healthy this cycle (to clear resolved ones)
-            healthy_pods = set()
-            
-            for pod in pods.items:
-                pod_name = pod.metadata.name
-                labels = pod.metadata.labels or {}
-                service_name = labels.get("app") or labels.get("app.kubernetes.io/name")
                 
-                if not service_name:
-                    continue
-                
-                # Skip self-monitoring
-                if service_name in ("darwin-brain", "darwin-blackboard-brain"):
-                    continue
-                
-                # Check container statuses for unhealthy states
-                reason = self._get_unhealthy_reason(pod)
-                
-                if reason:
-                    # Only report if not already reported for this pod+reason
-                    if self._reported_unhealthy.get(pod_name) != reason:
-                        self._reported_unhealthy[pod_name] = reason
-                        logger.warning(f"Unhealthy pod: {pod_name} ({service_name}): {reason}")
-                        await self.pod_health_callback(service_name, pod_name, reason)
-                else:
-                    healthy_pods.add(pod_name)
-            
-            # Clear resolved pods from tracking
-            for pod_name in list(self._reported_unhealthy.keys()):
-                if pod_name in healthy_pods:
-                    logger.info(f"Pod recovered: {pod_name}")
-                    del self._reported_unhealthy[pod_name]
+                for pod in pods.items:
+                    pod_name = pod.metadata.name
+                    pod_key = self._pod_key(namespace, pod_name)
+                    labels = pod.metadata.labels or {}
+                    service_name = labels.get("app") or labels.get("app.kubernetes.io/name")
                     
-        except Exception as e:
-            logger.debug(f"Failed to poll pod health: {e}")
+                    if not service_name:
+                        continue
+                    
+                    # Skip self-monitoring
+                    if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                        continue
+                    
+                    # Aggregate restart counts per service for error_rate
+                    total = sum(cs.restart_count or 0 for cs in (pod.status.container_statuses or []) + (pod.status.init_container_statuses or []))
+                    service_restarts[service_name] = service_restarts.get(service_name, 0) + total
+                    
+                    # Check container statuses for unhealthy states
+                    reason = self._get_unhealthy_reason(pod)
+                    
+                    if reason:
+                        # Only report if not already reported for this pod+reason
+                        if self._reported_unhealthy.get(pod_key) != reason:
+                            self._reported_unhealthy[pod_key] = reason
+                            logger.warning(f"Unhealthy pod: {pod_key} ({service_name}): {reason}")
+                            if self.pod_health_callback:
+                                await self.pod_health_callback(service_name, pod_name, reason)
+                    else:
+                        healthy_keys.add(pod_key)
+                    
+            except Exception as e:
+                logger.debug(f"Failed to poll pod health in {namespace}: {e}")
+
+        # Store restart-derived error_rate in Blackboard per service
+        for service_name, total_restarts in service_restarts.items():
+            error_rate = min(100.0, float(total_restarts) * 10.0) if total_restarts > 0 else 0.0
+            await self.blackboard.record_metric(
+                service_name, "error_rate", error_rate, source="kubernetes"
+            )
+            await self.blackboard.redis.sadd("darwin:services", service_name)
+        
+        # Clear resolved pods from tracking
+        for pod_key in list(self._reported_unhealthy.keys()):
+            if pod_key in healthy_keys:
+                logger.info(f"Pod recovered: {pod_key}")
+                del self._reported_unhealthy[pod_key]
     
     async def _poll_warning_events(self) -> None:
         """
@@ -273,64 +422,64 @@ class KubernetesObserver:
         if not self._k8s_available or not self.anomaly_callback:
             return
         
-        try:
-            events = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._core_api.list_namespaced_event(
-                    self.namespace,
-                    field_selector="type=Warning",
+        # Aggregate warnings across all namespaces
+        service_warnings: dict[str, dict] = {}
+        
+        for namespace in self.namespaces:
+            try:
+                events = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda ns=namespace: self._core_api.list_namespaced_event(
+                        ns,
+                        field_selector="type=Warning",
+                    )
                 )
-            )
-            
-            # Group events by service, count occurrences per reason
-            # Key: service_name, Value: {total_count, reasons: []}
-            service_warnings: dict[str, dict] = {}
-            
-            for event in events.items:
-                reason = event.reason or ""
-                if reason not in self.WARNING_EVENT_REASONS:
-                    message = event.message or ""
-                    if "probe failed" not in message.lower() and "liveness" not in message.lower() and "readiness" not in message.lower():
-                        continue
                 
-                obj = event.involved_object
-                if not obj or obj.kind != "Pod":
-                    continue
-                pod_name = obj.name or ""
-                if not pod_name:
-                    continue
-                
-                service_name = await self._get_service_name(pod_name)
-                if not service_name:
-                    continue
-                
-                # Skip self-monitoring
-                if service_name in ("darwin-brain", "darwin-blackboard-brain"):
-                    continue
-                
-                count = event.count or 1
-                if service_name not in service_warnings:
-                    service_warnings[service_name] = {"total_count": 0, "reasons": []}
-                service_warnings[service_name]["total_count"] += count
-                
-                reason_str = f"{reason}: {(event.message or '')[:120]} ({count}x)"
-                if reason_str not in service_warnings[service_name]["reasons"]:
-                    service_warnings[service_name]["reasons"].append(reason_str)
-            
-            # Update active warnings per service (used by _process_pod_metrics)
-            new_warnings: dict[str, str] = {}
-            for svc, info in service_warnings.items():
-                if info["total_count"] >= self.WARNING_EVENT_THRESHOLD:
-                    new_warnings[svc] = "; ".join(info["reasons"][:3])
-                    if svc not in self._active_warnings:
-                        logger.warning(
-                            f"K8s Warning events for {svc} ({info['total_count']}x): "
-                            f"{new_warnings[svc][:200]}"
-                        )
-            self._active_warnings = new_warnings
+                for event in events.items:
+                    reason = event.reason or ""
+                    if reason not in self.WARNING_EVENT_REASONS:
+                        message = event.message or ""
+                        if "probe failed" not in message.lower() and "liveness" not in message.lower() and "readiness" not in message.lower():
+                            continue
                     
-        except Exception as e:
-            logger.debug(f"Failed to poll K8s warning events: {e}")
+                    obj = event.involved_object
+                    if not obj or obj.kind != "Pod":
+                        continue
+                    pod_name = obj.name or ""
+                    if not pod_name:
+                        continue
+                    
+                    service_name = await self._get_service_name(pod_name, namespace)
+                    if not service_name:
+                        continue
+                    
+                    # Skip self-monitoring
+                    if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                        continue
+                    
+                    count = event.count or 1
+                    if service_name not in service_warnings:
+                        service_warnings[service_name] = {"total_count": 0, "reasons": []}
+                    service_warnings[service_name]["total_count"] += count
+                    
+                    reason_str = f"{reason}: {(event.message or '')[:120]} ({count}x)"
+                    if reason_str not in service_warnings[service_name]["reasons"]:
+                        service_warnings[service_name]["reasons"].append(reason_str)
+                        
+            except Exception as e:
+                logger.debug(f"Failed to poll K8s warning events in {namespace}: {e}")
+        
+        # Update active warnings per service (used by _process_pod_metrics)
+        new_warnings: dict[str, str] = {}
+        for svc, info in service_warnings.items():
+            if info["total_count"] >= self.WARNING_EVENT_THRESHOLD:
+                new_warnings[svc] = "; ".join(info["reasons"][:3])
+                if svc not in self._active_warnings:
+                    logger.warning(
+                        f"K8s Warning events for {svc} ({info['total_count']}x): "
+                        f"{new_warnings[svc][:200]}"
+                    )
+        self._active_warnings = new_warnings
     
     def _get_unhealthy_reason(self, pod) -> Optional[str]:
         """Extract unhealthy reason from pod container statuses."""
@@ -365,14 +514,16 @@ class KubernetesObserver:
             pod_metrics: Pod metrics from metrics.k8s.io API
         """
         try:
-            pod_name = pod_metrics["metadata"]["name"]
+            metadata = pod_metrics.get("metadata", {})
+            pod_name = metadata.get("name", "")
+            namespace = metadata.get("namespace", self.namespaces[0] if self.namespaces else "default")
             containers = pod_metrics.get("containers", [])
             
-            if not containers:
+            if not containers or not pod_name:
                 return
             
             # Get service name from pod labels
-            service_name = await self._get_service_name(pod_name)
+            service_name = await self._get_service_name(pod_name, namespace)
             if not service_name:
                 logger.debug(f"Skipping pod {pod_name}: no service name mapping")
                 return
@@ -382,7 +533,7 @@ class KubernetesObserver:
                 return
             
             # Get resource limits for percentage calculation
-            limits = await self._get_pod_limits(pod_name)
+            limits = await self._get_pod_limits(pod_name, namespace)
             
             # Aggregate metrics across all containers
             total_cpu_nano = 0
@@ -435,7 +586,7 @@ class KubernetesObserver:
             )
             
             # Update replica count for this service
-            replicas = await self.get_deployment_replicas(service_name)
+            replicas = await self.get_deployment_replicas(service_name, namespace)
             if replicas:
                 await self.blackboard.update_service_replicas(
                     service_name,
@@ -461,7 +612,7 @@ class KubernetesObserver:
         except Exception as e:
             logger.warning(f"Error processing pod metrics: {e}")
     
-    async def _get_service_name(self, pod_name: str) -> Optional[str]:
+    async def _get_service_name(self, pod_name: str, namespace: str) -> Optional[str]:
         """
         Get service name from pod labels.
         
@@ -471,7 +622,7 @@ class KubernetesObserver:
         try:
             pod = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self._core_api.read_namespaced_pod(pod_name, self.namespace)
+                lambda: self._core_api.read_namespaced_pod(pod_name, namespace)
             )
             
             labels = pod.metadata.labels or {}
@@ -523,22 +674,23 @@ class KubernetesObserver:
         except Exception:
             return None
     
-    async def _get_pod_limits(self, pod_name: str) -> dict:
+    async def _get_pod_limits(self, pod_name: str, namespace: str) -> dict:
         """
         Get resource limits for a pod.
         
         Returns dict with cpu_limit (millicores) and memory_limit (bytes).
         """
+        cache_key = self._pod_key(namespace, pod_name)
         # Check cache first
-        if pod_name in self._pod_limits:
-            return self._pod_limits[pod_name]
+        if cache_key in self._pod_limits:
+            return self._pod_limits[cache_key]
         
         limits = {"cpu_limit": 0, "memory_limit": 0}
         
         try:
             pod = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self._core_api.read_namespaced_pod(pod_name, self.namespace)
+                lambda: self._core_api.read_namespaced_pod(pod_name, namespace)
             )
             
             # Sum limits across all containers
@@ -553,10 +705,10 @@ class KubernetesObserver:
                         limits["memory_limit"] += self._parse_memory(mem_limit)
             
             # Cache the limits
-            self._pod_limits[pod_name] = limits
+            self._pod_limits[cache_key] = limits
             
         except Exception as e:
-            logger.debug(f"Failed to get limits for pod {pod_name}: {e}")
+            logger.debug(f"Failed to get limits for pod {cache_key}: {e}")
         
         return limits
     
@@ -582,26 +734,23 @@ class KubernetesObserver:
             # Assume cores
             return int(float(cpu_str) * 1_000_000_000)
     
-    async def get_deployment_replicas(self, service: str) -> Optional[dict]:
+    async def get_deployment_replicas(self, service: str, namespace: str) -> Optional[dict]:
         """
         Get ready/desired replicas for a service's deployment.
-        
+
         Queries apps/v1 Deployment by label app={service}.
-        
+
         Returns dict with {"ready": N, "desired": M} or None if not found.
         """
         if not self._k8s_available:
             return None
-        
+
         try:
-            from kubernetes import client
-            apps_api = client.AppsV1Api()
-            
             # List deployments with app={service} label
             deployments = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: apps_api.list_namespaced_deployment(
-                    self.namespace,
+                lambda: self._apps_api.list_namespaced_deployment(
+                    namespace,
                     label_selector=f"app={service}"
                 )
             )

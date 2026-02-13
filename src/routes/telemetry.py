@@ -44,6 +44,8 @@ async def receive_telemetry(
     - Triggers Architect analysis on anomalies (closed-loop)
     - Updates all Blackboard layers
     """
+    logger.warning("DEPRECATED: DarwinClient telemetry received. Use darwin.io/* annotations instead. "
+                   "This endpoint will be removed in a future release.")
     try:
         processed = await aligner.process_telemetry(payload)
         

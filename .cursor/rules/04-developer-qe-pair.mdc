@@ -1,3 +1,9 @@
+---
+description: Developer + QE pair programming protocol, invariants, and code contract
+globs: "**/agents/developer.py,**/rules/developer.md,**/rules/qe.md,**/files/developer.md,**/files/qe.md"
+alwaysApply: false
+---
+
 # Developer + QE Pair Programming Protocol
 
 ## The Pair Architecture
@@ -32,6 +38,8 @@ developer.py:
   - Phase 1: asyncio.gather(dev_sidecar, qe_sidecar)
   - Phase 2: flash_decide(dev_result, qe_result) -> review rounds
   - Returns: "## Developer Result\n...\n## QE Assessment\n..."
+  - Cancel: CancelledError propagates to both dev_task + qe_task
+  - Followup: Developer.followup() routes through Flash Manager internally
 
 brain.py:
   - Routes to "developer" only (never "qe")

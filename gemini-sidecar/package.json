@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "jsonwebtoken": "^9.0.2",
+    "node-pty": "^1.1.0",
     "ws": "^8.0.0"
   },
   "engines": {

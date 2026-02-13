@@ -149,7 +149,7 @@ spec:
             - name: K8S_OBSERVER_ENABLED
               value: "true"
             - name: K8S_OBSERVER_NAMESPACE
-              value: "{{ .Values.observer.namespace }}"
+              value: "{{ join "," .Values.observer.namespaces }}"
             - name: K8S_OBSERVER_INTERVAL
               value: "{{ .Values.observer.interval }}"
             - name: K8S_OBSERVER_LABEL_SELECTOR
@@ -303,6 +303,8 @@ spec:
               value: "{{ .Values.sidecars.architect.port }}"
             - name: AGENT_ROLE
               value: "architect"
+            - name: AGENT_PERMISSION_MODE
+              value: "{{ .Values.sidecars.architect.permissionMode | default "" }}"
             - name: GIT_USER_NAME
               value: "{{ .Values.sidecars.architect.gitUserName }}"
             - name: GIT_USER_EMAIL
@@ -432,6 +434,10 @@ spec:
             # CLI routing (gemini or claude)
             - name: AGENT_CLI
               value: "{{ .Values.sidecars.sysadmin.cliType | default "gemini" }}"
+            - name: AGENT_ROLE
+              value: "sysadmin"
+            - name: AGENT_PERMISSION_MODE
+              value: "{{ .Values.sidecars.sysadmin.permissionMode | default "" }}"
             - name: AGENT_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
             # GCP/Vertex AI configuration
@@ -557,6 +563,10 @@ spec:
             # CLI routing (gemini or claude)
             - name: AGENT_CLI
               value: "{{ .Values.sidecars.developer.cliType | default "gemini" }}"
+            - name: AGENT_ROLE
+              value: "developer"
+            - name: AGENT_PERMISSION_MODE
+              value: "{{ .Values.sidecars.developer.permissionMode | default "" }}"
             - name: AGENT_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
             # GCP/Vertex AI configuration
@@ -657,6 +667,10 @@ spec:
             # CLI routing (gemini or claude)
             - name: AGENT_CLI
               value: "{{ .Values.sidecars.qe.cliType | default "gemini" }}"
+            - name: AGENT_ROLE
+              value: "qe"
+            - name: AGENT_PERMISSION_MODE
+              value: "{{ .Values.sidecars.qe.permissionMode | default "" }}"
             - name: AGENT_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
             # GCP/Vertex AI configuration
