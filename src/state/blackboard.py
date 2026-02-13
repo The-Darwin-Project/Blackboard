@@ -173,6 +173,38 @@ class BlackboardState:
         await self.redis.sadd("darwin:services", name)
         logger.debug(f"Added service: {name}")
     
+    async def remove_service(self, name: str) -> int:
+        """
+        Remove a stale service and all its associated data from the topology.
+
+        Cleans: service set membership, metadata hash, outbound edges,
+        inbound edge references from other services, and edge metadata.
+
+        Returns the number of Redis keys deleted.
+        """
+        if not name or not name.strip():
+            return 0
+        deleted = 0
+        # Remove from service set
+        deleted += await self.redis.srem("darwin:services", name)
+        # Remove metadata hash
+        deleted += await self.redis.delete(f"darwin:service:{name}")
+        # Remove outbound edges set and their metadata
+        outbound = await self.redis.smembers(f"darwin:edges:{name}")
+        for target in outbound:
+            await self.redis.delete(f"darwin:edge:{name}:{target}")
+            deleted += 1
+        deleted += await self.redis.delete(f"darwin:edges:{name}")
+        # Remove inbound edge references from all other services
+        all_services = await self.redis.smembers("darwin:services")
+        for other in all_services:
+            removed = await self.redis.srem(f"darwin:edges:{other}", name)
+            if removed:
+                await self.redis.delete(f"darwin:edge:{other}:{name}")
+                deleted += removed + 1
+        logger.info(f"Removed stale service '{name}' ({deleted} keys cleaned)")
+        return deleted
+
     async def add_edge(self, source: str, target: str) -> None:
         """Add a dependency edge from source to target."""
         if not source or not source.strip() or not target or not target.strip():

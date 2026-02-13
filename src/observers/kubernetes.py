@@ -96,6 +96,12 @@ class KubernetesObserver:
         # Active warning events per service: {service -> reason_string}
         # Fed into anomaly_callback as elevated error_rate (30s buffer path)
         self._active_warnings: dict[str, str] = {}
+        # Reconciliation cycle counter (runs every RECONCILE_EVERY_N_CYCLES polls)
+        self._poll_count = 0
+        self.RECONCILE_EVERY_N_CYCLES = 12  # ~60s at 5s interval
+        # Set of service names with darwin.io/monitored annotation (populated by _poll_deployment_annotations)
+        # Used to filter pod metrics: only 'app' labels matching monitored services get registered
+        self._monitored_app_labels: set[str] = set()
     
     async def start(self) -> None:
         """Start the background polling loop."""
@@ -175,6 +181,10 @@ class KubernetesObserver:
                 await self._poll_metrics()
                 await self._poll_pod_health()
                 await self._poll_warning_events()
+                # Reconcile stale services on a slower cadence
+                self._poll_count += 1
+                if self._poll_count % self.RECONCILE_EVERY_N_CYCLES == 0:
+                    await self._reconcile_services()
             except Exception as e:
                 logger.error(f"Error polling K8s metrics: {e}")
             
@@ -213,6 +223,12 @@ class KubernetesObserver:
                     service_name = annotations.get(DARWIN_SERVICE_NAME) or deploy.metadata.name
                     if not service_name:
                         continue
+
+                    # Track which 'app' labels belong to monitored services
+                    # so _poll_metrics only registers pods from monitored workloads
+                    deploy_labels = deploy.metadata.labels or {}
+                    if "app" in deploy_labels:
+                        self._monitored_app_labels.add(deploy_labels["app"])
 
                     gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO)
                     helm_path = annotations.get(DARWIN_HELM_PATH)
@@ -253,6 +269,94 @@ class KubernetesObserver:
 
             except Exception as e:
                 logger.debug(f"Failed to poll deployment annotations in {namespace}: {e}")
+
+    # Stale service threshold: remove services with no telemetry for 5 minutes
+    STALE_SERVICE_SECONDS = 300
+
+    async def _reconcile_services(self) -> None:
+        """
+        Reconcile Redis service registry against live cluster state.
+
+        Removes services from darwin:services that have no matching Deployment
+        or StatefulSet AND no recent telemetry (last_seen > STALE_SERVICE_SECONDS).
+        This prevents ghost nodes from accumulating in the topology graph.
+        """
+        if not self._k8s_available:
+            return
+
+        import time
+
+        try:
+            # 1. Gather live workload names from the cluster
+            live_services: set[str] = set()
+            for namespace in self.namespaces:
+                try:
+                    # Deployments
+                    deploys = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ns=namespace: self._apps_api.list_namespaced_deployment(ns)
+                    )
+                    for d in deploys.items:
+                        # Use annotation service name if available, else deployment name
+                        annotations = d.metadata.annotations or {}
+                        svc_name = annotations.get(DARWIN_SERVICE_NAME) or d.metadata.name
+                        live_services.add(svc_name)
+                        # Add 'app' label only for monitored deployments
+                        labels = d.metadata.labels or {}
+                        if "app" in labels and labels["app"] in self._monitored_app_labels:
+                            live_services.add(labels["app"])
+
+                    # StatefulSets -- only add the resource name, NOT bare 'app' labels
+                    # (prevents ghost 'postgres' from app=postgres on internal StatefulSets)
+                    sts_list = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ns=namespace: self._apps_api.list_namespaced_stateful_set(ns)
+                    )
+                    for s in sts_list.items:
+                        live_services.add(s.metadata.name)
+
+                    # Services (K8s Service resources -- for dependency targets)
+                    svc_list = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda ns=namespace: self._core_api.list_namespaced_service(ns)
+                    )
+                    for svc in svc_list.items:
+                        live_services.add(svc.metadata.name)
+
+                except Exception as e:
+                    logger.debug(f"Reconciliation: failed to list resources in {namespace}: {e}")
+
+            # 2. Compare against Redis service registry
+            registered = await self.blackboard.get_services()
+            now = time.time()
+            removed = []
+
+            for service in registered:
+                # Skip if the service exists in the cluster
+                if service in live_services:
+                    continue
+
+                # Skip external services (github.com, etc.) -- they have no cluster presence
+                if "." in service and any(service.endswith(tld) for tld in
+                        [".com", ".io", ".org", ".net", ".dev", ".cloud"]):
+                    continue
+
+                # Check last_seen -- only remove if stale
+                metadata = await self.blackboard.get_service(service)
+                if metadata and metadata.last_seen:
+                    age = now - metadata.last_seen
+                    if age < self.STALE_SERVICE_SECONDS:
+                        continue  # Fresh telemetry, keep it
+
+                # Ghost confirmed: not in cluster + no fresh telemetry
+                await self.blackboard.remove_service(service)
+                removed.append(service)
+
+            if removed:
+                logger.info(f"Reconciliation: removed {len(removed)} stale services: {removed}")
+
+        except Exception as e:
+            logger.error(f"Service reconciliation failed: {e}")
 
     @staticmethod
     def _parse_gitops_repo_from_url(url: Optional[str]) -> Optional[str]:
@@ -367,6 +471,11 @@ class KubernetesObserver:
                     
                     # Skip self-monitoring
                     if service_name in ("darwin-brain", "darwin-blackboard-brain"):
+                        continue
+                    
+                    # Only monitor pods whose 'app' label matches a darwin.io/monitored workload.
+                    # Prevents ghost nodes from unmonitored StatefulSets (e.g., postgres with app=postgres).
+                    if self._monitored_app_labels and service_name not in self._monitored_app_labels:
                         continue
                     
                     # Aggregate restart counts per service for error_rate
@@ -632,6 +741,11 @@ class KubernetesObserver:
             if not service_name:
                 # Fallback: use app.kubernetes.io/name
                 service_name = labels.get("app.kubernetes.io/name")
+            
+            # Only register pods from darwin.io/monitored workloads.
+            # Prevents ghost nodes from internal deps (e.g., postgres StatefulSet with app=postgres).
+            if service_name and self._monitored_app_labels and service_name not in self._monitored_app_labels:
+                return None
             
             if service_name:
                 # Extract version from container image tag
