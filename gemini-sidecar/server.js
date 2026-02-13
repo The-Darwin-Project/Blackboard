@@ -977,29 +977,43 @@ wss.on('connection', (ws) => {
           // not a stale closure reference after Brain reconnects (L1 fix).
           currentTask = { eventId, child, ws, cwd: workDir, sessionId: geminiSessionId, ptyOutput: '' };
 
-          // Accumulate output and stream progress. When the prompt response ends
-          // (Gemini prints a new prompt marker), send a result message.
+          // Accumulate output and stream progress. Flush as a result message when
+          // Gemini is done responding. Two signals: (1) Gemini re-displays its
+          // input prompt (❯ or >) indicating it's waiting for the next turn, or
+          // (2) 5s timeout with no new output (fallback for edge cases).
           let responseBuffer = '';
           let responseTimer = null;
+          const GEMINI_PROMPT_RE = /[❯>]\s*$/;
+          const DEBOUNCE_MS = 5000;
+
+          const flushResponse = () => {
+            if (responseBuffer.trim() && currentTask) {
+              wsSend(currentTask.ws, {
+                type: 'result',
+                event_id: eventId,
+                session_id: geminiSessionId,
+                status: 'success',
+                output: responseBuffer.trim(),
+              });
+              responseBuffer = '';
+            }
+          };
+
           child.onData((data) => {
             if (!currentTask) return;
             currentTask.ptyOutput += data;
             responseBuffer += data;
             wsSend(currentTask.ws, { type: 'progress', event_id: eventId, message: data });
-            // Debounce: after 2s of no new data, treat accumulated buffer as result
+
+            // Signal 1: Gemini prompt marker means response is complete
+            if (GEMINI_PROMPT_RE.test(responseBuffer)) {
+              if (responseTimer) clearTimeout(responseTimer);
+              flushResponse();
+              return;
+            }
+            // Signal 2: Debounce fallback for responses without a prompt marker
             if (responseTimer) clearTimeout(responseTimer);
-            responseTimer = setTimeout(() => {
-              if (responseBuffer.trim() && currentTask) {
-                wsSend(currentTask.ws, {
-                  type: 'result',
-                  event_id: eventId,
-                  session_id: geminiSessionId,
-                  status: 'success',
-                  output: responseBuffer.trim(),
-                });
-                responseBuffer = '';
-              }
-            }, 2000);
+            responseTimer = setTimeout(flushResponse, DEBOUNCE_MS);
           });
 
           child.onExit(({ exitCode }) => {

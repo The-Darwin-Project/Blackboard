@@ -1241,8 +1241,8 @@ class Brain:
     ) -> None:
         """Forward a user message to an active agent session and persist the response.
 
-        Runs as a fire-and-forget task (asyncio.create_task) so the event loop
-        is not blocked waiting for the agent to respond.
+        Tracked in _active_tasks so cancel_active_task() and emergency_stop() can
+        cancel it. Runs as asyncio.create_task() so the event loop is not blocked.
         """
         try:
             followup_result = await self.send_to_agent(
@@ -1257,7 +1257,7 @@ class Brain:
                 await self.blackboard.append_turn(event_id, turn)
                 await self._broadcast_turn(event_id, turn)
         except asyncio.CancelledError:
-            pass  # Task was cancelled (event closed or emergency stop)
+            logger.info(f"Follow-up forwarding cancelled for {event_id}")
         except Exception as e:
             logger.warning(f"Follow-up forwarding failed for {event_id}: {e}")
 
@@ -1483,11 +1483,12 @@ class Brain:
                                         continue  # Empty user message -- skip forwarding
                                     agent_name = self._active_agent_for_event.get(eid)
                                     if agent_name:
-                                        # Fire-and-forget: don't block the event loop waiting
-                                        # for the agent to respond. Same pattern as _run_agent_task.
-                                        asyncio.create_task(
+                                        # Non-blocking: dispatch as tracked task so emergency_stop
+                                        # can cancel it. Replaces any existing task for this event.
+                                        fwd_task = asyncio.create_task(
                                             self._forward_user_to_agent(eid, agent_name, user_text)
                                         )
+                                        self._active_tasks[eid] = fwd_task
                                     continue
                                 else:
                                     # No session -- fall back to Phase 1 cancel behavior
