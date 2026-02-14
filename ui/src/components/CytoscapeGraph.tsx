@@ -365,6 +365,13 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
 
     cyRef.current = cy;
     setIsInitialized(true);
+
+    // Make HTML label overlays pass pointer events through to the Cytoscape canvas.
+    // This ensures nodes are grabbable/draggable by clicking on the visible HTML label.
+    const style = document.createElement('style');
+    style.textContent = '.cytoscape-node-html-label { pointer-events: none; }';
+    containerRef.current?.appendChild(style);
+
     console.log('[CytoscapeGraph] Cytoscape initialized successfully');
 
     // Save view state on pan/zoom
@@ -567,16 +574,24 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           },
         ]);
 
-        // Shrink the Cytoscape node body so it doesn't show as a "shadow"
-        // behind the HTML label, but keep it VISIBLE as a tiny fallback dot.
-        // If HTML labels fail to render, nodes still appear as small colored
-        // dots rather than being completely invisible.
+        // Size the Cytoscape node to match the HTML label so the grab target is correct.
+        // The node body is transparent -- the HTML label provides the visual.
+        // This ensures the node is draggable by clicking anywhere on the label.
         cy.style()
           .selector('node.service')
           .style({
-            'width': 10,
-            'height': 10,
+            'width': 200,
+            'height': 80,
             'label': '',
+            'background-opacity': 0,
+            'border-width': 0,
+          })
+          .selector('node.ghost')
+          .style({
+            'width': 160,
+            'height': 60,
+            'background-opacity': 0,
+            'border-width': 0,
           })
           .update();
           
