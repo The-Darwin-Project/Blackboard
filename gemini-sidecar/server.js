@@ -61,6 +61,46 @@ if (!fs.existsSync(claudeSettingsPath)) {
   console.log('Claude settings.json created (skip onboarding)');
 }
 
+// Pre-create Gemini settings to skip first-run prompts (trust + auth)
+// Without this, Gemini CLI shows interactive "trust folder" and "auth method" dialogs
+// that hang one-shot mode (no stdin) and waste time in PTY mode.
+const geminiDir = path.join(os.homedir(), '.gemini');
+fs.mkdirSync(geminiDir, { recursive: true });
+// 1. Settings: configure Vertex AI auth + disable trust prompt
+const geminiSettingsPath = path.join(geminiDir, 'settings.json');
+try {
+  let geminiSettings = {};
+  if (fs.existsSync(geminiSettingsPath)) {
+    try { geminiSettings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
+  }
+  // Auth: Vertex AI (matches GOOGLE_GENAI_USE_VERTEXAI=true env var)
+  geminiSettings.auth = geminiSettings.auth || { type: 'vertex_ai' };
+  // Disable trust folder prompt (all agent working dirs are safe)
+  geminiSettings.security = geminiSettings.security || {};
+  geminiSettings.security.folderTrust = { enabled: false };
+  // Preserve any existing MCP server configs
+  geminiSettings.mcpServers = geminiSettings.mcpServers || {};
+  fs.writeFileSync(geminiSettingsPath, JSON.stringify(geminiSettings, null, 2));
+  console.log('Gemini settings.json created (Vertex AI auth + trust disabled)');
+} catch (err) {
+  console.error(`Gemini settings.json error: ${err.message}`);
+}
+// 2. Trusted folders: pre-trust all agent working directories
+const trustedFoldersPath = path.join(geminiDir, 'trustedFolders.json');
+try {
+  const trustedFolders = [
+    '/data/gitops',
+    '/data/gitops-architect',
+    '/data/gitops-sysadmin',
+    '/data/gitops-developer',
+    '/data/gitops-qe',
+  ];
+  fs.writeFileSync(trustedFoldersPath, JSON.stringify(trustedFolders, null, 2));
+  console.log('Gemini trustedFolders.json created');
+} catch (err) {
+  console.error(`Gemini trustedFolders.json error: ${err.message}`);
+}
+
 /**
  * Unified stream-json line parser for both Gemini and Claude CLIs.
  * Returns { text, sessionId, toolCalls, done } or null if not user-facing.
@@ -465,52 +505,62 @@ function setupGitLabTooling(token) {
     process.env.GITLAB_TOKEN = token;
     process.env.GITLAB_HOST = GITLAB_HOST;
 
-    // 2. Configure GitLab MCP server for Gemini CLI
-    const geminiSettingsDir = `${process.env.HOME}/.gemini`;
-    const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
-    try {
-        fs.mkdirSync(geminiSettingsDir, { recursive: true });
-        let settings = {};
-        if (fs.existsSync(geminiSettingsPath)) {
-            try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
-        }
-        settings.mcpServers = settings.mcpServers || {};
-        settings.mcpServers.GitLab = {
-            command: 'gitlab-mcp-server',
-            args: [],
-            env: {
-                GITLAB_PERSONAL_ACCESS_TOKEN: token,
-                GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
-            },
-        };
-        fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
-        console.log(`[${new Date().toISOString()}] GitLab MCP configured for Gemini CLI`);
-    } catch (err) {
-        console.error(`[${new Date().toISOString()}] GitLab MCP config (Gemini) failed: ${err.message}`);
+    // Check if gitlab-mcp-server binary exists before configuring MCP
+    let hasGitLabMCP = false;
+    try { execSync('which gitlab-mcp-server', { stdio: 'ignore' }); hasGitLabMCP = true; } catch { /* not installed yet */ }
+
+    if (!hasGitLabMCP) {
+        console.log(`[${new Date().toISOString()}] gitlab-mcp-server not installed, skipping MCP config (glab CLI still available)`);
     }
 
-    // 3. Configure GitLab MCP server for Claude Code
-    const claudeSettingsDir = `${process.env.HOME}/.claude`;
-    const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
-    try {
-        fs.mkdirSync(claudeSettingsDir, { recursive: true });
-        let claudeSettings = {};
-        if (fs.existsSync(claudeSettingsPath)) {
-            try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
+    // 2. Configure GitLab MCP server for Gemini CLI (only if binary exists)
+    if (hasGitLabMCP) {
+        const geminiSettingsDir = `${process.env.HOME}/.gemini`;
+        const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
+        try {
+            fs.mkdirSync(geminiSettingsDir, { recursive: true });
+            let settings = {};
+            if (fs.existsSync(geminiSettingsPath)) {
+                try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
+            }
+            settings.mcpServers = settings.mcpServers || {};
+            settings.mcpServers.GitLab = {
+                command: 'gitlab-mcp-server',
+                args: [],
+                env: {
+                    GITLAB_PERSONAL_ACCESS_TOKEN: token,
+                    GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
+                },
+            };
+            fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+            console.log(`[${new Date().toISOString()}] GitLab MCP configured for Gemini CLI`);
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] GitLab MCP config (Gemini) failed: ${err.message}`);
         }
-        claudeSettings.mcpServers = claudeSettings.mcpServers || {};
-        claudeSettings.mcpServers.GitLab = {
-            command: 'gitlab-mcp-server',
-            args: [],
-            env: {
-                GITLAB_PERSONAL_ACCESS_TOKEN: token,
-                GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
-            },
-        };
-        fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
-        console.log(`[${new Date().toISOString()}] GitLab MCP configured for Claude Code`);
-    } catch (err) {
-        console.error(`[${new Date().toISOString()}] GitLab MCP config (Claude) failed: ${err.message}`);
+
+        // 3. Configure GitLab MCP server for Claude Code
+        const claudeSettingsDir = `${process.env.HOME}/.claude`;
+        const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
+        try {
+            fs.mkdirSync(claudeSettingsDir, { recursive: true });
+            let claudeSettings = {};
+            if (fs.existsSync(claudeSettingsPath)) {
+                try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
+            }
+            claudeSettings.mcpServers = claudeSettings.mcpServers || {};
+            claudeSettings.mcpServers.GitLab = {
+                command: 'gitlab-mcp-server',
+                args: [],
+                env: {
+                    GITLAB_PERSONAL_ACCESS_TOKEN: token,
+                    GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
+                },
+            };
+            fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+            console.log(`[${new Date().toISOString()}] GitLab MCP configured for Claude Code`);
+        } catch (err) {
+            console.error(`[${new Date().toISOString()}] GitLab MCP config (Claude) failed: ${err.message}`);
+        }
     }
 
     console.log(`[${new Date().toISOString()}] glab CLI + GitLab MCP server ready (${GITLAB_HOST})`);
