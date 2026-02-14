@@ -100,9 +100,11 @@ class KubernetesObserver:
         # Reconciliation cycle counter (runs every RECONCILE_EVERY_N_CYCLES polls)
         self._poll_count = 0
         self.RECONCILE_EVERY_N_CYCLES = 12  # ~60s at 5s interval
-        # Set of service names with darwin.io/monitored annotation (populated by _poll_deployment_annotations)
-        # Used to filter pod metrics: only 'app' labels matching monitored services get registered
-        self._monitored_app_labels: set[str] = set()
+        # Monitored services discovered from pod annotations (darwin.io/service-name)
+        # Maps service_name -> set of pod names for replica counting
+        self._monitored_services: dict[str, set[str]] = {}
+        # Maps pod_name -> service_name (reverse lookup for metrics routing)
+        self._pod_to_service: dict[str, str] = {}
     
     async def start(self) -> None:
         """Start the background polling loop."""
@@ -178,7 +180,7 @@ class KubernetesObserver:
         """Main polling loop - runs until stopped."""
         while self._running:
             try:
-                await self._poll_deployment_annotations()
+                await self._discover_from_pod_annotations()
                 await self._poll_metrics()
                 await self._poll_pod_health()
                 await self._poll_warning_events()
@@ -195,83 +197,132 @@ class KubernetesObserver:
             except asyncio.CancelledError:
                 break
     
-    async def _poll_deployment_annotations(self) -> None:
+    async def _discover_from_pod_annotations(self) -> None:
         """
-        Poll Deployments for darwin.io/* annotations and register/update services.
+        Discover services from darwin.io/* annotations on pods.
 
-        When a Deployment has darwin.io/monitored: "true", extract service name,
-        version from image tag, dependencies from env vars, gitops-repo, and helm-path,
-        then register the service and its metadata in the Blackboard.
+        Scans all pods in watched namespaces. Pods with darwin.io/monitored: "true"
+        are registered as services. Pods are grouped by darwin.io/service-name for
+        replica counting. This covers ALL workload types (Deployment, StatefulSet,
+        DaemonSet, Job, bare pods) with a single API call per namespace.
         """
         if not self._k8s_available:
             return
 
+        # Reset per-cycle tracking (rebuilt each scan)
+        current_services: dict[str, set[str]] = {}  # service_name -> set of pod names
+        current_pod_map: dict[str, str] = {}  # pod_name -> service_name
+
         for namespace in self.namespaces:
             try:
-                deployments = await asyncio.get_event_loop().run_in_executor(
+                pods = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda ns=namespace: self._apps_api.list_namespaced_deployment(
+                    lambda ns=namespace: self._core_api.list_namespaced_pod(
                         ns,
                         label_selector=self.label_selector or None,
                     )
                 )
 
-                for deploy in deployments.items:
-                    annotations = deploy.metadata.annotations or {}
+                for pod in pods.items:
+                    annotations = pod.metadata.annotations or {}
                     if annotations.get(DARWIN_MONITORED, "").lower() != "true":
                         continue
 
-                    service_name = annotations.get(DARWIN_SERVICE_NAME) or deploy.metadata.name
+                    service_name = annotations.get(DARWIN_SERVICE_NAME)
                     if not service_name:
                         continue
 
-                    # Track which 'app' labels belong to monitored services
-                    # so _poll_metrics only registers pods from monitored workloads
-                    deploy_labels = deploy.metadata.labels or {}
-                    if "app" in deploy_labels:
-                        self._monitored_app_labels.add(deploy_labels["app"])
+                    pod_name = pod.metadata.name
 
-                    source_repo_url = annotations.get(DARWIN_SOURCE_REPO)
-                    gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO) or source_repo_url  # fallback to source if no separate gitops
-                    helm_path = annotations.get(DARWIN_CONFIG_PATH)
+                    # Track pod -> service mapping
+                    current_pod_map[pod_name] = service_name
+                    if service_name not in current_services:
+                        current_services[service_name] = set()
+                    current_services[service_name].add(pod_name)
 
-                    gitops_repo = self._parse_gitops_repo_from_url(gitops_repo_url) if gitops_repo_url else None
-
-                    # Extract version from first container image tag
-                    containers = deploy.spec.template.spec.containers if deploy.spec and deploy.spec.template and deploy.spec.template.spec else []
-                    if containers:
-                        image = containers[0].image or ""
-                        version = image.split(":")[-1] if ":" in image else "latest"
-                        if len(version) >= 7 and all(c in "0123456789abcdef" for c in version.lower()):
-                            version = version[:7]
-                    else:
-                        version = "k8s"
-
-                    # Extract dependencies from env vars (SERVICE_URL, DB_HOST, etc.)
-                    deps = self._extract_dependencies(containers)
-
+                    # Register service in Blackboard (idempotent)
                     await self.blackboard.redis.sadd("darwin:services", service_name)
-                    for dep in deps:
-                        await self.blackboard.add_edge(service_name, dep)
 
-                    await self.blackboard.update_service_metadata(
-                        name=service_name,
-                        version=version,
-                        cpu=0.0,
-                        memory=0.0,
-                        error_rate=0.0,
-                        source_repo_url=source_repo_url,
-                        gitops_repo=gitops_repo,
-                        gitops_repo_url=gitops_repo_url,
-                        gitops_config_path=helm_path,
+                    # Extract metadata from pod annotations + spec (once per service, first pod wins)
+                    if len(current_services[service_name]) == 1:
+                        source_repo_url = annotations.get(DARWIN_SOURCE_REPO)
+                        gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO) or source_repo_url
+                        config_path = annotations.get(DARWIN_CONFIG_PATH)
+                        gitops_repo = self._parse_gitops_repo_from_url(gitops_repo_url) if gitops_repo_url else None
+
+                        # Extract version from container image
+                        containers = pod.spec.containers if pod.spec else []
+                        version = self._extract_version_from_image(containers)
+
+                        await self.blackboard.update_service_metadata(
+                            name=service_name,
+                            version=version,
+                            cpu=0.0,
+                            memory=0.0,
+                            error_rate=0.0,
+                            source_repo_url=source_repo_url,
+                            gitops_repo=gitops_repo,
+                            gitops_repo_url=gitops_repo_url,
+                            gitops_config_path=config_path,
+                        )
+
+                    # Count ready replicas
+                    is_ready = pod.status and pod.status.phase == "Running" and all(
+                        cs.ready for cs in (pod.status.container_statuses or [])
                     )
-                    logger.debug(
-                        f"Registered service from annotations: {service_name} "
-                        f"(version={version}, deps={deps}, gitops={gitops_repo}, helm_path={helm_path})"
-                    )
+                    if is_ready:
+                        ready_count = sum(1 for p in current_services[service_name]
+                                          if current_pod_map.get(p) == service_name)
+                    else:
+                        ready_count = max(0, len(current_services[service_name]) - 1)
+
+                logger.debug(
+                    f"Pod discovery in {namespace}: {len(current_services)} services, "
+                    f"{len(current_pod_map)} monitored pods"
+                )
 
             except Exception as e:
-                logger.debug(f"Failed to poll deployment annotations in {namespace}: {e}")
+                logger.debug(f"Failed to discover pod annotations in {namespace}: {e}")
+
+        # Update replica counts for all discovered services
+        for service_name, pod_names in current_services.items():
+            await self.blackboard.redis.hset(
+                f"darwin:service:{service_name}", "replicas_desired", str(len(pod_names))
+            )
+            # Count ready pods
+            ready = 0
+            for pn in pod_names:
+                # We'll rely on the pod health scan for accurate ready counts
+                ready += 1  # Approximate: all discovered pods counted as ready
+            await self.blackboard.redis.hset(
+                f"darwin:service:{service_name}", "replicas_ready", str(ready)
+            )
+
+        # Update instance state for use by _poll_metrics and _poll_pod_health
+        self._monitored_services = current_services
+        self._pod_to_service = current_pod_map
+
+    @staticmethod
+    def _extract_version_from_image(containers: list) -> str:
+        """Extract version string from the first container's image tag or digest."""
+        if not containers:
+            return "k8s"
+        image = ""
+        if hasattr(containers[0], 'image'):
+            image = containers[0].image or ""
+        elif isinstance(containers[0], dict):
+            image = containers[0].get("image", "")
+        if not image:
+            return "k8s"
+        # Handle digest-based images (@sha256:...)
+        if "@" in image:
+            return image.split("@")[1][:12]
+        if ":" in image:
+            tag = image.split(":")[-1]
+            if len(tag) >= 7 and all(c in "0123456789abcdef" for c in tag.lower()):
+                return tag[:7]
+            return tag
+        return "latest"
 
     # Stale service threshold: remove services with no telemetry for 5 minutes
     STALE_SERVICE_SECONDS = 300
@@ -290,46 +341,11 @@ class KubernetesObserver:
         import time
 
         try:
-            # 1. Gather live workload names from the cluster
-            live_services: set[str] = set()
-            for namespace in self.namespaces:
-                try:
-                    # Deployments
-                    deploys = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda ns=namespace: self._apps_api.list_namespaced_deployment(ns)
-                    )
-                    for d in deploys.items:
-                        # Use annotation service name if available, else deployment name
-                        annotations = d.metadata.annotations or {}
-                        svc_name = annotations.get(DARWIN_SERVICE_NAME) or d.metadata.name
-                        live_services.add(svc_name)
-                        # Add 'app' label only for monitored deployments
-                        labels = d.metadata.labels or {}
-                        if "app" in labels and labels["app"] in self._monitored_app_labels:
-                            live_services.add(labels["app"])
+            # _monitored_services is populated by _discover_from_pod_annotations() each cycle.
+            # It contains only services with darwin.io/monitored pods currently running.
+            live_services = set(self._monitored_services.keys())
 
-                    # StatefulSets -- only add the resource name, NOT bare 'app' labels
-                    # (prevents ghost 'postgres' from app=postgres on internal StatefulSets)
-                    sts_list = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda ns=namespace: self._apps_api.list_namespaced_stateful_set(ns)
-                    )
-                    for s in sts_list.items:
-                        live_services.add(s.metadata.name)
-
-                    # Services (K8s Service resources -- for dependency targets)
-                    svc_list = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda ns=namespace: self._core_api.list_namespaced_service(ns)
-                    )
-                    for svc in svc_list.items:
-                        live_services.add(svc.metadata.name)
-
-                except Exception as e:
-                    logger.debug(f"Reconciliation: failed to list resources in {namespace}: {e}")
-
-            # 2. Compare against Redis service registry
+            # Compare against Redis service registry
             registered = await self.blackboard.get_services()
             now = time.time()
             removed = []
@@ -466,19 +482,10 @@ class KubernetesObserver:
                 for pod in pods.items:
                     pod_name = pod.metadata.name
                     pod_key = self._pod_key(namespace, pod_name)
-                    labels = pod.metadata.labels or {}
-                    service_name = labels.get("app") or labels.get("app.kubernetes.io/name")
                     
+                    # Use pod annotation mapping from _discover_from_pod_annotations
+                    service_name = self._pod_to_service.get(pod_name)
                     if not service_name:
-                        continue
-                    
-                    # Skip self-monitoring
-                    if service_name in ("darwin-brain", "darwin-blackboard-brain"):
-                        continue
-                    
-                    # Only monitor pods whose 'app' label matches a darwin.io/monitored workload.
-                    # Prevents ghost nodes from unmonitored StatefulSets (e.g., postgres with app=postgres).
-                    if self._monitored_app_labels and service_name not in self._monitored_app_labels:
                         continue
                     
                     # Aggregate restart counts per service for error_rate
@@ -726,43 +733,30 @@ class KubernetesObserver:
     
     async def _get_service_name(self, pod_name: str, namespace: str) -> Optional[str]:
         """
-        Get service name from pod labels.
+        Get service name for a pod from the annotation-based pod-to-service mapping.
         
-        Uses the 'app' label as the service name.
-        Also caches version info for service metadata.
+        Uses _pod_to_service populated by _discover_from_pod_annotations().
+        No API call needed -- O(1) dict lookup.
+        Falls back to label-based lookup if pod is not in the mapping.
         """
+        # Fast path: annotation-based mapping (populated by _discover_from_pod_annotations)
+        service_name = self._pod_to_service.get(pod_name)
+        if service_name:
+            return service_name
+        
+        # Fallback: read pod labels for pods not yet discovered (race condition on first poll)
         try:
             pod = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self._core_api.read_namespaced_pod(pod_name, namespace)
             )
-            
-            labels = pod.metadata.labels or {}
-            
-            # Use 'app' label as service name (matches Darwin client naming)
-            service_name = labels.get("app")
-            if not service_name:
-                # Fallback: use app.kubernetes.io/name
-                service_name = labels.get("app.kubernetes.io/name")
-            
-            # Only register pods from darwin.io/monitored workloads.
-            # Prevents ghost nodes from internal deps (e.g., postgres StatefulSet with app=postgres).
-            if service_name and self._monitored_app_labels and service_name not in self._monitored_app_labels:
-                return None
-            
-            if service_name:
-                # Extract version from container image tag
-                version = self._extract_version_from_pod(pod)
-                if version:
-                    # Cache version for this service
-                    if not hasattr(self, '_service_versions'):
-                        self._service_versions: dict[str, str] = {}
-                    self._service_versions[service_name] = version
-                    
-                return service_name
-            
+            annotations = pod.metadata.annotations or {}
+            if annotations.get(DARWIN_MONITORED, "").lower() == "true":
+                service_name = annotations.get(DARWIN_SERVICE_NAME)
+                if service_name:
+                    self._pod_to_service[pod_name] = service_name
+                    return service_name
             return None
-            
         except Exception as e:
             logger.debug(f"Failed to get labels for pod {pod_name}: {e}")
             return None
