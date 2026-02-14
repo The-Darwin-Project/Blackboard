@@ -589,10 +589,14 @@ class KubernetesObserver:
                     if service_name in ("darwin-brain", "darwin-blackboard-brain"):
                         continue
                     
-                    count = event.count or 1
+                    # Count each event OBJECT as 1, NOT the cumulative event.count.
+                    # K8s coalesces repeated events (e.g., 50 probe failures during rollout)
+                    # into a single event with count=50. Using that count causes false positives
+                    # for services that had transient issues during deployments.
+                    # Counting distinct event objects means: 3+ pods failing simultaneously = real issue.
                     if service_name not in service_warnings:
                         service_warnings[service_name] = {"total_count": 0, "reasons": []}
-                    service_warnings[service_name]["total_count"] += count
+                    service_warnings[service_name]["total_count"] += 1
                     
                     reason_str = f"{reason}: {(event.message or '')[:120]} ({count}x)"
                     if reason_str not in service_warnings[service_name]["reasons"]:
