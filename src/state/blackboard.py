@@ -449,11 +449,13 @@ class BlackboardState:
             health = calculate_health_status(cpu, memory, error_rate, last_seen)
             node_type = infer_node_type(service_name)
             
-            # Debug: Log postgres specifically
-            if "postgres" in service_name.lower():
-                logger.debug(
-                    f"Adding postgres node: name={service_name}, type={node_type}, "
-                    f"cpu={cpu}, memory={memory}, health={health}"
+            # Log any service that resolves to "unknown" -- helps debug gray nodes
+            if health == "unknown":
+                age = time.time() - last_seen if last_seen else -1
+                logger.warning(
+                    f"Gray node detected: {service_name} health=unknown, "
+                    f"last_seen={last_seen:.0f} (age={age:.0f}s), "
+                    f"cpu={cpu}, memory={memory}, error_rate={error_rate}"
                 )
             
             nodes.append(GraphNode(
