@@ -434,15 +434,12 @@ function readFindings(workDir) {
 }
 
 /**
- * Fallback: extract tail of stdout when no findings file is available.
+ * Fallback: return full stdout when no findings file is available.
  * @param {string} effectiveOutput - Full captured stdout (or Claude parsed text)
- * @returns {string} Truncated stdout tail
+ * @returns {string} Full stdout content (no truncation)
  */
 function stdoutFallback(effectiveOutput) {
-  console.log(`[${new Date().toISOString()}] No findings, using stdout tail (${effectiveOutput.length} chars)`);
-  if (effectiveOutput.length > 3000) {
-    return '(truncated thinking...)\n' + effectiveOutput.slice(-3000);
-  }
+  console.log(`[${new Date().toISOString()}] No findings, using full stdout (${effectiveOutput.length} chars)`);
   return effectiveOutput;
 }
 
@@ -585,9 +582,9 @@ async function executeCLI(prompt, options = {}) {
       const effectiveOutput = streamTextAccum || stdout;
 
       console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited with code ${code}`);
-      console.log(`[${new Date().toISOString()}] stdout (${effectiveOutput.length} chars): ${effectiveOutput.slice(0, 500)}${effectiveOutput.length > 500 ? '...' : ''}`);
+      console.log(`[${new Date().toISOString()}] stdout (${effectiveOutput.length} chars): ${effectiveOutput}`);
       if (stderr) {
-        console.log(`[${new Date().toISOString()}] stderr: ${stderr.slice(0, 500)}${stderr.length > 500 ? '...' : ''}`);
+        console.log(`[${new Date().toISOString()}] stderr: ${stderr}`);
       }
       
       if (code === 0) {
@@ -719,7 +716,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         // Displayable text -> progress + accumulate
         if (parsed.text) {
           streamTextAccum += parsed.text;
-          console.log(`[${new Date().toISOString()}] [${eventId}] >> ${parsed.text.slice(0, 200)}`);
+          console.log(`[${new Date().toISOString()}] [${eventId}] >> ${parsed.text}`);
           wsSend(ws, { type: 'progress', event_id: eventId, message: parsed.text });
         }
       }
@@ -750,12 +747,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
 
       console.log(`[${new Date().toISOString()}] ${AGENT_CLI} exited code ${code} (${effectiveOutput.length} chars)`);
       if (effectiveOutput.length > 0) {
-        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stdout: ${effectiveOutput.slice(0, 1000)}${effectiveOutput.length > 1000 ? '...' : ''}`);
+        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stdout: ${effectiveOutput}`);
       } else {
         console.log(`[${new Date().toISOString()}] WARNING: ${AGENT_CLI} produced EMPTY stdout`);
       }
       if (stderr) {
-        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stderr: ${stderr.slice(0, 500)}`);
+        console.log(`[${new Date().toISOString()}] ${AGENT_CLI} stderr: ${stderr}`);
       }
 
       if (code === 0) {

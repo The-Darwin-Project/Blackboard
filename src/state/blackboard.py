@@ -956,14 +956,14 @@ class BlackboardState:
         })
         
         # Record event with full plan details for UI visibility
-        reason_preview = plan.reason[:100] if plan.reason else "No reason provided"
+        reason_preview = plan.reason if plan.reason else "No reason provided"
         await self.record_event(
             EventType.PLAN_CREATED,
             {
                 "plan_id": plan.id,
                 "action": plan.action.value,
                 "service": plan.service,
-                "reason": plan.reason[:200] if plan.reason else "",
+                "reason": plan.reason if plan.reason else "",
                 "params": plan.params,
             },
             narrative=f"Based on my analysis, I recommend: {plan.action.value} {plan.service}. Reason: {reason_preview}",
@@ -1030,7 +1030,7 @@ class BlackboardState:
                         "action": plan.action.value if plan else None,
                         "status": "success",
                         "summary": f"{plan.action.value} {plan.service}" if plan else None,
-                        "result": result[:500] if result else "",
+                        "result": result if result else "",
                     },
                     narrative=f"Successfully executed {plan.action.value} on {plan.service}." if plan else None,
                 )
@@ -1042,9 +1042,9 @@ class BlackboardState:
                         "service": plan.service if plan else None,
                         "action": plan.action.value if plan else None,
                         "status": "failed",
-                        "error": result[:500] if result else "",
+                        "error": result if result else "",
                     },
-                    narrative=f"Failed to execute plan for {plan.service}: {result[:100]}" if plan and result else None,
+                    narrative=f"Failed to execute plan for {plan.service}: {result}" if plan and result else None,
                 )
         
         if result:
@@ -1403,7 +1403,7 @@ class BlackboardState:
 
     # Ops journal -- per-service temporal memory for pattern recognition
     JOURNAL_PREFIX = "darwin:journal:"
-    JOURNAL_MAX_ENTRIES = 20
+    JOURNAL_MAX_ENTRIES = 100
 
     async def create_event(
         self,

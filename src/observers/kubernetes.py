@@ -586,7 +586,7 @@ class KubernetesObserver:
                 if svc not in self._active_warnings:
                     logger.warning(
                         f"K8s Warning events for {svc} ({info['total_count']}x): "
-                        f"{new_warnings[svc][:200]}"
+                        f"{new_warnings[svc]}"
                     )
         self._active_warnings = new_warnings
     
@@ -710,7 +710,7 @@ class KubernetesObserver:
             error_rate = 0.0
             if service_name in self._active_warnings:
                 error_rate = 100.0  # Signal to Flash: something is wrong
-                logger.debug(f"Injecting error_rate=100% for {service_name}: {self._active_warnings[service_name][:80]}")
+                logger.debug(f"Injecting error_rate=100% for {service_name}: {self._active_warnings[service_name]}")
             
             if self.anomaly_callback:
                 await self.anomaly_callback(

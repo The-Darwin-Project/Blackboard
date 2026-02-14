@@ -69,8 +69,8 @@ function EventCard({
         <strong style={{ color: '#e2e8f0' }}>{evt.service as string}</strong>
         <StatusBadge status={status} />
       </div>
-      <div style={{ color: '#94a3b8', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {(evt.reason as string)?.slice(0, 60)}
+      <div style={{ color: '#94a3b8', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={(evt.reason as string) || ''}>
+        {evt.reason as string}
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: '#64748b' }}>
         <span>{evt.source as string}</span>
@@ -416,8 +416,8 @@ function ResultViewer({ actor, result }: { actor: string; result: string }) {
   const color = ACTOR_COLORS[actor] || '#6b7280';
   return (
     <div style={{ margin: '4px 0' }}>
-      <p style={{ fontSize: 14, color: '#4ade80' }}>
-        {result.slice(0, 150)}...
+      <p style={{ fontSize: 14, color: '#4ade80', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        {result}
       </p>
       <button
         onClick={() => setExpanded(true)}
@@ -427,7 +427,7 @@ function ResultViewer({ actor, result }: { actor: string; result: string }) {
           cursor: 'pointer', marginTop: 4,
         }}
       >
-        View full response
+        View as Markdown
       </button>
       {expanded && (
         <MarkdownViewer

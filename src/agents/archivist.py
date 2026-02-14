@@ -93,9 +93,9 @@ class Archivist:
             for turn in event.conversation:
                 line = f"[{turn.actor}.{turn.action}]"
                 if turn.thoughts:
-                    line += f" {turn.thoughts[:300]}"
+                    line += f" {turn.thoughts}"
                 if turn.result:
-                    line += f" Result: {turn.result[:300]}"
+                    line += f" Result: {turn.result}"
                 conv_lines.append(line)
             conversation_text = "\n".join(conv_lines)
 
@@ -127,9 +127,9 @@ class Archivist:
                 summary = json.loads(summary_text)
             except json.JSONDecodeError:
                 summary = {
-                    "symptom": event.event.reason[:200],
+                    "symptom": event.event.reason,
                     "root_cause": "unknown",
-                    "fix_action": summary_text[:200],
+                    "fix_action": summary_text,
                     "keywords": [event.service],
                     "service": event.service,
                     "turns": len(event.conversation),

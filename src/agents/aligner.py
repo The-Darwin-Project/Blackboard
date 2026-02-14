@@ -659,7 +659,7 @@ class Aligner:
 
                 elif response.text:
                     # Flash returned text only (no function call) -- normal state, log and skip
-                    logger.debug(f"Flash observation for {service}: {response.text.strip()[:100]}")
+                    logger.debug(f"Flash observation for {service}: {response.text.strip()}")
 
             else:
                 # Flash not available -- fallback to simple threshold check
@@ -930,7 +930,7 @@ class Aligner:
                     evidence=message,
                 )
                 await self.blackboard.append_turn(eid, turn)
-                logger.info(f"Aligner notified active event {eid}: {message[:80]}")
+                logger.info(f"Aligner notified active event {eid}: {message}")
 
     async def check_state(self, service: str) -> dict:
         """Return current state of a service for Brain re-trigger."""

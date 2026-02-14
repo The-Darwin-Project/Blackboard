@@ -176,7 +176,7 @@ async def close_event_by_user(
     # Write to ops journal so Brain has temporal context for this closure
     await blackboard.append_journal(
         event.service,
-        f"{event.event.reason[:200]} -- user force-closed. {body.reason[:300]}"
+        f"{event.event.reason} -- user force-closed. {body.reason}"
     )
     logger.info(f"User force-closed event {event_id}: {body.reason}")
     return {"status": "closed", "event_id": event_id}

@@ -477,7 +477,7 @@ class Brain:
                 turn=len(event.conversation) + 1,
                 actor="brain",
                 action="error",
-                thoughts=f"LLM call failed: {str(e)[:200]}",
+                thoughts=f"LLM call failed: {str(e)}",
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -573,7 +573,7 @@ class Brain:
                 continue
             if other.service == event.service:
                 last_action = other.conversation[-1] if other.conversation else None
-                summary = f"  - {eid} ({other.source}): {other.event.reason[:100]}"
+                summary = f"  - {eid} ({other.source}): {other.event.reason}"
                 if last_action:
                     summary += f" [last: {last_action.actor}.{last_action.action}]"
                 related.append(summary)
@@ -581,7 +581,7 @@ class Brain:
                 # Check if chat events mention this service in recent turns
                 for turn in other.conversation[-3:]:
                     if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
-                        related.append(f"  - {eid} (chat): {other.event.reason[:100]}")
+                        related.append(f"  - {eid} (chat): {other.event.reason}")
                         break
 
         if related:
@@ -629,7 +629,7 @@ class Brain:
                 if turn.result:
                     lines.append(f"    Result: {turn.result}")
                 if turn.plan:
-                    lines.append(f"    Plan: {turn.plan[:500]}")
+                    lines.append(f"    Plan: {turn.plan}")
                 if turn.evidence:
                     lines.append(f"    Evidence: {turn.evidence}")
                 if turn.requestingAgent:
@@ -1077,7 +1077,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
                 action="error",
-                thoughts=f"Agent execution failed: {str(e)[:300]}",
+                thoughts=f"Agent execution failed: {str(e)}",
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -1140,7 +1140,7 @@ class Brain:
     async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
         """Close an event and broadcast the closure to UI."""
         # Cancel any running agent task for this event (prevents orphaned CLI processes)
-        await self.cancel_active_task(event_id, f"Event closing: {summary[:100]}")
+        await self.cancel_active_task(event_id, f"Event closing: {summary}")
         # Fetch event BEFORE close to get service name for journal
         event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary)
@@ -1149,7 +1149,7 @@ class Brain:
             turns = len(event.conversation)
             await self.blackboard.append_journal(
                 event.service,
-                f"{event.event.reason[:200]} -- closed in {turns} turns. {summary[:300]}"
+                f"{event.event.reason} -- closed in {turns} turns. {summary}"
             )
             # Invalidate journal cache for this service (immediate freshness)
             self._journal_cache.pop(event.service, None)
@@ -1420,7 +1420,7 @@ class Brain:
                 # Write to ops journal so Brain has temporal context for stale closures
                 await self.blackboard.append_journal(
                     event.service,
-                    f"{event.event.reason[:200]} -- stale closure on restart ({len(event.conversation)} turns)"
+                    f"{event.event.reason} -- stale closure on restart ({len(event.conversation)} turns)"
                 )
                 stale_count += 1
             else:
@@ -1598,7 +1598,7 @@ class Brain:
             plan = await self.blackboard.create_plan(PlanCreate(
                 action=action,
                 service=service,
-                reason=description[:300],
+                reason=description,
             ))
             self._event_plans[event_id] = plan.id
             logger.info(f"Created plan {plan.id} ({action.value}) for event {event_id} -> {service}")

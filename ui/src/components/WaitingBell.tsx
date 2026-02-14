@@ -221,7 +221,7 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                       }}>
-                        {evt.lastThoughts?.substring(0, 80)}...
+                        {evt.lastThoughts}
                       </div>
                       <div style={{ fontSize: 10, color: '#475569', fontFamily: 'monospace', marginTop: 2 }}>
                         {evt.id}
