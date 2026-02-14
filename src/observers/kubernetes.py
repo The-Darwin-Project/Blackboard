@@ -303,22 +303,26 @@ class KubernetesObserver:
         self._pod_to_service = current_pod_map
 
     @staticmethod
-    def _extract_version_from_image(containers: list) -> str:
+    def _extract_version_from_image(containers) -> str:
         """Extract version string from the first container's image tag or digest."""
         if not containers:
-            return "k8s"
-        image = ""
-        if hasattr(containers[0], 'image'):
-            image = containers[0].image or ""
-        elif isinstance(containers[0], dict):
-            image = containers[0].get("image", "")
+            return "unknown"
+        container = containers[0]
+        # K8s API objects have .image attribute, dicts have ["image"]
+        image = getattr(container, "image", None) or (container.get("image") if isinstance(container, dict) else None) or ""
         if not image:
-            return "k8s"
-        # Handle digest-based images (@sha256:...)
+            return "unknown"
+        # Handle digest-based images (@sha256:07dec86e5af5...)
         if "@" in image:
-            return image.split("@")[1][:12]
+            digest = image.split("@")[1]
+            # Strip algorithm prefix (sha256:) and take last 7 chars for readability
+            if ":" in digest:
+                digest = digest.split(":")[1]
+            return digest[-7:] if len(digest) > 7 else digest
+        # Handle tag-based images (store:6e58eb8)
         if ":" in image:
             tag = image.split(":")[-1]
+            # Short commit SHA -- return as-is
             if len(tag) >= 7 and all(c in "0123456789abcdef" for c in tag.lower()):
                 return tag[:7]
             return tag
