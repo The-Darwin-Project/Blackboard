@@ -542,8 +542,8 @@ class Brain:
                 lines.append(f"  GitOps Repo: {svc.gitops_repo}")
             if svc.gitops_repo_url:
                 lines.append(f"  Repo URL: {svc.gitops_repo_url}")
-            if svc.gitops_helm_path:
-                lines.append(f"  Helm Values Path: {svc.gitops_helm_path}")
+            if svc.gitops_config_path:
+                lines.append(f"  Config Path: {svc.gitops_config_path}")
             if svc.replicas_ready is not None:
                 lines.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
@@ -867,8 +867,8 @@ class Brain:
                     info_parts.append(f"  GitOps Repo: {svc.gitops_repo}")
                 if svc.gitops_repo_url:
                     info_parts.append(f"  Repo URL: {svc.gitops_repo_url}")
-                if svc.gitops_helm_path:
-                    info_parts.append(f"  Helm Values Path: {svc.gitops_helm_path}")
+                if svc.gitops_config_path:
+                    info_parts.append(f"  Config Path: {svc.gitops_config_path}")
                 if svc.replicas_ready is not None:
                     info_parts.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
                 info_parts.append(f"  CPU: {svc.metrics.cpu:.1f}%")
@@ -1325,8 +1325,8 @@ class Brain:
                 lines.append(f"- **GitOps Repo:** {service_meta.gitops_repo}")
             if service_meta.gitops_repo_url:
                 lines.append(f"- **Repo URL:** {service_meta.gitops_repo_url}")
-            if service_meta.gitops_helm_path:
-                lines.append(f"- **Helm Values Path:** {service_meta.gitops_helm_path}")
+            if service_meta.gitops_config_path:
+                lines.append(f"- **Config Path:** {service_meta.gitops_config_path}")
             if service_meta.replicas_ready is not None:
                 lines.append(f"- **Replicas:** {service_meta.replicas_ready}/{service_meta.replicas_desired}")
             lines.append(f"- **CPU:** {service_meta.metrics.cpu:.1f}%")

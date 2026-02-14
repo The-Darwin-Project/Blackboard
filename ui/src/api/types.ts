@@ -92,7 +92,7 @@ export interface GraphNode {
     last_seen: number;
     gitops_repo?: string;
     gitops_repo_url?: string;
-    gitops_helm_path?: string;
+    gitops_config_path?: string;
     replicas_ready?: number;
     replicas_desired?: number;
   };

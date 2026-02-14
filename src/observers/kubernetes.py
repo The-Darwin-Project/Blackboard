@@ -34,8 +34,9 @@ K8S_OBSERVER_LABEL_SELECTOR = os.getenv("K8S_OBSERVER_LABEL_SELECTOR", "")
 # Darwin annotation schema for Deployment-based service discovery
 DARWIN_ANNOTATION_PREFIX = "darwin.io/"
 DARWIN_MONITORED = f"{DARWIN_ANNOTATION_PREFIX}monitored"
+DARWIN_SOURCE_REPO = f"{DARWIN_ANNOTATION_PREFIX}source-repo"
 DARWIN_GITOPS_REPO = f"{DARWIN_ANNOTATION_PREFIX}gitops-repo"
-DARWIN_HELM_PATH = f"{DARWIN_ANNOTATION_PREFIX}helm-path"
+DARWIN_CONFIG_PATH = f"{DARWIN_ANNOTATION_PREFIX}config-path"
 DARWIN_SERVICE_NAME = f"{DARWIN_ANNOTATION_PREFIX}service-name"
 
 
@@ -230,8 +231,9 @@ class KubernetesObserver:
                     if "app" in deploy_labels:
                         self._monitored_app_labels.add(deploy_labels["app"])
 
-                    gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO)
-                    helm_path = annotations.get(DARWIN_HELM_PATH)
+                    source_repo_url = annotations.get(DARWIN_SOURCE_REPO)
+                    gitops_repo_url = annotations.get(DARWIN_GITOPS_REPO) or source_repo_url  # fallback to source if no separate gitops
+                    helm_path = annotations.get(DARWIN_CONFIG_PATH)
 
                     gitops_repo = self._parse_gitops_repo_from_url(gitops_repo_url) if gitops_repo_url else None
 
@@ -258,9 +260,10 @@ class KubernetesObserver:
                         cpu=0.0,
                         memory=0.0,
                         error_rate=0.0,
+                        source_repo_url=source_repo_url,
                         gitops_repo=gitops_repo,
                         gitops_repo_url=gitops_repo_url,
-                        gitops_helm_path=helm_path,
+                        gitops_config_path=helm_path,
                     )
                     logger.debug(
                         f"Registered service from annotations: {service_name} "

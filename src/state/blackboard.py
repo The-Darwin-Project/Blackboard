@@ -467,9 +467,10 @@ class BlackboardState:
                     "memory": memory,
                     "error_rate": error_rate,
                     "last_seen": last_seen,
+                    "source_repo_url": metadata.source_repo_url if metadata else None,
                     "gitops_repo": metadata.gitops_repo if metadata else None,
                     "gitops_repo_url": metadata.gitops_repo_url if metadata else None,
-                    "gitops_helm_path": metadata.gitops_helm_path if metadata else None,
+                    "gitops_config_path": metadata.gitops_config_path if metadata else None,
                     "replicas_ready": metadata.replicas_ready if metadata else None,
                     "replicas_desired": metadata.replicas_desired if metadata else None,
                 }
@@ -671,9 +672,10 @@ class BlackboardState:
         cpu: float,
         memory: float,
         error_rate: float,
+        source_repo_url: Optional[str] = None,
         gitops_repo: Optional[str] = None,
         gitops_repo_url: Optional[str] = None,
-        gitops_helm_path: Optional[str] = None,
+        gitops_config_path: Optional[str] = None,
     ) -> None:
         """Update service metadata in Redis hash."""
         key = f"darwin:service:{name}"
@@ -686,12 +688,14 @@ class BlackboardState:
         }
         
         # Add GitOps metadata if provided
+        if source_repo_url:
+            mapping["source_repo_url"] = source_repo_url
         if gitops_repo:
             mapping["gitops_repo"] = gitops_repo
         if gitops_repo_url:
             mapping["gitops_repo_url"] = gitops_repo_url
-        if gitops_helm_path:
-            mapping["gitops_helm_path"] = gitops_helm_path
+        if gitops_config_path:
+            mapping["gitops_config_path"] = gitops_config_path
         
         await self.redis.hset(key, mapping=mapping)
         logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
@@ -730,9 +734,10 @@ class BlackboardState:
             },
             dependencies=deps,
             last_seen=float(data.get("last_seen", 0)),
+            source_repo_url=data.get("source_repo_url"),
             gitops_repo=data.get("gitops_repo"),
             gitops_repo_url=data.get("gitops_repo_url"),
-            gitops_helm_path=data.get("gitops_helm_path"),
+            gitops_config_path=data.get("gitops_config_path"),
             replicas_ready=int(data["replicas_ready"]) if data.get("replicas_ready") else None,
             replicas_desired=int(data["replicas_desired"]) if data.get("replicas_desired") else None,
         )
@@ -1299,7 +1304,7 @@ class BlackboardState:
             error_rate=payload.metrics.error_rate,
             gitops_repo=payload.gitops.repo if payload.gitops else None,
             gitops_repo_url=payload.gitops.repo_url if payload.gitops else None,
-            gitops_helm_path=payload.gitops.helm_path if payload.gitops else None,
+            gitops_config_path=payload.gitops.helm_path if payload.gitops else None,
         )
         
         # Update Metrics History Layer

@@ -104,7 +104,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
   });
 
   // Build node HTML label
-  const buildNodeLabel = useCallback((node: GraphNode & { metadata: GraphNode['metadata'] & { gitops_repo?: string; gitops_repo_url?: string; gitops_helm_path?: string; replicas_ready?: number; replicas_desired?: number } }) => {
+  const buildNodeLabel = useCallback((node: GraphNode & { metadata: GraphNode['metadata'] & { source_repo_url?: string; gitops_repo?: string; gitops_repo_url?: string; gitops_config_path?: string; replicas_ready?: number; replicas_desired?: number } }) => {
     const icon = NODE_ICONS[node.type] || '📦';
     const health = node.metadata.health || 'unknown';
     const version = node.metadata.version || '?';
@@ -113,7 +113,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     
     // GitOps indicator (only show if repo is configured)
     const gitopsRepo = node.metadata.gitops_repo;
-    const gitopsPath = node.metadata.gitops_helm_path || 'helm/values.yaml';
+    const gitopsPath = node.metadata.gitops_config_path || 'helm/values.yaml';
     const gitIcon = gitopsRepo 
       ? `<span 
           style="
@@ -535,7 +535,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
                 type: NodeType;
                 gitops_repo?: string;
                 gitops_repo_url?: string;
-                gitops_helm_path?: string;
+                gitops_config_path?: string;
                 replicas_ready?: number;
                 replicas_desired?: number;
               };
@@ -552,7 +552,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
                   last_seen: d.last_seen,
                   gitops_repo: d.gitops_repo,
                   gitops_repo_url: d.gitops_repo_url,
-                  gitops_helm_path: d.gitops_helm_path,
+                  gitops_config_path: d.gitops_config_path,
                   replicas_ready: d.replicas_ready,
                   replicas_desired: d.replicas_desired,
                 },
