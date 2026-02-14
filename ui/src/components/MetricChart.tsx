@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/components/MetricChart.tsx
 /**
  * Grid container for service metric charts.
- * Displays separate charts per service in a 2-column grid layout.
+ * Displays separate charts per service in a responsive 1-4 column grid.
  */
 import { useMemo } from 'react';
 import { Loader2, BarChart3 } from 'lucide-react';
@@ -65,8 +65,12 @@ function MetricChart() {
         </div>
       </div>
       
-      {/* Service charts grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      {/* Service charts grid -- scales 1→4 columns based on viewport + service count */}
+      <div className={`grid gap-3 grid-cols-1${
+        services.length >= 2 ? ' sm:grid-cols-2' : ''
+      }${services.length >= 3 ? ' lg:grid-cols-3' : ''}${
+        services.length >= 4 ? ' xl:grid-cols-4' : ''
+      }`}>
         {services.map(service => (
           <ServiceMetricChart
             key={service}
