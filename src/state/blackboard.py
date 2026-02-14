@@ -927,11 +927,18 @@ class BlackboardState:
             )
             
             if not results:
-                # No recent data -- fall back to latest entry regardless of age
+                # No data in the last 30s. Fall back to latest entry, but only
+                # if it's within the zombie threshold (90s). Beyond that, stale
+                # ZSET data creates a visual inconsistency: graph shows "CPU:2%"
+                # but health is "unknown" (gray) because last_seen is stale.
                 fallback = await self.redis.zrevrange(key, 0, 0, withscores=True)
                 if fallback:
-                    parts = fallback[0][0].split(":")
-                    metrics[metric_name] = float(parts[1]) if len(parts) >= 2 else 0.0
+                    entry_ts = fallback[0][1]  # score = timestamp
+                    if (now - entry_ts) <= 90:  # Within zombie threshold
+                        parts = fallback[0][0].split(":")
+                        metrics[metric_name] = float(parts[1]) if len(parts) >= 2 else 0.0
+                    else:
+                        metrics[metric_name] = 0.0  # Stale data -- don't mislead the graph
                 else:
                     metrics[metric_name] = 0.0
                 continue
