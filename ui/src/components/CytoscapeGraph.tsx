@@ -152,17 +152,18 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         position: relative;
         background: ${HEALTH_COLORS[health]};
         border-radius: 8px;
-        padding: 6px 10px;
+        padding: 8px 12px;
         color: ${health === 'warning' ? '#000' : '#fff'};
         font-size: 11px;
         text-align: center;
-        min-width: 80px;
+        width: 236px;
+        box-sizing: border-box;
         box-shadow: 0 2px 4px rgba(0,0,0,0.3);
       ">
         ${gitIcon}
         ${replicaBadge}
         <div style="font-size: 16px; margin-bottom: 2px;">${icon}</div>
-        <div style="font-weight: 600; margin-bottom: 2px;">${node.label}</div>
+        <div style="font-weight: 600; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${node.label}</div>
         <div style="font-size: 9px; opacity: 0.9;">v${version}</div>
         <div style="font-size: 9px; opacity: 0.8;">CPU:${cpu}% MEM:${mem}%</div>
       </div>
@@ -366,10 +367,13 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     cyRef.current = cy;
     setIsInitialized(true);
 
-    // Make HTML label overlays pass pointer events through to the Cytoscape canvas.
-    // This ensures nodes are grabbable/draggable by clicking on the visible HTML label.
+    // Make HTML label overlays pass pointer events through to the Cytoscape canvas
+    // for dragging, but allow interactive elements (gitops link, replica badge) to receive hover/click.
     const style = document.createElement('style');
-    style.textContent = '.cytoscape-node-html-label { pointer-events: none; }';
+    style.textContent = `
+      .cytoscape-node-html-label { pointer-events: none; }
+      .cytoscape-node-html-label span[title] { pointer-events: auto; cursor: help; }
+    `;
     containerRef.current?.appendChild(style);
 
     console.log('[CytoscapeGraph] Cytoscape initialized successfully');
@@ -574,22 +578,26 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           },
         ]);
 
-        // Size the Cytoscape node to match the HTML label so the grab target is correct.
+        // Size the Cytoscape node to match the HTML label so edges connect at the card boundary.
+        // Width must cover the longest service name (darwin-store-postgres-svc ~260px).
         // The node body is transparent -- the HTML label provides the visual.
-        // This ensures the node is draggable by clicking anywhere on the label.
         cy.style()
           .selector('node.service')
           .style({
-            'width': 200,
-            'height': 80,
+            'width': 260,
+            'height': 90,
+            'shape': 'round-rectangle',
+            'corner-radius': 8,
             'label': '',
             'background-opacity': 0,
             'border-width': 0,
           })
           .selector('node.ghost')
           .style({
-            'width': 160,
-            'height': 60,
+            'width': 180,
+            'height': 70,
+            'shape': 'round-rectangle',
+            'corner-radius': 8,
             'background-opacity': 0,
             'border-width': 0,
           })
