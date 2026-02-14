@@ -80,7 +80,7 @@ CPU_CRITICAL = 80.0
 MEMORY_WARNING = 70.0
 MEMORY_CRITICAL = 85.0
 ERROR_CRITICAL = 5.0
-ZOMBIE_THRESHOLD = 30.0  # seconds without telemetry
+ZOMBIE_THRESHOLD = 90.0  # seconds without telemetry (3x observer interval to avoid flicker)
 
 
 def infer_node_type(service_name: str) -> NodeType:
