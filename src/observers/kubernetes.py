@@ -558,7 +558,16 @@ class KubernetesObserver:
                     )
                 )
                 
+                import datetime
+                # Only consider events from the last 2 polling intervals (freshness guard)
+                cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=self.interval * 2)
+                
                 for event in events.items:
+                    # Skip stale events -- only process recent warnings
+                    event_time = event.last_timestamp or event.event_time or event.metadata.creation_timestamp
+                    if event_time and hasattr(event_time, 'timestamp') and event_time < cutoff:
+                        continue
+                    
                     reason = event.reason or ""
                     if reason not in self.WARNING_EVENT_REASONS:
                         message = event.message or ""
