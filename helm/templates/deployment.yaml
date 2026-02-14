@@ -463,6 +463,10 @@ spec:
               value: "{{ .Values.sidecars.sysadmin.cliType | default "gemini" }}"
             - name: AGENT_ROLE
               value: "sysadmin"
+            {{- if and (ne (.Values.sidecars.sysadmin.cliType | default "gemini") "claude") .Values.sidecars.sysadmin.interactive }}
+            - name: GEMINI_INTERACTIVE
+              value: "true"
+            {{- end }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.sysadmin.permissionMode | default "" }}"
             - name: AGENT_MODEL
@@ -724,6 +728,10 @@ spec:
               value: "{{ .Values.sidecars.qe.cliType | default "gemini" }}"
             - name: AGENT_ROLE
               value: "qe"
+            {{- if and (ne (.Values.sidecars.qe.cliType | default "gemini") "claude") .Values.sidecars.qe.interactive }}
+            - name: GEMINI_INTERACTIVE
+              value: "true"
+            {{- end }}
             - name: AGENT_PERMISSION_MODE
               value: "{{ .Values.sidecars.qe.permissionMode | default "" }}"
             - name: AGENT_MODEL

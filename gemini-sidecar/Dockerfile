@@ -105,6 +105,11 @@ RUN npm install --omit=dev
 # Copy server code
 COPY server.js .
 
+# Install agent-to-brain callback scripts (sendResults + sendMessage symlink)
+COPY sendResults.sh /usr/local/bin/sendResults
+RUN chmod +x /usr/local/bin/sendResults && \
+    ln -s /usr/local/bin/sendResults /usr/local/bin/sendMessage
+
 # Create CLI config directories (rules come from ConfigMap mount)
 RUN mkdir -p /home/default/.gemini && \
     mkdir -p /home/default/.claude

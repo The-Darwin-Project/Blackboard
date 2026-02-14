@@ -152,6 +152,7 @@ class AgentClient:
         # CancelledError propagates up to Brain.cancel_active_task().
         # Finally block ensures WS close -> sidecar SIGTERM chain fires.
         session_id: Optional[str] = None
+        latest_callback_result: Optional[str] = None  # From sendResults partial_result
         try:
             async for raw_msg in self._ws:
                 msg = json.loads(raw_msg)
@@ -159,23 +160,45 @@ class AgentClient:
 
                 if msg_type == "progress":
                     progress_text = msg.get("message", "")
-                    logger.debug(f"{self.agent_name} progress [{event_id}]: {progress_text[:100]}")
+                    source = msg.get("source", "")
+                    log_prefix = "[agent_msg]" if source == "agent_message" else ""
+                    logger.debug(f"{self.agent_name} progress {log_prefix}[{event_id}]: {progress_text[:100]}")
                     if on_progress:
                         await on_progress({
                             "actor": self.agent_name,
                             "event_id": event_id,
                             "message": progress_text,
+                            "source": source,
+                        })
+
+                elif msg_type == "partial_result":
+                    # sendResults callback -- store as latest deliverable
+                    content = msg.get("content", "")
+                    latest_callback_result = content
+                    logger.info(f"{self.agent_name} callback result [{event_id}]: {len(content)} chars")
+                    if on_progress:
+                        await on_progress({
+                            "actor": self.agent_name,
+                            "event_id": event_id,
+                            "message": f"[deliverable updated: {len(content)} chars]",
+                            "source": "callback",
                         })
 
                 elif msg_type == "result":
                     output = msg.get("output", "")
+                    source = msg.get("source", "stdout")
                     if isinstance(output, dict):
                         output = json.dumps(output, indent=2)
+                    # If we have a callback result and the WS result is a stdout fallback,
+                    # prefer the callback (the agent's explicit deliverable)
+                    if latest_callback_result and source == "stdout":
+                        logger.info(f"{self.agent_name} [{event_id}]: preferring callback result over stdout fallback")
+                        output = latest_callback_result
                     # Capture session_id if sidecar reports one (Phase 2)
                     session_id = msg.get("session_id") or session_id
                     if session_id:
                         self._active_sessions[event_id] = session_id
-                    logger.info(f"{self.agent_name} completed [{event_id}]: {len(str(output))} chars"
+                    logger.info(f"{self.agent_name} completed [{event_id}]: {len(str(output))} chars (source={source})"
                                 + (f" (session: {session_id})" if session_id else ""))
                     self._busy_retries.pop(event_id, None)
                     return str(output), session_id

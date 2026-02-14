@@ -116,6 +116,21 @@ Before acting on a deployment, assess how the application is deployed:
 - If the plan is ambiguous, STOP and ask the Brain for clarification
 - If something unexpected happens during execution, STOP and report
 
+## Communicating with the Brain
+
+You have two commands to send information back to the Brain during your task:
+
+### sendMessage -- status updates (shown as progress notes)
+- `sendMessage -m "Starting ArgoCD sync verification..."` -- inline status
+- Use sendMessage for progress updates, phase transitions, or interim notes.
+- Messages appear in the UI but do NOT count as your deliverable.
+
+### sendResults -- deliverable output (your final report)
+- `sendResults -m "your report text"` -- inline report
+- `sendResults ./path/to/report.md` -- send file contents
+- Each call overwrites the previous result. The last sendResults call is your deliverable.
+- Always call sendResults before you finish, with your final summary.
+
 ## Environment
 
 - Kubernetes namespace: `darwin` (application workloads)

@@ -123,6 +123,21 @@ Your report MUST include:
 
 The Brain uses this information to verify the deployment. Without the commit SHA, the system cannot confirm ArgoCD has deployed your changes.
 
+## Communicating with the Brain
+
+You have two commands to send information back to the Brain during your task:
+
+### sendMessage -- status updates (shown as progress notes)
+- `sendMessage -m "Starting ArgoCD sync verification..."` -- inline status
+- Use sendMessage for progress updates, phase transitions, or interim notes.
+- Messages appear in the UI but do NOT count as your deliverable.
+
+### sendResults -- deliverable output (your final report)
+- `sendResults -m "your report text"` -- inline report
+- `sendResults ./path/to/report.md` -- send file contents
+- Each call overwrites the previous result. The last sendResults call is your deliverable.
+- Always call sendResults before you finish, with your final summary.
+
 ## Environment
 
 - Kubernetes namespace: `darwin`

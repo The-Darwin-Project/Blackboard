@@ -1,19 +1,17 @@
 // gemini-sidecar/server.js
 // @ai-rules:
-// 1. [Pattern]: executeCLI + executeCLIStreaming use fs.watch preemptive read for findings.md with {content, timestamp} cache.
-// 2. [Pattern]: readFindings() checks freshness (FINDINGS_FRESHNESS_MS). Returns null if stale/missing.
-// 3. [Pattern]: requestFindings() spawns a retry prompt if no fresh findings. 60s timeout, never rejects.
-// 4. [Pattern]: Close handler chain: cached -> readFindings -> requestFindings -> stdoutFallback. Wrapped in async try-catch.
-// 5. [Pattern]: AGENT_CLI env var routes spawn() to 'gemini' or 'claude' binary via buildCLICommand().
-// 6. [Gotcha]: cachedFindings is {content, timestamp} not a string. Use .content and .content.length.
-// 7. [Constraint]: Watcher setup MUST happen AFTER prepareResultsDir() but BEFORE spawn() to avoid watching a non-existent dir.
-// 8. [Gotcha]: fs.watch on Linux inotify fires 'rename' for file creation AND deletion -- existsSync guard prevents reading deleted files.
-// 9. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. "plan" -> --permission-mode plan; else autoApprove -> --dangerously-skip-permissions.
-// 10. [Pattern]: Claude session_id extracted from stream-json init event (type=system, subtype=init) and stored on currentTask.sessionId.
-// 11. [Pattern]: Claude settings.json pre-created at startup (~/.claude/settings.json) to skip onboarding flow.
-// 12. [Pattern]: spawnInteractiveGemini uses node-pty for Gemini -i mode. PTY child has .write for followup; /quit before SIGTERM for graceful exit.
-// HTTP wrapper for Gemini/Claude Code CLIs with GitHub App authentication
-// Exposes POST /execute endpoint for the brain container
+// 1. [Pattern]: Agent result delivery via sendResults/sendMessage -> POST /callback -> _callbackResult.
+//    _callbackResult (module-level) stores the latest "result" type callback. "message" type forwards as WS progress only.
+// 2. [Pattern]: resolveResult() is the single result resolution function used by BOTH executeCLI and executeCLIStreaming close handlers.
+//    Priority: _callbackResult (callback) -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
+// 3. [Pattern]: All WS result messages carry a `source` field: "callback" | "findings" | "stdout". Brain uses this for preference logic.
+// 4. [Pattern]: AGENT_CLI env var routes spawn() to 'gemini' or 'claude' binary via buildCLICommand().
+// 5. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. "plan" -> --permission-mode plan; else autoApprove -> --dangerously-skip-permissions.
+// 6. [Pattern]: Claude session_id extracted from stream-json init event (type=system, subtype=init) and stored on currentTask.sessionId.
+// 7. [Pattern]: Claude settings.json pre-created at startup (~/.claude/settings.json) to skip onboarding flow.
+// 8. [Pattern]: spawnInteractiveGemini uses node-pty for Gemini -i mode. PTY child has .write for followup; /quit before SIGTERM for graceful exit.
+// HTTP wrapper for Gemini/Claude Code CLIs with GitHub/GitLab authentication
+// Exposes POST /execute, POST /callback endpoints for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
 
 const http = require('http');
@@ -36,12 +34,21 @@ const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[process.env
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 const DEFAULT_WORK_DIR = '/data/gitops';
 
+// Agent callback result -- set by POST /callback when agent calls sendResults.
+// Module-level so both the HTTP handler and the close handler can access it.
+// Reset to null at the start of each new task.
+let _callbackResult = null;
+
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
 const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
 // Gemini interactive mode (PTY) -- opt-in via env var. When enabled, Gemini uses
 // node-pty with `-i` flag for multi-turn sessions instead of one-shot `-p`.
 const GEMINI_INTERACTIVE = process.env.GEMINI_INTERACTIVE === 'true' && AGENT_CLI === 'gemini';
+// Strip ANSI escape codes from PTY output (colors, cursor movements, etc.)
+// PTY output is raw terminal data -- Brain/LLM needs clean text.
+const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hlm]/g;
+function stripAnsi(text) { return text.replace(ANSI_RE, ''); }
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';
 
@@ -549,13 +556,89 @@ function readFindings(workDir) {
 }
 
 /**
- * Fallback: return full stdout when no findings file is available.
+ * Fallback: extract the final meaningful segment from stdout when no findings file is available.
+ * 
+ * The full stream contains planning noise ("I will check...", "I will investigate...")
+ * that the Brain already saw via progress messages. Sending it again as the result
+ * pollutes the Brain's LLM context with duplicate chatter.
+ * 
+ * Strategy: return only the last ~3000 chars -- typically the agent's final summary,
+ * not the early planning/investigation text.
+ * 
  * @param {string} effectiveOutput - Full captured stdout (or Claude parsed text)
- * @returns {string} Full stdout content (no truncation)
+ * @returns {string} Tail segment of stdout (max ~3000 chars)
  */
 function stdoutFallback(effectiveOutput) {
-  console.log(`[${new Date().toISOString()}] No findings, using full stdout (${effectiveOutput.length} chars)`);
-  return effectiveOutput;
+  const MAX_FALLBACK_CHARS = 3000;
+  if (effectiveOutput.length <= MAX_FALLBACK_CHARS) {
+    console.log(`[${new Date().toISOString()}] No findings, using full stdout (${effectiveOutput.length} chars)`);
+    return effectiveOutput;
+  }
+  // Return tail -- the final output is more likely to contain the actual deliverable
+  const tail = effectiveOutput.slice(-MAX_FALLBACK_CHARS);
+  console.log(`[${new Date().toISOString()}] No findings, using stdout tail (${MAX_FALLBACK_CHARS} of ${effectiveOutput.length} chars)`);
+  return `[...truncated planning output...]\n\n${tail}`;
+}
+
+/**
+ * Unified result resolution for CLI close handlers.
+ * Single function used by BOTH executeCLI and executeCLIStreaming.
+ * 
+ * Priority:
+ *   1. _callbackResult (from sendResults)     -> source: "callback"
+ *   2. cachedFindings (from fs.watch)          -> source: "findings"
+ *   3. disk findings (readFindings)            -> source: "findings"
+ *   4. retry (requestFindings)                 -> source: "findings"
+ *   5. stdoutFallback (tail 3000 chars)        -> source: "stdout"
+ * 
+ * @param {object} opts
+ * @param {string|null} opts.callbackResult - Captured _callbackResult at close time
+ * @param {object|null} opts.cachedFindings - {content, timestamp} from fs.watch
+ * @param {string} opts.findingsPath - Absolute path to findings.md
+ * @param {string} opts.workDir - Agent working directory
+ * @param {boolean} opts.autoApprove - For retry prompt
+ * @param {string} opts.effectiveOutput - Full stream text (fallback)
+ * @returns {Promise<{output: string, source: string}>}
+ */
+async function resolveResult(opts) {
+  const { callbackResult, cachedFindings, findingsPath, workDir, autoApprove, effectiveOutput } = opts;
+
+  // 1. Callback result (from sendResults script)
+  if (callbackResult && callbackResult.length > 0) {
+    console.log(`[${new Date().toISOString()}] Using callback result (${callbackResult.length} chars)`);
+    return { output: callbackResult, source: 'callback' };
+  }
+
+  // 2. Cached findings from fs.watch (captured in real-time for this run)
+  if (cachedFindings && cachedFindings.content && cachedFindings.content.length > 0) {
+    console.log(`[${new Date().toISOString()}] Using cached findings (${cachedFindings.content.length} chars)`);
+    try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
+    return { output: cachedFindings.content, source: 'findings' };
+  }
+
+  // 3. Read findings file from disk (no freshness -- cleaned at run start)
+  if (fs.existsSync(findingsPath)) {
+    try {
+      const content = fs.readFileSync(findingsPath, 'utf8').trim();
+      fs.unlinkSync(findingsPath);
+      if (content.length > 0) {
+        console.log(`[${new Date().toISOString()}] Read findings from disk (${content.length} chars)`);
+        return { output: content, source: 'findings' };
+      }
+    } catch (err) {
+      console.log(`[${new Date().toISOString()}] Could not read findings file: ${err.message}`);
+    }
+  }
+
+  // 4. Retry: ask agent to write report
+  console.log(`[${new Date().toISOString()}] No findings, requesting report from agent`);
+  const retryFindings = await requestFindings(workDir, autoApprove);
+  if (retryFindings) {
+    return { output: retryFindings, source: 'findings' };
+  }
+
+  // 5. Final fallback: stdout tail
+  return { output: stdoutFallback(effectiveOutput), source: 'stdout' };
 }
 
 /**
@@ -706,45 +789,28 @@ async function executeCLI(prompt, options = {}) {
         // Try JSON parse first (structured output)
         try {
           const result = JSON.parse(effectiveOutput);
-          resolve({ status: 'success', exitCode: code, output: result });
+          resolve({ status: 'success', exitCode: code, output: result, source: 'stdout' });
           return;
         } catch (e) {}
 
-        // Findings chain: cached -> file -> retry -> stdout
-        (async () => {
-          try {
-            // 1. Cached findings from watcher (with freshness)
-            if (cachedFindings && cachedFindings.content.length > 0
-                && (Date.now() - cachedFindings.timestamp) < FINDINGS_FRESHNESS_MS) {
-              try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
-              resolve({ status: 'success', exitCode: code, output: cachedFindings.content, raw: true });
-              return;
-            }
-            // 2. Read findings file (with freshness)
-            const findings = readFindings(options.cwd || DEFAULT_WORK_DIR);
-            if (findings) {
-              resolve({ status: 'success', exitCode: code, output: findings, raw: true });
-              return;
-            }
-            // 3. Retry: ask agent to write report
-            console.log(`[${new Date().toISOString()}] No fresh findings, requesting report from agent`);
-            const retryFindings = await requestFindings(
-              options.cwd || DEFAULT_WORK_DIR, options.autoApprove !== false
-            );
-            if (retryFindings) {
-              resolve({ status: 'success', exitCode: code, output: retryFindings, raw: true });
-              return;
-            }
-            // 4. Final fallback: stdout tail
-            resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), raw: true });
-          } catch (err) {
-            // Safety net: never hang
-            console.error(`[${new Date().toISOString()}] Findings chain error: ${err.message}`);
-            resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), raw: true });
-          }
-        })();
+        // Unified result resolution (callback -> findings -> retry -> stdout)
+        const capturedCallback = _callbackResult;
+        _callbackResult = null;
+        resolveResult({
+          callbackResult: capturedCallback,
+          cachedFindings,
+          findingsPath,
+          workDir: options.cwd || DEFAULT_WORK_DIR,
+          autoApprove: options.autoApprove !== false,
+          effectiveOutput,
+        }).then(({ output, source }) => {
+          resolve({ status: 'success', exitCode: code, output, source });
+        }).catch((err) => {
+          console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
+          resolve({ status: 'success', exitCode: code, output: stdoutFallback(effectiveOutput), source: 'stdout' });
+        });
       } else {
-        resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput });
+        resolve({ status: 'failed', exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
       }
     });
     
@@ -874,45 +940,28 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         // Try JSON parse first (structured output)
         try {
           const result = JSON.parse(effectiveOutput);
-          resolve({ status: 'success', sessionId: capturedSessionId, output: result });
+          resolve({ status: 'success', sessionId: capturedSessionId, output: result, source: 'stdout' });
           return;
         } catch (e) {}
 
-        // Findings chain: cached -> file -> retry -> stdout
-        (async () => {
-          try {
-            // 1. Cached findings from watcher (with freshness)
-            if (cachedFindings && cachedFindings.content.length > 0
-                && (Date.now() - cachedFindings.timestamp) < FINDINGS_FRESHNESS_MS) {
-              try { if (fs.existsSync(findingsPath)) fs.unlinkSync(findingsPath); } catch(e) {}
-              resolve({ status: 'success', sessionId: capturedSessionId, output: cachedFindings.content, raw: true });
-              return;
-            }
-            // 2. Read findings file (with freshness)
-            const findings = readFindings(options.cwd || DEFAULT_WORK_DIR);
-            if (findings) {
-              resolve({ status: 'success', sessionId: capturedSessionId, output: findings, raw: true });
-              return;
-            }
-            // 3. Retry: ask agent to write report
-            console.log(`[${new Date().toISOString()}] No fresh findings, requesting report from agent`);
-            const retryFindings = await requestFindings(
-              options.cwd || DEFAULT_WORK_DIR, options.autoApprove !== false
-            );
-            if (retryFindings) {
-              resolve({ status: 'success', sessionId: capturedSessionId, output: retryFindings, raw: true });
-              return;
-            }
-            // 4. Final fallback: stdout tail
-            resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), raw: true });
-          } catch (err) {
-            // Safety net: never hang
-            console.error(`[${new Date().toISOString()}] Findings chain error: ${err.message}`);
-            resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), raw: true });
-          }
-        })();
+        // Unified result resolution (callback -> findings -> retry -> stdout)
+        const capturedCallback = _callbackResult;
+        _callbackResult = null;
+        resolveResult({
+          callbackResult: capturedCallback,
+          cachedFindings,
+          findingsPath,
+          workDir: options.cwd || DEFAULT_WORK_DIR,
+          autoApprove: options.autoApprove !== false,
+          effectiveOutput,
+        }).then(({ output, source }) => {
+          resolve({ status: 'success', sessionId: capturedSessionId, output, source });
+        }).catch((err) => {
+          console.error(`[${new Date().toISOString()}] resolveResult error: ${err.message}`);
+          resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), source: 'stdout' });
+        });
       } else {
-        resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput });
+        resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
       }
     });
 
@@ -968,6 +1017,55 @@ async function handleRequest(req, res) {
     return;
   }
   
+  // Agent callback endpoint (sendResults / sendMessage)
+  if (url.pathname === '/callback' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const callbackType = body.type || 'result';  // "result" or "message"
+      const content = body.content || '';
+
+      if (!content) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'content is required' }));
+        return;
+      }
+
+      if (callbackType === 'result') {
+        // sendResults: store as deliverable (last-write-wins)
+        _callbackResult = content;
+        const eid = currentTask?.eventId || 'no-task';
+        console.log(`[${new Date().toISOString()}] [${eid}] Callback result stored (${content.length} chars)`);
+        // Forward as partial_result via WS if task is active
+        if (currentTask?.ws) {
+          wsSend(currentTask.ws, {
+            type: 'partial_result',
+            event_id: currentTask.eventId,
+            content,
+          });
+        }
+      } else {
+        // sendMessage: forward as progress note (do NOT overwrite deliverable)
+        const eid2 = currentTask?.eventId || 'no-task';
+        console.log(`[${new Date().toISOString()}] [${eid2}] Callback message forwarded (${content.length} chars)`);
+        if (currentTask?.ws) {
+          wsSend(currentTask.ws, {
+            type: 'progress',
+            event_id: currentTask.eventId,
+            message: content,
+            source: 'agent_message',
+          });
+        }
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, type: callbackType }));
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // Execute endpoint
   if (url.pathname === '/execute' && req.method === 'POST') {
     try {
@@ -980,6 +1078,7 @@ async function handleRequest(req, res) {
       }
       
       const workDir = body.cwd || DEFAULT_WORK_DIR;
+      _callbackResult = null; // Reset stale callback from previous WS task
       
       // Setup git credentials + GitHub tooling if GitHub App is configured
       if (hasGitHubCredentials()) {
@@ -1075,6 +1174,8 @@ wss.on('connection', (ws) => {
         return;
       }
 
+      // Reset callback result for new task
+      _callbackResult = null;
       console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars)`);
 
       // Setup git credentials + GitHub tooling
@@ -1126,13 +1227,29 @@ wss.on('connection', (ws) => {
           const DEBOUNCE_MS = 5000;
 
           const flushResponse = () => {
-            if (responseBuffer.trim() && currentTask) {
+            if (!currentTask) return;
+            // Callback result (from sendResults) takes priority over PTY buffer
+            if (_callbackResult) {
               wsSend(currentTask.ws, {
                 type: 'result',
                 event_id: eventId,
                 session_id: geminiSessionId,
                 status: 'success',
-                output: responseBuffer.trim(),
+                output: _callbackResult,
+                source: 'callback',
+              });
+              _callbackResult = null;
+              responseBuffer = '';
+              return;
+            }
+            if (responseBuffer.trim()) {
+              wsSend(currentTask.ws, {
+                type: 'result',
+                event_id: eventId,
+                session_id: geminiSessionId,
+                status: 'success',
+                output: stripAnsi(responseBuffer.trim()),
+                source: 'stdout',
               });
               responseBuffer = '';
             }
@@ -1142,7 +1259,7 @@ wss.on('connection', (ws) => {
             if (!currentTask) return;
             currentTask.ptyOutput += data;
             responseBuffer += data;
-            wsSend(currentTask.ws, { type: 'progress', event_id: eventId, message: data });
+            wsSend(currentTask.ws, { type: 'progress', event_id: eventId, message: stripAnsi(data) });
 
             // Signal 1: Gemini prompt marker means response is complete
             if (GEMINI_PROMPT_RE.test(responseBuffer)) {
@@ -1158,14 +1275,26 @@ wss.on('connection', (ws) => {
           child.onExit(({ exitCode }) => {
             if (responseTimer) clearTimeout(responseTimer);
             const activeWs = currentTask?.ws || ws;
-            // Send final result if there's remaining output
-            if (responseBuffer.trim()) {
+            // Callback result takes priority over remaining PTY buffer
+            const capturedCallback = _callbackResult;
+            _callbackResult = null;
+            if (capturedCallback) {
               wsSend(activeWs, {
                 type: 'result',
                 event_id: eventId,
                 session_id: geminiSessionId,
                 status: exitCode === 0 ? 'success' : 'error',
-                output: responseBuffer.trim(),
+                output: capturedCallback,
+                source: 'callback',
+              });
+            } else if (responseBuffer.trim()) {
+              wsSend(activeWs, {
+                type: 'result',
+                event_id: eventId,
+                session_id: geminiSessionId,
+                status: exitCode === 0 ? 'success' : 'error',
+                output: stripAnsi(responseBuffer.trim()),
+                source: 'stdout',
               });
             }
             currentTask = null;
@@ -1185,6 +1314,7 @@ wss.on('connection', (ws) => {
             session_id: result.sessionId || null,
             status: result.status,
             output: result.output || result.stdout || '',
+            source: result.source || 'stdout',
           });
         } catch (err) {
           wsSend(ws, {
@@ -1216,6 +1346,7 @@ wss.on('connection', (ws) => {
             event_id: eventId,
             session_id: result.sessionId || sessionId,
             output: result.output || result.stdout || '',
+            source: result.source || 'stdout',
           });
         } catch (err) {
           wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
