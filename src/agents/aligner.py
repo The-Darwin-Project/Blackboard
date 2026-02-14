@@ -735,12 +735,21 @@ class Aligner:
                 )
                 return
 
-        # Layer 2: time-based cooldown (2 minutes between events per service)
+        # Layer 2: time-based cooldown (5 minutes between events per service)
+        # Check in-memory cache first, then Redis (survives pod restarts)
+        COOLDOWN_SECONDS = 300
+        now = time.time()
         last_event_time = self._last_event_creation.get(service, 0)
-        if time.time() - last_event_time < 120:
+        if not last_event_time:
+            # In-memory miss -- check Redis (populated by previous pod lifecycle)
+            redis_ts = await self.blackboard.redis.get(f"darwin:aligner:cooldown:{service}")
+            if redis_ts:
+                last_event_time = float(redis_ts)
+                self._last_event_creation[service] = last_event_time
+        if now - last_event_time < COOLDOWN_SECONDS:
             logger.info(
                 f"Skipping event for {service} ({anomaly_type}): "
-                f"cooldown ({int(time.time() - last_event_time)}s since last)"
+                f"cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s since last)"
             )
             return
 
@@ -761,7 +770,11 @@ class Aligner:
             reason=anomaly_type.replace("_", " "),
             evidence=evidence,
         )
-        self._last_event_creation[service] = time.time()
+        self._last_event_creation[service] = now
+        # Persist to Redis so cooldown survives pod restarts (TTL = cooldown + buffer)
+        await self.blackboard.redis.set(
+            f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
+        )
         logger.info(f"Created event for {service} ({anomaly_type})")
     
     async def check_anomalies_for_service(
