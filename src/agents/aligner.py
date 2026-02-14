@@ -95,6 +95,13 @@ Use "complex" or "chaotic" only when the data is genuinely confusing or the syst
 ## When to do nothing (return text only)
 - Metrics are normal, nothing noteworthy
 - Transient blip that already normalized within the observation window
+- The ops journal shows this exact issue was JUST resolved (within the last 5 minutes) -- it is a residual alert, not a new incident
+
+## Ops Journal Context
+Your prompt may include recent ops journal entries for the service. Use this temporal context:
+- If the journal shows "closed in N turns" for the same anomaly type within the last few minutes, this is likely a residual alert from the same incident. Do NOT create a new event.
+- If the journal shows repeated closures of the same pattern (3+ times), consider escalating with a different reason that highlights the recurrence.
+- The journal gives you memory across analysis cycles -- use it to avoid alert fatigue.
 """.format(
     cpu_threshold=CPU_THRESHOLD,
     memory_threshold=MEMORY_THRESHOLD,
@@ -576,6 +583,22 @@ class Aligner:
         # Check if there's an active event for this service (context for Flash)
         has_active = await self._has_active_event_for(service)
 
+        # Temporal context: recent ops journal entries for this service
+        # Prevents re-escalating events that were just closed (residual alerts)
+        journal_context = ""
+        try:
+            journal_entries = await self.blackboard.get_journal(service)
+            if journal_entries:
+                # Last 5 entries, newest last
+                recent = journal_entries[-5:]
+                journal_context = (
+                    f"\nRecent ops journal for {service}:\n"
+                    + "\n".join(f"  {entry}" for entry in recent)
+                    + "\n"
+                )
+        except Exception:
+            pass  # Journal unavailable is not fatal
+
         try:
             adapter = await self._get_adapter()
             if adapter:
@@ -588,8 +611,11 @@ class Aligner:
                     f"Stats: avg_cpu={avg_cpu:.1f}% max_cpu={max_cpu:.1f}% avg_mem={avg_mem:.1f}% "
                     f"avg_err={avg_err:.2f}% max_err={max_err:.2f}% replicas={latest['replicas']}\n"
                     f"Latest reading: CPU={latest['cpu']:.1f}% MEM={latest['memory']:.1f}% ERR={latest['error_rate']:.2f}%\n"
-                    f"Active event exists for this service: {'yes' if has_active else 'no'}\n\n"
-                    f"Analyze this data. Use your tools to report what you observe, or return text only if everything is normal."
+                    f"Active event exists for this service: {'yes' if has_active else 'no'}\n"
+                    f"{journal_context}\n"
+                    f"Analyze this data. If the ops journal shows this issue was JUST resolved (within the last few minutes), "
+                    f"do NOT create a new event -- it is likely a residual alert. Use your tools to report what you observe, "
+                    f"or return text only if everything is normal or recently resolved."
                 )
 
                 response = await adapter.generate(
