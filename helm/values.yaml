@@ -109,7 +109,7 @@ sidecars:
 # GCP / Vertex AI Configuration
 # =============================================================================
 gcp:
-  project: "cnv-ai-insights" # Required: GCP project ID
+  project: "" # Required: GCP project ID (set via --set or override file)
   location: "global"
   provider: "gemini" # Brain LLM provider: "gemini" or "claude"
   models:
@@ -120,11 +120,11 @@ gcp:
   temperature:
     brain: "0.8" # Brain orchestrator decisions
     aligner: "0.3" # Aligner metrics analysis (Flash)
-  # Service account JSON secrets
+  # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
-  existingSecret: "gcp-sa-key"
+  existingSecret: "" # e.g., "gcp-sa-key"
   # Agent SA -- separate SA for agent sidecars (avoids sharing 429 quota with Brain)
-  agentExistingSecret: "gcp-agent-key"
+  agentExistingSecret: "" # e.g., "gcp-agent-key"
 # =============================================================================
 # Service Configuration
 # =============================================================================
@@ -158,38 +158,43 @@ app:
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
 github:
-  # The GitHub App secret containing:
+  # Pre-created secret containing:
   # - app-id: GitHub App ID
   # - installation-id: GitHub App Installation ID
-  # - darwin-ci.2026-02-04.private-key.pem: Private key file
-  existingSecret: "darwin-github-app"
-  # NOTE: repository field is no longer used - init container removed
-  # GitOps repo is now determined dynamically from service telemetry
-  # repository: "The-Darwin-Project/gitops"  # DEPRECATED
+  # - <name>.pem: Private key file
+  existingSecret: "" # e.g., "darwin-github-app"
   # Branch to use (for reference, sidecar defaults to main)
   branch: "main"
+# =============================================================================
+# GitLab Token Configuration (for GitLab GitOps authentication)
+# =============================================================================
+gitlab:
+  enabled: false
+  # Pre-created secret with keys: token, host
+  # - token: GitLab Service Account / Group Access Token (PAT)
+  #   Required scopes: api, read_repository, write_repository
+  # - host: GitLab instance hostname (e.g., gitlab.example.com)
+  existingSecret: "" # e.g., "darwin-gitlab-token"
 # =============================================================================
 # ArgoCD CLI Credentials (for agent ArgoCD API access)
 # =============================================================================
 argocd:
-  enabled: true
+  enabled: false
   # Pre-created secret with keys: server, auth-token
-  # If empty and enabled=true, a placeholder secret is rendered by the chart
-  existingSecret: "darwin-argocd-creds"
-  # Server URL (e.g., argocd-server.openshift-gitops.svc:443)
-  server: "openshift-gitops-server.openshift-gitops.svc.cluster.local:8080"
+  existingSecret: "" # e.g., "darwin-argocd-creds"
+  # Server URL (e.g., argocd-server.argocd-ns.svc.cluster.local:443)
+  server: ""
   # Set to true if using self-signed certs
   insecure: true
 # =============================================================================
 # Kargo CLI Credentials (for agent Kargo pipeline access)
 # =============================================================================
 kargo:
-  enabled: true
+  enabled: false
   # Pre-created secret with keys: server, auth-token
-  # If empty and enabled=true, a placeholder secret is rendered by the chart
-  existingSecret: "darwin-kargo-creds"
-  # Server URL (e.g., kargo-api.kargo-system.svc:443)
-  server: "kargo-api.kargo.svc.cluster.local:8080"
+  existingSecret: "" # e.g., "darwin-kargo-creds"
+  # Server URL (e.g., kargo-api.kargo-ns.svc.cluster.local:443)
+  server: ""
   insecure: true
 # =============================================================================
 # Resource Limits (Brain container -- singleton, handles event loop + LLM calls)

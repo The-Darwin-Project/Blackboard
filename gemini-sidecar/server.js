@@ -192,6 +192,11 @@ const INSTALL_ID_PATH = `${SECRETS_PATH}/installation-id`;
 // Note: Private key filename may vary - we'll find it dynamically
 const PRIVATE_KEY_PATTERN = /\.pem$/;
 
+// GitLab token secret paths (mounted from K8s secret)
+const GITLAB_SECRETS_PATH = '/secrets/gitlab';
+const GITLAB_TOKEN_PATH = process.env.GITLAB_TOKEN_PATH || `${GITLAB_SECRETS_PATH}/token`;
+const GITLAB_HOST = process.env.GITLAB_HOST || '';
+
 /**
  * Find the private key file in the secrets directory
  */
@@ -392,6 +397,116 @@ function setupGitHubTooling(token) {
     }
 
     console.log(`[${new Date().toISOString()}] gh CLI + GitHub MCP server ready`);
+}
+
+/**
+ * Check if GitLab token credentials are available
+ */
+function hasGitLabCredentials() {
+  return fs.existsSync(GITLAB_TOKEN_PATH);
+}
+
+/**
+ * Read GitLab token from mounted secret.
+ * Unlike GitHub App (JWT exchange), GitLab uses a static PAT.
+ * @returns {string} GitLab access token
+ */
+function readGitLabToken() {
+  if (!fs.existsSync(GITLAB_TOKEN_PATH)) {
+    throw new Error(`GitLab token not found at ${GITLAB_TOKEN_PATH}`);
+  }
+  return fs.readFileSync(GITLAB_TOKEN_PATH, 'utf8').trim();
+}
+
+/**
+ * Configure git credentials for GitLab operations.
+ * Appends GitLab credentials alongside existing GitHub credentials.
+ * @param {string} token - GitLab access token (PAT)
+ * @param {string} workDir - Working directory for git operations
+ */
+function setupGitLabCredentials(token, workDir) {
+  console.log(`[${new Date().toISOString()}] Configuring GitLab git credentials (${GITLAB_HOST})`);
+  try {
+    // Ensure work directory exists
+    if (!fs.existsSync(workDir)) {
+      fs.mkdirSync(workDir, { recursive: true });
+    }
+    // Append GitLab credentials to git credential store
+    // Uses unique file per request (same pattern as GitHub)
+    const credFile = `/tmp/git-creds-gitlab-${Date.now()}`;
+    execSync(`git config --global credential.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
+    fs.writeFileSync(credFile, `https://darwin-agent:${token}@${GITLAB_HOST}\n`, { mode: 0o600 });
+    // Also set credentials via git config for the specific host
+    // This ensures both credential helpers are consulted
+    execSync(`git config --global credential.https://${GITLAB_HOST}.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
+    console.log(`[${new Date().toISOString()}] GitLab git credentials configured for ${GITLAB_HOST}`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] GitLab git config error:`, err.message);
+    throw new Error(`Failed to configure GitLab git: ${err.message}`);
+  }
+}
+
+/**
+ * Configure GitLab MCP server + glab CLI auth with a token.
+ * Both Gemini CLI and Claude Code use the MCP server for structured GitLab interaction.
+ * The glab CLI uses GITLAB_TOKEN env var for direct commands.
+ *
+ * @param {string} token - GitLab access token (PAT)
+ */
+function setupGitLabTooling(token) {
+    // 1. Set GITLAB_TOKEN for glab CLI (persists in process env for child processes)
+    process.env.GITLAB_TOKEN = token;
+    process.env.GITLAB_HOST = GITLAB_HOST;
+
+    // 2. Configure GitLab MCP server for Gemini CLI
+    const geminiSettingsDir = `${process.env.HOME}/.gemini`;
+    const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
+    try {
+        fs.mkdirSync(geminiSettingsDir, { recursive: true });
+        let settings = {};
+        if (fs.existsSync(geminiSettingsPath)) {
+            try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
+        }
+        settings.mcpServers = settings.mcpServers || {};
+        settings.mcpServers.GitLab = {
+            command: 'gitlab-mcp-server',
+            args: [],
+            env: {
+                GITLAB_PERSONAL_ACCESS_TOKEN: token,
+                GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
+            },
+        };
+        fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+        console.log(`[${new Date().toISOString()}] GitLab MCP configured for Gemini CLI`);
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] GitLab MCP config (Gemini) failed: ${err.message}`);
+    }
+
+    // 3. Configure GitLab MCP server for Claude Code
+    const claudeSettingsDir = `${process.env.HOME}/.claude`;
+    const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
+    try {
+        fs.mkdirSync(claudeSettingsDir, { recursive: true });
+        let claudeSettings = {};
+        if (fs.existsSync(claudeSettingsPath)) {
+            try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
+        }
+        claudeSettings.mcpServers = claudeSettings.mcpServers || {};
+        claudeSettings.mcpServers.GitLab = {
+            command: 'gitlab-mcp-server',
+            args: [],
+            env: {
+                GITLAB_PERSONAL_ACCESS_TOKEN: token,
+                GITLAB_API_URL: `https://${GITLAB_HOST}/api/v4`,
+            },
+        };
+        fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+        console.log(`[${new Date().toISOString()}] GitLab MCP configured for Claude Code`);
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] GitLab MCP config (Claude) failed: ${err.message}`);
+    }
+
+    console.log(`[${new Date().toISOString()}] glab CLI + GitLab MCP server ready (${GITLAB_HOST})`);
 }
 
 /**
@@ -843,9 +958,12 @@ async function handleRequest(req, res) {
       agentRole: AGENT_ROLE || 'default',
       toolRestrictions: AGENT_ROLE === 'architect' ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
+      hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
       hasKargoCredentials: fs.existsSync('/secrets/kargo/auth-token'),
       hasGitHubMCP: !!process.env.GH_TOKEN,
+      hasGitLabMCP: !!process.env.GITLAB_TOKEN,
+      gitlabHost: GITLAB_HOST,
     }));
     return;
   }
@@ -872,6 +990,18 @@ async function handleRequest(req, res) {
         } catch (err) {
           console.error(`[${new Date().toISOString()}] Git credential setup failed:`, err.message);
           console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
+        }
+      }
+
+      // Setup GitLab credentials + MCP tooling if token is available
+      if (hasGitLabCredentials()) {
+        try {
+          const glToken = readGitLabToken();
+          setupGitLabCredentials(glToken, workDir);
+          setupGitLabTooling(glToken);
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] GitLab credential setup failed:`, err.message);
+          console.log(`[${new Date().toISOString()}] Continuing without GitLab credentials`);
         }
       }
 
@@ -953,9 +1083,21 @@ wss.on('connection', (ws) => {
           const token = await generateInstallationToken();
           setupGitCredentials(token, workDir);
           setupGitHubTooling(token);
-          wsSend(ws, { type: 'progress', event_id: eventId, message: 'Git credentials configured' });
+          wsSend(ws, { type: 'progress', event_id: eventId, message: 'GitHub credentials configured' });
         } catch (err) {
-          wsSend(ws, { type: 'progress', event_id: eventId, message: `Git credentials failed: ${err.message}, continuing...` });
+          wsSend(ws, { type: 'progress', event_id: eventId, message: `GitHub credentials failed: ${err.message}, continuing...` });
+        }
+      }
+
+      // Setup GitLab credentials + MCP tooling
+      if (hasGitLabCredentials()) {
+        try {
+          const glToken = readGitLabToken();
+          setupGitLabCredentials(glToken, workDir);
+          setupGitLabTooling(glToken);
+          wsSend(ws, { type: 'progress', event_id: eventId, message: `GitLab credentials configured (${GITLAB_HOST})` });
+        } catch (err) {
+          wsSend(ws, { type: 'progress', event_id: eventId, message: `GitLab credentials failed: ${err.message}, continuing...` });
         }
       }
 
@@ -1143,6 +1285,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Agent sidecar (${AGENT_CLI}) listening on port ${PORT}`);
   console.log(`[${new Date().toISOString()}] Endpoints: GET /health, POST /execute, WS /ws`);
   console.log(`[${new Date().toISOString()}] GitHub App credentials: ${hasGitHubCredentials() ? 'available' : 'NOT FOUND'}`);
+  console.log(`[${new Date().toISOString()}] GitLab credentials: ${hasGitLabCredentials() ? `available (${GITLAB_HOST})` : 'NOT FOUND'}`);
   console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);
   console.log(`[${new Date().toISOString()}] Kargo credentials: ${fs.existsSync('/secrets/kargo/auth-token') ? 'available' : 'not configured'}`);
 });

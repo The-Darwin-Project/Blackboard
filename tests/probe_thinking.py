@@ -67,7 +67,7 @@ async def main():
     from google import genai
     from google.genai import types
 
-    project = os.getenv("GCP_PROJECT", "cnv-ai-insights")
+    project = os.getenv("GCP_PROJECT", "")
     location = os.getenv("GCP_LOCATION", "global")
     model = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
 

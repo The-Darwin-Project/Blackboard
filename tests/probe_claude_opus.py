@@ -21,7 +21,7 @@ async def main():
         print("FAIL: anthropic SDK not installed (pip install anthropic)")
         sys.exit(1)
 
-    project = os.getenv("GCP_PROJECT", "cnv-ai-insights")
+    project = os.getenv("GCP_PROJECT", "")
     region = os.getenv("GCP_LOCATION", "global")
     model_name = "claude-opus-4-6"
 

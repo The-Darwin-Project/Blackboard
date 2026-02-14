@@ -48,9 +48,9 @@ SIDECAR_IMAGE = os.getenv(
 )
 GCP_SA_KEY = os.getenv(
     "GCP_SA_KEY",
-    "/home/thason/Git/GitHub/The-Darwin-Project/cnv-ai-insights-8502f29094a2.json",
+    "",  # Set GCP_SA_KEY env var to service account JSON path
 )
-GCP_PROJECT = os.getenv("GCP_PROJECT", "cnv-ai-insights")
+GCP_PROJECT = os.getenv("GCP_PROJECT", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "global")
 
 # Set credentials for google-genai SDK (Flash Manager runs in this process)

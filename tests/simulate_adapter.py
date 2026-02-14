@@ -267,7 +267,7 @@ async def main():
     print("Adapter Simulation -- End-to-End Brain Dispatch Validation")
     print("=" * 70)
 
-    project = os.getenv("GCP_PROJECT", "cnv-ai-insights")
+    project = os.getenv("GCP_PROJECT", "")
     location = os.getenv("GCP_LOCATION", "global")
 
     gemini_model = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")

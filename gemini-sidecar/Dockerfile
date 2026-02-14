@@ -1,5 +1,5 @@
 # gemini-sidecar/Dockerfile
-# Agent CLI sidecar - HTTP wrapper for Gemini + Claude Code CLIs with GitHub App auth
+# Agent CLI sidecar - HTTP wrapper for Gemini + Claude Code CLIs with GitHub/GitLab auth
 # Uses Node.js 22 (required by @google/gemini-cli)
 
 FROM registry.access.redhat.com/ubi9/nodejs-22:latest
@@ -52,16 +52,29 @@ RUN \
       -o /tmp/mcp.tar.gz && tar -xzf /tmp/mcp.tar.gz -C /tmp/ && \
     cp /tmp/github-mcp-server /usr/local/bin/github-mcp-server && chmod +x /usr/local/bin/github-mcp-server && \
     rm -rf /tmp/mcp* /tmp/github-mcp-server* && \
+    # glab -- GitLab CLI (MR status, pipeline runs, issue management)
+    GLAB_VERSION=$(curl -sL https://gitlab.com/api/v4/projects/34675721/releases | \
+      jq -r '.[0].tag_name') && \
+    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${GLAB_VERSION}/downloads/glab_${GLAB_VERSION#v}_Linux_x86_64.tar.gz" \
+      -o /tmp/glab.tar.gz && tar -xzf /tmp/glab.tar.gz -C /tmp/ && \
+    cp /tmp/bin/glab /usr/local/bin/glab && chmod +x /usr/local/bin/glab && \
+    rm -rf /tmp/glab* /tmp/bin && \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
     helm version --short && jq --version && yq --version && \
-    gh --version && github-mcp-server --help | head -1
+    gh --version && github-mcp-server --help | head -1 && \
+    glab --version
 
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
 # UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
 RUN npm install -g @google/gemini-cli@latest && \
     ln -sf "$(npm prefix -g)/bin/gemini" /usr/local/bin/gemini && \
     /usr/local/bin/gemini --version || echo "Gemini CLI linked"
+
+# Install GitLab MCP server (MR/issue/repo tools for Gemini + Claude CLIs)
+RUN npm install -g @modelcontextprotocol/server-gitlab@latest && \
+    ln -sf "$(npm prefix -g)/bin/gitlab-mcp-server" /usr/local/bin/gitlab-mcp-server && \
+    /usr/local/bin/gitlab-mcp-server --help 2>&1 | head -1 || echo "GitLab MCP server linked"
 
 # Install Claude Code CLI (for agents using Claude models via Vertex AI)
 RUN npm install -g @anthropic-ai/claude-code@latest && \

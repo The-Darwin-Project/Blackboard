@@ -20,7 +20,19 @@ logger = logging.getLogger(__name__)
 # GitHub App configuration from environment/secrets
 GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
 GITHUB_INSTALLATION_ID = os.getenv("GITHUB_INSTALLATION_ID")
-GITHUB_PRIVATE_KEY_PATH = os.getenv("GITHUB_PRIVATE_KEY_PATH", "/secrets/github/private-key.pem")
+GITHUB_PRIVATE_KEY_PATH = os.getenv("GITHUB_PRIVATE_KEY_PATH", "/secrets/github")
+
+
+def _find_pem_file(search_path: str) -> str:
+    """Find the .pem private key file in a directory or return as-is if it's a file."""
+    p = Path(search_path)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():
+        pem_files = list(p.glob("*.pem"))
+        if pem_files:
+            return str(pem_files[0])
+    raise ValueError(f"No .pem private key found at {search_path}")
 
 
 class GitHubAppAuth:
@@ -41,7 +53,6 @@ class GitHubAppAuth:
     ):
         self.app_id = app_id or GITHUB_APP_ID
         self.installation_id = installation_id or GITHUB_INSTALLATION_ID
-        self.private_key_path = private_key_path or GITHUB_PRIVATE_KEY_PATH
         
         self._token: Optional[str] = None
         self._token_expires_at: float = 0
@@ -51,8 +62,10 @@ class GitHubAppAuth:
             raise ValueError("GITHUB_APP_ID not configured")
         if not self.installation_id:
             raise ValueError("GITHUB_INSTALLATION_ID not configured")
-        if not Path(self.private_key_path).exists():
-            raise ValueError(f"Private key not found at {self.private_key_path}")
+        # Discover .pem file (path may be a directory or a direct file)
+        self.private_key_path = _find_pem_file(
+            private_key_path or GITHUB_PRIVATE_KEY_PATH
+        )
     
     def _load_private_key(self) -> str:
         """Load the GitHub App private key from file."""
