@@ -56,7 +56,7 @@ RUN \
     GLAB_VERSION=$(curl -sL https://gitlab.com/api/v4/projects/34675721/releases | \
       jq -r '.[0].tag_name') && \
     curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${GLAB_VERSION}/downloads/glab_${GLAB_VERSION#v}_linux_amd64.tar.gz" \
-      -o /tmp/glab.tar.gz && tar -xzf /tmp/glab.tar.gz -C /tmp/glab && \
+      -o /tmp/glab.tar.gz && mkdir -p /tmp/glab && tar -xzf /tmp/glab.tar.gz -C /tmp/glab && \
     cp /tmp/glab/bin/glab /usr/local/bin/glab && chmod +x /usr/local/bin/glab && \
     rm -rf /tmp/glab* && \
     # Verify all CLIs installed
