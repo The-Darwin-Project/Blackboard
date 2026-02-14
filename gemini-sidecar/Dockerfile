@@ -114,6 +114,14 @@ RUN chmod +x /usr/local/bin/sendResults && \
 RUN mkdir -p /home/default/.gemini && \
     mkdir -p /home/default/.claude
 
+# Install Darwin agent skills (shared skills, symlinked into both CLIs)
+# Gemini: ~/.gemini/skills/  Claude: ~/.claude/skills/
+COPY skills/ /home/default/.gemini/skills/
+RUN mkdir -p /home/default/.claude/skills && \
+    for skill in /home/default/.gemini/skills/*/; do \
+      ln -s "$skill" /home/default/.claude/skills/"$(basename "$skill")"; \
+    done
+
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \

@@ -61,42 +61,41 @@ if (!fs.existsSync(claudeSettingsPath)) {
   console.log('Claude settings.json created (skip onboarding)');
 }
 
-// Pre-create Gemini settings to skip first-run prompts (trust + auth)
-// Without this, Gemini CLI shows interactive "trust folder" and "auth method" dialogs
-// that hang one-shot mode (no stdin) and waste time in PTY mode.
+// Pre-create Gemini settings to minimize first-run prompts.
+// Trust is disabled so the trust dialog never appears.
+// Auth still requires PTY auto-handler (GEMINI_INTERACTIVE mode) to select Vertex AI
+// on first run -- the CLI doesn't honor a pre-set auth mode in settings.json.
 const geminiDir = path.join(os.homedir(), '.gemini');
 fs.mkdirSync(geminiDir, { recursive: true });
-// 1. Settings: configure Vertex AI auth + disable trust prompt
 const geminiSettingsPath = path.join(geminiDir, 'settings.json');
 try {
   let geminiSettings = {};
   if (fs.existsSync(geminiSettingsPath)) {
     try { geminiSettings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh start */ }
   }
-  // Auth: Vertex AI (matches GOOGLE_GENAI_USE_VERTEXAI=true env var)
-  geminiSettings.auth = geminiSettings.auth || { type: 'vertex_ai' };
   // Disable trust folder prompt (all agent working dirs are safe)
   geminiSettings.security = geminiSettings.security || {};
   geminiSettings.security.folderTrust = { enabled: false };
   // Preserve any existing MCP server configs
   geminiSettings.mcpServers = geminiSettings.mcpServers || {};
   fs.writeFileSync(geminiSettingsPath, JSON.stringify(geminiSettings, null, 2));
-  console.log('Gemini settings.json created (Vertex AI auth + trust disabled)');
+  console.log('Gemini settings.json created (trust disabled)');
 } catch (err) {
   console.error(`Gemini settings.json error: ${err.message}`);
 }
-// 2. Trusted folders: pre-trust all agent working directories
+// Trusted folders: JSON object format (path -> trust level), not array.
+// Even with trust disabled, an invalid file causes a warning on every run.
 const trustedFoldersPath = path.join(geminiDir, 'trustedFolders.json');
 try {
-  const trustedFolders = [
-    '/data/gitops',
-    '/data/gitops-architect',
-    '/data/gitops-sysadmin',
-    '/data/gitops-developer',
-    '/data/gitops-qe',
-  ];
+  const trustedFolders = {
+    '/data/gitops': 'TRUST_FOLDER',
+    '/data/gitops-architect': 'TRUST_FOLDER',
+    '/data/gitops-sysadmin': 'TRUST_FOLDER',
+    '/data/gitops-developer': 'TRUST_FOLDER',
+    '/data/gitops-qe': 'TRUST_FOLDER',
+  };
   fs.writeFileSync(trustedFoldersPath, JSON.stringify(trustedFolders, null, 2));
-  console.log('Gemini trustedFolders.json created');
+  console.log('Gemini trustedFolders.json created (object format)');
 } catch (err) {
   console.error(`Gemini trustedFolders.json error: ${err.message}`);
 }
