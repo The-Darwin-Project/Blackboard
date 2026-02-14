@@ -1228,20 +1228,10 @@ wss.on('connection', (ws) => {
 
           const flushResponse = () => {
             if (!currentTask) return;
-            // Callback result (from sendResults) takes priority over PTY buffer
-            if (_callbackResult) {
-              wsSend(currentTask.ws, {
-                type: 'result',
-                event_id: eventId,
-                session_id: geminiSessionId,
-                status: 'success',
-                output: _callbackResult,
-                source: 'callback',
-              });
-              _callbackResult = null;
-              responseBuffer = '';
-              return;
-            }
+            // Only flush PTY buffer here (turn boundary).
+            // _callbackResult is NOT checked -- it resolves in onExit only.
+            // This lets agents call sendResults multiple times during the session
+            // without terminating the PTY (Brain treats "result" as terminal).
             if (responseBuffer.trim()) {
               wsSend(currentTask.ws, {
                 type: 'result',
