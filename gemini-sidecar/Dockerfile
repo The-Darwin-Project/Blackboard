@@ -55,10 +55,10 @@ RUN \
     # glab -- GitLab CLI (MR status, pipeline runs, issue management)
     GLAB_VERSION=$(curl -sL https://gitlab.com/api/v4/projects/34675721/releases | \
       jq -r '.[0].tag_name') && \
-    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${GLAB_VERSION}/downloads/glab_${GLAB_VERSION#v}_Linux_x86_64.tar.gz" \
-      -o /tmp/glab.tar.gz && tar -xzf /tmp/glab.tar.gz -C /tmp/ && \
-    cp /tmp/bin/glab /usr/local/bin/glab && chmod +x /usr/local/bin/glab && \
-    rm -rf /tmp/glab* /tmp/bin && \
+    curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${GLAB_VERSION}/downloads/glab_${GLAB_VERSION#v}_linux_amd64.tar.gz" \
+      -o /tmp/glab.tar.gz && tar -xzf /tmp/glab.tar.gz -C /tmp/glab && \
+    cp /tmp/glab/bin/glab /usr/local/bin/glab && chmod +x /usr/local/bin/glab && \
+    rm -rf /tmp/glab* && \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
     helm version --short && jq --version && yq --version && \
