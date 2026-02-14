@@ -700,6 +700,38 @@ class BlackboardState:
         await self.redis.hset(key, mapping=mapping)
         logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
     
+    async def update_service_discovery(
+        self,
+        name: str,
+        version: str,
+        source_repo_url: Optional[str] = None,
+        gitops_repo: Optional[str] = None,
+        gitops_repo_url: Optional[str] = None,
+        gitops_config_path: Optional[str] = None,
+    ) -> None:
+        """Update service discovery metadata WITHOUT overwriting metrics.
+        
+        Used by the K8s observer's annotation discovery cycle. Only writes
+        version, repo URLs, and config path. Leaves cpu/memory/error_rate
+        untouched so the metrics poll values are never clobbered.
+        """
+        key = f"darwin:service:{name}"
+        mapping: dict[str, str] = {
+            "version": version,
+            "last_seen": str(time.time()),
+        }
+        if source_repo_url:
+            mapping["source_repo_url"] = source_repo_url
+        if gitops_repo:
+            mapping["gitops_repo"] = gitops_repo
+        if gitops_repo_url:
+            mapping["gitops_repo_url"] = gitops_repo_url
+        if gitops_config_path:
+            mapping["gitops_config_path"] = gitops_config_path
+        
+        await self.redis.hset(key, mapping=mapping)
+        logger.debug(f"Updated discovery metadata for {name}: version={version}")
+
     async def update_service_replicas(
         self,
         name: str,

@@ -254,12 +254,13 @@ class KubernetesObserver:
                         containers = pod.spec.containers if pod.spec else []
                         version = self._extract_version_from_image(containers)
 
-                        await self.blackboard.update_service_metadata(
+                        # Discovery: only write metadata (version, repos).
+                        # Do NOT write cpu/memory/error_rate -- those come from
+                        # _process_pod_metrics. Writing zeros here caused a race
+                        # where the Aligner read 0% between discovery and metrics poll.
+                        await self.blackboard.update_service_discovery(
                             name=service_name,
                             version=version,
-                            cpu=0.0,
-                            memory=0.0,
-                            error_rate=0.0,
                             source_repo_url=source_repo_url,
                             gitops_repo=gitops_repo,
                             gitops_repo_url=gitops_repo_url,
