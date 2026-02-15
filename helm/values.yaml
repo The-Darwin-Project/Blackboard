@@ -92,7 +92,7 @@ sidecars:
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "4ccc7ff" # Updated by CI to commit SHA
+    tag: "144a7c8" # Updated by CI to commit SHA
   resources:
     requests:
       memory: 256Mi
