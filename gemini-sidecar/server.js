@@ -6,7 +6,7 @@
 //    Priority: _callbackResult (callback) -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: All WS result messages carry a `source` field: "callback" | "findings" | "stdout". Brain uses this for preference logic.
 // 4. [Pattern]: AGENT_CLI env var routes spawn() to 'gemini' or 'claude' binary via buildCLICommand().
-// 5. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. "plan" -> --permission-mode plan; else autoApprove -> --dangerously-skip-permissions.
+// 5. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. If set (e.g. "plan") -> --permission-mode <value>; else autoApprove -> --dangerously-skip-permissions. Currently no agents use plan mode (soft rules via CLAUDE.md instead).
 // 6. [Pattern]: Claude session_id extracted from stream-json init event (type=system, subtype=init) and stored on currentTask.sessionId.
 // 7. [Pattern]: Claude settings.json pre-created at startup (~/.claude/settings.json) to skip onboarding flow.
 // 8. [Pattern]: Both Gemini and Claude use headless mode (-p + stream-json). Follow-ups via --resume <session_id>. No PTY.

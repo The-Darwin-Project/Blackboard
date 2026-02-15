@@ -8,6 +8,7 @@ description: Safety rules for modifying Dockerfiles and Containerfiles. Use when
 ## Allowed Modifications
 
 You MAY add:
+
 - `ARG` -- build arguments
 - `ENV` -- environment variables
 - `COPY` -- copy files into the image
@@ -17,12 +18,14 @@ You MAY add:
 ## Forbidden Modifications
 
 You MUST NOT change:
+
 - `FROM` -- base image (changing this breaks the build chain)
 - `CMD` / `ENTRYPOINT` -- the container's startup command
 - `USER` -- the runtime user (security context)
 - `WORKDIR` -- the working directory
 
 You MUST NOT remove:
+
 - Existing `COPY`, `RUN`, or `CMD` lines
 - Running processes from `CMD` (e.g., removing a sidecar process)
 

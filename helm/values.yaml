@@ -62,7 +62,7 @@ sidecars:
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI (deep planning, code analysis)
-    permissionMode: "plan" # Claude permission mode: "plan" restricts to read-only planning
+    permissionMode: "" # No hard restriction -- soft rules via architect.md + skills
   sysadmin:
     enabled: true
     port: 9092

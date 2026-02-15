@@ -20,6 +20,7 @@ sendResults ./results/findings.md
 ```
 
 **Rules:**
+
 - Each call **overwrites** the previous result. The Brain receives your **last** `sendResults` call as the deliverable.
 - Always call `sendResults` before finishing your task with your final summary.
 - Structure your report with: root cause, evidence, files changed, outcome.
@@ -35,6 +36,7 @@ sendMessage -m "Applying fix via GitOps, waiting for ArgoCD sync..."
 ```
 
 **Rules:**
+
 - Messages appear in the Brain's UI as progress notes.
 - Messages do **not** overwrite your deliverable (only `sendResults` does that).
 - Use messages to keep the Brain informed during long-running tasks.

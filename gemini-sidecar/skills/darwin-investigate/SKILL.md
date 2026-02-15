@@ -19,7 +19,7 @@ Do NOT keep investigating after you have enough evidence. The Brain decides the 
 
 Structure your findings as:
 
-```
+```text
 **Root Cause**: one sentence
 **Evidence**: 2-3 bullet points of what you found
 **Recommendation**: what the Brain should do next
