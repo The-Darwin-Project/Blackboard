@@ -2,6 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Single Socket Mode connection. If Brain scales, only one replica enables Slack.
 # 2. [Pattern]: /darwin slash command is the ONLY way to create events from Slack. Bare DMs are ignored.
+# 6. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
 # 3. [Pattern]: broadcast_handler filters by message["type"] -- only mirrors "turn" and "event_closed" to Slack threads.
 # 4. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
 # 5. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
@@ -89,8 +90,10 @@ class SlackChannel:
             if event.get("bot_id") or event.get("subtype"):
                 return
 
-            # Phase 1: DM-only. Phase 2 may extend to channel threads (#darwin-infra).
-            if event.get("channel_type") != "im":
+            # DMs + infra channel threads (Phase 2). Other channels are ignored.
+            channel_type = event.get("channel_type", "")
+            channel = event.get("channel", "")
+            if channel_type != "im" and channel != self._infra_channel:
                 return
 
             thread_ts = event.get("thread_ts")
@@ -98,7 +101,6 @@ class SlackChannel:
                 # Not a thread reply -- ignore (events only via /darwin)
                 return
 
-            channel = event["channel"]
             user = event["user"]
             text = event.get("text", "")
 
@@ -188,10 +190,26 @@ class SlackChannel:
 
         if msg_type == "turn":
             event_doc = await self._blackboard.get_event(event_id)
-            if not event_doc or not event_doc.slack_thread_ts:
+            if not event_doc:
                 return
             from ..models import ConversationTurn
             turn = ConversationTurn(**message["turn"])
+
+            # Phase 2: Auto-open #darwin-infra thread for aligner events on first
+            # brain.route (agent dispatched). Skips trivial events that Brain
+            # auto-closes without routing -- keeps the channel clean.
+            if (
+                not event_doc.slack_thread_ts
+                and event_doc.source == "aligner"
+                and self._infra_channel
+                and turn.actor == "brain"
+                and turn.action == "route"
+            ):
+                await self.open_infra_thread(event_doc, event_doc.event.reason)
+                event_doc = await self._blackboard.get_event(event_id)
+
+            if not event_doc or not event_doc.slack_thread_ts:
+                return
             # Don't echo Slack-originated user messages back to Slack
             if turn.actor == "user" and turn.source == "slack":
                 return
