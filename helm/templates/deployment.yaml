@@ -281,8 +281,6 @@ spec:
         - name: qdrant
           image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
           imagePullPolicy: IfNotPresent
-          args:
-            - "--force-snapshot"  # Recover from snapshots when WAL is corrupted (CephFS flock issue)
           ports:
             - name: qdrant-http
               containerPort: {{ .Values.qdrant.port }}
