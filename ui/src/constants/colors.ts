@@ -11,6 +11,13 @@ export const ACTOR_COLORS: Record<string, string> = {
   user: '#ec4899',
 };
 
+export const DOMAIN_COLORS = {
+  clear:       { border: '#22c55e', bg: '#22c55e15', text: '#4ade80' },
+  complicated: { border: '#eab308', bg: '#eab30815', text: '#facc15' },
+  complex:     { border: '#a855f7', bg: '#a855f715', text: '#c084fc' },
+  chaotic:     { border: '#ef4444', bg: '#ef444415', text: '#f87171' },
+} as const;
+
 export const STATUS_COLORS: Record<string, { bg: string; text: string; label: string }> = {
   new: { bg: '#1e40af', text: '#93c5fd', label: 'New' },
   active: { bg: '#065f46', text: '#6ee7b7', label: 'Active' },

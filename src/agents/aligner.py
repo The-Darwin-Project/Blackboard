@@ -661,7 +661,10 @@ class Aligner:
                             logger.info(f"Skipping event creation for {service} ({severity}_{domain}): recovery signal, not actionable")
                         else:
                             # Dedup + create Brain event (anomaly_type used for dedup key only)
-                            await self._trigger_architect(service, f"{severity}_{domain}")
+                            await self._trigger_architect(
+                                service, f"{severity}_{domain}",
+                                domain=domain, severity_level=severity,
+                            )
 
                     elif func_name == "update_active_event":
                         await self._notify_active_events(service, observation)
@@ -720,7 +723,10 @@ class Aligner:
                 return True
         return False
 
-    async def _trigger_architect(self, service: str, anomaly_type: str) -> None:
+    async def _trigger_architect(
+        self, service: str, anomaly_type: str,
+        domain: str = "complicated", severity_level: str = "warning",
+    ) -> None:
         """
         Create an event for the Brain to process -- with two-layer deduplication.
         
@@ -758,7 +764,8 @@ class Aligner:
             )
             return
 
-        # Get current metrics for evidence
+        # Get current metrics for structured evidence
+        from ..models import EventEvidence, EventMetrics
         svc = await self.blackboard.get_service(service)
         evidence_parts = [f"Service: {service}", f"Anomaly: {anomaly_type}"]
         if svc:
@@ -767,13 +774,25 @@ class Aligner:
             evidence_parts.append(f"Error Rate: {svc.metrics.error_rate:.2f}%")
             if svc.replicas_ready is not None:
                 evidence_parts.append(f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
-        evidence = ", ".join(evidence_parts)
+        evidence_obj = EventEvidence(
+            display_text=", ".join(evidence_parts),
+            source_type="aligner",
+            domain=domain,
+            severity=severity_level,
+            metrics=EventMetrics(
+                cpu=svc.metrics.cpu if svc else 0.0,
+                memory=svc.metrics.memory if svc else 0.0,
+                error_rate=svc.metrics.error_rate if svc else 0.0,
+                replicas=(f"{svc.replicas_ready}/{svc.replicas_desired}"
+                          if svc and svc.replicas_ready is not None else "unknown"),
+            ),
+        )
         
         await self.blackboard.create_event(
             source="aligner",
             service=service,
             reason=anomaly_type.replace("_", " "),
-            evidence=evidence,
+            evidence=evidence_obj,
         )
         self._last_event_creation[service] = now
         # Persist to Redis so cooldown survives pod restarts (TTL = cooldown + buffer)

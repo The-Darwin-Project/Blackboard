@@ -8,8 +8,14 @@ import { Loader2, BarChart3 } from 'lucide-react';
 import { useMetrics } from '../hooks';
 import { ServiceMetricChart } from './ServiceMetricChart';
 
-function MetricChart() {
+interface MetricChartProps {
+  collapsed?: boolean;
+}
+
+function MetricChart({ collapsed }: MetricChartProps) {
   const { data, isLoading, isError } = useMetrics();
+
+  if (collapsed) return null;
 
   // Extract unique services from the data, excluding Brain self-monitoring
   const EXCLUDED_SERVICES = ['darwin-brain', 'darwin-blackboard-brain'];

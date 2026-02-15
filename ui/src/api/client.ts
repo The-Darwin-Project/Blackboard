@@ -7,6 +7,7 @@
  * Typed API client for Darwin Brain backend.
  */
 import type {
+  ActiveEvent,
   ArchitectureEvent,
   ChatEventRequest,
   ChatEventResponse,
@@ -125,8 +126,8 @@ export async function getCurrentMetrics(service: string): Promise<Record<string,
 // Queue API (event documents)
 // =============================================================================
 
-export async function getActiveEvents(): Promise<any[]> {
-  return fetchApi<any[]>('/queue/active');
+export async function getActiveEvents(): Promise<ActiveEvent[]> {
+  return fetchApi<ActiveEvent[]>('/queue/active');
 }
 
 export async function getEventDocument(eventId: string): Promise<EventDocument> {
@@ -154,9 +155,9 @@ export async function closeEvent(eventId: string, reason?: string): Promise<any>
   });
 }
 
-export async function getClosedEvents(limit?: number): Promise<any[]> {
+export async function getClosedEvents(limit?: number): Promise<ActiveEvent[]> {
   const params = limit ? `?limit=${limit}` : '';
-  return fetchApi<any[]>(`/queue/closed/list${params}`);
+  return fetchApi<ActiveEvent[]>(`/queue/closed/list${params}`);
 }
 
 export async function getEventReport(

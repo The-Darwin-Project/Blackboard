@@ -42,6 +42,7 @@ from ..models import (
     ArchitectureEvent,
     ChartData,
     EventDocument,
+    EventEvidence,
     EventInput,
     EventStatus,
     EventType,
@@ -1456,7 +1457,7 @@ class BlackboardState:
         source: str,
         service: str,
         reason: str,
-        evidence: str,
+        evidence: "str | EventEvidence",
     ) -> str:
         """Create a new event and add to the queue for Brain triage."""
         from datetime import datetime

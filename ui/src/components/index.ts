@@ -11,3 +11,7 @@ export { default as Layout } from './Layout';
 export { default as MetricChart } from './MetricChart';
 export { ServiceMetricChart } from './ServiceMetricChart';
 export { default as NodeInspector } from './NodeInspector';
+export { default as TabPanel } from './TabPanel';
+export { default as EventTicketCard } from './EventTicketCard';
+export { default as EventTicketList } from './EventTicketList';
+export { default as ActivityStream } from './ActivityStream';

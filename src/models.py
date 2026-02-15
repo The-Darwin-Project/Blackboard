@@ -3,6 +3,7 @@
 # 1. [Constraint]: All models are Pydantic BaseModel. Use Field() for defaults and descriptions.
 # 2. [Pattern]: MessageStatus enum gates the read-receipt protocol (SENT -> DELIVERED -> EVALUATED).
 # 3. [Gotcha]: ConversationTurn.status defaults to SENT for backward compat with existing Redis data.
+# 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # =============================================================================
@@ -297,14 +298,39 @@ class EventStatus(str, Enum):
     CLOSED = "closed"
 
 
+class EventMetrics(BaseModel):
+    """Snapshot metrics attached to event evidence."""
+    cpu: float = 0.0
+    memory: float = 0.0
+    error_rate: float = 0.0
+    replicas: str = "unknown"
+
+
+class EventEvidence(BaseModel):
+    """Structured evidence for event ticket cards and multi-source rendering."""
+    display_text: str = Field(..., description="Human-readable evidence string")
+    source_type: str = Field("unknown", description="aligner | chat | headhunter | ...")
+    domain: str = Field("complicated", description="Cynefin: clear|complicated|complex|chaotic")
+    severity: str = Field("warning", description="info|warning|critical")
+    metrics: Optional[EventMetrics] = None
+
+
 class EventInput(BaseModel):
     """Input data that triggered an event."""
     reason: str = Field(..., description="What triggered this event")
-    evidence: str = Field(..., description="Logs, metrics, event details")
+    evidence: "str | EventEvidence" = Field(..., description="Logs, metrics, event details")
     timeDate: str = Field(
         default_factory=lambda: datetime.now().isoformat(),
         description="ISO 8601 timestamp",
     )
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _coerce_evidence(cls, v: Any) -> Any:
+        """Accept plain strings (legacy) and wrap into EventEvidence for backward compat."""
+        if isinstance(v, str):
+            return EventEvidence(display_text=v, source_type="unknown")
+        return v
 
 
 class MessageStatus(str, Enum):

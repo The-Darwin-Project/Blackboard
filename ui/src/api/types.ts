@@ -126,12 +126,43 @@ export interface GraphResponse {
 export type MessageStatus = 'sent' | 'delivered' | 'evaluated';
 
 // =============================================================================
+// Event Evidence (structured ticket data)
+// =============================================================================
+
+export interface EventMetrics {
+  cpu: number;
+  memory: number;
+  error_rate: number;
+  replicas: string;
+}
+
+export interface EventEvidence {
+  display_text: string;
+  source_type: string;
+  domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
+  severity: 'info' | 'warning' | 'critical';
+  metrics?: EventMetrics;
+}
+
+/** List-level event summary returned by /queue/active and /queue/closed/list. */
+export interface ActiveEvent {
+  id: string;
+  source: string;
+  service: string;
+  status: EventStatus;
+  reason: string;
+  evidence: EventEvidence;
+  turns: number;
+  created: string;
+}
+
+// =============================================================================
 // Event Queue (Brain conversation documents)
 // =============================================================================
 
 export interface EventInput {
   reason: string;
-  evidence: string;
+  evidence: EventEvidence;
   timeDate: string;
 }
 

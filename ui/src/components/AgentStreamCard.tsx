@@ -194,15 +194,32 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
               </span>
             )}
           </div>
-          <button onClick={() => setPoppedOut(true)} title="Pop out" style={{
-            background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
-          }}>⧉</button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button
+              onClick={() => {
+                const text = isChatMode
+                  ? huddleMessages.map(m => `[${m.actor}] ${m.text}`).join('\n')
+                  : messages.join('\n');
+                navigator.clipboard.writeText(text);
+              }}
+              title="Copy stream"
+              style={{
+                background: 'transparent', border: 'none', color: '#64748b',
+                fontSize: 13, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+              }}
+            >
+              &#x2398;
+            </button>
+            <button onClick={() => setPoppedOut(true)} title="Pop out" style={{
+              background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+            }}>⧉</button>
+          </div>
         </div>
 
         {/* Scrollable body */}
         <div ref={scrollRef} style={{
           flex: 1, overflow: 'auto', padding: '6px 10px', fontFamily: 'monospace',
-          fontSize: 12, lineHeight: '1.4', color: '#94a3b8', maxHeight: 200,
+          fontSize: 12, lineHeight: '1.4', color: '#94a3b8',
         }}>
           {isChatMode ? (
             huddleMessages.slice(-50).map((msg, i) => <ChatBubble key={i} msg={msg} />)

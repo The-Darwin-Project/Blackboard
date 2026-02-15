@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..dependencies import get_blackboard, get_brain
-from ..models import ConversationTurn, EventDocument, EventStatus
+from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus
 from ..state.blackboard import BlackboardState
 
 
@@ -37,6 +37,19 @@ class RejectRequest(BaseModel):
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/queue", tags=["queue"])
+
+
+def _serialize_evidence(event: EventDocument) -> dict:
+    """Serialize evidence to dict with fallback for legacy string evidence."""
+    evidence_val = event.event.evidence
+    if isinstance(evidence_val, EventEvidence):
+        return evidence_val.model_dump()
+    return {
+        "display_text": str(evidence_val),
+        "source_type": event.source,
+        "domain": "complicated",
+        "severity": "warning",
+    }
 
 
 @router.get("/active")
@@ -55,6 +68,7 @@ async def list_active_events(
                 "service": event.service,
                 "status": event.status.value,
                 "reason": event.event.reason,
+                "evidence": _serialize_evidence(event),
                 "turns": len(event.conversation),
                 "created": event.event.timeDate,
             })
@@ -236,6 +250,8 @@ async def list_closed_events(
                 "service": event.service,
                 "status": event.status.value,
                 "reason": event.event.reason,
+                "evidence": _serialize_evidence(event),
                 "turns": len(event.conversation),
+                "created": event.event.timeDate,
             })
     return events
