@@ -20,11 +20,8 @@ import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
 import { RefreshCw } from 'lucide-react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
-import mermaid from 'mermaid';
 import { getCodeString } from 'rehype-rewrite';
-
-// Initialize mermaid once at module scope (not per-render)
-mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+import MermaidBlock from './MermaidBlock';
 
 // ============================================================================
 // Sub-components
@@ -40,24 +37,6 @@ function StatusBadge({ status }: { status: string }) {
       {s.label}
     </span>
   );
-}
-
-/** Renders a single Mermaid diagram inside MarkdownPreview */
-function MermaidBlock({ code }: { code: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const idRef = useRef(`mermaid-${Math.random().toString(36).slice(2, 8)}`);
-
-  useEffect(() => {
-    if (ref.current) {
-      mermaid.render(idRef.current, code).then(({ svg }) => {
-        if (ref.current) ref.current.innerHTML = svg;
-      }).catch((err) => {
-        if (ref.current) ref.current.textContent = String(err);
-      });
-    }
-  }, [code]);
-
-  return <div ref={ref} style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }} />;
 }
 
 /** Floating resizable Markdown preview window */

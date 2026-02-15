@@ -46,6 +46,12 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      // Reports API -- Vite proxies fetch/XHR only, not HTML page navigations.
+      // Browser navigation to /reports serves the SPA; API calls proxy to FastAPI.
+      '/reports': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
       '/telemetry': {
         target: 'http://localhost:8000',
         changeOrigin: true,

@@ -187,6 +187,11 @@ async def close_event_by_user(
     except RuntimeError:
         pass  # Brain not initialized
     await blackboard.close_event(event_id, close_summary)
+    # Persist report snapshot (non-fatal)
+    try:
+        await blackboard.persist_report(event_id)
+    except Exception as e:
+        logger.warning(f"Report persistence failed for {event_id} (non-fatal): {e}")
     # Write to ops journal so Brain has temporal context for this closure
     await blackboard.append_journal(
         event.service,

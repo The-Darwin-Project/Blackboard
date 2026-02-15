@@ -15,3 +15,8 @@ export { default as TabPanel } from './TabPanel';
 export { default as EventTicketCard } from './EventTicketCard';
 export { default as EventTicketList } from './EventTicketList';
 export { default as ActivityStream } from './ActivityStream';
+export { default as MermaidBlock } from './MermaidBlock';
+export { default as ReportGrid } from './ReportGrid';
+export { default as ReportContent } from './ReportContent';
+export { default as ReportToolbar } from './ReportToolbar';
+export { default as ReportsPage } from './ReportsPage';

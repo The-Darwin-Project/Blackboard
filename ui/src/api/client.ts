@@ -14,6 +14,8 @@ import type {
   ChartData,
   EventDocument,
   GraphResponse,
+  ReportFull,
+  ReportMeta,
   Service,
   TopologyResponse,
 } from './types';
@@ -200,4 +202,24 @@ export async function createChatEvent(
     method: 'POST',
     body: JSON.stringify(request),
   });
+}
+
+// =============================================================================
+// Reports API (persisted event snapshots)
+// =============================================================================
+
+export async function getReports(
+  limit = 50,
+  offset = 0,
+  service?: string,
+): Promise<ReportMeta[]> {
+  const params = new URLSearchParams();
+  params.append('limit', limit.toString());
+  params.append('offset', offset.toString());
+  if (service) params.append('service', service);
+  return fetchApi<ReportMeta[]>(`/reports/list?${params.toString()}`);
+}
+
+export async function getReport(eventId: string): Promise<ReportFull> {
+  return fetchApi<ReportFull>(`/reports/${encodeURIComponent(eventId)}`);
 }

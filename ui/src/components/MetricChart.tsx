@@ -71,12 +71,10 @@ function MetricChart({ collapsed }: MetricChartProps) {
         </div>
       </div>
       
-      {/* Service charts grid -- scales 1→4 columns based on viewport + service count */}
+      {/* Service charts grid -- scales 1→3 columns based on viewport + service count */}
       <div className={`grid gap-3 grid-cols-1${
         services.length >= 2 ? ' sm:grid-cols-2' : ''
-      }${services.length >= 3 ? ' lg:grid-cols-3' : ''}${
-        services.length >= 4 ? ' xl:grid-cols-4' : ''
-      }`}>
+      }${services.length >= 3 ? ' lg:grid-cols-3' : ''}`}>
         {services.map(service => (
           <ServiceMetricChart
             key={service}

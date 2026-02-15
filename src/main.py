@@ -30,6 +30,7 @@ from .routes import (
     events_router,
     metrics_router,
     queue_router,
+    reports_router,
     telemetry_router,
     topology_router,
 )
@@ -367,6 +368,7 @@ app.include_router(queue_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)
+app.include_router(reports_router)
 
 
 # =============================================================================

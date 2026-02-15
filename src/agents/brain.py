@@ -516,15 +516,21 @@ class Brain:
         [text_str, {"bytes": bytes, "mime_type": str}]
         Each LLM adapter converts to its SDK's native format.
         """
+        from ..models import EventEvidence
+        evidence = event.event.evidence
+        evidence_text = evidence.display_text if isinstance(evidence, EventEvidence) else str(evidence)
         lines = [
             f"Event ID: {event.id}",
             f"Source: {event.source}",
             f"Service: {event.service}",
             f"Status: {event.status.value}",
             f"Reason: {event.event.reason}",
-            f"Evidence: {event.event.evidence}",
+            f"Evidence: {evidence_text}",
             f"Time: {event.event.timeDate}",
         ]
+        if isinstance(evidence, EventEvidence):
+            lines.append(f"Domain: {evidence.domain}")
+            lines.append(f"Severity: {evidence.severity}")
 
         # Event age (how long since first turn)
         event_created = event.conversation[0].timestamp if event.conversation else time.time()
@@ -785,29 +791,66 @@ class Brain:
         elif function_name == "re_trigger_aligner":
             service = args.get("service", "")
             condition = args.get("check_condition", "")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="verify",
-                thoughts=f"Re-triggering Aligner to check: {condition}",
-                waitingFor="aligner",
-                evidence=f"target_service:{service}",  # Store target service for Aligner
-            )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            # Brain-push: call check_state directly instead of polling
+            aligner = self.agents.get("_aligner")
+            if aligner and service:
+                state = await aligner.check_state(service)
+                verify_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="verify",
+                    thoughts=f"Re-triggering Aligner to check: {condition}",
+                    evidence=f"target_service:{service}",
+                )
+                await self.blackboard.append_turn(event_id, verify_turn)
+                await self._broadcast_turn(event_id, verify_turn)
+                # Immediately append the Aligner's response
+                confirm_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="aligner",
+                    action="confirm",
+                    evidence=(
+                        f"Service: {state['service']}, "
+                        f"CPU: {state.get('cpu', 0):.1f}%, "
+                        f"Memory: {state.get('memory', 0):.1f}%, "
+                        f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
+                    ),
+                )
+                await self.blackboard.append_turn(event_id, confirm_turn)
+                await self._broadcast_turn(event_id, confirm_turn)
             return False
 
         elif function_name == "wait_for_verification":
             condition = args.get("condition", "")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="verify",
-                thoughts=f"Waiting for verification: {condition}",
-                waitingFor="aligner",
-            )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            # Brain-push: call check_state directly instead of polling
+            event = await self.blackboard.get_event(event_id)
+            target_service = event.service if event else ""
+            aligner = self.agents.get("_aligner")
+            if aligner and target_service:
+                state = await aligner.check_state(target_service)
+                verify_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="verify",
+                    thoughts=f"Waiting for verification: {condition}",
+                    evidence=f"target_service:{target_service}",
+                )
+                await self.blackboard.append_turn(event_id, verify_turn)
+                await self._broadcast_turn(event_id, verify_turn)
+                # Immediately append the Aligner's response
+                confirm_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="aligner",
+                    action="confirm",
+                    evidence=(
+                        f"Service: {state['service']}, "
+                        f"CPU: {state.get('cpu', 0):.1f}%, "
+                        f"Memory: {state.get('memory', 0):.1f}%, "
+                        f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
+                    ),
+                )
+                await self.blackboard.append_turn(event_id, confirm_turn)
+                await self._broadcast_turn(event_id, confirm_turn)
             return False
 
         elif function_name == "defer_event":
@@ -1144,6 +1187,11 @@ class Brain:
         # Fetch event BEFORE close to get service name for journal
         event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary)
+        # Persist report snapshot (non-fatal)
+        try:
+            await self.blackboard.persist_report(event_id)
+        except Exception as e:
+            logger.warning(f"Report persistence failed for {event_id} (non-fatal): {e}")
         # Append to service ops journal (temporal memory)
         if event:
             turns = len(event.conversation)
@@ -1297,6 +1345,8 @@ class Brain:
     @staticmethod
     def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:
         """Convert event document to readable Markdown, enriched with service metadata and topology."""
+        from ..models import EventEvidence
+        evidence = event.event.evidence
         lines = [
             f"# Event: {event.id}",
             f"",
@@ -1304,9 +1354,14 @@ class Brain:
             f"- **Service:** {event.service}",
             f"- **Status:** {event.status.value}",
             f"- **Reason:** {event.event.reason}",
-            f"- **Evidence:** {event.event.evidence}",
-            f"- **Time:** {event.event.timeDate}",
         ]
+        if isinstance(evidence, EventEvidence):
+            lines.append(f"- **Evidence:** {evidence.display_text}")
+            lines.append(f"- **Domain:** {evidence.domain}")
+            lines.append(f"- **Severity:** {evidence.severity}")
+        else:
+            lines.append(f"- **Evidence:** {evidence}")
+        lines.append(f"- **Time:** {event.event.timeDate}")
 
         # Include architecture diagram so agents see the full topology
         if mermaid:
@@ -1417,6 +1472,11 @@ class Brain:
                     f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
                 )
                 await self.blackboard.close_event(eid, stale_summary)
+                # Persist report snapshot (non-fatal)
+                try:
+                    await self.blackboard.persist_report(eid)
+                except Exception as e:
+                    logger.warning(f"Report persistence failed for {eid} (non-fatal): {e}")
                 # Write to ops journal so Brain has temporal context for stale closures
                 await self.blackboard.append_journal(
                     event.service,
@@ -1447,11 +1507,6 @@ class Brain:
 
         while self._running:
             try:
-                # 0. Run Aligner verification checks (for events waiting on aligner confirmation)
-                aligner = self.agents.get("_aligner")
-                if aligner and hasattr(aligner, "check_active_verifications"):
-                    await aligner.check_active_verifications()
-
                 # 1. Check for new events on the queue
                 event_id = await self.blackboard.dequeue_event()
                 if event_id:

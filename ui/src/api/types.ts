@@ -255,6 +255,29 @@ export interface HealthResponse {
 // Agent Mapping Helper
 // =============================================================================
 
+// =============================================================================
+// Reports (persisted event snapshots)
+// =============================================================================
+
+export interface ReportMeta {
+  event_id: string;
+  service: string;
+  source: string;
+  domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
+  severity: 'info' | 'warning' | 'critical';
+  turns: number;
+  reason: string;
+  closed_at: string;
+}
+
+export interface ReportFull extends ReportMeta {
+  markdown: string;
+}
+
+// =============================================================================
+// Agent Mapping Helper
+// =============================================================================
+
 export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'brain';
 
 export function getAgentFromEventType(eventType: EventType): Agent {

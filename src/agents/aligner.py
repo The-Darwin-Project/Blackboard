@@ -1,8 +1,8 @@
 # BlackBoard/src/agents/aligner.py
 # @ai-rules:
-# 1. [Pattern]: check_active_verifications extracts target_service from evidence field (target_service:xxx).
+# 1. [Pattern]: Analysis interval is 120s. Hard failures (CrashLoop, OOM, ImagePull) bypass buffer entirely.
 # 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
-# 3. [Gotcha]: _notify_active_events uses conversation-state gate: skips if Brain's last action is route/verify/defer/wait with no response yet.
+# 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
 # 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
 # 6. [Pattern]: Aligner always uses GeminiAdapter (Flash) -- never Claude. Provider is hardcoded to "gemini".
@@ -142,13 +142,14 @@ class FilterRule:
 
 class Aligner:
     """
-    The Aligner agent - processes telemetry and maintains truth.
+    The Aligner agent - observes K8s metrics and maintains truth.
     
     Responsibilities:
-    - Normalize and validate incoming telemetry
+    - Buffer K8s Observer metrics (120s sliding window)
     - Apply filter rules for noise reduction
-    - Update Blackboard state layers
+    - LLM-based anomaly analysis via Gemini Flash (every 120s)
     - Detect anomalies and trigger Architect (closed-loop)
+    - Provide check_state() for Brain inline verification
     - Configurable via natural language (Gemini Flash via LLM adapter)
     """
     
@@ -164,13 +165,10 @@ class Aligner:
         # Closed-loop state tracking
         self._known_services: set[str] = set()
         self._service_versions: dict[str, str] = {}  # service -> last known version
-        # Version observation buffer for LLM-based drift detection
-        self._version_buffer: dict[str, list[tuple[float, str]]] = {}  # service -> [(timestamp, version)]
-        self._version_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         # Unified metrics signal buffer for LLM-based anomaly analysis
-        # Buffer is RETAINED across analysis windows (60s trim handles old entries).
-        # This gives Flash continuity: each analysis sees up to 60s of data, not
-        # just the last 30s, so sustained patterns aren't misclassified as transient.
+        # Buffer is RETAINED across analysis windows (120s trim handles old entries).
+        # This gives Flash continuity: each analysis sees up to 120s of data,
+        # so sustained patterns aren't misclassified as transient.
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
@@ -320,176 +318,15 @@ class Aligner:
         
         return False
     
-    async def process_telemetry(self, payload) -> bool:
-        """
-        Process incoming telemetry through the Aligner.
-        
-        Implements closed-loop:
-        1. Detect new services → emit SERVICE_DISCOVERED
-        2. Check thresholds → emit anomaly events
-        3. Trigger Architect analysis on anomalies
-        
-        Returns True if telemetry was processed, False if filtered.
-        """
-        from ..models import TelemetryPayload
-        
-        # Type check
-        if not isinstance(payload, TelemetryPayload):
-            logger.warning(f"Invalid telemetry payload type: {type(payload)}")
-            return False
-        
-        # Check filter rules
-        is_error = payload.metrics.error_rate > 0
-        if self.should_filter(payload.service, is_error):
-            logger.debug(f"Telemetry from {payload.service} filtered by active rule")
-            return False
-        
-        # === CLOSED-LOOP: Service Discovery ===
-        if payload.service not in self._known_services:
-            self._known_services.add(payload.service)
-            self._service_versions[payload.service] = payload.version
-            await self.blackboard.record_event(
-                EventType.SERVICE_DISCOVERED,
-                {"service": payload.service, "version": payload.version},
-                narrative=f"I discovered a new service '{payload.service}' (v{payload.version}) reporting telemetry.",
-            )
-            logger.info(f"New service discovered: {payload.service} v{payload.version}")
-        
-        # === CLOSED-LOOP: Version Drift Detection (LLM-assisted) ===
-        # Buffer version observations over 30s window, then ask Flash to interpret
-        # the pattern (rolling update? deployment? rollback?) before firing events.
-        last_version = self._service_versions.get(payload.service)
-        now = time.time()
-        if last_version and last_version != payload.version:
-            # Version changed -- buffer the observation
-            if payload.service not in self._version_buffer:
-                self._version_buffer[payload.service] = []
-            self._version_buffer[payload.service].append((now, payload.version))
-            # Also record the previous version if buffer is fresh
-            if len(self._version_buffer[payload.service]) == 1:
-                self._version_buffer[payload.service].insert(0, (now - 1, last_version))
-
-        # Check buffer on EVERY telemetry cycle (not just on version change).
-        # This ensures fast deployments that stabilize quickly still get analyzed.
-        if payload.service in self._version_buffer and not self._version_analysis_pending.get(payload.service):
-            buffer = self._version_buffer[payload.service]
-            buffer_age = now - buffer[0][0]
-            if buffer_age >= 30:
-                self._version_analysis_pending[payload.service] = True
-                await self._analyze_version_drift(payload.service)
-
-        self._service_versions[payload.service] = payload.version
-        
-        # Delegate to Blackboard for storage
-        await self.blackboard.process_telemetry(payload)
-        
-        # === CLOSED-LOOP: Anomaly Detection (LLM-assisted via Flash) ===
-        await self._check_anomalies(payload)
-        
-        return True
-    
-    async def _analyze_version_drift(self, service: str) -> None:
-        """
-        Use Gemini Flash (via google-genai) to interpret version observation patterns.
-        
-        Instead of hardcoded cooldowns, ask the LLM to reason about what's happening:
-        rolling update, completed deployment, rollback, or noise.
-        """
-        buffer = self._version_buffer.get(service, [])
-        if not buffer:
-            self._version_analysis_pending[service] = False
-            return
-
-        # Format observations for Flash
-        observations = "\n".join(
-            f"  {time.strftime('%H:%M:%S', time.localtime(ts))}: {ver}"
-            for ts, ver in buffer
-        )
-        versions_seen = list(set(ver for _, ver in buffer))
-
-        try:
-            adapter = await self._get_adapter()
-            if adapter:
-                prompt = (
-                    f"Service '{service}' reported these version observations over the last 30+ seconds:\n"
-                    f"{observations}\n\n"
-                    f"Unique versions seen: {versions_seen}\n\n"
-                    f"What is happening? Respond with EXACTLY one of these words on the first line:\n"
-                    f"- ROLLING_UPDATE (if versions are alternating -- pods with different versions during rollout)\n"
-                    f"- DEPLOYMENT (if version changed and stabilized to a new version)\n"
-                    f"- ROLLBACK (if version went to a new one then back to the old)\n"
-                    f"- NOISE (if unclear or irrelevant)\n\n"
-                    f"Then on the second line, a brief explanation."
-                )
-
-                response = await adapter.generate(
-                    system_prompt="", contents=prompt, max_output_tokens=1024,
-                )
-                result_text = response.text.strip() if response.text else "NOISE"
-                first_line = result_text.split("\n")[0].strip().upper()
-
-                logger.info(f"Flash version analysis for {service}: {first_line}")
-
-                if first_line == "DEPLOYMENT":
-                    # Stable deployment -- fire event with the latest version
-                    latest_version = buffer[-1][1]
-                    old_version = buffer[0][1]
-                    await self.blackboard.record_event(
-                        EventType.DEPLOYMENT_DETECTED,
-                        {"service": service, "old_version": old_version, "new_version": latest_version},
-                        narrative=f"Deployment confirmed: {service} updated from v{old_version} to v{latest_version}.",
-                    )
-                    logger.info(f"DEPLOYMENT CONFIRMED (Flash): {service} v{old_version} → v{latest_version}")
-
-                elif first_line == "ROLLING_UPDATE":
-                    # Rolling update in progress -- log but don't fire event yet
-                    logger.info(f"Rolling update detected (Flash): {service} -- versions {versions_seen}, waiting for convergence")
-                    # Don't fire event -- will re-analyze on next window
-
-                elif first_line == "ROLLBACK":
-                    old_version = buffer[0][1]
-                    latest_version = buffer[-1][1]
-                    await self.blackboard.record_event(
-                        EventType.DEPLOYMENT_DETECTED,
-                        {"service": service, "old_version": old_version, "new_version": latest_version},
-                        narrative=f"Rollback detected: {service} reverted from v{old_version} to v{latest_version}.",
-                    )
-                    logger.info(f"ROLLBACK DETECTED (Flash): {service} v{old_version} → v{latest_version}")
-
-                else:
-                    logger.debug(f"Version drift noise for {service}: {first_line}")
-
-            else:
-                # Flash not available -- fallback to simple: if only one version in last observations, it's stable
-                if len(versions_seen) == 1:
-                    old_version = self._service_versions.get(service, "unknown")
-                    await self.blackboard.record_event(
-                        EventType.DEPLOYMENT_DETECTED,
-                        {"service": service, "old_version": old_version, "new_version": versions_seen[0]},
-                        narrative=f"Detected deployment: {service} updated to v{versions_seen[0]}.",
-                    )
-                else:
-                    logger.info(f"Version drift for {service}: mixed versions {versions_seen}, likely rolling update")
-
-        except Exception as e:
-            logger.error(f"Version drift analysis failed for {service}: {e}")
-
-        finally:
-            # Clear buffer and reset pending flag
-            self._version_buffer.pop(service, None)
-            self._version_analysis_pending[service] = False
-    
     def _buffer_metric(self, service: str, now: float, cpu: float, memory: float,
                        error_rate: float, replicas: str) -> None:
         """
         Add a metric observation to the buffer, merging with existing entries
         in the same 5s time bucket (max wins).
         
-        Both self-reported telemetry (app-level CPU) and K8s observer (container-
-        level CPU) feed this buffer. An app may self-report 0.2% CPU while the
-        container is at 100% limit. By merging into time buckets with max(),
-        the higher (more accurate) reading wins, preventing Flash from seeing
-        a mix of low app values and high K8s values as "transient spikes."
+        K8s observer (container-level CPU/memory) feeds this buffer.
+        Merging into time buckets with max() ensures the highest reading
+        wins when multiple observations arrive in the same 5s window.
         """
         if service not in self._metrics_buffer:
             self._metrics_buffer[service] = []
@@ -523,9 +360,9 @@ class Aligner:
         Buffer metrics observations and use Flash to analyze patterns.
         
         Instead of firing on every threshold breach, collects data continuously
-        then asks Flash every 30s: is this a sustained issue, a transient spike,
+        then asks Flash every 120s: is this a sustained issue, a transient spike,
         or noise? Buffer is retained across analysis windows so Flash sees up to
-        60s of history for pattern continuity.
+        120s of history for pattern continuity.
         """
         service = payload.service
         now = time.time()
@@ -538,16 +375,16 @@ class Aligner:
         self._buffer_metric(service, now, payload.metrics.cpu, payload.metrics.memory,
                             payload.metrics.error_rate, replicas)
 
-        # Trim buffer to last 60s max (sliding window, not reset)
-        cutoff = now - 60
+        # Trim buffer to last 120s max (sliding window, not reset)
+        cutoff = now - 120
         self._metrics_buffer[service] = [
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger analysis every 30s (time since last analysis, not buffer age).
+        # Trigger analysis every 120s (time since last analysis, not buffer age).
         # Buffer is retained between windows so Flash sees continuity.
         time_since_analysis = now - self._last_analysis_time.get(service, 0)
-        if time_since_analysis >= 30 and not self._metrics_analysis_pending.get(service):
+        if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
     
@@ -555,7 +392,7 @@ class Aligner:
         """
         Use Flash to analyze buffered metrics and determine what's happening.
         
-        Replaces hardcoded threshold checks with LLM reasoning over a 30s window.
+        Replaces hardcoded threshold checks with LLM reasoning over a 120s window.
         Flash interprets patterns: sustained anomaly, transient spike, recovery, 
         over-provisioning, or normal operation.
         """
@@ -813,9 +650,8 @@ class Aligner:
         Feed K8s Observer metrics into the unified buffer for LLM analysis.
         
         Called by the KubernetesObserver with metrics from metrics-server.
-        Instead of instant hardcoded threshold checks, feeds the same 30s
-        metrics buffer used by _check_anomalies(). Both telemetry push AND
-        K8s Observer now converge on _analyze_metrics_signals() for a single
+        Instead of instant hardcoded threshold checks, feeds the 120s
+        metrics buffer and triggers _analyze_metrics_signals() for
         LLM-based assessment.
         
         Args:
@@ -831,18 +667,18 @@ class Aligner:
         svc = await self.blackboard.get_service(service)
         replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
 
-        # Buffer the observation (merged with self-reported data in same time bucket)
+        # Buffer the observation
         self._buffer_metric(service, now, cpu, memory, error_rate, replicas)
 
-        # Trim buffer to last 60s max
-        cutoff = now - 60
+        # Trim buffer to last 120s max
+        cutoff = now - 120
         self._metrics_buffer[service] = [
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger analysis every 30s (time since last analysis, not buffer age)
+        # Trigger analysis every 120s (time since last analysis, not buffer age)
         time_since_analysis = now - self._last_analysis_time.get(service, 0)
-        if time_since_analysis >= 30 and not self._metrics_analysis_pending.get(service):
+        if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
     
@@ -877,61 +713,6 @@ class Aligner:
         
         await self._trigger_architect(service, anomaly_type)
     
-    async def check_active_verifications(self) -> None:
-        """Scan active events for unanswered verification requests from Brain.
-
-        Scans all turns (not just last) so a user message arriving after
-        brain.verify doesn't silently drop the verification request.
-        """
-        active_ids = await self.blackboard.get_active_events()
-        for event_id in active_ids:
-            event = await self.blackboard.get_event(event_id)
-            if not event or not event.conversation:
-                continue
-            # Find the latest brain.verify turn waiting for aligner
-            verify_turn = None
-            for t in reversed(event.conversation):
-                if t.actor == "brain" and t.waitingFor == "aligner":
-                    verify_turn = t
-                    break
-                # Stop scanning if we hit an aligner confirm (already answered)
-                if t.actor == "aligner" and t.action == "confirm":
-                    break
-            if not verify_turn:
-                continue
-            # Dedup: skip if a previous confirm is still unprocessed
-            pending_confirms = [
-                t for t in event.conversation
-                if t.actor == "aligner" and t.action == "confirm"
-                and t.status.value in ("sent", "delivered")
-            ]
-            if pending_confirms:
-                logger.debug(f"Skipping confirm for {event_id}: previous confirm not yet evaluated")
-                continue
-            # Extract target service from verify turn (falls back to event.service)
-            target_service = event.service
-            if verify_turn.evidence and verify_turn.evidence.startswith("target_service:"):
-                target_service = verify_turn.evidence.split(":", 1)[1]
-            # Check if the condition is met
-            svc = await self.blackboard.get_service(target_service)
-            if svc:
-                from ..models import ConversationTurn
-                confirm_turn = ConversationTurn(
-                    turn=len(event.conversation) + 1,
-                    actor="aligner",
-                    action="confirm",
-                    evidence=(
-                        f"Service: {target_service}, "
-                        f"CPU: {svc.metrics.cpu:.1f}%, "
-                        f"Memory: {svc.metrics.memory:.1f}%, "
-                        f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}"
-                        if svc.replicas_ready is not None else
-                        f"Service: {target_service}, CPU: {svc.metrics.cpu:.1f}%"
-                    ),
-                )
-                await self.blackboard.append_turn(event_id, confirm_turn)
-                logger.info(f"Aligner confirmed verification for event {event_id}")
-    
     async def _notify_active_events(self, service: str, message: str) -> None:
         """Append an aligner.confirm turn to any active events for this service.
 
@@ -939,11 +720,9 @@ class Aligner:
         to see this in the event conversation -- otherwise it continues chasing
         a problem that no longer exists.
 
-        Noise suppression (conversation-state-aware):
+        Noise suppression:
         1. Skip DEFERRED events (Brain explicitly chose to wait)
-        2. Skip if Brain is busy -- last brain turn is route/verify/defer/wait
-           with no subsequent agent/aligner response (Brain is waiting for something)
-        3. Skip if a previous confirm is still unprocessed (SENT/DELIVERED)
+        2. Skip if a previous confirm is still unprocessed (SENT/DELIVERED)
         """
         from ..models import ConversationTurn
         active_ids = await self.blackboard.get_active_events()
@@ -954,29 +733,6 @@ class Aligner:
                 if event.status.value == "deferred":
                     logger.debug(f"Skipping notify for deferred event {eid}")
                     continue
-                # Conversation-state gate: find the last brain turn and check
-                # if the Brain is waiting for something. If so, periodic
-                # observations are noise -- the Brain already knows and acted.
-                last_brain_turn = next(
-                    (t for t in reversed(event.conversation) if t.actor == "brain"),
-                    None,
-                )
-                if last_brain_turn and last_brain_turn.action in ("route", "verify", "defer", "wait"):
-                    # Check if an agent/aligner has responded AFTER this brain turn
-                    brain_idx = next(
-                        i for i, t in enumerate(event.conversation)
-                        if t is last_brain_turn
-                    )
-                    response_after = any(
-                        t.actor in ("architect", "sysadmin", "developer", "aligner")
-                        for t in event.conversation[brain_idx + 1:]
-                    )
-                    if not response_after:
-                        logger.debug(
-                            f"Skipping notify for {eid}: Brain is waiting "
-                            f"({last_brain_turn.action}), no response yet"
-                        )
-                        continue
                 # Dedup: skip if a previous confirm is still unprocessed
                 pending = [
                     t for t in event.conversation

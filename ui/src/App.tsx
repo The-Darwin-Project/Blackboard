@@ -8,6 +8,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
+import ReportsPage from './components/ReportsPage';
 
 // Configure QueryClient with default options
 const queryClient = new QueryClient({
@@ -27,6 +28,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Layout />}>
               <Route index element={<Dashboard />} />
+              <Route path="reports" element={<ReportsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

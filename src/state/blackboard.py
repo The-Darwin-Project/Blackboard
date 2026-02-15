@@ -1307,14 +1307,17 @@ class BlackboardState:
         return ChartData(series=series, events=events)
     
     # =========================================================================
-    # Telemetry Processing (called by Aligner)
+    # Telemetry Processing (DEPRECATED -- no active callers)
     # =========================================================================
     
     async def process_telemetry(self, payload: TelemetryPayload) -> None:
         """
-        Process incoming telemetry and update all layers.
+        DEPRECATED: Process incoming telemetry and update all layers.
         
-        Called by the Aligner agent.
+        Previously called by Aligner.process_telemetry() which was removed.
+        DarwinClient telemetry push is deprecated in favor of K8s Observer
+        annotations (darwin.io/*). Kept for reference -- contains IP registration,
+        topology edge creation, and metadata update logic that may be reused.
         """
         # Register this service's IPs for IP-to-name correlation
         # (before processing dependencies so other services can resolve us)
@@ -1759,3 +1762,122 @@ class BlackboardState:
         await self.redis.srem(self.EVENT_ACTIVE, event_id)
         await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
         logger.info(f"Closed event: {event_id}")
+
+    # =========================================================================
+    # Report Persistence (90-day TTL snapshots)
+    # =========================================================================
+
+    REPORT_PREFIX = "darwin:report:"
+    REPORT_INDEX = "darwin:reports:index"
+    REPORT_TTL = 7_776_000  # 90 days in seconds
+
+    async def persist_report(self, event_id: str) -> None:
+        """Generate and persist a markdown report for a closed event.
+
+        Fault-tolerant: logs a warning and returns on any failure.
+        Must NEVER crash the caller's close flow.
+        """
+        try:
+            event = await self.get_event(event_id)
+            if not event:
+                logger.warning(f"persist_report: event {event_id} not found in Redis, skipping")
+                return
+
+            # Fetch enrichment data (best-effort)
+            service_meta = None
+            mermaid = ""
+            try:
+                service_meta = await self.get_service(event.service)
+            except Exception:
+                pass
+            try:
+                mermaid = await self.generate_mermaid()
+            except Exception:
+                pass
+
+            # Lazy import to avoid circular dependency (Brain imports blackboard)
+            from ..agents.brain import Brain
+            markdown = Brain._event_to_markdown(event, service_meta, mermaid)
+
+            # Add journal context
+            journal = await self.get_journal(event.service)
+            if journal:
+                markdown += "\n\n## Service Ops Journal\n\n"
+                for entry in journal:
+                    markdown += f"- {entry}\n"
+
+            # Extract evidence metadata
+            evidence = event.event.evidence
+            domain = "complicated"
+            severity = "warning"
+            if isinstance(evidence, EventEvidence):
+                domain = evidence.domain
+                severity = evidence.severity
+
+            report_data = {
+                "event_id": event_id,
+                "markdown": markdown,
+                "service": event.service,
+                "source": event.source,
+                "domain": domain,
+                "severity": severity,
+                "turns": len(event.conversation),
+                "reason": event.event.reason,
+                "closed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+
+            key = f"{self.REPORT_PREFIX}{event_id}"
+            await self.redis.set(key, json.dumps(report_data), ex=self.REPORT_TTL)
+            await self.redis.zadd(self.REPORT_INDEX, {event_id: time.time()})
+            logger.info(f"Persisted report for event {event_id} (TTL={self.REPORT_TTL}s)")
+
+        except Exception as e:
+            logger.warning(f"persist_report failed for {event_id} (non-fatal): {e}")
+
+    async def list_reports(
+        self, limit: int = 50, offset: int = 0, service: Optional[str] = None
+    ) -> list[dict]:
+        """List persisted report metadata, sorted newest first.
+
+        Uses MGET for batch fetching instead of N individual GETs.
+        """
+        # Fetch all IDs from sorted set (newest first)
+        all_ids: list[str] = await self.redis.zrevrangebyscore(
+            self.REPORT_INDEX,
+            max="+inf",
+            min="-inf",
+        )
+        if not all_ids:
+            return []
+
+        # Batch fetch all report keys
+        keys = [f"{self.REPORT_PREFIX}{eid}" for eid in all_ids]
+        raw_values = await self.redis.mget(keys)
+
+        results: list[dict] = []
+        expired_ids: list[str] = []
+        for eid, raw in zip(all_ids, raw_values):
+            if not raw:
+                expired_ids.append(eid)
+                continue
+            data = json.loads(raw)
+            # Optional service filter
+            if service and data.get("service") != service:
+                continue
+            # Strip markdown for list response (metadata only)
+            meta = {k: v for k, v in data.items() if k != "markdown"}
+            results.append(meta)
+
+        # Clean up expired entries from the index
+        if expired_ids:
+            await self.redis.zrem(self.REPORT_INDEX, *expired_ids)
+
+        # Apply pagination
+        return results[offset : offset + limit]
+
+    async def get_report(self, event_id: str) -> Optional[dict]:
+        """Get a persisted report by event ID (full content including markdown)."""
+        raw = await self.redis.get(f"{self.REPORT_PREFIX}{event_id}")
+        if not raw:
+            return None
+        return json.loads(raw)

@@ -63,3 +63,11 @@ body {
 @keyframes pulse {
   50% { opacity: 0.5; }
 }
+
+/* Print styles -- hide chrome, show only report content */
+@media print {
+  header, footer, [data-no-print] { display: none !important; }
+  main { overflow: visible !important; }
+  body { background: white !important; color: black !important; }
+  [data-report-content] { padding: 0 !important; }
+}
