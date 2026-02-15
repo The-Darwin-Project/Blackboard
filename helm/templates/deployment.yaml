@@ -237,6 +237,8 @@ spec:
             - redis-server
           args:
             {{- if .Values.redis.persistence.enabled }}
+            - --dir
+            - /var/lib/redis/data  # PVC mount path -- ensures RDB snapshots persist across restarts
             - --save
             - "60 1"           # RDB snapshot every 60s if at least 1 key changed
             {{- else }}
