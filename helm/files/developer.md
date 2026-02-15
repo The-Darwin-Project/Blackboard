@@ -38,6 +38,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
 - **darwin-gitops**: Git workflow, commit conventions, branch naming (mode: implement/execute)
 - **darwin-investigate**: Investigation workflow for MR/code inspection (mode: investigate)
+- **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 
 ## Code Rules

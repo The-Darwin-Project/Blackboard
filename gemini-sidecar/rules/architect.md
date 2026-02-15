@@ -41,6 +41,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-hexagonal**: Hexagonal Architecture (Ports & Adapters) patterns
 - **darwin-microservice-patterns**: Microservice technical patterns
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
+- **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 
 ## Hard Rules
 

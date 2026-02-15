@@ -39,6 +39,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-investigate**: Time-boxed K8s investigation workflow (mode: investigate)
 - **darwin-rollback**: GitOps rollback workflow -- git revert, verify sync (mode: rollback)
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
+- **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 
 ## Safety Rules
 
