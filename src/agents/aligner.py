@@ -655,8 +655,13 @@ class Aligner:
                         # Notify active events if one exists (dual path for ongoing investigations)
                         if has_active:
                             await self._notify_active_events(service, observation)
-                        # Dedup + create Brain event (anomaly_type used for dedup key only)
-                        await self._trigger_architect(service, f"{severity}_{domain}")
+                        # "clear" domain = recovery signal, NOT a new anomaly.
+                        # Only notify active events (above), never create new ones.
+                        if domain == "clear":
+                            logger.info(f"Skipping event creation for {service} ({severity}_{domain}): recovery signal, not actionable")
+                        else:
+                            # Dedup + create Brain event (anomaly_type used for dedup key only)
+                            await self._trigger_architect(service, f"{severity}_{domain}")
 
                     elif func_name == "update_active_event":
                         await self._notify_active_events(service, observation)
