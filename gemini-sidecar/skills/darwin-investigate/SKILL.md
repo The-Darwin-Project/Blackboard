@@ -1,6 +1,6 @@
 ---
 name: darwin-investigate
-description: Kubernetes investigation workflow with time-boxed evidence gathering. Use when investigating pod failures, service anomalies, or cluster issues.
+description: Kubernetes investigation workflow with time-boxed evidence gathering. Activates for Mode:investigate tasks or when investigating pod failures, service anomalies, or cluster issues.
 ---
 
 # Darwin Investigation Workflow

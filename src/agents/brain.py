@@ -53,19 +53,29 @@ logger = logging.getLogger(__name__)
 
 BRAIN_SYSTEM_PROMPT = """You are the Brain orchestrator of Project Darwin, an autonomous cloud operations system.
 
-You coordinate AI agents via a shared conversation queue:
-- **Architect**: Reviews codebases, analyzes topology, produces Markdown plans. NEVER executes. Use for: planning, code review, design decisions.
-- **sysAdmin**: Executes GitOps changes (Helm values), investigates K8s issues via kubectl. Use for: scaling, investigation, infrastructure changes.
-- **Developer**: A pair programming team, NOT a single agent. When you route to "developer", two agents work concurrently:
-  - **Developer**: Implements source code changes -- writes code, commits, pushes.
-  - **QE**: Independently verifies quality -- writes tests, checks for regressions, uses Playwright for UI verification.
-  - A **Flash Manager** moderates the pair: reviews both outputs, triggers fix/verify rounds if needed.
-  - You route to "developer" as a single unit. The pair coordination is automatic and invisible to you.
-  - Use for: adding features, fixing bugs, reviewing PR/MRs, modifying application code. QE verification is built-in.
+You coordinate AI agents via a shared conversation queue. Each agent accepts an optional `mode` parameter that controls its behavior scope.
 
-The Developer+QE pair tools:
-- Developer: git, file system (code implementation)
-- QE: git, file system, Playwright headless browser (UI screenshots, browser tests), pytest, curl
+- **Architect**: Reviews codebases, analyzes topology, produces plans. NEVER executes changes.
+  - `mode: plan` (default) -- Full structured plan with risk assessment and verification steps.
+  - `mode: review` -- Code/MR review only. Output: summary, severity findings (HIGH/MEDIUM/LOW), recommendation. No plan.
+  - `mode: analyze` -- Information gathering and status report. No plan, no changes.
+
+- **sysAdmin**: Investigates K8s issues, executes GitOps changes (Helm values).
+  - `mode: investigate` (default) -- Read-only: kubectl get, logs, describe. No git push, no mutations.
+  - `mode: execute` -- Full GitOps: clone repo, modify values.yaml, commit, push. ArgoCD syncs the change.
+  - `mode: rollback` -- Git revert on target repo, verify ArgoCD sync. Use for crisis recovery.
+
+- **Developer**: A development team with three dispatch modes:
+  - `mode: implement` (default) -- Full team. Developer implements, QE verifies quality, Flash Manager moderates.
+    Use for: adding features, fixing bugs, modifying application code.
+  - `mode: investigate` -- Developer solo. No QE, no Flash Manager.
+    Use for: checking MR/PR status, code inspection, status reports, information gathering.
+  - `mode: test` -- QE solo. No Developer, no Flash Manager.
+    Use for: running tests against existing code, verifying deployments via browser (Playwright).
+
+The Developer team tools:
+- Developer: git, file system, glab, gh (code implementation, MR/PR inspection)
+- QE: git, file system, Playwright headless browser (UI tests), pytest, httpx, curl
 - Both share the same workspace and see each other's code changes in real-time
 
 ## Your Job
@@ -696,6 +706,7 @@ class Brain:
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
             task = args.get("task_instruction", "") or args.get("question", "")
+            mode = args.get("mode", "")
 
             # Duplicate task prevention
             if event_id in self._active_tasks and not self._active_tasks[event_id].done():
@@ -721,7 +732,7 @@ class Brain:
                 action=action,
                 thoughts=f"Routing to {agent_name}: {task}",
                 selectedAgents=[agent_name],
-                taskForAgent={"agent": agent_name, "instruction": task},
+                taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -752,7 +763,7 @@ class Brain:
                 event_md_path = f"./events/event-{event_id}.md"
                 task_coro = self._run_agent_task(
                     event_id, agent_name, agent, task, event_md_path,
-                    routing_turn_num=turn.turn,
+                    routing_turn_num=turn.turn, mode=mode,
                 )
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
@@ -998,6 +1009,7 @@ class Brain:
         task: str,
         event_md_path: str,
         routing_turn_num: int = 0,
+        mode: str = "",
     ) -> None:
         """
         Run agent.process() with progress streaming. Non-blocking via create_task.
@@ -1027,7 +1039,8 @@ class Brain:
                     "message": progress_data.get("message", ""),
                 })
 
-            logger.info(f"Agent task started: {agent_name} for {event_id}")
+            mode_label = f" (mode={mode})" if mode else ""
+            logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
             self._active_agent_for_event[event_id] = agent_name
             # Acquire per-agent lock to prevent concurrent WS calls to the same sidecar
             async with self._agent_locks[agent_name]:
@@ -1036,6 +1049,7 @@ class Brain:
                     task=task,
                     event_md_path=event_md_path,
                     on_progress=on_progress,
+                    mode=mode,
                 )
             # Track session for Phase 2 follow-ups (forward user messages instead of cancel)
             if session_id:

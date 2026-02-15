@@ -99,6 +99,7 @@ class AgentClient:
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
+        mode: str = "",
     ) -> tuple[str, Optional[str]]:
         """
         Send task to sidecar via WebSocket, stream progress, return (result, session_id).
@@ -108,7 +109,7 @@ class AgentClient:
         Serialized via asyncio.Lock to prevent concurrent WS recv conflicts.
         """
         async with self._lock:
-            return await self._process_inner(event_id, task, event_md_path, on_progress)
+            return await self._process_inner(event_id, task, event_md_path, on_progress, mode)
 
     async def _process_inner(
         self,
@@ -116,6 +117,7 @@ class AgentClient:
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
+        mode: str = "",
     ) -> tuple[str, Optional[str]]:
         """Inner process logic (called under lock). Returns (result, session_id)."""
         # Build prompt
@@ -123,6 +125,10 @@ class AgentClient:
             prompt = f"Read the event document at {event_md_path} and execute this task:\n\n{task}"
         else:
             prompt = task
+
+        # Prepend mode context for CLI skill matching
+        if mode:
+            prompt = f"[Mode: {mode}] {prompt}"
 
         # Security check
         for pattern in FORBIDDEN_PATTERNS:

@@ -145,14 +145,23 @@ class Developer(AgentClient):
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
+        mode: str = "implement",
     ) -> tuple[str, Optional[str]]:
-        """Dev + optional QE pair with Flash Manager moderation.
+        """Dev team dispatch with mode-based routing.
 
-        Returns (merged_result, dev_session_id). Brain sees the developer session;
-        QE session is internal to the Huddle.
+        - implement (default): Full Huddle -- Dev + QE + Flash Manager
+        - investigate: Dev solo -- no QE, no Flash Manager
+        - test: QE solo -- no Dev, no Flash Manager
         """
-        if not self._qe_enabled:
-            return await super().process(event_id, task, event_md_path, on_progress)
+        # investigate -> Dev sidecar only, no QE
+        if mode == "investigate" or not self._qe_enabled:
+            return await super().process(event_id, task, event_md_path, on_progress, mode)
+
+        # test -> QE sidecar only, no Dev
+        if mode == "test":
+            return await self.qe.process(event_id, task, event_md_path, on_progress, mode)
+
+        # implement (default) -> full Huddle: Dev + QE + Flash Manager
 
         # QE progress callback -- override actor so UI renders as QE bubble
         async def qe_on_progress(data: dict) -> None:
@@ -162,10 +171,10 @@ class Developer(AgentClient):
 
         # Phase 1: Fire Dev + QE concurrently
         dev_task = asyncio.create_task(
-            super().process(event_id, task, event_md_path, on_progress)
+            super().process(event_id, task, event_md_path, on_progress, mode)
         )
         qe_task = asyncio.create_task(
-            self.qe.process(event_id, task, event_md_path, qe_on_progress)
+            self.qe.process(event_id, task, event_md_path, qe_on_progress, mode)
         )
 
         dev_result = None

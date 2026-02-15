@@ -94,6 +94,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "What the agent should do (be specific and actionable)",
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["investigate", "execute", "rollback", "plan", "review", "analyze", "implement", "test"],
+                    "description": "Behavioral mode for the agent. Determines scope of actions (e.g., investigate=read-only, execute=GitOps write, implement=full dev+QE team).",
+                },
             },
             "required": ["agent_name", "task_instruction"],
         },
