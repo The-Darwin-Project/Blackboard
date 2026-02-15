@@ -209,23 +209,48 @@ function spawnInteractiveGemini(prompt, options = {}) {
         cwd: options.cwd || DEFAULT_WORK_DIR,
         env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
     });
-    // Auto-handle first-run prompts (trust + auth)
-    // These fire once per container lifecycle, then cached
+    // Auto-handle first-run prompts (trust + auth).
+    // PTY output arrives in arbitrary chunks -- patterns like "How would you like
+    // to authenticate" may be split across multiple onData events. Buffer the init
+    // output and check the accumulated text, not individual chunks.
     let initPhase = true;
+    let initBuffer = '';
+    let authHandled = false;
+    let trustHandled = false;
     child.onData((data) => {
         if (initPhase) {
-            if (data.includes('Do you trust this folder')) {
+            initBuffer += data;
+            // Trust folder prompt -- press Enter to accept default (Trust folder)
+            if (!trustHandled && initBuffer.includes('Do you trust this folder')) {
+                trustHandled = true;
+                console.log(`[${new Date().toISOString()}] PTY init: handling trust prompt`);
                 setTimeout(() => child.write('\r'), 500);
             }
-            if (data.includes('How would you like to authenticate')) {
+            // Auth selection -- navigate to Vertex AI (option 3)
+            if (!authHandled && initBuffer.includes('How would you like to authenticate')) {
+                authHandled = true;
+                console.log(`[${new Date().toISOString()}] PTY init: handling auth prompt (selecting Vertex AI)`);
                 setTimeout(() => {
-                    child.write('\x1b[B');
-                    setTimeout(() => { child.write('\x1b[B');
-                        setTimeout(() => child.write('\r'), 300);
-                    }, 300);
-                }, 500);
+                    child.write('\x1b[B');  // Down to option 2
+                    setTimeout(() => {
+                        child.write('\x1b[B');  // Down to option 3 (Vertex AI)
+                        setTimeout(() => child.write('\r'), 500);  // Enter
+                    }, 500);
+                }, 800);
             }
-            if (data.includes('YOLO mode')) initPhase = false;
+            // API key prompt -- the CLI selected API key mode (wrong path).
+            // Press Escape to go back, then try auth selection again.
+            if (!authHandled && initBuffer.includes('Enter Gemini API Key')) {
+                authHandled = true;
+                console.log(`[${new Date().toISOString()}] PTY init: API key prompt detected, pressing Escape`);
+                child.write('\x1b');  // Escape to cancel
+            }
+            // YOLO mode banner = init complete, agent is ready
+            if (initBuffer.includes('YOLO mode') || initBuffer.includes('yolo mode')) {
+                initPhase = false;
+                initBuffer = '';
+                console.log(`[${new Date().toISOString()}] PTY init: complete, agent ready`);
+            }
         }
     });
     return child;
