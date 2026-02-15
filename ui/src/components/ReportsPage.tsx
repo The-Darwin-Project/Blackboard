@@ -54,6 +54,23 @@ export default function ReportsPage() {
     setSearchParams({});
   };
 
+  // Sidebar cards (filtered + sorted) -- must be above any early return to satisfy Rules of Hooks
+  const sidebarReports = useMemo(() => {
+    let filtered = reports;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      filtered = reports.filter((r) =>
+        r.service.toLowerCase().includes(q)
+        || r.event_id.toLowerCase().includes(q)
+        || r.reason.toLowerCase().includes(q),
+      );
+    }
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'service') return a.service.localeCompare(b.service);
+      return new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime();
+    });
+  }, [reports, searchQuery, sortBy]);
+
   // ========== State 1: Grid ==========
   if (!selectedReportId) {
     return (
@@ -71,23 +88,6 @@ export default function ReportsPage() {
   }
 
   // ========== State 2 & 3: Report View ==========
-  // Sidebar cards (filtered + sorted for State 3)
-  const sidebarReports = useMemo(() => {
-    let filtered = reports;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = reports.filter((r) =>
-        r.service.toLowerCase().includes(q)
-        || r.event_id.toLowerCase().includes(q)
-        || r.reason.toLowerCase().includes(q),
-      );
-    }
-    return [...filtered].sort((a, b) => {
-      if (sortBy === 'service') return a.service.localeCompare(b.service);
-      return new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime();
-    });
-  }, [reports, searchQuery, sortBy]);
-
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       {/* Report view */}
