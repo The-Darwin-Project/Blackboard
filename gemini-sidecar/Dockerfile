@@ -81,6 +81,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
+# Install skopeo (container image inspection -- no daemon required)
+RUN dnf install -y skopeo && dnf clean all && skopeo --version
+
 # Install Python 3.12 + pip + test tools (QE agent needs pytest/httpx)
 # Also install Chromium deps for Playwright headless browser testing
 RUN dnf install -y \
