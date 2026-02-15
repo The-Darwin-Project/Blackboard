@@ -36,18 +36,19 @@ const MIN_SIDEBAR_WIDTH = 280;
 const MAX_SIDEBAR_WIDTH = 600;
 const DEFAULT_SIDEBAR_WIDTH = 400;
 
-// SessionStorage keys
+// Storage keys -- layout uses localStorage (survives refresh + tab close),
+// volatile state uses sessionStorage (clears on tab close)
 const SS = {
-  selectedEventId: 'darwin:selectedEventId',
-  leftTab: 'darwin:leftTab',
-  middleTab: 'darwin:middleTab',
-  leftWidth: 'darwin:leftWidth',
-  agentCardHeight: 'darwin:agentCardHeight',
-  resourceCollapsed: 'darwin:resourceCollapsed',
+  selectedEventId: 'darwin:selectedEventId',   // sessionStorage (volatile)
+  leftTab: 'darwin:leftTab',                   // localStorage (persistent)
+  middleTab: 'darwin:middleTab',               // localStorage (persistent)
+  leftWidth: 'darwin:leftWidth',               // localStorage (persistent)
+  agentCardHeight: 'darwin:agentCardHeight',   // localStorage (persistent)
+  resourceCollapsed: 'darwin:resourceCollapsed', // localStorage (persistent)
 } as const;
 
-function ssGet(key: string, fallback: string): string {
-  return sessionStorage.getItem(key) || fallback;
+function lsGet(key: string, fallback: string): string {
+  return localStorage.getItem(key) || fallback;
 }
 
 // Huddle chat message (for developer card pair programming view)
@@ -82,14 +83,14 @@ function DashboardInner() {
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
-  // -- Layout state (sessionStorage-persisted) --
-  const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(ssGet(SS.leftWidth, String(DEFAULT_SIDEBAR_WIDTH))));
-  const [agentCardHeight, setAgentCardHeight] = useState(() => parseInt(ssGet(SS.agentCardHeight, '220')));
-  const [resourceCollapsed, setResourceCollapsed] = useState(() => ssGet(SS.resourceCollapsed, 'false') === 'true');
+  // -- Layout state (localStorage-persisted -- survives refresh + tab close) --
+  const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(lsGet(SS.leftWidth, String(DEFAULT_SIDEBAR_WIDTH))));
+  const [agentCardHeight, setAgentCardHeight] = useState(() => parseInt(lsGet(SS.agentCardHeight, '220')));
+  const [resourceCollapsed, setResourceCollapsed] = useState(() => lsGet(SS.resourceCollapsed, 'false') === 'true');
 
-  // -- Tab state --
-  const [leftTab, setLeftTab] = useState(() => ssGet(SS.leftTab, 'activity'));
-  const [middleTab, setMiddleTab] = useState(() => ssGet(SS.middleTab, 'architecture'));
+  // -- Tab state (localStorage-persisted) --
+  const [leftTab, setLeftTab] = useState(() => lsGet(SS.leftTab, 'activity'));
+  const [middleTab, setMiddleTab] = useState(() => lsGet(SS.middleTab, 'architecture'));
   const [previousLeftTab, setPreviousLeftTab] = useState('activity');
 
   // -- Event selection state machine --
@@ -122,12 +123,13 @@ function DashboardInner() {
     }
   }, [selectedEventError, selectedEventId]);
 
-  // -- Persist layout state to sessionStorage --
-  useEffect(() => { sessionStorage.setItem(SS.leftTab, leftTab); }, [leftTab]);
-  useEffect(() => { sessionStorage.setItem(SS.middleTab, middleTab); }, [middleTab]);
-  useEffect(() => { sessionStorage.setItem(SS.leftWidth, String(sidebarWidth)); }, [sidebarWidth]);
-  useEffect(() => { sessionStorage.setItem(SS.agentCardHeight, String(agentCardHeight)); }, [agentCardHeight]);
-  useEffect(() => { sessionStorage.setItem(SS.resourceCollapsed, String(resourceCollapsed)); }, [resourceCollapsed]);
+  // -- Persist layout state to localStorage (survives refresh + tab close) --
+  useEffect(() => { localStorage.setItem(SS.leftTab, leftTab); }, [leftTab]);
+  useEffect(() => { localStorage.setItem(SS.middleTab, middleTab); }, [middleTab]);
+  useEffect(() => { localStorage.setItem(SS.leftWidth, String(sidebarWidth)); }, [sidebarWidth]);
+  useEffect(() => { localStorage.setItem(SS.agentCardHeight, String(agentCardHeight)); }, [agentCardHeight]);
+  useEffect(() => { localStorage.setItem(SS.resourceCollapsed, String(resourceCollapsed)); }, [resourceCollapsed]);
+  // selectedEventId stays in sessionStorage (volatile -- clears on tab close, keeps on refresh)
   useEffect(() => {
     if (selectedEventId) sessionStorage.setItem(SS.selectedEventId, selectedEventId);
     else sessionStorage.removeItem(SS.selectedEventId);
@@ -306,17 +308,18 @@ function DashboardInner() {
           style={{ width: sidebarWidth }}
         >
           <TabPanel tabs={LEFT_TABS} activeTab={leftTab} onTabChange={setLeftTab}>
-            {leftTab === 'activity' ? (
+            <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <ActivityStream />
-            ) : (
-              selectedEventId ? (
+            </div>
+            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+              {selectedEventId ? (
                 <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} />
               ) : (
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 13 }}>
                   Select an event from the Tickets tab to view conversation.
                 </div>
-              )
-            )}
+              )}
+            </div>
           </TabPanel>
           <ChatInput eventId={selectedEventId} wsSend={connected ? send : undefined} />
         </div>
@@ -333,19 +336,18 @@ function DashboardInner() {
           }`} />
         </div>
 
-        {/* MIDDLE PANEL: Tickets | Architecture */}
+        {/* MIDDLE PANEL: Tickets | Architecture -- both mounted, inactive hidden via CSS to avoid remount */}
         <div className="flex-1 min-w-0 bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
           <TabPanel tabs={MIDDLE_TABS} activeTab={middleTab} onTabChange={setMiddleTab}>
-            {middleTab === 'tickets' ? (
+            <div style={{ display: middleTab === 'tickets' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <EventTicketList onEventSelect={onEventSelect} selectedEventId={selectedEventId} />
-            ) : (
-              <div className="flex-1 overflow-hidden relative">
-                <CytoscapeGraph
-                  onNodeClick={handleNodeClick}
-                  onPlanClick={handlePlanClick}
-                />
-              </div>
-            )}
+            </div>
+            <div style={{ display: middleTab === 'architecture' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative' }}>
+              <CytoscapeGraph
+                onNodeClick={handleNodeClick}
+                onPlanClick={handlePlanClick}
+              />
+            </div>
           </TabPanel>
         </div>
 

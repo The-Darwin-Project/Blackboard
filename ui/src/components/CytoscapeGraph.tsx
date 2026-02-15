@@ -164,7 +164,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         ${replicaBadge}
         <div style="font-size: 16px; margin-bottom: 2px;">${icon}</div>
         <div style="font-weight: 600; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${node.label}</div>
-        <div style="font-size: 9px; opacity: 0.9;">v${version}</div>
+        <div style="font-size: 9px; opacity: 0.9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="v${version}">v${version}</div>
         <div style="font-size: 9px; opacity: 0.8;">CPU:${cpu}% MEM:${mem}%</div>
       </div>
     `;
