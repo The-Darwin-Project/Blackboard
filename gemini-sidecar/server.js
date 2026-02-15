@@ -9,7 +9,7 @@
 // 5. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE env var. "plan" -> --permission-mode plan; else autoApprove -> --dangerously-skip-permissions.
 // 6. [Pattern]: Claude session_id extracted from stream-json init event (type=system, subtype=init) and stored on currentTask.sessionId.
 // 7. [Pattern]: Claude settings.json pre-created at startup (~/.claude/settings.json) to skip onboarding flow.
-// 8. [Pattern]: spawnInteractiveGemini uses node-pty for Gemini -i mode. PTY child has .write for followup; /quit before SIGTERM for graceful exit.
+// 8. [Pattern]: Both Gemini and Claude use headless mode (-p + stream-json). Follow-ups via --resume <session_id>. No PTY.
 // HTTP wrapper for Gemini/Claude Code CLIs with GitHub/GitLab authentication
 // Exposes POST /execute, POST /callback endpoints for the brain container
 // Handles dynamic repo cloning with fresh tokens per execution
@@ -42,9 +42,7 @@ let _callbackResult = null;
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
 const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
-// Gemini interactive mode (PTY) -- opt-in via env var. When enabled, Gemini uses
-// node-pty with `-i` flag for multi-turn sessions instead of one-shot `-p`.
-const GEMINI_INTERACTIVE = process.env.GEMINI_INTERACTIVE === 'true' && AGENT_CLI === 'gemini';
+// GEMINI_INTERACTIVE removed -- both CLIs now use headless mode + session resume.
 // Strip ANSI escape codes from PTY output (colors, cursor movements, etc.)
 // PTY output is raw terminal data -- Brain/LLM needs clean text.
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hlm]/g;
@@ -61,10 +59,8 @@ if (!fs.existsSync(claudeSettingsPath)) {
   console.log('Claude settings.json created (skip onboarding)');
 }
 
-// Pre-create Gemini settings to minimize first-run prompts.
-// Trust is disabled so the trust dialog never appears.
-// Auth still requires PTY auto-handler (GEMINI_INTERACTIVE mode) to select Vertex AI
-// on first run -- the CLI doesn't honor a pre-set auth mode in settings.json.
+// Pre-create Gemini settings. Trust is disabled so the trust dialog never appears.
+// Auth is handled by env vars in headless mode (no interactive wizard needed).
 const geminiDir = path.join(os.homedir(), '.gemini');
 fs.mkdirSync(geminiDir, { recursive: true });
 const geminiSettingsPath = path.join(geminiDir, 'settings.json');
@@ -185,76 +181,25 @@ function buildCLICommand(prompt, options = {}) {
         args.push('-p', prompt);
         return { binary: 'claude', args };
     } else {
-        // Gemini path -- stream-json for unified parsing + tool call counting
+        // Gemini path -- headless mode with stream-json (same pattern as Claude)
+        // Auth handled by env vars (GOOGLE_GENAI_USE_VERTEXAI + GOOGLE_APPLICATION_CREDENTIALS)
         const args = [];
         if (options.autoApprove) args.push('--yolo');
         args.push('-o', 'stream-json');
+        if (options.sessionId) {
+            args.push('--resume', options.sessionId);
+        }
         args.push('-p', prompt);
         return { binary: 'gemini', args };
     }
 }
 
-let pty;
-try {
-  pty = require('node-pty');
-} catch (e) {
-  console.warn('node-pty not available -- Gemini interactive mode disabled');
-}
-
-function spawnInteractiveGemini(prompt, options = {}) {
-    if (!pty) throw new Error('node-pty not installed');
-    const child = pty.spawn('gemini', ['-i', prompt, '--yolo'], {
-        name: 'xterm-256color',
-        cols: 120, rows: 30,
-        cwd: options.cwd || DEFAULT_WORK_DIR,
-        env: { ...process.env, GOOGLE_GENAI_USE_VERTEXAI: 'true' },
-    });
-    // Auto-handle first-run prompts (trust + auth).
-    // PTY output arrives in arbitrary chunks -- patterns like "How would you like
-    // to authenticate" may be split across multiple onData events. Buffer the init
-    // output and check the accumulated text, not individual chunks.
-    let initPhase = true;
-    let initBuffer = '';
-    let authHandled = false;
-    let trustHandled = false;
-    child.onData((data) => {
-        if (initPhase) {
-            initBuffer += data;
-            // Trust folder prompt -- press Enter to accept default (Trust folder)
-            if (!trustHandled && initBuffer.includes('Do you trust this folder')) {
-                trustHandled = true;
-                console.log(`[${new Date().toISOString()}] PTY init: handling trust prompt`);
-                setTimeout(() => child.write('\r'), 500);
-            }
-            // Auth selection -- navigate to Vertex AI (option 3)
-            if (!authHandled && initBuffer.includes('How would you like to authenticate')) {
-                authHandled = true;
-                console.log(`[${new Date().toISOString()}] PTY init: handling auth prompt (selecting Vertex AI)`);
-                setTimeout(() => {
-                    child.write('\x1b[B');  // Down to option 2
-                    setTimeout(() => {
-                        child.write('\x1b[B');  // Down to option 3 (Vertex AI)
-                        setTimeout(() => child.write('\r'), 500);  // Enter
-                    }, 500);
-                }, 800);
-            }
-            // API key prompt -- the CLI selected API key mode (wrong path).
-            // Press Escape to go back, then try auth selection again.
-            if (!authHandled && initBuffer.includes('Enter Gemini API Key')) {
-                authHandled = true;
-                console.log(`[${new Date().toISOString()}] PTY init: API key prompt detected, pressing Escape`);
-                child.write('\x1b');  // Escape to cancel
-            }
-            // YOLO mode banner = init complete, agent is ready
-            if (initBuffer.includes('YOLO mode') || initBuffer.includes('yolo mode')) {
-                initPhase = false;
-                initBuffer = '';
-                console.log(`[${new Date().toISOString()}] PTY init: complete, agent ready`);
-            }
-        }
-    });
-    return child;
-}
+// NOTE: PTY/interactive mode (spawnInteractiveGemini) has been removed.
+// Both Gemini and Claude now use headless mode (-p + -o stream-json) with
+// session resume (--resume <session_id>) for follow-ups. This eliminates
+// the TUI auth wizard, ANSI codes, and PTY complexity. Auth is handled
+// entirely by env vars (GOOGLE_GENAI_USE_VERTEXAI + GOOGLE_APPLICATION_CREDENTIALS)
+// per https://geminicli.com/docs/get-started/authentication/
 
 // GitHub App secret paths (mounted from K8s secret)
 const SECRETS_PATH = '/secrets/github';
@@ -1279,126 +1224,37 @@ wss.on('connection', (ws) => {
       // Login to ArgoCD/Kargo CLIs in background (non-blocking, runs concurrent with agent CLI)
       setupCLILoginsBackground();
 
-      // Execute agent CLI with streaming progress
-      if (GEMINI_INTERACTIVE && pty) {
-        // Gemini interactive mode: spawn PTY session, stream output via WS.
-        // PTY stays alive for follow-ups (stdin writes). Session ID is generated
-        // locally since Gemini -i doesn't report one like Claude.
-        try {
-          const child = spawnInteractiveGemini(prompt, { cwd: workDir });
-          const geminiSessionId = `gemini-pty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          // Store ws on currentTask so PTY handlers use the current socket,
-          // not a stale closure reference after Brain reconnects (L1 fix).
-          currentTask = { eventId, child, ws, cwd: workDir, sessionId: geminiSessionId, ptyOutput: '' };
-
-          // Accumulate output and stream progress. Flush as a result message when
-          // Gemini is done responding. Two signals: (1) Gemini re-displays its
-          // input prompt (❯ or >) indicating it's waiting for the next turn, or
-          // (2) 5s timeout with no new output (fallback for edge cases).
-          let responseBuffer = '';
-          let responseTimer = null;
-          const GEMINI_PROMPT_RE = /[❯>]\s*$/;
-          const DEBOUNCE_MS = 5000;
-
-          const flushResponse = () => {
-            if (!currentTask) return;
-            // Only flush PTY buffer here (turn boundary).
-            // _callbackResult is NOT checked -- it resolves in onExit only.
-            // This lets agents call sendResults multiple times during the session
-            // without terminating the PTY (Brain treats "result" as terminal).
-            if (responseBuffer.trim()) {
-              wsSend(currentTask.ws, {
-                type: 'result',
-                event_id: eventId,
-                session_id: geminiSessionId,
-                status: 'success',
-                output: stripAnsi(responseBuffer.trim()),
-                source: 'stdout',
-              });
-              responseBuffer = '';
-            }
-          };
-
-          child.onData((data) => {
-            if (!currentTask) return;
-            currentTask.ptyOutput += data;
-            responseBuffer += data;
-            wsSend(currentTask.ws, { type: 'progress', event_id: eventId, message: stripAnsi(data) });
-
-            // Signal 1: Gemini prompt marker means response is complete
-            if (GEMINI_PROMPT_RE.test(responseBuffer)) {
-              if (responseTimer) clearTimeout(responseTimer);
-              flushResponse();
-              return;
-            }
-            // Signal 2: Debounce fallback for responses without a prompt marker
-            if (responseTimer) clearTimeout(responseTimer);
-            responseTimer = setTimeout(flushResponse, DEBOUNCE_MS);
-          });
-
-          child.onExit(({ exitCode }) => {
-            if (responseTimer) clearTimeout(responseTimer);
-            const activeWs = currentTask?.ws || ws;
-            // Callback result takes priority over remaining PTY buffer
-            const capturedCallback = _callbackResult;
-            _callbackResult = null;
-            if (capturedCallback) {
-              wsSend(activeWs, {
-                type: 'result',
-                event_id: eventId,
-                session_id: geminiSessionId,
-                status: exitCode === 0 ? 'success' : 'error',
-                output: capturedCallback,
-                source: 'callback',
-              });
-            } else if (responseBuffer.trim()) {
-              wsSend(activeWs, {
-                type: 'result',
-                event_id: eventId,
-                session_id: geminiSessionId,
-                status: exitCode === 0 ? 'success' : 'error',
-                output: stripAnsi(responseBuffer.trim()),
-                source: 'stdout',
-              });
-            }
-            currentTask = null;
-          });
-          // Don't clear currentTask here -- PTY stays alive for followups
-        } catch (err) {
-          wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
-          currentTask = null;
-        }
-      } else {
-        // Standard mode: one-shot CLI execution with streaming
-        try {
-          const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
-          wsSend(ws, {
-            type: 'result',
-            event_id: eventId,
-            session_id: result.sessionId || null,
-            status: result.status,
-            output: result.output || result.stdout || '',
-            source: result.source || 'stdout',
-          });
-        } catch (err) {
-          wsSend(ws, {
-            type: 'error',
-            event_id: eventId,
-            message: err.message,
-          });
-        }
-        currentTask = null;
+      // Execute agent CLI with streaming progress (headless mode for both Gemini + Claude).
+      // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event
+      // enable --resume for follow-ups. No PTY needed -- env vars handle auth in headless.
+      try {
+        const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
+        wsSend(ws, {
+          type: 'result',
+          event_id: eventId,
+          session_id: result.sessionId || null,
+          status: result.status,
+          output: result.output || result.stdout || '',
+          source: result.source || 'stdout',
+        });
+      } catch (err) {
+        wsSend(ws, {
+          type: 'error',
+          event_id: eventId,
+          message: err.message,
+        });
       }
+      currentTask = null;
 
     } else if (msg.type === 'followup') {
-      // Phase 2: Forward follow-up message to an active or resumable session
+      // Forward follow-up message to an existing session via --resume.
+      // Both Gemini and Claude CLIs support --resume <session_id>.
       const sessionId = msg.session_id || '';
       const followupMsg = msg.message || '';
       const eventId = msg.event_id || 'unknown';
       console.log(`[${new Date().toISOString()}] Followup for session ${sessionId} (event: ${eventId})`);
 
-      if (AGENT_CLI === 'claude' && sessionId) {
-        // Claude: spawn a new process with --resume to chain context
+      if (sessionId) {
         try {
           const result = await executeCLIStreaming(ws, eventId, followupMsg, {
             autoApprove: true,
@@ -1415,27 +1271,16 @@ wss.on('connection', (ws) => {
         } catch (err) {
           wsSend(ws, { type: 'error', event_id: eventId, message: err.message });
         }
-        currentTask = null;  // Prevent permanent "busy" state after followup
-      } else if (currentTask && currentTask.child && currentTask.child.write) {
-        // Gemini: write follow-up to PTY stdin (live session)
-        // Refresh ws reference so debounced results go to the current connection
-        currentTask.ws = ws;
-        console.log(`[${new Date().toISOString()}] Gemini PTY followup for ${eventId}`);
-        currentTask.child.write(followupMsg + '\r');
+        currentTask = null;
       } else {
-        wsSend(ws, { type: 'error', event_id: eventId, message: 'No active session for followup' });
+        wsSend(ws, { type: 'error', event_id: eventId, message: 'No session_id for followup' });
       }
 
     } else if (msg.type === 'cancel') {
       if (currentTask && currentTask.child) {
         console.log(`[${new Date().toISOString()}] Cancelling task: ${currentTask.eventId}`);
         const child = currentTask.child;
-        // Graceful PTY exit (Gemini -i accepts /quit)
-        if (typeof child.write === 'function') {
-          child.write('/quit\r');
-        }
         child.kill('SIGTERM');
-        // SIGKILL escalation: if SIGTERM doesn't work after 5s, force kill
         const killTimer = setTimeout(() => {
           if (!child.killed) {
             console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL for ${currentTask?.eventId || 'unknown'}`);
@@ -1450,16 +1295,10 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log(`[${new Date().toISOString()}] WebSocket client disconnected`);
-    // Kill running process on disconnect
     if (currentTask && currentTask.child) {
       console.log(`[${new Date().toISOString()}] Killing orphaned process for ${currentTask.eventId}`);
       const child = currentTask.child;
-      // Graceful PTY exit (Gemini -i accepts /quit)
-      if (typeof child.write === 'function') {
-        child.write('/quit\r');
-      }
       child.kill('SIGTERM');
-      // SIGKILL escalation: if SIGTERM doesn't work after 5s, force kill
       const killTimer = setTimeout(() => {
         if (!child.killed) {
           console.log(`[${new Date().toISOString()}] SIGTERM timeout -- SIGKILL`);
