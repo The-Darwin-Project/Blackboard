@@ -38,3 +38,7 @@ websockets
 
 # Kubernetes client (for K8s metrics observer)
 kubernetes
+
+# Slack integration (Socket Mode, async handlers)
+slack-bolt[async]
+aiohttp

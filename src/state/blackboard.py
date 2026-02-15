@@ -6,6 +6,7 @@
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Keep them in sync.
+# 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -1455,6 +1456,9 @@ class BlackboardState:
     JOURNAL_PREFIX = "darwin:journal:"
     JOURNAL_MAX_ENTRIES = 100
 
+    # Slack thread_ts <-> event_id reverse index
+    SLACK_THREAD_PREFIX = "darwin:slack:thread:"
+
     async def create_event(
         self,
         source: str,
@@ -1762,6 +1766,61 @@ class BlackboardState:
         await self.redis.srem(self.EVENT_ACTIVE, event_id)
         await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
         logger.info(f"Closed event: {event_id}")
+
+    # =========================================================================
+    # Slack Thread Mapping (reverse index for DM thread replies)
+    # =========================================================================
+
+    async def update_event_slack_context(
+        self, event_id: str, channel_id: str, thread_ts: str, user_id: str = "",
+    ) -> None:
+        """Set Slack correlation fields on an EventDocument (WATCH/MULTI)."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for slack context update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    event.slack_channel_id = channel_id
+                    event.slack_thread_ts = thread_ts
+                    if user_id:
+                        event.slack_user_id = user_id
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"Slack context set on event {event_id}: ch={channel_id} ts={thread_ts}")
+
+    SLACK_MAPPING_TTL = 86400  # 24h safety net (cleaned explicitly on event close)
+
+    async def set_slack_mapping(
+        self, channel_id: str, thread_ts: str, event_id: str,
+    ) -> None:
+        """Map a Slack thread to an event for reverse-lookup by on_dm_message."""
+        key = f"{self.SLACK_THREAD_PREFIX}{channel_id}:{thread_ts}"
+        await self.redis.set(key, event_id, ex=self.SLACK_MAPPING_TTL)
+        logger.debug(f"Slack mapping: {channel_id}:{thread_ts} -> {event_id}")
+
+    async def get_event_by_slack_thread(
+        self, channel_id: str, thread_ts: str,
+    ) -> Optional[str]:
+        """Reverse-lookup event_id from a Slack thread_ts. Returns None if not found."""
+        key = f"{self.SLACK_THREAD_PREFIX}{channel_id}:{thread_ts}"
+        return await self.redis.get(key)
+
+    async def delete_slack_mapping(
+        self, channel_id: str, thread_ts: str,
+    ) -> None:
+        """Remove Slack thread mapping on event close (TTL cleanup)."""
+        key = f"{self.SLACK_THREAD_PREFIX}{channel_id}:{thread_ts}"
+        await self.redis.delete(key)
+        logger.debug(f"Slack mapping deleted: {channel_id}:{thread_ts}")
 
     # =========================================================================
     # Report Persistence (90-day TTL snapshots)

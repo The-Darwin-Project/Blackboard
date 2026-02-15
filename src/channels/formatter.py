@@ -1,0 +1,115 @@
+# BlackBoard/src/channels/formatter.py
+# @ai-rules:
+# 1. [Constraint]: Pure functions only -- no I/O, no Slack API calls. Returns Block Kit dicts.
+# 2. [Pattern]: format_turn dispatches on actor.action pattern (e.g., "brain.think", "brain.route").
+# 3. [Gotcha]: Slack Block Kit text limit is 3000 chars per section. Truncate long results.
+"""Convert ConversationTurn objects to Slack Block Kit payloads."""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..models import ConversationTurn, EventDocument
+
+# Slack section text limit (Block Kit)
+_MAX_TEXT = 2900
+
+
+def _truncate(text: str, limit: int = _MAX_TEXT) -> str:
+    """Truncate text for Slack Block Kit section limits."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 20] + "\n...(truncated)"
+
+
+def _section(text: str) -> dict[str, Any]:
+    """Shorthand for a mrkdwn section block."""
+    return {"type": "section", "text": {"type": "mrkdwn", "text": _truncate(text)}}
+
+
+def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
+    """Convert a ConversationTurn to Slack Block Kit blocks.
+
+    Returns a list of block dicts ready for chat_postMessage(blocks=...).
+    """
+    key = f"{turn.actor}.{turn.action}"
+    blocks: list[dict] = []
+
+    if key == "brain.triage":
+        thoughts = turn.thoughts or "Analyzing event..."
+        blocks.append(_section(f"_:brain: {thoughts}_"))
+
+    elif key == "brain.route":
+        agents = ", ".join(turn.selectedAgents or [])
+        header = f"*:arrow_right: Routing to {agents}*"
+        if turn.thoughts:
+            header += f"\n{turn.thoughts}"
+        blocks.append(_section(header))
+
+    elif key == "brain.request_approval":
+        plan_text = turn.plan or turn.thoughts or "Plan ready for review."
+        blocks.append(_section(f"*:clipboard: Plan ready:*\n{_truncate(plan_text)}"))
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve"},
+                    "style": "primary",
+                    "action_id": "darwin_approve",
+                    "value": event_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Reject"},
+                    "style": "danger",
+                    "action_id": "darwin_reject",
+                    "value": event_id,
+                },
+            ],
+        })
+
+    elif key == "brain.wait":
+        waiting = turn.waitingFor or "user input"
+        blocks.append(_section(f":hourglass_flowing_sand: Waiting for {waiting}"))
+
+    elif key == "brain.close":
+        blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))
+
+    elif turn.actor in ("architect", "sysadmin", "developer") and turn.result:
+        result = _truncate(turn.result)
+        blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n```{result}```"))
+
+    elif key == "aligner.confirm":
+        blocks.append(_section(f":chart_with_upwards_trend: {turn.thoughts or turn.result or 'Metrics confirmed.'}"))
+
+    elif key in ("user.message", "user.approve", "user.reject"):
+        text = turn.thoughts or turn.result or turn.action
+        blocks.append(_section(f":speech_balloon: {text}"))
+
+    else:
+        # Fallback: render whatever we have
+        text = turn.thoughts or turn.result or f"{turn.actor}.{turn.action}"
+        blocks.append(_section(f"_{turn.actor}:_ {text}"))
+
+    return blocks
+
+
+def format_event_summary(event_doc: "EventDocument") -> list[dict]:
+    """Format the initial thread-parent message for an event."""
+    reason = event_doc.event.reason
+    evidence = ""
+    if hasattr(event_doc.event.evidence, "display_text"):
+        evidence = event_doc.event.evidence.display_text
+    elif isinstance(event_doc.event.evidence, str):
+        evidence = event_doc.event.evidence
+
+    blocks = [
+        _section(
+            f"*Event `{event_doc.id}` created*\n"
+            f">*Service:* {event_doc.service}\n"
+            f">*Reason:* {reason}\n"
+            + (f">*Evidence:* {_truncate(evidence, 500)}" if evidence else "")
+        ),
+    ]
+    return blocks

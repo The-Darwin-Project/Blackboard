@@ -1,7 +1,7 @@
 # BlackBoard/src/routes/queue.py
 # @ai-rules:
 # 1. [Gotcha]: GET /closed/list MUST stay before GET /{event_id} to avoid "closed" matching as event_id.
-# 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() -- same state machine as Brain.
+# 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() for Slack cleanup (Brain path uses _close_and_broadcast instead).
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 # 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
 """
@@ -187,6 +187,9 @@ async def close_event_by_user(
     except RuntimeError:
         pass  # Brain not initialized
     await blackboard.close_event(event_id, close_summary)
+    # Clean up Slack thread mapping if event had Slack context
+    if event.slack_channel_id and event.slack_thread_ts:
+        await blackboard.delete_slack_mapping(event.slack_channel_id, event.slack_thread_ts)
     # Persist report snapshot (non-fatal)
     try:
         await blackboard.persist_report(event_id)

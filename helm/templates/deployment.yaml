@@ -163,6 +163,23 @@ spec:
             - name: K8S_OBSERVER_LABEL_SELECTOR
               value: "{{ .Values.observer.labelSelector }}"
             {{- end }}
+            {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
+            # Slack integration (Socket Mode)
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slack.existingSecret }}
+                  key: bot-token
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slack.existingSecret }}
+                  key: app-token
+            - name: SLACK_INFRA_CHANNEL
+              value: {{ .Values.slack.channels.infrastructure | quote }}
+            - name: SLACK_MR_CHANNEL
+              value: {{ .Values.slack.channels.mrFallback | quote }}
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS

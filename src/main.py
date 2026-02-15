@@ -4,6 +4,7 @@
 # 2. [Gotcha]: Brain instance accessed via app.state.brain, guarded by hasattr check.
 # 3. [Constraint]: Static files mount MUST be last -- API routes take precedence.
 # 4. [Pattern]: emergency_stop WS handler cancels all active tasks and responds with cancelled count.
+# 5. [Pattern]: Slack channel init is conditional on SLACK_BOT_TOKEN + SLACK_APP_TOKEN env vars. Graceful degradation if missing.
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -132,6 +133,27 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(brain.start_event_loop())
         logger.info("Brain event loop started - WebSocket conversation queue active")
         
+        # === SLACK CHANNEL ===
+        # Bidirectional Slack integration via Socket Mode (conditional on env vars)
+        slack_bot_token = os.getenv("SLACK_BOT_TOKEN", "")
+        slack_app_token = os.getenv("SLACK_APP_TOKEN", "")
+        if slack_bot_token and slack_app_token:
+            from .channels.slack import SlackChannel
+            slack = SlackChannel(
+                bot_token=slack_bot_token,
+                app_token=slack_app_token,
+                infra_channel=os.getenv("SLACK_INFRA_CHANNEL", ""),
+                mr_fallback_channel=os.getenv("SLACK_MR_CHANNEL", ""),
+                blackboard=blackboard,
+                brain=brain,
+            )
+            brain.register_channel(slack.broadcast_handler)
+            await slack.start()
+            app.state.slack = slack
+            logger.info("Slack channel started (Socket Mode)")
+        else:
+            logger.info("Slack channel disabled (SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set)")
+        
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
         k8s_observer = None
@@ -177,6 +199,11 @@ async def lifespan(app: FastAPI):
         await sysadmin.close()
         await developer.close()
         logger.info("Brain event loop stopped, agent WebSocket connections closed")
+    
+    # Stop Slack channel
+    if hasattr(app.state, "slack"):
+        await app.state.slack.stop()
+        logger.info("Slack channel stopped")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:

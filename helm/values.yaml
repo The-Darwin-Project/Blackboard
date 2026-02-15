@@ -249,6 +249,17 @@ observer:
   interval: 30 # Poll interval in seconds
   labelSelector: "" # Optional: filter pods by label (e.g., "app=darwin-store")
 # =============================================================================
+# Slack Integration (Socket Mode, bidirectional event mirroring)
+# =============================================================================
+slack:
+  enabled: false
+  existingSecret: ""  # e.g., "slack-credentials" (keys: bot-token, app-token)
+  channels:
+    infrastructure: ""   # Channel ID for #darwin-infra (e.g., "C0XXXXXXX")
+    mrFallback: ""       # Channel ID for #cnv-ci-release (e.g., "C0YYYYYYY")
+  userMapping:
+    method: "email"      # "email" (auto-lookup via Slack API) or "static"
+# =============================================================================
 # Node Selection (optional)
 # =============================================================================
 nodeSelector: {}

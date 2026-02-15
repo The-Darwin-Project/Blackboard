@@ -4,6 +4,7 @@
 # 2. [Pattern]: MessageStatus enum gates the read-receipt protocol (SENT -> DELIVERED -> EVALUATED).
 # 3. [Gotcha]: ConversationTurn.status defaults to SENT for backward compat with existing Redis data.
 # 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
+# 5. [Pattern]: EventDocument.slack_* fields and ConversationTurn.source are Optional for backward compat with existing Redis data (pre-Slack events have None).
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -360,17 +361,22 @@ class ConversationTurn(BaseModel):
     pendingApproval: Optional[bool] = None
     image: Optional[str] = Field(None, description="Base64 data URI of an attached image")
     status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
+    source: Optional[str] = Field(None, description="Origin channel: 'dashboard' | 'slack' | None (legacy)")
     timestamp: float = Field(default_factory=time.time)
 
 
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    source: Literal["aligner", "chat"]
+    source: Literal["aligner", "chat", "slack"]
     status: EventStatus = EventStatus.NEW
     service: str = Field(..., description="Target service name")
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)
+    # Slack correlation fields (None for non-Slack events)
+    slack_thread_ts: Optional[str] = Field(None, description="Slack thread timestamp (correlation key)")
+    slack_channel_id: Optional[str] = Field(None, description="DM channel or public channel ID")
+    slack_user_id: Optional[str] = Field(None, description="Slack user who initiated (for DM events)")
 
 
 # =============================================================================

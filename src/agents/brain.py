@@ -12,6 +12,7 @@
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 # 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
+# 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
 # 15. [Pattern]: _agent_sessions tracks session_id per event (Phase 2). Persists across task invocations, cleaned in cancel/close paths only.
@@ -215,7 +216,10 @@ class Brain:
     ):
         self.blackboard = blackboard
         self.agents = agents or {}
-        self.broadcast = broadcast  # async callable to push to UI WebSocket clients
+        # Multi-target broadcast: WS (initial) + Slack (registered later)
+        self._broadcast_targets: list[Callable] = []
+        if broadcast:
+            self._broadcast_targets.append(broadcast)
         self._running = False
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
@@ -453,14 +457,13 @@ class Brain:
                 if chunk.text:
                     accumulated_text += chunk.text
                     # Stream thinking to UI in real-time
-                    if self.broadcast:
-                        await self.broadcast({
-                            "type": "brain_thinking",
-                            "event_id": event_id,
-                            "text": chunk.text,
-                            "accumulated": accumulated_text,
-                            "is_thought": chunk.is_thought,  # True for reasoning tokens
-                        })
+                    await self._broadcast({
+                        "type": "brain_thinking",
+                        "event_id": event_id,
+                        "text": chunk.text,
+                        "accumulated": accumulated_text,
+                        "is_thought": chunk.is_thought,  # True for reasoning tokens
+                    })
 
                 if chunk.function_call:
                     function_call = chunk.function_call
@@ -468,11 +471,10 @@ class Brain:
         except Exception as e:
             logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
             # Clear thinking indicator on error
-            if self.broadcast:
-                await self.broadcast({
-                    "type": "brain_thinking_done",
-                    "event_id": event_id,
-                })
+            await self._broadcast({
+                "type": "brain_thinking_done",
+                "event_id": event_id,
+            })
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -484,11 +486,10 @@ class Brain:
             return False
 
         # Clear thinking indicator (committed turn replaces it)
-        if self.broadcast:
-            await self.broadcast({
-                "type": "brain_thinking_done",
-                "event_id": event_id,
-            })
+        await self._broadcast({
+            "type": "brain_thinking_done",
+            "event_id": event_id,
+        })
 
         # Process the final result
         if function_call:
@@ -727,9 +728,9 @@ class Brain:
 
             # Broadcast the event MD as attachment
             event = await self.blackboard.get_event(event_id)
-            if event and self.broadcast:
+            if event:
                 svc_meta = await self.blackboard.get_service(event.service)
-                await self.broadcast({
+                await self._broadcast({
                     "type": "attachment",
                     "event_id": event_id,
                     "actor": "brain",
@@ -1019,13 +1020,12 @@ class Brain:
                     await self._broadcast_status_update(
                         event_id, "delivered", turns=[routing_turn_num],
                     )
-                if self.broadcast:
-                    await self.broadcast({
-                        "type": "progress",
-                        "event_id": event_id,
-                        "actor": progress_data.get("actor", agent_name),
-                        "message": progress_data.get("message", ""),
-                    })
+                await self._broadcast({
+                    "type": "progress",
+                    "event_id": event_id,
+                    "actor": progress_data.get("actor", agent_name),
+                    "message": progress_data.get("message", ""),
+                })
 
             logger.info(f"Agent task started: {agent_name} for {event_id}")
             self._active_agent_for_event[event_id] = agent_name
@@ -1143,13 +1143,12 @@ class Brain:
     # =========================================================================
 
     async def _broadcast_turn(self, event_id: str, turn: ConversationTurn) -> None:
-        """Broadcast a conversation turn to connected UI clients."""
-        if self.broadcast:
-            await self.broadcast({
-                "type": "turn",
-                "event_id": event_id,
-                "turn": turn.model_dump(),
-            })
+        """Broadcast a conversation turn to all channels (WS, Slack, etc.)."""
+        await self._broadcast({
+            "type": "turn",
+            "event_id": event_id,
+            "turn": turn.model_dump(),
+        })
 
     async def _broadcast_status_update(
         self, event_id: str, status: str, turns=None,
@@ -1162,23 +1161,34 @@ class Brain:
             turns: list of ConversationTurn objects, list of int turn numbers,
                    or None for "all"
         """
-        if self.broadcast:
-            if turns is None:
-                turn_list = "all"
-            elif turns and hasattr(turns[0], "turn"):
-                turn_list = [t.turn for t in turns]
-            else:
-                turn_list = turns  # Already int list
-            await self.broadcast({
-                "type": "message_status",
-                "event_id": event_id,
-                "status": status,
-                "turns": turn_list,
-            })
+        if turns is None:
+            turn_list = "all"
+        elif turns and hasattr(turns[0], "turn"):
+            turn_list = [t.turn for t in turns]
+        else:
+            turn_list = turns  # Already int list
+        await self._broadcast({
+            "type": "message_status",
+            "event_id": event_id,
+            "status": status,
+            "turns": turn_list,
+        })
 
     def clear_waiting(self, event_id: str) -> None:
         """Clear the wait_for_user state for an event (called when user responds)."""
         self._waiting_for_user.discard(event_id)
+
+    def register_channel(self, channel_broadcast: Callable) -> None:
+        """Register an additional broadcast target (e.g., Slack)."""
+        self._broadcast_targets.append(channel_broadcast)
+
+    async def _broadcast(self, message: dict) -> None:
+        """Fan out a message to all registered broadcast targets (WS, Slack, etc.)."""
+        for target in self._broadcast_targets:
+            try:
+                await target(message)
+            except Exception as e:
+                logger.warning(f"Broadcast target failed: {e}")
 
     async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
         """Close an event and broadcast the closure to UI."""
@@ -1222,11 +1232,10 @@ class Brain:
                 await self.blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=summary)
             except Exception as e:
                 logger.warning(f"Failed to complete plan {plan_id}: {e}")
-        if self.broadcast:
-            await self.broadcast({
-                "type": "event_closed",
-                "event_id": event_id,
-                "summary": summary,
+        await self._broadcast({
+            "type": "event_closed",
+            "event_id": event_id,
+            "summary": summary,
             })
 
     # =========================================================================
