@@ -1,8 +1,8 @@
 // BlackBoard/ui/src/components/AgentStreamCard.tsx
 // @ai-rules:
-// 1. [Pattern]: When agentName === 'developer' and huddleMessages has items, render chat layout.
+// 1. [Pattern]: All agents use bubble/card layout. Developer card has multi-actor bubbles (dev/qe/flash).
 // 2. [Pattern]: Three bubble styles: dev (left green), qe (right purple), flash (center gray).
-// 3. [Pattern]: Architect and SysAdmin cards use legacy single-stream layout (messages[]).
+// 3. [Pattern]: Architect and SysAdmin render single-actor message cards with their agent color.
 // 4. [Pattern]: FloatingWindow also supports chat mode via huddleMessages prop.
 /**
  * Real-time streaming card for agent CLI output.
@@ -53,16 +53,27 @@ function ChatBubble({ msg }: { msg: HuddleMessage }) {
   );
 }
 
-/** Render legacy single-stream lines (architect, sysadmin). */
-function StreamLines({ messages, color }: { messages: string[]; color: string }) {
+/** Render agent messages as cards (architect, sysadmin -- single-actor bubble style). */
+function MessageCards({ messages, color }: { messages: string[]; color: string }) {
   return (
     <>
       {messages.length === 0 ? (
         <div style={{ color: '#334155', fontStyle: 'italic', fontSize: 11 }}>Idle</div>
       ) : (
         messages.slice(-50).map((line, i) => (
-          <div key={i} style={{ marginBottom: 2, wordBreak: 'break-word', whiteSpace: 'pre-wrap' }}>
-            <span style={{ color: `${color}77` }}>{'>'} </span>
+          <div key={i} style={{
+            marginBottom: 4,
+            padding: '4px 10px',
+            borderRadius: 8,
+            borderLeft: `3px solid ${color}`,
+            background: `${color}12`,
+            fontSize: 12,
+            fontFamily: 'monospace',
+            lineHeight: '1.4',
+            wordBreak: 'break-word' as const,
+            whiteSpace: 'pre-wrap' as const,
+            color: '#94a3b8',
+          }}>
             {line}
           </div>
         ))
@@ -134,7 +145,7 @@ function FloatingWindow({
         {isChatMode ? (
           huddleMessages.map((msg, i) => <ChatBubble key={i} msg={msg} />)
         ) : (
-          <StreamLines messages={messages} color={color} />
+          <MessageCards messages={messages} color={color} />
         )}
       </div>
 
@@ -224,7 +235,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
           {isChatMode ? (
             huddleMessages.slice(-50).map((msg, i) => <ChatBubble key={i} msg={msg} />)
           ) : (
-            <StreamLines messages={messages} color={color} />
+            <MessageCards messages={messages} color={color} />
           )}
         </div>
       </div>
