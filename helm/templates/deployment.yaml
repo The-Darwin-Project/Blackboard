@@ -294,10 +294,6 @@ spec:
           volumeMounts:
             - name: qdrant-data
               mountPath: /qdrant/storage
-              subPath: storage
-            - name: qdrant-data
-              mountPath: /qdrant/snapshots
-              subPath: snapshots
           {{- end }}
           livenessProbe:
             httpGet:

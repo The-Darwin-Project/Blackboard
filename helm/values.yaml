@@ -18,10 +18,10 @@ redis:
   image:
     repository: registry.redhat.io/rhel9/redis-7
     tag: "latest"
-  password: "darwin-brain" # Override via secret in production
+  password: ""  # Override via secret or ArgoCD app parameters
   persistence:
     enabled: true # Enables RDB snapshots to PVC -- survives pod restarts
-    storageClassName: "ocs-storagecluster-cephfs"
+    storageClassName: ""  # Override via ArgoCD app parameters
     size: 8Gi
   resources:
     requests:
@@ -40,8 +40,8 @@ qdrant:
     tag: "v1.16.3-unprivileged" # Non-root image for OpenShift SCC
   persistence:
     enabled: true
-    storageClassName: "ocs-storagecluster-cephfs"
-    accessMode: ReadWriteOnce  # RWO -- Qdrant WAL requires exclusive flock (CephFS RWX breaks flock)
+    storageClassName: ""  # Override via ArgoCD app parameters (use block storage, NOT CephFS -- Qdrant WAL needs flock)
+    accessMode: ReadWriteOnce
     size: 10Gi
   resources:
     requests:
@@ -104,7 +104,7 @@ sidecars:
   # Shared persistent storage for agent working directories (git clones)
   persistence:
     enabled: true
-    storageClassName: "ocs-storagecluster-cephfs"
+    storageClassName: ""  # Override via ArgoCD app parameters
     size: 5Gi
     accessModes:
       - ReadWriteMany
