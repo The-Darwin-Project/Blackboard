@@ -41,6 +41,7 @@ qdrant:
   persistence:
     enabled: true
     storageClassName: "ocs-storagecluster-cephfs"
+    accessMode: ReadWriteOnce  # RWO -- Qdrant WAL requires exclusive flock (CephFS RWX breaks flock)
     size: 10Gi
   resources:
     requests:

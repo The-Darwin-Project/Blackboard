@@ -50,7 +50,7 @@ metadata:
     app.kubernetes.io/component: qdrant
 spec:
   accessModes:
-    - ReadWriteMany
+    - {{ .Values.qdrant.persistence.accessMode | default "ReadWriteOnce" }}
   {{- if .Values.qdrant.persistence.storageClassName }}
   storageClassName: {{ .Values.qdrant.persistence.storageClassName }}
   {{- end }}
