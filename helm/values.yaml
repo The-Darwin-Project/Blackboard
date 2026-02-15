@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "c107ca1" # Updated by CI to commit SHA
+  tag: "23e1718" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -253,12 +253,12 @@ observer:
 # =============================================================================
 slack:
   enabled: false
-  existingSecret: ""  # e.g., "slack-credentials" (keys: bot-token, app-token)
+  existingSecret: "" # e.g., "slack-credentials" (keys: bot-token, app-token)
   channels:
-    infrastructure: ""   # Channel ID for #darwin-infra (e.g., "C0XXXXXXX")
-    mrFallback: ""       # Channel ID for #cnv-ci-release (e.g., "C0YYYYYYY")
+    infrastructure: "" # Channel ID for #darwin-infra (e.g., "C0XXXXXXX")
+    mrFallback: "" # Channel ID for #cnv-ci-release (e.g., "C0YYYYYYY")
   userMapping:
-    method: "email"      # "email" (auto-lookup via Slack API) or "static"
+    method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================
 # Node Selection (optional)
 # =============================================================================
