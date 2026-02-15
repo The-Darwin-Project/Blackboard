@@ -15,6 +15,25 @@ if TYPE_CHECKING:
 _MAX_TEXT = 2900
 
 
+import re
+
+
+def _md_to_mrkdwn(text: str) -> str:
+    """Convert standard Markdown to Slack mrkdwn format.
+
+    Slack uses *bold*, _italic_, ~strike~, and ```code``` but NOT **bold** or ### headings.
+    """
+    # Headers: ### Heading -> *Heading*
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+    # Bold: **text** -> *text*
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    # Inline code with backticks stays the same (Slack supports `code`)
+    # Fenced code blocks stay the same (Slack supports ```)
+    # Links: [text](url) -> <url|text>
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
+    return text
+
+
 def _truncate(text: str, limit: int = _MAX_TEXT) -> str:
     """Truncate text for Slack Block Kit section limits."""
     if len(text) <= limit:
@@ -47,7 +66,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         blocks.append(_section(header))
 
     elif key == "brain.request_approval":
-        plan_text = turn.plan or turn.thoughts or "Plan ready for review."
+        plan_text = _md_to_mrkdwn(turn.plan or turn.thoughts or "Plan ready for review.")
         blocks.append(_section(f"*:clipboard: Plan ready:*\n{_truncate(plan_text)}"))
         blocks.append({
             "type": "actions",
@@ -77,8 +96,8 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))
 
     elif turn.actor in ("architect", "sysadmin", "developer") and turn.result:
-        result = _truncate(turn.result)
-        blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n```{result}```"))
+        result = _md_to_mrkdwn(_truncate(turn.result))
+        blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n{result}"))
 
     elif key == "aligner.confirm":
         blocks.append(_section(f":chart_with_upwards_trend: {turn.thoughts or turn.result or 'Metrics confirmed.'}"))

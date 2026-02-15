@@ -196,26 +196,22 @@ function HuddleResultViewer({ result }: { result: string }) {
     <div style={{ margin: '4px 0' }}>
       <div style={{ padding: '8px 12px', borderLeft: '3px solid #22c55e', marginBottom: 8, background: 'rgba(16, 185, 129, 0.06)', borderRadius: 4 }}>
         <div style={{ fontSize: 10, fontWeight: 600, color: '#22c55e', marginBottom: 4 }}>DEVELOPER</div>
-        <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>{devExpanded ? devText : devText.slice(0, PREVIEW_LEN)}{!devExpanded && devText.length > PREVIEW_LEN ? '...' : ''}</div>
+        <MarkdownPreview source={devExpanded ? devText : devText.slice(0, PREVIEW_LEN) + (!devExpanded && devText.length > PREVIEW_LEN ? '\n...' : '')} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
         {devText.length > PREVIEW_LEN && <button onClick={() => setDevExpanded(!devExpanded)} style={{ background: '#22c55e22', color: '#22c55e', border: '1px solid #22c55e44', padding: '2px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', marginTop: 4 }}>{devExpanded ? 'Collapse' : 'View full'}</button>}
       </div>
       <div style={{ padding: '8px 12px', borderLeft: '3px solid #8b5cf6', background: 'rgba(168, 85, 247, 0.06)', borderRadius: 4 }}>
         <div style={{ fontSize: 10, fontWeight: 600, color: '#8b5cf6', marginBottom: 4 }}>QE ASSESSMENT</div>
-        <div style={{ fontSize: 13, color: '#e2e8f0', whiteSpace: 'pre-wrap' }}>{qeExpanded ? qeText : qeText.slice(0, PREVIEW_LEN)}{!qeExpanded && qeText.length > PREVIEW_LEN ? '...' : ''}</div>
+        <MarkdownPreview source={qeExpanded ? qeText : qeText.slice(0, PREVIEW_LEN) + (!qeExpanded && qeText.length > PREVIEW_LEN ? '\n...' : '')} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
         {qeText.length > PREVIEW_LEN && <button onClick={() => setQeExpanded(!qeExpanded)} style={{ background: '#8b5cf622', color: '#8b5cf6', border: '1px solid #8b5cf644', padding: '2px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', marginTop: 4 }}>{qeExpanded ? 'Collapse' : 'View full'}</button>}
       </div>
     </div>
   );
 }
 
-function ResultViewer({ actor, result }: { actor: string; result: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const color = ACTOR_COLORS[actor] || '#6b7280';
+function ResultViewer({ result }: { actor: string; result: string }) {
   return (
     <div style={{ margin: '4px 0' }}>
-      <p style={{ fontSize: 14, color: '#4ade80', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{result}</p>
-      <button onClick={() => setExpanded(true)} style={{ background: `${color}22`, color, border: `1px solid ${color}44`, padding: '3px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', marginTop: 4 }}>View as Markdown</button>
-      {expanded && <MarkdownViewer filename={`${actor}-response.md`} content={result} onClose={() => setExpanded(false)} />}
+      <MarkdownPreview source={result} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0', lineHeight: 1.6 }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />
     </div>
   );
 }
@@ -256,7 +252,7 @@ function TurnBubble({ turn, eventId, attachment, onStatusChange }: {
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
       </div>
-      {turn.thoughts && <p style={{ margin: '4px 0', fontSize: 14, color: '#e2e8f0' }}>{turn.thoughts}</p>}
+      {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       {turn.image && (
         <img src={turn.image} alt="User attachment" style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }} onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')} />
       )}
@@ -266,10 +262,10 @@ function TurnBubble({ turn, eventId, attachment, onStatusChange }: {
         ) : turn.action === 'execute' && turn.result.length > 500 ? (
           <ResultViewer actor={turn.actor} result={turn.result} />
         ) : (
-          <p style={{ margin: '4px 0', fontSize: 14, color: '#4ade80' }}>{turn.result}</p>
+          <MarkdownPreview source={turn.result} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#4ade80' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
         )
       )}
-      {turn.plan && <pre style={{ background: '#1e1e2e', padding: 12, borderRadius: 8, fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0' }}>{turn.plan}</pre>}
+      {turn.plan && <MarkdownPreview source={turn.plan} style={{ background: '#1e1e2e', padding: 12, borderRadius: 8, fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />}
       {turn.evidence && <p style={{ margin: '4px 0', fontSize: 13, color: '#94a3b8' }}>Evidence: {turn.evidence}</p>}
       {turn.pendingApproval && eventId && (
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
