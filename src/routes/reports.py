@@ -28,22 +28,33 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
-# SPA static dir (built React app)
+# SPA static dir (built React app) -- same path as main.py static mount
 _static_dir = Path(__file__).parent.parent.parent / "ui" / "dist"
 
 
-@router.get("/", include_in_schema=False)
-async def reports_spa():
-    """Serve SPA index.html for /reports page navigation.
-
-    When the browser navigates to /reports, FastAPI's router intercepts
-    the request before the static mount. This handler serves index.html
-    so React Router can render the ReportsPage component.
-    """
+def _serve_spa():
+    """Serve SPA index.html so React Router can render the ReportsPage."""
     index = _static_dir / "index.html"
     if index.exists():
         return FileResponse(index, media_type="text/html")
-    raise HTTPException(status_code=404, detail="UI not built. Run npm run build in BlackBoard/ui/")
+    # In dev mode (Vite dev server), dist doesn't exist -- return a redirect hint
+    raise HTTPException(
+        status_code=404,
+        detail="UI not built. In dev mode, navigate via Vite dev server (e.g. http://localhost:5173/reports).",
+    )
+
+
+# Both with and without trailing slash to avoid redirect issues
+@router.get("", include_in_schema=False)
+async def reports_spa_no_slash():
+    """Serve SPA for /reports (no trailing slash)."""
+    return _serve_spa()
+
+
+@router.get("/", include_in_schema=False)
+async def reports_spa_with_slash():
+    """Serve SPA for /reports/ (with trailing slash)."""
+    return _serve_spa()
 
 
 @router.get("/list")
