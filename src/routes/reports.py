@@ -1,20 +1,25 @@
 # BlackBoard/src/routes/reports.py
 # @ai-rules:
-# 1. [Gotcha]: GET /reports/list MUST stay before GET /reports/{event_id} to avoid "list" matching as event_id.
+# 1. [Gotcha]: GET /reports/ (SPA handler) MUST be first. GET /reports/list MUST stay before GET /reports/{event_id}.
 # 2. [Pattern]: Reports are persisted snapshots (90-day TTL), NOT live-generated like queue/{id}/report.
+# 3. [Gotcha]: GET /reports/ serves index.html so the SPA loads when browser navigates to /reports.
+#    Without this, FastAPI's router intercepts the request and returns 404 (no bare /reports handler).
 """
 Reports API - Persisted event report management.
 
 Provides endpoints for the Report Viewer UI to:
+- Serve SPA for /reports page (browser navigation)
 - List all persisted reports (metadata only)
 - Get a specific report (full markdown content)
 """
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from ..dependencies import get_blackboard
 from ..state.blackboard import BlackboardState
@@ -22,6 +27,23 @@ from ..state.blackboard import BlackboardState
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+# SPA static dir (built React app)
+_static_dir = Path(__file__).parent.parent.parent / "ui" / "dist"
+
+
+@router.get("/", include_in_schema=False)
+async def reports_spa():
+    """Serve SPA index.html for /reports page navigation.
+
+    When the browser navigates to /reports, FastAPI's router intercepts
+    the request before the static mount. This handler serves index.html
+    so React Router can render the ReportsPage component.
+    """
+    index = _static_dir / "index.html"
+    if index.exists():
+        return FileResponse(index, media_type="text/html")
+    raise HTTPException(status_code=404, detail="UI not built. Run npm run build in BlackBoard/ui/")
 
 
 @router.get("/list")
