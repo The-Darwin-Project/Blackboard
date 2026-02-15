@@ -41,6 +41,7 @@ These specialized skills are loaded automatically when relevant:
 
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
 - **darwin-gitops**: Git safety rules, branch conventions
+- **darwin-test-strategy**: QE test strategy and execution workflow (mode: test)
 
 ## Testing Guidelines
 

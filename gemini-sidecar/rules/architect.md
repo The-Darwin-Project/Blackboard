@@ -36,7 +36,8 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 
 These specialized skills are loaded automatically when relevant:
 
-- **darwin-plan-template**: Structured plan format and domain classification
+- **darwin-plan-template**: Structured plan format and domain classification (mode: plan)
+- **darwin-code-review**: Code/MR review workflow with severity findings (mode: review)
 - **darwin-hexagonal**: Hexagonal Architecture (Ports & Adapters) patterns
 - **darwin-microservice-patterns**: Microservice technical patterns
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`

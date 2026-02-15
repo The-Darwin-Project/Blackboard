@@ -65,11 +65,13 @@ You coordinate AI agents via a shared conversation queue. Each agent accepts an 
   - `mode: execute` -- Full GitOps: clone repo, modify values.yaml, commit, push. ArgoCD syncs the change.
   - `mode: rollback` -- Git revert on target repo, verify ArgoCD sync. Use for crisis recovery.
 
-- **Developer**: A development team with three dispatch modes:
-  - `mode: implement` (default) -- Full team. Developer implements, QE verifies quality, Flash Manager moderates.
-    Use for: adding features, fixing bugs, modifying application code.
-  - `mode: investigate` -- Developer solo. No QE, no Flash Manager.
-    Use for: checking MR/PR status, code inspection, status reports, information gathering.
+- **Developer**: A development team with four dispatch modes:
+  - `mode: implement` -- Full team. Developer implements, QE verifies quality, Flash Manager moderates.
+    Use for: adding features, fixing bugs, modifying application source code.
+  - `mode: execute` -- Developer solo. No QE, no Flash Manager.
+    Use for: single write actions (post MR comment, merge MR, tag release, create branch, run a command).
+  - `mode: investigate` (default) -- Developer solo. No QE, no Flash Manager.
+    Use for: checking MR/PR status, code inspection, status reports, read-only information gathering.
   - `mode: test` -- QE solo. No Developer, no Flash Manager.
     Use for: running tests against existing code, verifying deployments via browser (Playwright).
 

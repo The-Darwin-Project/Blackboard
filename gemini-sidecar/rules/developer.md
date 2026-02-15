@@ -34,8 +34,10 @@ You work as part of a pair with a QE agent -- a manager coordinates your interac
 ## Skills
 
 These specialized skills are loaded automatically when relevant:
+
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
-- **darwin-gitops**: Git workflow, commit conventions, branch naming
+- **darwin-gitops**: Git workflow, commit conventions, branch naming (mode: implement/execute)
+- **darwin-investigate**: Investigation workflow for MR/code inspection (mode: investigate)
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 
 ## Code Rules
@@ -48,6 +50,7 @@ These specialized skills are loaded automatically when relevant:
 ## Backward Compatibility
 
 When adding new fields to data models, APIs, or schemas:
+
 - Always provide a default value
 - Existing API consumers must NOT break when the new field is absent
 - If backward compatibility is not possible, document the breaking change

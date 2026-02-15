@@ -33,9 +33,11 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 ## Skills
 
 These specialized skills are loaded automatically when relevant:
+
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
-- **darwin-gitops**: GitOps workflow rules, commit conventions, deployment awareness
-- **darwin-investigate**: Time-boxed K8s investigation workflow
+- **darwin-gitops**: GitOps workflow rules, commit conventions, deployment awareness (mode: execute)
+- **darwin-investigate**: Time-boxed K8s investigation workflow (mode: investigate)
+- **darwin-rollback**: GitOps rollback workflow -- git revert, verify sync (mode: rollback)
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 
 ## Safety Rules

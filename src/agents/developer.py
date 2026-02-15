@@ -145,16 +145,17 @@ class Developer(AgentClient):
         task: str,
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
-        mode: str = "implement",
+        mode: str = "investigate",
     ) -> tuple[str, Optional[str]]:
         """Dev team dispatch with mode-based routing.
 
-        - implement (default): Full Huddle -- Dev + QE + Flash Manager
-        - investigate: Dev solo -- no QE, no Flash Manager
-        - test: QE solo -- no Dev, no Flash Manager
+        - implement: Full Huddle -- Dev + QE + Flash Manager
+        - execute: Dev solo -- single write actions (post comment, merge MR, tag release)
+        - investigate (default): Dev solo -- read-only checks, status reports
+        - test: QE solo -- write/run tests independently
         """
-        # investigate -> Dev sidecar only, no QE
-        if mode == "investigate" or not self._qe_enabled:
+        # investigate/execute -> Dev sidecar only, no QE
+        if mode in ("investigate", "execute") or not self._qe_enabled:
             return await super().process(event_id, task, event_md_path, on_progress, mode)
 
         # test -> QE sidecar only, no Dev
