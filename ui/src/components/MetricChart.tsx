@@ -71,10 +71,8 @@ function MetricChart({ collapsed }: MetricChartProps) {
         </div>
       </div>
       
-      {/* Service charts grid -- scales 1→3 columns based on viewport + service count */}
-      <div className={`grid gap-3 grid-cols-1${
-        services.length >= 2 ? ' sm:grid-cols-2' : ''
-      }${services.length >= 3 ? ' lg:grid-cols-3' : ''}`}>
+      {/* Service charts grid -- auto-fill with min 100px cards, adapts to panel width */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: 8 }}>
         {services.map(service => (
           <ServiceMetricChart
             key={service}

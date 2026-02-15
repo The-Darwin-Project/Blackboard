@@ -47,18 +47,18 @@ export function ServiceMetricChart({ service, data, events: _events }: ServiceMe
 
   if (!chartData.length) {
     return (
-      <div className="bg-surface-secondary rounded-lg p-4">
-        <h3 className="text-sm font-medium text-text-primary mb-2">{service}</h3>
+      <div style={{ minWidth: 100 }} className="bg-bg-primary rounded-lg p-3 border border-border">
+        <h3 className="text-xs font-medium text-text-primary mb-2 truncate" title={service}>{service}</h3>
         <div className="h-[100px] flex items-center justify-center text-text-muted text-xs">
-          No data available
+          No data
         </div>
       </div>
     );
   }
 
   return (
-    <div className="bg-surface-secondary rounded-lg p-4">
-      <h3 className="text-sm font-medium text-text-primary mb-2">{service}</h3>
+    <div style={{ minWidth: 100 }} className="bg-bg-primary rounded-lg p-3 border border-border">
+      <h3 className="text-xs font-medium text-text-primary mb-1 truncate" title={service}>{service}</h3>
       <ResponsiveContainer width="100%" height={120}>
         <LineChart data={chartData}>
           <XAxis 
