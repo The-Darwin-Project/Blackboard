@@ -386,7 +386,18 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     cy.on('pan', handlePanZoom);
     cy.on('zoom', handlePanZoom);
 
+    // ResizeObserver: notify Cytoscape when flex container dimensions change
+    // Prevents grey nodes when minHeight:0 causes transient zero-height during reflows
+    const resizeObserver = new ResizeObserver(() => {
+      if (cyRef.current) {
+        cyRef.current.resize();
+        cyRef.current.nodeHtmlLabel?.()?.updateNodeLabel?.();
+      }
+    });
+    resizeObserver.observe(container);
+
     return () => {
+      resizeObserver.disconnect();
       cy.off('pan', handlePanZoom);
       cy.off('zoom', handlePanZoom);
       // Clean up HTML labels before destroying Cytoscape
