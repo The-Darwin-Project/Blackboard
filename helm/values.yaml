@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "144a7c8" # Updated by CI to commit SHA
+  tag: "825566e" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -18,10 +18,10 @@ redis:
   image:
     repository: registry.redhat.io/rhel9/redis-7
     tag: "latest"
-  password: ""  # Override via secret or ArgoCD app parameters
+  password: "" # Override via secret or ArgoCD app parameters
   persistence:
     enabled: true # Enables RDB snapshots to PVC -- survives pod restarts
-    storageClassName: ""  # Override via ArgoCD app parameters
+    storageClassName: "" # Override via ArgoCD app parameters
     size: 8Gi
   resources:
     requests:
@@ -40,7 +40,7 @@ qdrant:
     tag: "v1.16.3-unprivileged" # Non-root image for OpenShift SCC
   persistence:
     enabled: true
-    storageClassName: ""  # Override via ArgoCD app parameters (use block storage, NOT CephFS -- Qdrant WAL needs flock)
+    storageClassName: "" # Override via ArgoCD app parameters (use block storage, NOT CephFS -- Qdrant WAL needs flock)
     accessMode: ReadWriteOnce
     size: 10Gi
   resources:
@@ -104,7 +104,7 @@ sidecars:
   # Shared persistent storage for agent working directories (git clones)
   persistence:
     enabled: true
-    storageClassName: ""  # Override via ArgoCD app parameters
+    storageClassName: "" # Override via ArgoCD app parameters
     size: 5Gi
     accessModes:
       - ReadWriteMany
