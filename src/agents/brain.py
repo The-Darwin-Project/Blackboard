@@ -1044,6 +1044,13 @@ class Brain:
             mode_label = f" (mode={mode})" if mode else ""
             logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
             self._active_agent_for_event[event_id] = agent_name
+            # Immediate progress so UI shows activity during CLI cold start
+            await self._broadcast({
+                "type": "progress",
+                "event_id": event_id,
+                "actor": agent_name,
+                "message": f"{agent_name} starting...",
+            })
             # Acquire per-agent lock to prevent concurrent WS calls to the same sidecar
             async with self._agent_locks[agent_name]:
                 result, session_id = await agent.process(
@@ -1146,6 +1153,9 @@ class Brain:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
                 )
+            # Re-evaluate so the Brain sees the error and decides next step
+            # (without this, the event goes idle until the safety net fires)
+            await self.process_event(event_id)
 
         finally:
             # Clean up active task tracking
@@ -1418,8 +1428,14 @@ class Brain:
             f"## Conversation",
             f"",
         ])
+        from datetime import datetime
+        prev_ts = event.conversation[0].timestamp if event.conversation else 0
         for turn in event.conversation:
-            lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action})")
+            ts_str = datetime.fromtimestamp(turn.timestamp).strftime('%H:%M:%S')
+            delta = int(turn.timestamp - prev_ts)
+            delta_label = f"+{delta // 60}m {delta % 60}s" if delta > 0 else "+0s"
+            lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action}) [{ts_str}] ({delta_label})")
+            prev_ts = turn.timestamp
             if turn.thoughts:
                 lines.append(f"**Thoughts:** {turn.thoughts}")
             if turn.result:
@@ -1624,7 +1640,7 @@ class Brain:
                         # Active-task events already hit `continue` in Phase 1 above.
                         # (is_waiting already computed above)
                         time_since_process = time.time() - self._last_processed.get(eid, 0)
-                        if not is_waiting and time_since_process > 240:
+                        if not is_waiting and time_since_process > 60:
                             logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")
                             await self.process_event(eid, prefetched_event=event)
 

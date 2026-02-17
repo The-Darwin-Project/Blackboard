@@ -72,9 +72,10 @@ RUN npm install -g @google/gemini-cli@latest && \
     /usr/local/bin/gemini --version || echo "Gemini CLI linked"
 
 # Install GitLab MCP server (MR/issue/repo tools for Gemini + Claude CLIs)
+# Package bin is 'mcp-server-gitlab'; symlink to 'gitlab-mcp-server' for server.js compat
 RUN npm install -g @modelcontextprotocol/server-gitlab@latest && \
-    ln -sf "$(npm prefix -g)/bin/gitlab-mcp-server" /usr/local/bin/gitlab-mcp-server && \
-    /usr/local/bin/gitlab-mcp-server --help 2>&1 | head -1 || echo "GitLab MCP server linked"
+    ln -sf "$(npm prefix -g)/bin/mcp-server-gitlab" /usr/local/bin/gitlab-mcp-server && \
+    gitlab-mcp-server --help 2>&1 | head -1
 
 # Install Claude Code CLI (for agents using Claude models via Vertex AI)
 RUN npm install -g @anthropic-ai/claude-code@latest && \

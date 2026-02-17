@@ -50,6 +50,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [reconnecting, setReconnecting] = useState(false);
   const retryRef = useRef(0);
   const maxRetries = 10;
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
 
@@ -62,6 +63,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        // Clear any pending reconnect timer (prevents double-connect)
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
         // Fire reconnect signal BEFORE resetting retryRef so consumers
         // can distinguish reconnect from initial connect.
         if (retryRef.current > 0) {
@@ -100,7 +106,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           retryRef.current++;
           setReconnecting(true);
           console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
-          setTimeout(connect, delay);
+          reconnectTimerRef.current = setTimeout(connect, delay);
         }
       };
 
@@ -115,6 +121,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     connect();
     return () => {
+      // Clear pending reconnect timer to prevent zombie connections after unmount
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }

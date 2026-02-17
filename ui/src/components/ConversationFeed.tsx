@@ -291,8 +291,13 @@ function eventToMarkdown(event: { id: string; source: string; status: string; se
     `- **Evidence:** ${evidenceText}`, `- **Time:** ${event.event.timeDate}`,
     '', '## Conversation', '',
   ];
+  let prevTs = event.conversation[0]?.timestamp || 0;
   for (const turn of event.conversation) {
-    lines.push(`### Turn ${turn.turn} - ${turn.actor} (${turn.action})`);
+    const ts = new Date(turn.timestamp * 1000).toLocaleTimeString('en-GB', { hour12: false });
+    const delta = Math.round(turn.timestamp - prevTs);
+    const deltaLabel = delta > 0 ? `+${Math.floor(delta / 60)}m ${delta % 60}s` : '+0s';
+    lines.push(`### Turn ${turn.turn} - ${turn.actor} (${turn.action}) [${ts}] (${deltaLabel})`);
+    prevTs = turn.timestamp;
     if (turn.thoughts) lines.push(`**Thoughts:** ${turn.thoughts}`);
     if (turn.result) lines.push(`**Result:** ${turn.result}`);
     if (turn.plan) lines.push(`**Plan:**\n${turn.plan}`);
@@ -364,7 +369,7 @@ export function ConversationFeed({ eventId, onInvalidateActive }: ConversationFe
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
       {/* Sticky event header */}
       <div style={{ padding: '8px 12px', borderBottom: '1px solid #333', background: '#1e293b', flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -401,7 +406,7 @@ export function ConversationFeed({ eventId, onInvalidateActive }: ConversationFe
       {reportOpen && <MarkdownViewer filename={`event-${selectedEvent.id}.md`} content={reportContent} onClose={() => setReportOpen(false)} />}
 
       {/* Scrollable conversation */}
-      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12 }}>
+      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0 }}>
         {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
           const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
             ? attachments.find((a) => a.eventId === eventId)

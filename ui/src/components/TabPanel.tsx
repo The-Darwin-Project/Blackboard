@@ -22,7 +22,7 @@ interface TabPanelProps {
 
 export default function TabPanel({ tabs, activeTab, onTabChange, children }: TabPanelProps) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
       {/* Tab bar */}
       <div style={{
         display: 'flex',

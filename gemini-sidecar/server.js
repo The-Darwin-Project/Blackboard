@@ -301,9 +301,9 @@ function setupGitCredentials(token, workDir) {
     execSync(`git config --global --add safe.directory ${workDir}`, { encoding: 'utf8' });
     execSync(`git config --global --add safe.directory '*'`, { encoding: 'utf8' });  // Allow any subdir
     
-    // Store credentials using unique file per request (avoids stale state issues)
+    // Store credentials using host-specific helper (coexists with GitLab credentials)
     const credFile = `/tmp/git-creds-${Date.now()}`;
-    execSync(`git config --global credential.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
+    execSync(`git config --global credential.https://github.com.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
     fs.writeFileSync(credFile, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
     
     console.log(`[${new Date().toISOString()}] Git credentials configured`);
@@ -315,45 +315,66 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
- * Login to ArgoCD/Kargo CLIs in the background (non-blocking).
- * Spawns login processes that run concurrently with agent CLI execution.
- * The CLI sessions become available within ~2s; if the agent uses argocd/kargo
- * before login completes, the command fails gracefully (agent retries or
- * falls back to kubectl/oc).
+ * Login to ArgoCD/Kargo CLIs (awaitable, with deduplication).
+ * Returns a Promise that resolves when both logins complete (or timeout after 10s).
+ * Skips login if already logged in within the last 30 minutes.
  */
-function setupCLILoginsBackground() {
-  // ArgoCD login (background)
+let _lastCLILoginTime = 0;
+const CLI_LOGIN_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+
+async function setupCLILogins() {
+  const now = Date.now();
+  if (now - _lastCLILoginTime < CLI_LOGIN_INTERVAL_MS) {
+    return; // Already logged in recently
+  }
+
+  const promises = [];
+
+  // ArgoCD login
   const argoServer = process.env.ARGOCD_SERVER;
   const argoSecretPath = '/secrets/argocd/auth-token';
   if (argoServer && fs.existsSync(argoSecretPath)) {
     const password = fs.readFileSync(argoSecretPath, 'utf8').trim();
     const insecure = process.env.ARGOCD_INSECURE === 'true' ? '--insecure' : '';
-    const child = spawn('argocd', ['login', argoServer, '--username', 'admin', '--password', password, insecure, '--grpc-web'].filter(Boolean),
-      { stdio: 'pipe', timeout: 10000 });
-    child.on('close', (code) => {
-      if (code === 0) console.log(`[${new Date().toISOString()}] ArgoCD login successful (${argoServer})`);
-      else console.log(`[${new Date().toISOString()}] ArgoCD login failed (exit ${code}), agents use kubectl/oc fallback`);
-    });
-    child.on('error', (err) => {
-      console.log(`[${new Date().toISOString()}] ArgoCD login error: ${err.message}`);
-    });
+    promises.push(new Promise((resolve) => {
+      const child = spawn('argocd', ['login', argoServer, '--username', 'admin', '--password', password, insecure, '--grpc-web'].filter(Boolean),
+        { stdio: 'pipe', timeout: 10000 });
+      child.on('close', (code) => {
+        if (code === 0) console.log(`[${new Date().toISOString()}] ArgoCD login successful (${argoServer})`);
+        else console.log(`[${new Date().toISOString()}] ArgoCD login failed (exit ${code}), agents use kubectl/oc fallback`);
+        resolve();
+      });
+      child.on('error', (err) => {
+        console.log(`[${new Date().toISOString()}] ArgoCD login error: ${err.message}`);
+        resolve();
+      });
+    }));
   }
 
-  // Kargo login (background)
+  // Kargo login
   const kargoServer = process.env.KARGO_SERVER;
   const kargoSecretPath = '/secrets/kargo/auth-token';
   if (kargoServer && fs.existsSync(kargoSecretPath)) {
     const password = fs.readFileSync(kargoSecretPath, 'utf8').trim();
     const insecure = process.env.KARGO_INSECURE === 'true' ? '--insecure-skip-tls-verify' : '';
-    const child = spawn('kargo', ['login', `https://${kargoServer}`, '--admin', '--password', password, insecure].filter(Boolean),
-      { stdio: 'pipe', timeout: 10000 });
-    child.on('close', (code) => {
-      if (code === 0) console.log(`[${new Date().toISOString()}] Kargo login successful (${kargoServer})`);
-      else console.log(`[${new Date().toISOString()}] Kargo login failed (exit ${code}), agents use kubectl/oc fallback`);
-    });
-    child.on('error', (err) => {
-      console.log(`[${new Date().toISOString()}] Kargo login error: ${err.message}`);
-    });
+    promises.push(new Promise((resolve) => {
+      const child = spawn('kargo', ['login', `https://${kargoServer}`, '--admin', '--password', password, insecure].filter(Boolean),
+        { stdio: 'pipe', timeout: 10000 });
+      child.on('close', (code) => {
+        if (code === 0) console.log(`[${new Date().toISOString()}] Kargo login successful (${kargoServer})`);
+        else console.log(`[${new Date().toISOString()}] Kargo login failed (exit ${code}), agents use kubectl/oc fallback`);
+        resolve();
+      });
+      child.on('error', (err) => {
+        console.log(`[${new Date().toISOString()}] Kargo login error: ${err.message}`);
+        resolve();
+      });
+    }));
+  }
+
+  if (promises.length > 0) {
+    await Promise.all(promises);
+    _lastCLILoginTime = Date.now();
   }
 }
 
@@ -419,7 +440,7 @@ function setupGitHubTooling(token) {
  * Check if GitLab token credentials are available
  */
 function hasGitLabCredentials() {
-  return fs.existsSync(GITLAB_TOKEN_PATH);
+  return fs.existsSync(GITLAB_TOKEN_PATH) && !!GITLAB_HOST;
 }
 
 /**
@@ -447,13 +468,9 @@ function setupGitLabCredentials(token, workDir) {
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true });
     }
-    // Append GitLab credentials to git credential store
-    // Uses unique file per request (same pattern as GitHub)
+    // Store credentials using host-specific helper (coexists with GitHub credentials)
     const credFile = `/tmp/git-creds-gitlab-${Date.now()}`;
-    execSync(`git config --global credential.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
     fs.writeFileSync(credFile, `https://darwin-agent:${token}@${GITLAB_HOST}\n`, { mode: 0o600 });
-    // Also set credentials via git config for the specific host
-    // This ensures both credential helpers are consulted
     execSync(`git config --global credential.https://${GITLAB_HOST}.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
     console.log(`[${new Date().toISOString()}] GitLab git credentials configured for ${GITLAB_HOST}`);
   } catch (err) {
@@ -1087,6 +1104,13 @@ async function handleRequest(req, res) {
 
   // Execute endpoint
   if (url.pathname === '/execute' && req.method === 'POST') {
+    // Concurrency guard: reject if agent is already running a task
+    if (currentTask) {
+      res.writeHead(429, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Agent busy', event_id: currentTask.eventId || '' }));
+      return;
+    }
+
     try {
       const body = await parseBody(req);
       
@@ -1123,8 +1147,8 @@ async function handleRequest(req, res) {
         }
       }
 
-      // Login to ArgoCD/Kargo CLIs in background (non-blocking)
-      setupCLILoginsBackground();
+      // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
+      await setupCLILogins();
       
       // Execute agent CLI
       const result = await executeCLI(body.prompt, {
@@ -1221,8 +1245,8 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // Login to ArgoCD/Kargo CLIs in background (non-blocking, runs concurrent with agent CLI)
-      setupCLILoginsBackground();
+      // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
+      await setupCLILogins();
 
       // Execute agent CLI with streaming progress (headless mode for both Gemini + Claude).
       // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event
@@ -1296,7 +1320,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log(`[${new Date().toISOString()}] WebSocket client disconnected`);
     if (currentTask && currentTask.child) {
-      console.log(`[${new Date().toISOString()}] Killing orphaned process for ${currentTask.eventId}`);
+      // S5 probe: log whether the disconnecting client is the task owner
+      console.log(`[${new Date().toISOString()}] Killing orphaned process for ${currentTask.eventId} (disconnect-triggered, task was active)`);
       const child = currentTask.child;
       child.kill('SIGTERM');
       const killTimer = setTimeout(() => {
@@ -1322,6 +1347,18 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] GitLab credentials: ${hasGitLabCredentials() ? `available (${GITLAB_HOST})` : 'NOT FOUND'}`);
   console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);
   console.log(`[${new Date().toISOString()}] Kargo credentials: ${fs.existsSync('/secrets/kargo/auth-token') ? 'available' : 'not configured'}`);
+
+  // Warm up CLI logins at startup (pod ready before first task)
+  setupCLILogins().catch((err) => {
+    console.log(`[${new Date().toISOString()}] Startup CLI login failed: ${err.message}`);
+  });
+
+  // Periodic CLI login refresh -- keeps ArgoCD/Kargo sessions warm during idle
+  setInterval(() => {
+    setupCLILogins().catch((err) => {
+      console.log(`[${new Date().toISOString()}] Periodic CLI login refresh failed: ${err.message}`);
+    });
+  }, CLI_LOGIN_INTERVAL_MS);
 });
 
 // Graceful shutdown

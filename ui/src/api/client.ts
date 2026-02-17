@@ -62,12 +62,13 @@ async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const { headers: optHeaders, ...restOptions } = options;
   const response = await fetch(`${BASE_URL}${endpoint}`, {
+    ...restOptions,
     headers: {
       'Content-Type': 'application/json',
-      ...options.headers,
+      ...optHeaders,
     },
-    ...options,
   });
 
   if (!response.ok) {

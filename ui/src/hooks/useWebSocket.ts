@@ -18,6 +18,7 @@ export function useWebSocket(onMessage: MessageHandler) {
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const retryRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxRetries = 10;
   const handlersRef = useRef(onMessage);
   handlersRef.current = onMessage;
@@ -31,6 +32,10 @@ export function useWebSocket(onMessage: MessageHandler) {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
         setConnected(true);
         setReconnecting(false);
         retryRef.current = 0;
@@ -55,7 +60,7 @@ export function useWebSocket(onMessage: MessageHandler) {
           retryRef.current++;
           setReconnecting(true);
           console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
-          setTimeout(connect, delay);
+          reconnectTimerRef.current = setTimeout(connect, delay);
         }
       };
 
@@ -70,6 +75,10 @@ export function useWebSocket(onMessage: MessageHandler) {
   useEffect(() => {
     connect();
     return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
