@@ -588,15 +588,18 @@ class Brain:
         for part in raw_parts:
             p: dict = {}
             if hasattr(part, 'text') and part.text:
-                p['text'] = part.text
+                p['text'] = str(part.text)
             if hasattr(part, 'thought') and part.thought:
                 p['thought'] = True
             if hasattr(part, 'function_call') and part.function_call:
                 fc = part.function_call
-                p['functionCall'] = {"name": fc.name, "args": dict(fc.args) if fc.args else {}}
+                args = {}
+                if fc.args:
+                    args = {str(k): str(v) if isinstance(v, bytes) else v for k, v in dict(fc.args).items()}
+                p['functionCall'] = {"name": str(fc.name), "args": args}
             sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
             if sig:
-                p['thought_signature'] = sig
+                p['thought_signature'] = sig.decode('utf-8') if isinstance(sig, bytes) else str(sig)
             if p:
                 preserved.append(p)
         return preserved or [{"text": ""}]
