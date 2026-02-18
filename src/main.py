@@ -47,10 +47,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Squelch noisy loggers that pollute Brain output
-logging.getLogger("kubernetes.client.rest").setLevel(logging.WARNING)
-logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
-logging.getLogger("slack_bolt").setLevel(logging.INFO)
-logging.getLogger("slack_sdk").setLevel(logging.WARNING)
+for noisy in (
+    "kubernetes.client.rest", "urllib3.connectionpool",
+    "slack_bolt", "slack_bolt.AsyncApp", "slack_bolt.IgnoringSelfEvents",
+    "slack_sdk", "slack_sdk.socket_mode", "slack_sdk.web.async_client",
+):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
+
+# WebSocket logger: keep agent TEXT frames, drop PING/PONG/CLOSE/EOF noise
+class _WSFrameFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "TEXT" in msg or "text" in msg
+_ws_logger = logging.getLogger("websockets.client")
+_ws_logger.addFilter(_WSFrameFilter())
 
 
 @asynccontextmanager

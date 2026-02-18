@@ -733,7 +733,6 @@ class BlackboardState:
             mapping["gitops_config_path"] = gitops_config_path
         
         await self.redis.hset(key, mapping=mapping)
-        logger.debug(f"Updated discovery metadata for {name}: version={version}")
 
     async def update_service_replicas(
         self,
@@ -747,7 +746,6 @@ class BlackboardState:
             "replicas_ready": str(ready),
             "replicas_desired": str(desired),
         })
-        logger.debug(f"Updated replicas for {name}: {ready}/{desired}")
     
     async def get_service(self, name: str) -> Optional[Service]:
         """Get service metadata."""

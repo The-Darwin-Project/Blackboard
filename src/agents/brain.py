@@ -1248,11 +1248,11 @@ class Brain:
                         )
                         await self.blackboard.append_turn(event_id, turn)
                         await self._broadcast_turn(event_id, turn)
-                        await self.process_event(event_id)
+                        if not await self._is_event_closed(event_id):
+                            await self.process_event(event_id)
                         return
 
                     if result_data.get("type") == "agent_busy":
-                        # Agent exhausted retries -- return to Brain for decision
                         turn = ConversationTurn(
                             turn=(await self._next_turn_number(event_id)),
                             actor=agent_name,
@@ -1262,8 +1262,8 @@ class Brain:
                         await self.blackboard.append_turn(event_id, turn)
                         await self._broadcast_turn(event_id, turn)
                         logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
-                        # Let Brain decide: close, wait, or try another agent
-                        await self.process_event(event_id)
+                        if not await self._is_event_closed(event_id):
+                            await self.process_event(event_id)
                         return
             except (json.JSONDecodeError, TypeError):
                 pass  # Not a JSON question, treat as regular result
@@ -1280,7 +1280,8 @@ class Brain:
                 await self.blackboard.append_turn(event_id, turn)
                 await self._broadcast_turn(event_id, turn)
                 logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
-                await self.process_event(event_id)
+                if not await self._is_event_closed(event_id):
+                    await self.process_event(event_id)
                 return
 
             # Append agent result turn
@@ -1303,8 +1304,11 @@ class Brain:
                     event_id, "evaluated", turns=[routing_turn_num],
                 )
 
-            # Trigger next Brain decision
-            await self.process_event(event_id)
+            # Trigger next Brain decision (skip if event was closed while agent ran)
+            if not await self._is_event_closed(event_id):
+                await self.process_event(event_id)
+            else:
+                logger.info(f"Skipping re-entry for {event_id}: event closed while agent ran")
 
         except Exception as e:
             logger.error(f"Agent task failed: {agent_name} for {event_id}: {e}", exc_info=True)
@@ -1316,15 +1320,13 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            # Mark routing turn as EVALUATED so the orphaned SENT/DELIVERED turn
-            # doesn't trigger the unread-message scan and re-dispatch to a failing agent.
             if routing_turn_num:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
                 )
-            # Re-evaluate so the Brain sees the error and decides next step
-            # (without this, the event goes idle until the safety net fires)
-            await self.process_event(event_id)
+            # Re-evaluate (skip if event was closed concurrently)
+            if not await self._is_event_closed(event_id):
+                await self.process_event(event_id)
 
         finally:
             # Clean up active task tracking
@@ -1832,6 +1834,11 @@ class Brain:
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    async def _is_event_closed(self, event_id: str) -> bool:
+        """Fresh Redis check: True if event is closed or missing."""
+        ev = await self.blackboard.get_event(event_id)
+        return not ev or ev.status == EventStatus.CLOSED
 
     async def _next_turn_number(self, event_id: str) -> int:
         """Get the next turn number for an event."""
