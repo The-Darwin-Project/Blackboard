@@ -1,6 +1,6 @@
 // BlackBoard/ui/src/components/EventTicketCard.tsx
 // @ai-rules:
-// 1. [Pattern]: STATUS_COLORS.border drives card left border (status-based). Domain pill badge still uses DOMAIN_COLORS.
+// 1. [Pattern]: STATUS_COLORS.border drives full card border ring (status-based). Domain pill badge still uses DOMAIN_COLORS.
 // 2. [Pattern]: Close uses window.confirm() -- KISS, matching existing ConversationFeed pattern.
 // 3. [Constraint]: Props use ActiveEvent type from api/types.ts.
 /**
@@ -36,28 +36,28 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
     <div
       onClick={onSelect}
       style={{
-        padding: '10px 12px',
-        borderRadius: 8,
-        background: isSelected ? '#334155' : '#1e293b',
-        borderLeft: `4px solid ${statusStyle.border}`,
+        padding: '14px 16px',
+        borderRadius: 12,
+        background: isSelected ? '#334155' : '#0f172a',
+        border: `2px solid ${isSelected ? statusStyle.border : statusStyle.border + '88'}`,
         cursor: 'pointer',
-        fontSize: 13,
-        transition: 'background 0.15s',
+        fontSize: 14,
+        transition: 'all 0.15s',
       }}
     >
       {/* Header: service + status */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-        <strong style={{ color: '#e2e8f0', fontSize: 13 }}>{event.service}</strong>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <strong style={{ color: '#e2e8f0', fontSize: 15 }}>{event.service}</strong>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{
             background: statusStyle.bg, color: statusStyle.text,
-            padding: '1px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
+            padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600,
           }}>
             {statusStyle.label}
           </span>
           <span style={{
             background: domainColor.bg, color: domainColor.text,
-            padding: '1px 6px', borderRadius: 10, fontSize: 9, fontWeight: 600,
+            padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
             textTransform: 'uppercase',
           }}>
             {domain}
@@ -67,16 +67,17 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
 
       {/* Reason */}
       <div style={{
-        color: '#94a3b8', fontSize: 12, marginBottom: 4,
+        color: '#94a3b8', fontSize: 13, marginBottom: 8,
         overflow: 'hidden', display: '-webkit-box',
         WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+        lineHeight: 1.4,
       }} title={event.reason}>
         {event.reason}
       </div>
 
       {/* Metrics mini-bar (if available) */}
       {metrics && (
-        <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#64748b', marginBottom: 4 }}>
+        <div style={{ display: 'flex', gap: 14, fontSize: 12, color: '#64748b', marginBottom: 6 }}>
           <span>CPU: {metrics.cpu.toFixed(1)}%</span>
           <span>Mem: {metrics.memory.toFixed(1)}%</span>
           {metrics.replicas !== 'unknown' && <span>Replicas: {metrics.replicas}</span>}
@@ -84,9 +85,9 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
       )}
 
       {/* Footer: source + turns + close */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: '#64748b' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#64748b' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <SourceIcon source={event.source} size={14} />
+          <SourceIcon source={event.source} size={16} />
           <span>{event.turns} turns</span>
         </div>
         {event.status !== 'closed' && (
@@ -94,8 +95,8 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
             onClick={handleClose}
             style={{
               background: '#7f1d1d', border: '1px solid #dc262644',
-              borderRadius: 4, color: '#fca5a5', fontSize: 10,
-              padding: '1px 6px', cursor: 'pointer', fontWeight: 600,
+              borderRadius: 6, color: '#fca5a5', fontSize: 11,
+              padding: '2px 8px', cursor: 'pointer', fontWeight: 600,
             }}
             title="Close event"
           >

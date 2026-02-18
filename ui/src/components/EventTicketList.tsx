@@ -77,10 +77,10 @@ export default function EventTicketList({ onEventSelect, selectedEventId }: Even
 
       {/* Scrollable ticket grid */}
       <div style={{
-        flex: 1, overflow: 'auto', padding: '8px 12px',
+        flex: 1, overflow: 'auto', padding: '12px 16px',
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-        gap: 8,
+        gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+        gap: 12,
         alignContent: 'start',
       }}>
         {allEvents.map((evt) => (
