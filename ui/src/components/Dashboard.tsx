@@ -354,19 +354,20 @@ function DashboardInner() {
         {/* RIGHT PANEL: Resource Grid (collapsible) */}
         {resourceCollapsed ? (
           /* ExpandHandle */
-          <div
+          <button
             onClick={() => setResourceCollapsed(false)}
             style={{
               width: 16, flexShrink: 0, cursor: 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               background: '#1e293b', borderRadius: '0 8px 8px 0',
               borderRight: '1px solid #334155', borderTop: '1px solid #334155', borderBottom: '1px solid #334155',
-              marginLeft: 4,
+              borderLeft: 'none', marginLeft: 4, padding: 0,
             }}
             title="Expand resource panel"
+            aria-label="Expand resource panel"
           >
-            <span style={{ color: '#64748b', fontSize: 14, transform: 'rotate(0deg)' }}>&#x276E;</span>
-          </div>
+            <span style={{ color: '#64748b', fontSize: 14 }}>&#x276E;</span>
+          </button>
         ) : (
           <div
             className="flex-shrink-0 ml-3 bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col"

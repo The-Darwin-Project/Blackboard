@@ -22,7 +22,7 @@ interface EventTicketListProps {
 export default function EventTicketList({ onEventSelect, selectedEventId }: EventTicketListProps) {
   const [showOlderClosed, setShowOlderClosed] = useState(false);
 
-  const { data: activeEvents } = useActiveEvents();
+  const { data: activeEvents, isLoading } = useActiveEvents();
   const { data: closedEvents } = useQuery({
     queryKey: ['closedEvents'],
     queryFn: () => getClosedEvents(20),
@@ -92,7 +92,12 @@ export default function EventTicketList({ onEventSelect, selectedEventId }: Even
             onClose={handleClose}
           />
         ))}
-        {allEvents.length === 0 && (
+        {isLoading && allEvents.length === 0 && (
+          <p style={{ color: '#94a3b8', fontSize: 13, padding: '24px 0', textAlign: 'center', gridColumn: '1 / -1' }}>
+            Loading events...
+          </p>
+        )}
+        {!isLoading && allEvents.length === 0 && (
           <p style={{ color: '#64748b', fontSize: 13, padding: '12px 0', textAlign: 'center', gridColumn: '1 / -1' }}>
             No events
           </p>

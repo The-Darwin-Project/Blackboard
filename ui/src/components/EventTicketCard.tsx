@@ -35,6 +35,12 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
   return (
     <div
       onClick={onSelect}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+      tabIndex={0}
+      role="button"
+      aria-pressed={isSelected}
+      onMouseEnter={(e) => { if (!isSelected) { e.currentTarget.style.background = '#1e293b'; e.currentTarget.style.borderColor = statusStyle.border; } }}
+      onMouseLeave={(e) => { if (!isSelected) { e.currentTarget.style.background = '#0f172a'; e.currentTarget.style.borderColor = statusStyle.border + '88'; } }}
       style={{
         padding: '14px 16px',
         borderRadius: 12,
@@ -43,6 +49,7 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         cursor: 'pointer',
         fontSize: 14,
         transition: 'all 0.15s',
+        outline: 'none',
       }}
     >
       {/* Row 1: icon + state + domain */}
@@ -84,7 +91,7 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
           {event.service}
         </strong>
         {event.created && (
-          <span style={{ fontSize: 11, color: '#64748b', flexShrink: 0 }}>
+          <span style={{ fontSize: 11, color: '#94a3b8', flexShrink: 0 }}>
             {new Date(event.created).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
           </span>
         )}
@@ -102,7 +109,7 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
 
       {/* Metrics + turns (compact footer) */}
       {metrics && (
-        <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#64748b', marginBottom: 4 }}>
+        <div style={{ display: 'flex', gap: 12, fontSize: 11, color: '#94a3b8', marginBottom: 4 }}>
           <span>CPU: {metrics.cpu.toFixed(1)}%</span>
           <span>Mem: {metrics.memory.toFixed(1)}%</span>
           {metrics.replicas !== 'unknown' && <span>Replicas: {metrics.replicas}</span>}

@@ -1,4 +1,8 @@
 // BlackBoard/ui/src/components/WaitingBell.tsx
+// @ai-rules:
+// 1. [Pattern]: Polls activeEvents, filters for waiting_approval status, fetches last thoughts per event.
+// 2. [Pattern]: Urgency color escalation: green < 15min, amber < 60min, red > 60min. Shake animation at red.
+// 3. [Constraint]: Dropdown closes on outside click via document listener.
 /**
  * Notification bell for events waiting on user action (approval or feedback).
  * Shows badge count, color-coded urgency, and shakes after 1 hour.
@@ -143,19 +147,23 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
 
         {/* Dropdown */}
         {isOpen && (
-          <div style={{
-            position: 'absolute',
-            top: '100%',
-            right: 0,
-            width: 340,
-            background: '#1e293b',
-            border: '1px solid #334155',
-            borderRadius: 8,
-            boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
-            zIndex: 1000,
-            maxHeight: 400,
-            overflow: 'auto',
-          }}>
+          <div
+            role="menu"
+            onKeyDown={(e) => { if (e.key === 'Escape') setIsOpen(false); }}
+            style={{
+              position: 'absolute',
+              top: '100%',
+              right: 0,
+              width: 340,
+              background: '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: 8,
+              boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+              zIndex: 1000,
+              maxHeight: 400,
+              overflow: 'auto',
+            }}
+          >
             <div style={{
               padding: '10px 14px',
               borderBottom: '1px solid #334155',
@@ -177,7 +185,14 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
                 return (
                   <div
                     key={evt.id}
+                    role="menuitem"
+                    tabIndex={0}
                     onClick={() => { onEventClick(evt.id); setIsOpen(false); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onEventClick(evt.id); setIsOpen(false); }
+                      if (e.key === 'ArrowDown') { e.preventDefault(); (e.currentTarget.nextElementSibling as HTMLElement)?.focus(); }
+                      if (e.key === 'ArrowUp') { e.preventDefault(); (e.currentTarget.previousElementSibling as HTMLElement)?.focus(); }
+                    }}
                     style={{
                       padding: '10px 14px',
                       borderBottom: '1px solid #334155',
@@ -186,6 +201,7 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
                       gap: 10,
                       alignItems: 'flex-start',
                       transition: 'background 0.15s',
+                      outline: 'none',
                     }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = '#334155')}
                     onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
@@ -213,9 +229,9 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
                       <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
                         {evt.isPendingApproval ? '⏳ Approve/Reject plan' : '💬 Feedback requested'}
                       </div>
-                      <div style={{
+                      <div title={evt.lastThoughts} style={{
                         fontSize: 11,
-                        color: '#64748b',
+                        color: '#94a3b8',
                         marginTop: 4,
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',

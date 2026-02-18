@@ -214,15 +214,18 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
                 navigator.clipboard.writeText(text);
               }}
               title="Copy stream"
+              aria-label="Copy stream"
               style={{
                 background: 'transparent', border: 'none', color: '#64748b',
-                fontSize: 13, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+                fontSize: 14, cursor: 'pointer', padding: 0, lineHeight: 1,
+                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               }}
             >
               &#x2398;
             </button>
-            <button onClick={() => setPoppedOut(true)} title="Pop out" style={{
-              background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+            <button onClick={() => setPoppedOut(true)} title="Pop out" aria-label="Pop out" style={{
+              background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: 0, lineHeight: 1,
+              width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             }}>⧉</button>
           </div>
         </div>

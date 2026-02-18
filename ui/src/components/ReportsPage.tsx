@@ -166,10 +166,14 @@ export default function ReportsPage() {
             <button
               onClick={onBackToGrid}
               style={{
-                background: '#334155', border: 'none', borderRadius: 6,
-                color: '#94a3b8', padding: '4px 10px', cursor: 'pointer', fontSize: 12,
+                background: '#3b82f6', border: 'none', borderRadius: 6,
+                color: '#ffffff', padding: '6px 14px', cursor: 'pointer', fontSize: 13,
+                fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6,
               }}
-            >Back to Grid</button>
+            >
+              <span style={{ fontSize: 16, lineHeight: 1 }}>&#x2190;</span>
+              Back to Grid
+            </button>
             {selectedReport && (
               <span style={{ fontSize: 12, color: '#64748b' }}>
                 {selectedReport.service} &middot; {selectedReport.event_id}
@@ -205,11 +209,17 @@ function SidebarCard({ report, isSelected, onClick }: {
   return (
     <div
       onClick={onClick}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+      tabIndex={0}
+      role="button"
+      onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = '#334155'; }}
+      onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = '#1e293b'; }}
       style={{
         padding: '8px 10px', marginBottom: 4, borderRadius: 6, cursor: 'pointer',
         background: isSelected ? '#334155' : '#1e293b',
         borderLeft: `3px solid ${domainColor.border}`,
         transition: 'background 0.15s',
+        outline: 'none',
       }}
     >
       <div style={{ fontSize: 12, color: '#e2e8f0', fontWeight: isSelected ? 600 : 400 }}>
@@ -219,7 +229,7 @@ function SidebarCard({ report, isSelected, onClick }: {
         {report.reason}
       </div>
       <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
-        {new Date(report.closed_at).toLocaleDateString()} &middot; {report.turns} turns
+        {new Date(report.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} &middot; {report.turns} turns
       </div>
     </div>
   );

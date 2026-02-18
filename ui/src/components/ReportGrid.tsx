@@ -67,6 +67,8 @@ export default function ReportGrid({
             <button
               key={key}
               onClick={() => onSortChange(key)}
+              onMouseEnter={(e) => { if (sortBy !== key) e.currentTarget.style.background = '#334155'; }}
+              onMouseLeave={(e) => { if (sortBy !== key) e.currentTarget.style.background = '#1e293b'; }}
               style={{
                 background: sortBy === key ? '#3b82f6' : '#1e293b',
                 border: sortBy === key ? '1px solid #60a5fa' : '1px solid #334155',
@@ -74,6 +76,7 @@ export default function ReportGrid({
                 borderRadius: i === 0 ? '6px 0 0 6px' : i === arr.length - 1 ? '0 6px 6px 0' : 0,
                 color: sortBy === key ? '#ffffff' : '#94a3b8',
                 padding: '6px 14px', cursor: 'pointer', fontSize: 12, fontWeight: sortBy === key ? 600 : 400,
+                transition: 'background 0.15s',
               }}
             >
               {label}
@@ -110,14 +113,9 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
   return (
     <div
       onClick={onClick}
-      style={{
-        padding: '16px 20px',
-        borderRadius: 12,
-        background: '#0f172a',
-        border: `2px solid ${domainColor.border}88`,
-        cursor: 'pointer',
-        transition: 'all 0.15s',
-      }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+      tabIndex={0}
+      role="button"
       onMouseEnter={(e) => {
         e.currentTarget.style.background = '#1e293b';
         e.currentTarget.style.borderColor = domainColor.border;
@@ -125,6 +123,15 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
       onMouseLeave={(e) => {
         e.currentTarget.style.background = '#0f172a';
         e.currentTarget.style.borderColor = domainColor.border + '88';
+      }}
+      style={{
+        padding: '16px 20px',
+        borderRadius: 12,
+        background: '#0f172a',
+        border: `2px solid ${domainColor.border}88`,
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+        outline: 'none',
       }}
     >
       {/* Row 1: icon + severity + domain */}

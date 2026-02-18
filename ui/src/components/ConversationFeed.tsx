@@ -406,7 +406,7 @@ export function ConversationFeed({ eventId, onInvalidateActive }: ConversationFe
       {reportOpen && <MarkdownViewer filename={`event-${selectedEvent.id}.md`} content={reportContent} onClose={() => setReportOpen(false)} />}
 
       {/* Scrollable conversation */}
-      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0 }}>
+      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
         {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
           const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
             ? attachments.find((a) => a.eventId === eventId)

@@ -6,7 +6,7 @@
  * Reusable tab panel with bottom-border active indicator.
  * Used by Dashboard for left (Activity/Chat) and middle (Tickets/Architecture) panels.
  */
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
 
 export interface Tab {
   id: string;
@@ -21,21 +21,36 @@ interface TabPanelProps {
 }
 
 export default function TabPanel({ tabs, activeTab, onTabChange, children }: TabPanelProps) {
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
       {/* Tab bar */}
-      <div style={{
+      <div role="tablist" style={{
         display: 'flex',
         borderBottom: '1px solid #334155',
         flexShrink: 0,
         background: '#0f172a',
       }}>
-        {tabs.map((tab) => {
+        {tabs.map((tab, i) => {
           const isActive = tab.id === activeTab;
           return (
             <button
               key={tab.id}
+              ref={(el) => { tabRefs.current[i] = el; }}
+              role="tab"
+              aria-selected={isActive}
+              tabIndex={isActive ? 0 : -1}
               onClick={() => onTabChange(tab.id)}
+              onKeyDown={(e) => {
+                const len = tabs.length;
+                let next = -1;
+                if (e.key === 'ArrowRight') { e.preventDefault(); next = (i + 1) % len; }
+                if (e.key === 'ArrowLeft') { e.preventDefault(); next = (i - 1 + len) % len; }
+                if (next >= 0) { onTabChange(tabs[next].id); tabRefs.current[next]?.focus(); }
+              }}
+              onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = '#94a3b8'; }}
+              onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = '#64748b'; }}
               style={{
                 flex: 1,
                 padding: '8px 12px',

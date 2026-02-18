@@ -10,29 +10,33 @@
 import { useEvents } from '../hooks/useEvents';
 
 export default function ActivityStream() {
-  const { data: archEvents } = useEvents();
+  const { data: archEvents, isLoading } = useEvents();
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 12 }}>
-      {archEvents && archEvents.length > 0 ? (
+      {isLoading && !archEvents ? (
+        <p style={{ color: '#94a3b8', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>
+          Loading activity...
+        </p>
+      ) : archEvents && archEvents.length > 0 ? (
         archEvents.slice(0, 30).map((evt, i) => (
           <div
             key={i}
             style={{
               padding: '4px 0',
               fontSize: 13,
-              color: '#94a3b8',
+              color: '#cbd5e1',
               borderBottom: '1px solid #1e293b',
             }}
           >
-            <span style={{ color: '#64748b' }}>
+            <span style={{ color: '#94a3b8' }}>
               {new Date(evt.timestamp * 1000).toLocaleTimeString()}
             </span>
             {' '}{evt.narrative || evt.type}
           </div>
         ))
       ) : (
-        <p style={{ color: '#64748b', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
+        <p style={{ color: '#94a3b8', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
           No activity yet. Events will appear when services are monitored.
         </p>
       )}
