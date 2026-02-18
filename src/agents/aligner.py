@@ -172,6 +172,7 @@ class Aligner:
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
+        self._service_analysis_offset: dict[str, float] = {}  # service -> stagger offset (0-120s)
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
     
@@ -383,7 +384,15 @@ class Aligner:
 
         # Trigger analysis every 120s (time since last analysis, not buffer age).
         # Buffer is retained between windows so Flash sees continuity.
-        time_since_analysis = now - self._last_analysis_time.get(service, 0)
+        # Stagger: on first analysis per service, offset by 0-120s to avoid
+        # all 15 services firing Flash simultaneously on pod startup (causes 429).
+        if service not in self._service_analysis_offset:
+            import hashlib
+            h = int(hashlib.md5(service.encode()).hexdigest()[:8], 16)
+            self._service_analysis_offset[service] = h % 120
+        stagger = self._service_analysis_offset[service]
+        effective_last = self._last_analysis_time.get(service, now - 120 + stagger)
+        time_since_analysis = now - effective_last
         if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
@@ -395,9 +404,28 @@ class Aligner:
         Replaces hardcoded threshold checks with LLM reasoning over a 120s window.
         Flash interprets patterns: sustained anomaly, transient spike, recovery, 
         over-provisioning, or normal operation.
+        
+        Pre-filter: skip Flash entirely when all metrics are below thresholds
+        AND no active event exists for the service. Saves ~7 LLM calls/minute
+        during normal operation across 15 healthy services.
         """
         buffer = self._metrics_buffer.get(service, [])
         if not buffer:
+            self._metrics_analysis_pending[service] = False
+            return
+
+        # Pre-filter: skip Flash if all metrics are healthy
+        max_cpu = max(m["cpu"] for m in buffer)
+        max_mem = max(m["memory"] for m in buffer)
+        max_err = max(m["error_rate"] for m in buffer)
+        has_active = await self._has_active_event_for(service)
+
+        if (max_cpu < CPU_THRESHOLD * 0.7
+            and max_mem < MEMORY_THRESHOLD * 0.7
+            and max_err < ERROR_RATE_THRESHOLD * 0.5
+            and not has_active):
+            logger.debug(f"Metrics normal for {service} (CPU={max_cpu:.1f}% MEM={max_mem:.1f}% ERR={max_err:.2f}%), skipping Flash")
+            self._last_analysis_time[service] = time.time()
             self._metrics_analysis_pending[service] = False
             return
 
@@ -676,8 +704,14 @@ class Aligner:
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger analysis every 120s (time since last analysis, not buffer age)
-        time_since_analysis = now - self._last_analysis_time.get(service, 0)
+        # Trigger analysis every 120s -- staggered to avoid startup burst
+        if service not in self._service_analysis_offset:
+            import hashlib
+            h = int(hashlib.md5(service.encode()).hexdigest()[:8], 16)
+            self._service_analysis_offset[service] = h % 120
+        stagger = self._service_analysis_offset[service]
+        effective_last = self._last_analysis_time.get(service, now - 120 + stagger)
+        time_since_analysis = now - effective_last
         if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)

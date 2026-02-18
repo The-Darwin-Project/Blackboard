@@ -163,6 +163,15 @@ spec:
             - name: K8S_OBSERVER_LABEL_SELECTOR
               value: "{{ .Values.observer.labelSelector }}"
             {{- end }}
+            # Aligner anomaly thresholds (configurable via Helm)
+            {{- if .Values.aligner }}
+            - name: ALIGNER_CPU_THRESHOLD
+              value: "{{ .Values.aligner.thresholds.cpu }}"
+            - name: ALIGNER_MEMORY_THRESHOLD
+              value: "{{ .Values.aligner.thresholds.memory }}"
+            - name: ALIGNER_ERROR_RATE_THRESHOLD
+              value: "{{ .Values.aligner.thresholds.errorRate }}"
+            {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)
             - name: SLACK_BOT_TOKEN

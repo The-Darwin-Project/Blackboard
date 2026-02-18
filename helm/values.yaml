@@ -250,6 +250,14 @@ observer:
   interval: 30 # Poll interval in seconds
   labelSelector: "" # Optional: filter pods by label (e.g., "app=darwin-store")
 # =============================================================================
+# Aligner Anomaly Thresholds
+# =============================================================================
+aligner:
+  thresholds:
+    cpu: "80.0"       # CPU % above which Flash analyzes the service
+    memory: "85.0"    # Memory % above which Flash analyzes the service
+    errorRate: "5.0"  # Error rate % above which Flash analyzes the service
+# =============================================================================
 # Slack Integration (Socket Mode, bidirectional event mirroring)
 # =============================================================================
 slack:
