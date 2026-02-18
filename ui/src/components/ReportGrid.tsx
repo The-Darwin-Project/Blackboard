@@ -1,13 +1,21 @@
 // BlackBoard/ui/src/components/ReportGrid.tsx
 // @ai-rules:
-// 1. [Pattern]: Responsive card grid reuses DOMAIN_COLORS and STATUS_COLORS patterns from EventTicketCard.
+// 1. [Pattern]: Tile design matches EventTicketCard -- full border ring, domain-colored.
 // 2. [Constraint]: Cards show metadata only -- no markdown content loaded until selected.
+// 3. [Pattern]: Severity badge uses inline SEVERITY_STYLES map (local, not shared).
 /**
- * Responsive report card grid for the Reports page State 1.
+ * Responsive report tile grid for the Reports page State 1.
  * Displays persisted report metadata in a multi-column grid.
  */
 import type { ReportMeta } from '../api/types';
 import { DOMAIN_COLORS } from '../constants/colors';
+import SourceIcon from './SourceIcon';
+
+const SEVERITY_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  info:     { bg: '#1e3a5f', text: '#7dd3fc', label: 'Info' },
+  warning:  { bg: '#78350f', text: '#fcd34d', label: 'Warning' },
+  critical: { bg: '#7f1d1d', text: '#fca5a5', label: 'Critical' },
+};
 
 interface ReportGridProps {
   reports: ReportMeta[];
@@ -21,7 +29,6 @@ interface ReportGridProps {
 export default function ReportGrid({
   reports, onSelectReport, searchQuery, onSearchChange, sortBy, onSortChange,
 }: ReportGridProps) {
-  // Filter by search
   const filtered = reports.filter((r) => {
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
@@ -30,7 +37,6 @@ export default function ReportGrid({
       || r.reason.toLowerCase().includes(q);
   });
 
-  // Sort
   const sorted = [...filtered].sort((a, b) => {
     if (sortBy === 'service') return a.service.localeCompare(b.service);
     return new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime();
@@ -61,51 +67,93 @@ export default function ReportGrid({
         </button>
       </div>
 
-      {/* Card Grid */}
+      {/* Tile Grid */}
       {sorted.length === 0 ? (
         <div style={{ textAlign: 'center', color: '#64748b', fontSize: 14, padding: 40 }}>
           {searchQuery ? 'No reports match your search.' : 'No reports yet. Reports are generated when events close.'}
         </div>
       ) : (
-        <div className={`grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4`}>
-          {sorted.map((report) => {
-            const domain = (report.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
-            const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
-            return (
-              <div
-                key={report.event_id}
-                onClick={() => onSelectReport(report.event_id)}
-                style={{
-                  padding: '12px 14px', borderRadius: 8, cursor: 'pointer',
-                  background: '#1e293b', borderLeft: `4px solid ${domainColor.border}`,
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#334155'; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#1e293b'; }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <strong style={{ color: '#e2e8f0', fontSize: 13 }}>{report.service}</strong>
-                  <span style={{
-                    background: domainColor.bg, color: domainColor.text,
-                    padding: '1px 6px', borderRadius: 10, fontSize: 9, fontWeight: 600,
-                    textTransform: 'uppercase',
-                  }}>{domain}</span>
-                </div>
-                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={report.reason}>
-                  {report.reason}
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#64748b' }}>
-                  <span>{report.turns} turns</span>
-                  <span>{new Date(report.closed_at).toLocaleDateString()}</span>
-                </div>
-                <div style={{ fontSize: 10, color: '#475569', marginTop: 4, fontFamily: 'monospace' }}>
-                  {report.event_id}
-                </div>
-              </div>
-            );
-          })}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
+          gap: 14,
+        }}>
+          {sorted.map((report) => (
+            <ReportTile key={report.event_id} report={report} onClick={() => onSelectReport(report.event_id)} />
+          ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => void }) {
+  const domain = (report.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
+  const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
+  const severity = SEVERITY_STYLES[report.severity] || SEVERITY_STYLES.info;
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        padding: '16px 20px',
+        borderRadius: 12,
+        background: '#0f172a',
+        border: `2px solid ${domainColor.border}88`,
+        cursor: 'pointer',
+        transition: 'all 0.15s',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = '#1e293b';
+        e.currentTarget.style.borderColor = domainColor.border;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = '#0f172a';
+        e.currentTarget.style.borderColor = domainColor.border + '88';
+      }}
+    >
+      {/* Header: service + badges */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <strong style={{ color: '#e2e8f0', fontSize: 16 }}>{report.service}</strong>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{
+            background: severity.bg, color: severity.text,
+            padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600,
+          }}>
+            {severity.label}
+          </span>
+          <span style={{
+            background: domainColor.bg, color: domainColor.text,
+            padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
+            textTransform: 'uppercase',
+          }}>
+            {domain}
+          </span>
+        </div>
+      </div>
+
+      {/* Reason -- 3-line clamp for more detail */}
+      <div style={{
+        color: '#94a3b8', fontSize: 14, marginBottom: 10, lineHeight: 1.5,
+        overflow: 'hidden', display: '-webkit-box',
+        WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+      }} title={report.reason}>
+        {report.reason}
+      </div>
+
+      {/* Footer: source + turns + date */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, color: '#64748b' }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <SourceIcon source={report.source} size={16} />
+          <span>{report.turns} turns</span>
+        </div>
+        <span>{new Date(report.closed_at).toLocaleDateString()}</span>
+      </div>
+
+      {/* Event ID */}
+      <div style={{ fontSize: 11, color: '#475569', marginTop: 6, fontFamily: 'monospace' }}>
+        {report.event_id}
+      </div>
     </div>
   );
 }
