@@ -10,10 +10,7 @@
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
 # 9. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak.
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
-# 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses chat_send() for sessions, generate_stream() as stateless fallback. Tool schemas in llm/types.py.
-# 17. [Pattern]: _brain_chats: dict[event_id, session_id]. Ephemeral -- pod restart creates fresh sessions. Cleaned up in _close_and_broadcast + cancel_active_task.
-# 18. [Pattern]: Inner tool-chain loop in _process_with_llm: chat_report_tool_result returns chunks, Brain handles chained function_calls. Sentinel on early break prevents dangling state.
-# 19. [Pattern]: _execute_function_call returns tuple[bool, str]. str = actual result fed to chat_report_tool_result, not a generic placeholder.
+# 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
@@ -240,7 +237,6 @@ class Brain:
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
-        self._brain_chats: dict[str, str] = {}  # event_id -> llm_session_id (ChatPort)
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
@@ -416,18 +412,14 @@ class Brain:
         # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
         # returns True, meaning the LLM needs to make a follow-up decision.
         # Bounded to prevent runaway loops.
-        # last_sent_turn tracks which turns the chat session has already seen,
-        # so delta builders only send new turns on subsequent iterations.
         max_llm_iterations = 5
-        last_sent_turn = len(event.conversation)
         for iteration in range(max_llm_iterations):
             # Re-fetch event to pick up turns appended by the previous iteration
             if iteration > 0:
                 event = await self.blackboard.get_event(event_id)
                 if not event:
                     return
-            should_continue = await self._process_with_llm(event_id, event, last_sent_turn)
-            last_sent_turn = len(event.conversation)
+            should_continue = await self._process_with_llm(event_id, event)
             if not should_continue:
                 break
             logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
@@ -447,18 +439,13 @@ class Brain:
         self,
         event_id: str,
         event: EventDocument,
-        last_sent_turn: int = 0,
     ) -> bool:
-        """Process event using chat session or stateless fallback.
-
-        Uses chat_send for session-based calls (delta only) with an inner
-        tool-chain loop that feeds function results back via chat_report_tool_result.
+        """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
         Returns True if the caller should re-invoke immediately (e.g., after
         a lookup_service call that needs a follow-up LLM decision).
 
-        last_sent_turn: index of the last turn the chat session has seen.
-        Used to build delta prompts instead of full context on subsequent calls.
+        Precondition: self._adapter is not None (caller checks via _get_adapter()).
         """
         from .llm import BRAIN_TOOL_SCHEMAS
 
@@ -466,140 +453,8 @@ class Brain:
             logger.error(f"_process_with_llm called without adapter for {event_id}")
             return False
 
-        # Build prompt: full initial context or delta depending on session state
-        session_id = self._brain_chats.get(event_id)
-        if session_id and last_sent_turn > 0:
-            prompt = self._build_delta(event, last_sent_turn)
-        else:
-            prompt = await self._build_initial_context(event)
-
-        # Ensure a chat session exists
-        if not session_id:
-            try:
-                session_id = self._adapter.create_chat(
-                    system_prompt=BRAIN_SYSTEM_PROMPT,
-                    tools=BRAIN_TOOL_SCHEMAS,
-                    temperature=self.temperature,
-                )
-                self._brain_chats[event_id] = session_id
-            except Exception as e:
-                logger.warning(f"Chat session creation failed for {event_id}, using stateless: {e}")
-                return await self._process_with_llm_stateless(event_id, event, prompt)
-
-        accumulated_text = ""
-        function_call = None
-
-        try:
-            async for chunk in self._adapter.chat_send(session_id, prompt):
-                if chunk.text:
-                    accumulated_text += chunk.text
-                    await self._broadcast({
-                        "type": "brain_thinking",
-                        "event_id": event_id,
-                        "text": chunk.text,
-                        "accumulated": accumulated_text,
-                        "is_thought": chunk.is_thought,
-                    })
-                if chunk.function_call:
-                    function_call = chunk.function_call
-
-        except Exception as e:
-            logger.warning(f"Chat session failed for {event_id}, falling back to stateless: {e}")
-            self._brain_chats.pop(event_id, None)
-            try:
-                self._adapter.close_chat(session_id)
-            except Exception:
-                pass
-            fallback_prompt = self._event_to_markdown(event)
-            return await self._process_with_llm_stateless(event_id, event, fallback_prompt)
-
-        # Inner tool-chain loop: execute function_call, report result, handle chaining
-        max_tool_chains = 5
-        for _chain in range(max_tool_chains):
-            if not function_call:
-                break
-
-            logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
-            fc_name = function_call.name
-            should_continue, result_text = await self._execute_function_call(
-                event_id, function_call.name, function_call.args,
-            )
-
-            session_id = self._brain_chats.get(event_id)
-            if not session_id:
-                # Session disposed during function execution (e.g., close_event)
-                if accumulated_text:
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain",
-                        action="think",
-                        thoughts=accumulated_text,
-                    )
-                    await self.blackboard.append_turn(event_id, turn)
-                    await self._broadcast_turn(event_id, turn)
-                await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
-                return should_continue
-
-            function_call = None
-            try:
-                async for chunk in self._adapter.chat_report_tool_result(
-                    session_id, fc_name, result_text,
-                ):
-                    if chunk.text:
-                        accumulated_text += chunk.text
-                        await self._broadcast({
-                            "type": "brain_thinking",
-                            "event_id": event_id,
-                            "text": chunk.text,
-                            "accumulated": accumulated_text,
-                            "is_thought": chunk.is_thought,
-                        })
-                    if chunk.function_call:
-                        function_call = chunk.function_call
-            except Exception as e:
-                logger.warning(f"chat_report_tool_result failed for {event_id}: {e}")
-                break
-
-            if not should_continue:
-                if function_call and session_id:
-                    try:
-                        async for _ in self._adapter.chat_report_tool_result(
-                            session_id, function_call.name,
-                            "Acknowledged. Awaiting external result.",
-                        ):
-                            pass
-                    except Exception:
-                        pass
-                break
-
-        # Clear thinking indicator AFTER tool-chain loop completes
-        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
-
-        if not function_call and accumulated_text:
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="think",
-                thoughts=accumulated_text,
-            )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
-            return False
-
-        if not function_call:
-            logger.warning(f"Brain LLM returned empty response for {event_id}")
-
-        return False
-
-    async def _process_with_llm_stateless(
-        self,
-        event_id: str,
-        event: EventDocument,
-        prompt: str | list,
-    ) -> bool:
-        """Stateless fallback: single-shot generate_stream (pre-chat-session behavior)."""
-        from .llm import BRAIN_TOOL_SCHEMAS
-
+        # Build prompt from event context
+        prompt = await self._build_event_prompt(event)
         accumulated_text = ""
         function_call = None
 
@@ -613,19 +468,25 @@ class Brain:
             ):
                 if chunk.text:
                     accumulated_text += chunk.text
+                    # Stream thinking to UI in real-time
                     await self._broadcast({
                         "type": "brain_thinking",
                         "event_id": event_id,
                         "text": chunk.text,
                         "accumulated": accumulated_text,
-                        "is_thought": chunk.is_thought,
+                        "is_thought": chunk.is_thought,  # True for reasoning tokens
                     })
+
                 if chunk.function_call:
                     function_call = chunk.function_call
 
         except Exception as e:
             logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
-            await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+            # Clear thinking indicator on error
+            await self._broadcast({
+                "type": "brain_thinking_done",
+                "event_id": event_id,
+            })
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -636,14 +497,16 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             return False
 
-        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+        # Clear thinking indicator (committed turn replaces it)
+        await self._broadcast({
+            "type": "brain_thinking_done",
+            "event_id": event_id,
+        })
 
+        # Process the final result
         if function_call:
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
-            should_continue, _result = await self._execute_function_call(
-                event_id, function_call.name, function_call.args,
-            )
-            return should_continue
+            return await self._execute_function_call(event_id, function_call.name, function_call.args)
 
         if accumulated_text:
             turn = ConversationTurn(
@@ -659,8 +522,8 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
-    async def _build_initial_context(self, event: EventDocument) -> str | list:
-        """Build the full event context for the first chat_send in a session.
+    async def _build_event_prompt(self, event: EventDocument) -> str | list:
+        """Serialize event document as prompt for the LLM.
 
         Returns str when no images, or list for multimodal input:
         [text_str, {"bytes": bytes, "mime_type": str}]
@@ -823,33 +686,6 @@ class Brain:
 
         return text_prompt
 
-    def _build_delta(self, event: EventDocument, since_turn: int) -> str:
-        """Build a compact delta prompt containing only new turns since since_turn.
-
-        Used on subsequent chat_send calls within an existing session.
-        """
-        lines = []
-        for turn in event.conversation[since_turn:]:
-            parts = [f"Turn {turn.turn} [{turn.actor}.{turn.action}]"]
-            if turn.thoughts:
-                parts.append(turn.thoughts[:500])
-            if turn.result:
-                parts.append(f"Result: {turn.result[:500]}")
-            if turn.evidence:
-                parts.append(f"Evidence: {turn.evidence[:500]}")
-            if turn.pendingApproval:
-                parts.append("PENDING USER APPROVAL")
-            if turn.waitingFor:
-                parts.append(f"Waiting for: {turn.waitingFor}")
-            lines.append(": ".join(parts))
-
-        if not lines:
-            lines.append("(No new turns since last call.)")
-
-        lines.append("")
-        lines.append("What is the next action? Call one of your functions.")
-        return "\n".join(lines)
-
     # =========================================================================
     # Function Call Dispatcher
     # =========================================================================
@@ -859,12 +695,15 @@ class Brain:
         event_id: str,
         function_name: str,
         args: dict,
-    ) -> tuple[bool, str]:
-        """Execute an LLM function call. Maps function names to real operations.
-
-        Returns (should_continue, result_text):
-        - should_continue: True if the caller should re-invoke the LLM immediately
-        - result_text: actual function output fed back to chat_report_tool_result
+    ) -> bool:
+        """
+        Execute an LLM function call. Maps function names to real operations.
+        
+        Returns True if the caller should re-invoke the LLM immediately
+        (e.g., after lookup_service). Returns False for all other cases.
+        
+        Agent dispatch uses asyncio.create_task for non-blocking execution.
+        Other functions (close, approve, verify) are fast Redis writes.
         """
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
@@ -874,14 +713,14 @@ class Brain:
             # Duplicate task prevention
             if event_id in self._active_tasks and not self._active_tasks[event_id].done():
                 logger.info(f"Task already active for {event_id}, skipping dispatch")
-                return False, "Task already active, dispatch skipped"
+                return False
 
             # Recursion guard
             depth = self._routing_depth.get(event_id, 0) + 1
             if depth > 15:
                 logger.warning(f"Event {event_id} hit routing depth limit (15)")
                 await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
-                return False, "Routing loop detected, event force closed"
+                return False
             self._routing_depth[event_id] = depth
 
             # Write event MD to agent volume
@@ -931,12 +770,12 @@ class Brain:
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
-            return False, f"Agent {agent_name} dispatched: {task}"
+            return False
 
         elif function_name == "close_event":
             summary = args.get("summary", "Event closed.")
             await self._close_and_broadcast(event_id, summary)
-            return False, f"Event closed: {summary}"
+            return False
 
         elif function_name == "request_user_approval":
             plan_summary = args.get("plan_summary", "")
@@ -961,7 +800,7 @@ class Brain:
                 )
                 # Create Plan in the Blackboard Plan Layer (ghost node on graph)
                 await self._create_plan_for_event(event_id, event.service, plan_summary)
-            return False, f"Awaiting user approval: {plan_summary}"
+            return False
 
         elif function_name == "re_trigger_aligner":
             service = args.get("service", "")
@@ -993,8 +832,7 @@ class Brain:
                 )
                 await self.blackboard.append_turn(event_id, confirm_turn)
                 await self._broadcast_turn(event_id, confirm_turn)
-                return False, confirm_turn.evidence
-            return False, f"Aligner check requested for {service}: {condition}"
+            return False
 
         elif function_name == "wait_for_verification":
             condition = args.get("condition", "")
@@ -1027,14 +865,13 @@ class Brain:
                 )
                 await self.blackboard.append_turn(event_id, confirm_turn)
                 await self._broadcast_turn(event_id, confirm_turn)
-                return False, confirm_turn.evidence
-            return False, f"Verification requested: {condition}"
+            return False
 
         elif function_name == "defer_event":
             # Guard: never defer when waiting for user response
             if event_id in self._waiting_for_user:
                 logger.warning(f"Ignoring defer_event for {event_id}: waiting for user response")
-                return False, "Defer blocked: waiting for user"
+                return False
             reason = args.get("reason", "Deferred by Brain")
             delay = max(30, min(int(args.get("delay_seconds", 60)), 300))  # Clamp 30-300s
             defer_until = time.time() + delay
@@ -1061,7 +898,7 @@ class Brain:
                     ex=delay + 60,  # Auto-expire the key after delay + buffer
                 )
             logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
-            return False, f"Deferred {delay}s: {reason}"
+            return False
 
         elif function_name == "wait_for_user":
             summary = args.get("summary", "")
@@ -1075,7 +912,7 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            return False, f"Waiting for user: {summary}"
+            return False
 
         elif function_name == "lookup_service":
             service_name = args.get("service_name", "")
@@ -1108,7 +945,8 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            return True, result_text
+            # Signal caller to re-invoke LLM so it can act on the lookup result
+            return True
 
         elif function_name == "consult_deep_memory":
             query = args.get("query", "")
@@ -1137,7 +975,7 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            return True, memory_text
+            return True
 
         elif function_name == "lookup_journal":
             service_name = args.get("service_name", "")
@@ -1155,11 +993,11 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            return True, journal_text
+            return True
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
-            return False, f"Unknown function: {function_name}"
+            return False
 
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)
@@ -1414,13 +1252,6 @@ class Brain:
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
-        # Dispose Brain LLM chat session
-        brain_session = self._brain_chats.pop(event_id, None)
-        if brain_session and self._adapter:
-            try:
-                self._adapter.close_chat(brain_session)
-            except Exception:
-                pass
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
@@ -1462,12 +1293,6 @@ class Brain:
         self._active_tasks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
-        brain_session = self._brain_chats.pop(event_id, None)
-        if brain_session and self._adapter:
-            try:
-                self._adapter.close_chat(brain_session)
-            except Exception:
-                pass
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
