@@ -1714,6 +1714,13 @@ class Brain:
                     event.service,
                     f"{event.event.reason} -- stale closure on restart ({len(event.conversation)} turns)"
                 )
+                # Archive to deep memory (same as _close_and_broadcast path)
+                archivist = self.agents.get("_archivist_memory")
+                if archivist and hasattr(archivist, "archive_event"):
+                    try:
+                        await archivist.archive_event(event)
+                    except Exception as e:
+                        logger.warning(f"Deep memory archive failed for {eid} (non-fatal): {e}")
                 stale_count += 1
             else:
                 # No turns yet -- re-queue for fresh processing
