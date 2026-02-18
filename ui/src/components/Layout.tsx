@@ -6,14 +6,17 @@
  * 3-pane "War Room" layout for Darwin Brain Dashboard.
  * Header with status badge, main content area with responsive grid.
  */
-import { Outlet } from 'react-router-dom';
-import { Activity, AlertCircle, CheckCircle2, FileText, Square, Wifi, WifiOff } from 'lucide-react';
+import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { Activity, AlertCircle, CheckCircle2, FileText, Home, Square, Wifi, WifiOff } from 'lucide-react';
 import { useTopology } from '../hooks';
 import { useActiveEvents } from '../hooks/useQueue';
 import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
 import WaitingBell from './WaitingBell';
 
 function Layout() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const onReports = location.pathname.startsWith('/reports');
   const { isError, isFetching } = useTopology();
   const { connected, send } = useWSConnection();
   const { data: activeEvents } = useActiveEvents();
@@ -52,12 +55,12 @@ function Layout() {
         <div className="flex items-center gap-4">
           <button
             type="button"
-            onClick={() => window.open('/reports', '_blank')}
-            title="Open Reports in new tab"
+            onClick={() => navigate(onReports ? '/' : '/reports')}
+            title={onReports ? 'Back to Dashboard' : 'View Reports'}
             className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
           >
-            <FileText className="w-3.5 h-3.5" />
-            Reports
+            {onReports ? <Home className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
+            {onReports ? 'Dashboard' : 'Reports'}
           </button>
           <button
             type="button"
