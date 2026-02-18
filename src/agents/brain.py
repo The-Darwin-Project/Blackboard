@@ -1798,15 +1798,14 @@ class Brain:
 
                     # Re-process if there are DELIVERED (unread) turns the Brain hasn't evaluated
                     # But skip if waiting for user -- only user response should resume
+                    # Skip if event is already being processed (lock held) -- prevents
+                    # queued process_event calls that exhaust routing_depth during 429 retries
                     has_unread = any(t.status.value == "delivered" for t in event.conversation)
                     is_waiting = eid in self._waiting_for_user
-                    if has_unread and not is_waiting:
+                    is_locked = eid in self._event_locks and self._event_locks[eid].locked()
+                    if has_unread and not is_waiting and not is_locked:
                         await self.process_event(eid, prefetched_event=event)
-                    elif not has_unread:
-                        # Idle safety net: re-process if not waiting for user
-                        # and hasn't been processed recently.
-                        # Active-task events already hit `continue` in Phase 1 above.
-                        # (is_waiting already computed above)
+                    elif not has_unread and not is_locked:
                         time_since_process = time.time() - self._last_processed.get(eid, 0)
                         if not is_waiting and time_since_process > 60:
                             logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")
