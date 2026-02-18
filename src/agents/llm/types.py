@@ -1,9 +1,11 @@
 # src/agents/llm/types.py
 # @ai-rules:
 # 1. [Constraint]: All tool schemas are plain dicts (provider-agnostic). No google.genai or anthropic imports.
-# 2. [Pattern]: LLMPort protocol defines generate() (blocking) and generate_stream() (async iterator).
+# 2. [Pattern]: LLMPort protocol defines generate() (blocking), generate_stream() (async iterator), and ChatPort (session-based).
 # 3. [Gotcha]: Anthropic uses "input_schema" key; Gemini uses "parameters_json_schema". Adapters convert.
 # 4. [Constraint]: BRAIN_TOOL_SCHEMAS must stay in sync with _execute_function_call() in brain.py.
+# 5. [Pattern]: ChatPort methods (create_chat, chat_send, chat_report_tool_result, close_chat) are additive -- existing generate()/generate_stream() unchanged.
+# 6. [Gotcha]: chat_report_tool_result returns AsyncIterator[LLMChunk], NOT None. Model responds to function results and may chain function_calls.
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -40,8 +42,9 @@ class LLMChunk:
     """A single streaming chunk from the LLM (used by Brain)."""
     text: Optional[str] = None
     function_call: Optional[FunctionCall] = None
+    tool_use_id: Optional[str] = None
     done: bool = False
-    is_thought: bool = False  # True for thinking/reasoning tokens (Gemini ThinkingConfig)
+    is_thought: bool = False
 
 
 # =============================================================================
@@ -50,6 +53,8 @@ class LLMChunk:
 
 class LLMPort(Protocol):
     """Hexagonal port -- adapters implement this for each LLM provider."""
+
+    # --- Stateless API (used by Aligner + Brain fallback) ---
 
     async def generate(
         self,
@@ -70,6 +75,46 @@ class LLMPort(Protocol):
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
     ) -> AsyncIterator[LLMChunk]: ...
+
+    # --- Chat Session API (used by Brain for multi-turn events) ---
+
+    def create_chat(
+        self,
+        system_prompt: str,
+        tools: list[dict] | None = None,
+        temperature: float = 0.8,
+        top_p: float = 0.95,
+        max_output_tokens: int = 65000,
+    ) -> str:
+        """Create a new chat session. Returns session_id (UUID)."""
+        ...
+
+    async def chat_send(
+        self,
+        session_id: str,
+        contents: str | list,
+    ) -> AsyncIterator[LLMChunk]:
+        """Send a message in an existing chat session. Yields streaming chunks."""
+        ...
+
+    async def chat_report_tool_result(
+        self,
+        session_id: str,
+        function_name: str,
+        result: str,
+    ) -> AsyncIterator[LLMChunk]:
+        """Report function call result and stream the model's response.
+
+        Must be called after extracting a function_call from chat_send().
+        The model may respond with text, ANOTHER function_call (chaining), or both.
+        Gemini: sends Part.from_function_response via send_message_stream.
+        Claude: appends tool_result message, calls messages.stream with full list.
+        """
+        ...
+
+    def close_chat(self, session_id: str) -> None:
+        """Dispose of a chat session and free resources."""
+        ...
 
 
 # =============================================================================
