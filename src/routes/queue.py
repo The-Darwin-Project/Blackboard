@@ -200,6 +200,16 @@ async def close_event_by_user(
         event.service,
         f"{event.event.reason} -- user force-closed. {body.reason}"
     )
+    # Archive to deep memory (same path as Brain._close_and_broadcast)
+    try:
+        brain = await get_brain()
+        archivist = brain.agents.get("_archivist_memory")
+        if archivist and hasattr(archivist, "archive_event"):
+            closed_event = await blackboard.get_event(event_id)
+            if closed_event:
+                await archivist.archive_event(closed_event)
+    except Exception as e:
+        logger.warning(f"Deep memory archive failed for {event_id} (non-fatal): {e}")
     logger.info(f"User force-closed event {event_id}: {body.reason}")
     return {"status": "closed", "event_id": event_id}
 
