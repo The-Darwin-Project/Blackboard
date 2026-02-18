@@ -112,10 +112,13 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
         e.currentTarget.style.borderColor = domainColor.border + '88';
       }}
     >
-      {/* Header: service + badges */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <strong style={{ color: '#e2e8f0', fontSize: 16 }}>{report.service}</strong>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {/* Header: source icon + service + badges */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+        <SourceIcon source={report.source} size={28} />
+        <strong style={{ color: '#e2e8f0', fontSize: 16, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {report.service}
+        </strong>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           <span style={{
             background: severity.bg, color: severity.text,
             padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600,
@@ -141,12 +144,9 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
         {report.reason}
       </div>
 
-      {/* Footer: source + turns + date */}
+      {/* Footer: turns + date */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, color: '#64748b' }}>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <SourceIcon source={report.source} size={16} />
-          <span>{report.turns} turns</span>
-        </div>
+        <span>{report.turns} turns</span>
         <span>{new Date(report.closed_at).toLocaleDateString()}</span>
       </div>
 

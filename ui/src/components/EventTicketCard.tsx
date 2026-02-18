@@ -45,10 +45,13 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         transition: 'all 0.15s',
       }}
     >
-      {/* Header: service + status */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <strong style={{ color: '#e2e8f0', fontSize: 15 }}>{event.service}</strong>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {/* Header: source icon + service + badges */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <SourceIcon source={event.source} size={24} />
+        <strong style={{ color: '#e2e8f0', fontSize: 15, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {event.service}
+        </strong>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           <span style={{
             background: statusStyle.bg, color: statusStyle.text,
             padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600,
@@ -84,12 +87,9 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         </div>
       )}
 
-      {/* Footer: source + turns + close */}
+      {/* Footer: turns + close */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#64748b' }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <SourceIcon source={event.source} size={16} />
-          <span>{event.turns} turns</span>
-        </div>
+        <span>{event.turns} turns</span>
         {event.status !== 'closed' && (
           <button
             onClick={handleClose}
