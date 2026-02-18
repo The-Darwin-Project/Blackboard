@@ -271,6 +271,29 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "notify_user_slack",
+        "description": (
+            "Send a Slack DM notification to a user by email address. "
+            "Use when an agent recommends notifying someone, or when the event outcome "
+            "requires human attention (e.g., pipeline failure notification, escalation). "
+            "The message is delivered as a DM from the Darwin bot."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_email": {
+                    "type": "string",
+                    "description": "Email address of the Slack user to notify (e.g., 'user@company.com')",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The notification message to send",
+                },
+            },
+            "required": ["user_email", "message"],
+        },
+    },
 ]
 
 

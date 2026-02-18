@@ -41,6 +41,22 @@ sendMessage -m "Applying fix via GitOps, waiting for ArgoCD sync..."
 - Messages do **not** overwrite your deliverable (only `sendResults` does that).
 - Use messages to keep the Brain informed during long-running tasks.
 
+## Long-Running Operations -- NEVER Poll
+
+If your action triggers a process that takes more than 60 seconds to complete (CI/CD pipelines, ArgoCD syncs, image builds, deployments rolling out):
+
+1. **Execute the action** (post `/retest`, trigger pipeline, push commit)
+2. **Confirm the action was accepted** (pipeline status changed to `running`, comment posted)
+3. **Return immediately** via `sendResults` with current state and a recommendation:
+
+```bash
+sendResults -m "## Status Report\n\nAction: Posted /retest on MR !14\nPipeline: now running (id: 14556584)\n\nRecommendation: Re-check pipeline status in 5-10 minutes. If passed, merge. If failed, notify user@company.com."
+```
+
+**NEVER** poll, sleep, or loop waiting for pipelines/builds/syncs to complete. The Brain manages wait cycles via `defer_event`. Your job is to act and report -- not to wait.
+
+This frees your session for other events. The Brain will re-route you to check status after the deferral expires.
+
 ## Recommended workflow
 
 ```bash

@@ -64,6 +64,15 @@ When adding new fields to data models, APIs, or schemas:
 - NEVER modify infrastructure files unless explicitly in the plan
 - Always verify changes with `git diff` before committing
 
+## Long-Running Operations -- Return, Don't Wait
+
+If your action triggers a process that takes more than 60 seconds (CI/CD pipelines, image builds, ArgoCD syncs):
+- Execute the action (post `/retest`, push commit, trigger pipeline)
+- Confirm it was accepted (status changed to `running`)
+- **Return immediately** via `sendResults` with state + recommendation ("re-check in 5 min")
+- **NEVER** poll, sleep, or loop waiting for completion
+- The Brain handles wait cycles -- it will re-route you to check status later
+
 ## Engineering Principles
 
 - **KISS**: The simplest implementation that satisfies the plan is the best one.

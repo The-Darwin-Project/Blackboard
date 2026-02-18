@@ -58,6 +58,15 @@ These specialized skills are loaded automatically when relevant:
 - Follow the plan exactly -- do not improvise or add extras.
 - If the plan is ambiguous, STOP and ask the Brain for clarification.
 
+## Long-Running Operations -- Return, Don't Wait
+
+If your action triggers a process that takes more than 60 seconds (ArgoCD sync, rollout, pipeline):
+- Execute the action (push commit, trigger sync)
+- Confirm it was accepted (ArgoCD shows `Syncing`, rollout started)
+- **Return immediately** via `sendResults` with state + recommendation ("re-check in 5 min")
+- **NEVER** poll, sleep, or loop waiting for sync/rollout completion
+- The Brain handles wait cycles -- it will re-route you to verify later
+
 ## Communication Protocol
 
 1. When you start working, send a status update: `sendMessage "Investigating <service> pod status..."`

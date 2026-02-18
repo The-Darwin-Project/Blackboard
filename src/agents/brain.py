@@ -91,6 +91,12 @@ The Developer team tools:
 2. Decide the NEXT action by calling ONE of your available functions.
 3. You are called repeatedly as the conversation progresses. Each call, you see the full history and decide the next step.
 
+## Slack Notifications
+Use notify_user_slack to send a direct message to a user by their email address.
+- When an agent recommends notifying someone, call notify_user_slack with the email from the agent's recommendation.
+- Use for: pipeline failure alerts, escalations, status updates to specific users.
+- The message is delivered as a DM from the Darwin bot in Slack.
+
 ## Deep Memory
 Before routing to an agent, call consult_deep_memory with a short query describing the symptom or task.
 Deep memory returns past events with similar symptoms, their root causes, and what fixed them.
@@ -1139,6 +1145,15 @@ class Brain:
             return True
 
         elif function_name == "consult_deep_memory":
+            # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
+            already_consulted = any(
+                t.action == "think" and t.evidence and "Deep memory results" in (t.evidence or "")
+                for t in (await self.blackboard.get_event(event_id) or EventDocument(id=event_id, source="", service="", status=EventStatus.CLOSED, event=EventInput(reason=""))).conversation
+            )
+            if already_consulted:
+                logger.info(f"Deep memory already consulted for {event_id} -- skipping repeat call")
+                return True  # Continue to next LLM decision without re-querying
+
             query = args.get("query", "")
             archivist = self.agents.get("_archivist_memory")
             results = []
@@ -1185,9 +1200,51 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             return True
 
+        elif function_name == "notify_user_slack":
+            user_email = args.get("user_email", "")
+            message = args.get("message", "")
+            slack_channel = self._get_slack_channel()
+            if not slack_channel:
+                result_text = "Slack integration not available. Cannot send notification."
+            elif not user_email or not message:
+                result_text = "Missing user_email or message parameter."
+            else:
+                try:
+                    user_info = await slack_channel._app.client.users_lookupByEmail(email=user_email)
+                    slack_user_id = user_info["user"]["id"]
+                    dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
+                    dm_channel = dm["channel"]["id"]
+                    await slack_channel._app.client.chat_postMessage(
+                        channel=dm_channel,
+                        text=f":bell: *Darwin Notification*\n\n{message}",
+                    )
+                    result_text = f"Slack DM sent to {user_email}."
+                    logger.info(f"Slack notification sent to {user_email} for event {event_id}")
+                except Exception as e:
+                    result_text = f"Failed to send Slack DM to {user_email}: {e}"
+                    logger.warning(f"Slack notification failed for {user_email}: {e}")
+
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="notify",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return True
+
         else:
             logger.warning(f"Unknown function call: {function_name}")
             return False
+
+    def _get_slack_channel(self):
+        """Get the registered Slack channel from broadcast targets, if available."""
+        for target in self._broadcast_targets:
+            if hasattr(target, '__self__') and hasattr(target.__self__, '_app'):
+                return target.__self__
+        return None
 
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)
