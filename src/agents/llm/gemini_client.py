@@ -69,6 +69,9 @@ class GeminiAdapter:
         if tools is not None:
             kwargs["tools"] = [self._convert_tools(tools)]
             kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+            kwargs["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode="AUTO")
+            )
 
         return types.GenerateContentConfig(**kwargs)
 
