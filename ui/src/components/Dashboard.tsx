@@ -313,7 +313,7 @@ function DashboardInner() {
             </div>
             <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               {selectedEventId ? (
-                <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} />
+                <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
               ) : (
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 13 }}>
                   Select an event from the Tickets tab to view conversation.
@@ -340,7 +340,7 @@ function DashboardInner() {
         <div className="flex-1 min-w-0 bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col">
           <TabPanel tabs={MIDDLE_TABS} activeTab={middleTab} onTabChange={setMiddleTab}>
             <div style={{ display: middleTab === 'tickets' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
-              <EventTicketList onEventSelect={onEventSelect} selectedEventId={selectedEventId} />
+              <EventTicketList onEventSelect={onEventSelect} onEventClose={onEventClose} selectedEventId={selectedEventId} />
             </div>
             <div style={{ display: middleTab === 'architecture' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative' }}>
               <CytoscapeGraph

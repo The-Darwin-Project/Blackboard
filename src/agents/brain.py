@@ -12,6 +12,11 @@
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 # 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
+# 17. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
+# 18. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
+# 19. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
+# 20. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
+# 21. [Pattern]: Adaptive thinking: _determine_thinking_params returns (thinking_level, temperature) per conversation state. High for triage, low for routing.
 # 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
@@ -33,6 +38,7 @@ The Python code only:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -453,60 +459,83 @@ class Brain:
             logger.error(f"_process_with_llm called without adapter for {event_id}")
             return False
 
-        # Build prompt from event context
-        prompt = await self._build_event_prompt(event)
+        # Build structured contents from Redis conversation
+        prompt = await self._build_contents(event)
+
+        # Adaptive thinking level + temperature based on conversation state
+        # Gemini 3 best practice: low reasoning for mechanical routing, high for complex analysis
+        thinking_level, call_temp = self._determine_thinking_params(event)
+
+        max_retries = 3
+        last_error = None
         accumulated_text = ""
         function_call = None
+        raw_parts = None
 
-        try:
-            async for chunk in self._adapter.generate_stream(
-                system_prompt=BRAIN_SYSTEM_PROMPT,
-                contents=prompt,
-                tools=BRAIN_TOOL_SCHEMAS,
-                temperature=self.temperature,
-                max_output_tokens=65000,
-            ):
-                if chunk.text:
-                    accumulated_text += chunk.text
-                    # Stream thinking to UI in real-time
-                    await self._broadcast({
-                        "type": "brain_thinking",
-                        "event_id": event_id,
-                        "text": chunk.text,
-                        "accumulated": accumulated_text,
-                        "is_thought": chunk.is_thought,  # True for reasoning tokens
-                    })
+        for attempt in range(max_retries + 1):
+            accumulated_text = ""
+            function_call = None
+            raw_parts = None
 
-                if chunk.function_call:
-                    function_call = chunk.function_call
+            try:
+                async for chunk in self._adapter.generate_stream(
+                    system_prompt=BRAIN_SYSTEM_PROMPT,
+                    contents=prompt,
+                    tools=BRAIN_TOOL_SCHEMAS,
+                    temperature=call_temp,
+                    max_output_tokens=65000,
+                    thinking_level=thinking_level,
+                ):
+                    if chunk.text:
+                        accumulated_text += chunk.text
+                        await self._broadcast({
+                            "type": "brain_thinking",
+                            "event_id": event_id,
+                            "text": chunk.text,
+                            "accumulated": accumulated_text,
+                            "is_thought": chunk.is_thought,
+                        })
+                    if chunk.function_call:
+                        function_call = chunk.function_call
+                    if chunk.raw_parts:
+                        raw_parts = chunk.raw_parts
+                last_error = None
+                break  # Success
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries and self._is_transient(e):
+                    delay = min(5 * (2 ** attempt), 30)
+                    logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}): {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+                break
 
-        except Exception as e:
-            logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
-            # Clear thinking indicator on error
-            await self._broadcast({
-                "type": "brain_thinking_done",
-                "event_id": event_id,
-            })
+        # Clear thinking indicator ONCE after the loop exits
+        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+
+        # If all retries failed with no output, write error turn
+        if last_error and not function_call and not accumulated_text:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
                 action="error",
-                thoughts=f"LLM call failed: {str(e)}",
+                thoughts=f"LLM call failed after {attempt + 1} attempts: {last_error}",
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
             return False
 
-        # Clear thinking indicator (committed turn replaces it)
-        await self._broadcast({
-            "type": "brain_thinking_done",
-            "event_id": event_id,
-        })
+        # Normalize raw response parts for thought_signature preservation
+        captured_parts = self._normalize_response_parts(raw_parts) if raw_parts else None
 
         # Process the final result
         if function_call:
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
-            return await self._execute_function_call(event_id, function_call.name, function_call.args)
+            return await self._execute_function_call(
+                event_id, function_call.name, function_call.args,
+                response_parts=captured_parts,
+            )
 
         if accumulated_text:
             turn = ConversationTurn(
@@ -514,6 +543,7 @@ class Brain:
                 actor="brain",
                 action="think",
                 thoughts=accumulated_text,
+                response_parts=captured_parts,
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -522,14 +552,66 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
-    async def _build_event_prompt(self, event: EventDocument) -> str | list:
-        """Serialize event document as prompt for the LLM.
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """Check if exception is a transient rate-limit or availability error."""
+        err_str = str(e)
+        return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 
-        Returns str when no images, or list for multimodal input:
-        [text_str, {"bytes": bytes, "mime_type": str}]
-        Each LLM adapter converts to its SDK's native format.
+    @staticmethod
+    def _determine_thinking_params(event: "EventDocument") -> tuple[str, float]:
+        """Adaptive thinking level + temperature based on conversation state.
+
+        Gemini 3 best practice: low reasoning for mechanical routing, high for complex analysis.
+        Returns (thinking_level, temperature).
+        """
+        if not event.conversation or len(event.conversation) <= 1:
+            return "high", 0.8  # New event triage -- needs deep reasoning
+
+        recent = event.conversation[-3:]
+        has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
+        last_is_user = recent[-1].actor == "user"
+
+        if last_is_user:
+            return "medium", 0.5  # User message -- moderate reasoning to understand intent
+        if has_agent_result:
+            return "low", 0.3    # Agent reported back -- mechanical routing decision
+        return "medium", 0.5     # Default
+
+    @staticmethod
+    def _normalize_response_parts(raw_parts: list) -> list[dict]:
+        """Normalize SDK Part objects to plain dicts for Redis storage.
+
+        Handles camelCase vs snake_case thought_signature across SDK versions.
+        """
+        preserved = []
+        for part in raw_parts:
+            p: dict = {}
+            if hasattr(part, 'text') and part.text:
+                p['text'] = part.text
+            if hasattr(part, 'thought') and part.thought:
+                p['thought'] = True
+            if hasattr(part, 'function_call') and part.function_call:
+                fc = part.function_call
+                p['functionCall'] = {"name": fc.name, "args": dict(fc.args) if fc.args else {}}
+            sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
+            if sig:
+                p['thought_signature'] = sig
+            if p:
+                preserved.append(p)
+        return preserved or [{"text": ""}]
+
+    async def _build_contents(self, event: EventDocument) -> list[dict]:
+        """Build structured Gemini-format contents array from Redis conversation.
+
+        Returns list of {role: str, parts: list[dict]} messages.
+        First message = event context (user role).
+        Subsequent messages alternate user/model based on ConversationTurn actor.
+        Consecutive same-role turns are merged (Gemini requires alternating roles).
         """
         from ..models import EventEvidence
+
+        # -- Event context (first user message) --
         evidence = event.event.evidence
         evidence_text = evidence.display_text if isinstance(evidence, EventEvidence) else str(evidence)
         lines = [
@@ -545,13 +627,11 @@ class Brain:
             lines.append(f"Domain: {evidence.domain}")
             lines.append(f"Severity: {evidence.severity}")
 
-        # Event age (how long since first turn)
         event_created = event.conversation[0].timestamp if event.conversation else time.time()
         age_seconds = int(time.time() - event_created)
         age_min, age_sec = divmod(age_seconds, 60)
         lines.append(f"Event Age: {age_min}m {age_sec}s")
 
-        # Include service metadata so the LLM knows the GitOps coordinates
         svc = await self.blackboard.get_service(event.service)
         if svc:
             lines.append("")
@@ -568,9 +648,6 @@ class Brain:
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
             lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
 
-        # Architecture diagram: show the Brain the full topology with health,
-        # metrics, and dependency edges so it can correlate issues across services
-        # (e.g., darwin-store high CPU might be caused by postgres being slow).
         mermaid = ""
         try:
             mermaid = await self.blackboard.generate_mermaid()
@@ -581,7 +658,6 @@ class Brain:
             lines.append("Architecture Diagram (Mermaid):")
             lines.append(mermaid)
 
-        # Cross-event correlation: show other active events for the same service
         active_event_ids = await self.blackboard.get_active_events()
         related = []
         for eid in active_event_ids:
@@ -597,7 +673,6 @@ class Brain:
                     summary += f" [last: {last_action.actor}.{last_action.action}]"
                 related.append(summary)
             elif other.service == "general":
-                # Check if chat events mention this service in recent turns
                 for turn in other.conversation[-3:]:
                     if event.service in (turn.thoughts or "") or event.service in (turn.result or ""):
                         related.append(f"  - {eid} (chat): {other.event.reason}")
@@ -608,7 +683,6 @@ class Brain:
             lines.append("Related Active Events (same service -- consider before acting):")
             lines.extend(related)
 
-        # Recently closed events for same service (temporal memory)
         recent_closed = await self.blackboard.get_recent_closed_for_service(
             event.service, minutes=15
         )
@@ -620,71 +694,159 @@ class Brain:
                 ago_min = ago // 60
                 lines.append(f"  - {cid} (closed {ago_min}m ago): {csummary}")
 
-        # Service ops journal (persistent temporal memory)
         journal = await self._get_journal_cached(event.service)
         if journal:
             lines.append("")
             lines.append(f"Service Ops Journal (last {len(journal)} actions):")
-            for entry in journal[-10:]:  # Show last 10 entries in prompt
+            for entry in journal[-10:]:
                 lines.append(f"  {entry}")
             lines.append("  (Use lookup_journal to check other services' history)")
 
-        lines.extend(["", "Conversation so far:"])
-
         if not event.conversation:
+            lines.append("")
             lines.append("(No turns yet -- this is a new event. Triage it.)")
+            lines.append("What is the next action? Call one of your functions.")
+            return [{"role": "user", "parts": [{"text": "\n".join(lines)}]}]
+
+        context_text = "\n".join(lines)
+
+        # -- Build structured conversation messages --
+        contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
+
+        for turn in event.conversation:
+            role = "model" if turn.actor == "brain" else "user"
+            parts = self._turn_to_parts(turn)
+
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"].extend(parts)
+            else:
+                contents.append({"role": role, "parts": parts})
+
+        # Ensure the last message is a user prompt requesting action
+        action_prompt = {"text": "What is the next action? Call one of your functions."}
+        if contents[-1]["role"] == "user":
+            contents[-1]["parts"].append(action_prompt)
         else:
-            for turn in event.conversation:
-                turn_ago = int(time.time() - turn.timestamp)
-                if turn_ago < 60:
-                    time_label = f"{turn_ago}s ago"
-                elif turn_ago < 3600:
-                    time_label = f"{turn_ago // 60}m {turn_ago % 60}s ago"
-                else:
-                    time_label = f"{turn_ago // 3600}h {(turn_ago % 3600) // 60}m ago"
-                lines.append(f"  Turn {turn.turn} [{turn.actor}.{turn.action}] ({time_label}):")
-                if turn.thoughts:
-                    lines.append(f"    Thoughts: {turn.thoughts}")
-                if turn.result:
-                    lines.append(f"    Result: {turn.result}")
-                if turn.plan:
-                    lines.append(f"    Plan: {turn.plan}")
-                if turn.evidence:
-                    lines.append(f"    Evidence: {turn.evidence}")
-                if turn.requestingAgent:
-                    lines.append(f"    Requesting agent: {turn.requestingAgent}")
-                if turn.pendingApproval:
-                    lines.append(f"    PENDING USER APPROVAL")
-                if turn.waitingFor:
-                    lines.append(f"    Waiting for: {turn.waitingFor}")
-                if turn.image:
-                    lines.append(f"    [Image attached -- see below]")
+            contents.append({"role": "user", "parts": [action_prompt]})
 
-        lines.append("")
-        lines.append("What is the next action? Call one of your functions.")
+        return self._compress_contents(contents)
 
-        text_prompt = "\n".join(lines)
+    @staticmethod
+    def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
+        """Convert a single ConversationTurn to provider-agnostic parts.
 
-        # If any turn has an image, return multimodal content (text + last image)
-        last_image = None
-        for t in reversed(event.conversation):
-            if t.image:
-                last_image = t.image
-                break
+        Brain turns use response_parts (thought_signature preserved) when available.
+        User/agent turns use text from thoughts/result/evidence fields.
+        Image turns embed the image bytes inline in the parts array.
+        """
+        if turn.actor == "brain" and turn.response_parts:
+            return list(turn.response_parts)
 
-        if last_image:
+        text = ""
+        if turn.actor == "brain":
+            text = turn.thoughts or ""
+        elif turn.actor == "user":
+            text = turn.thoughts or ""
+        elif turn.actor == "aligner":
+            text = turn.evidence or turn.thoughts or ""
+        else:
+            text = turn.result or turn.thoughts or ""
+            if text and turn.actor != "user":
+                text = f"Agent {turn.actor} result: {text}"
+
+        parts: list[dict] = [{"text": text}] if text else [{"text": f"[{turn.actor}.{turn.action}]"}]
+
+        if turn.image:
             try:
-                import base64
-                # Parse data URI: "data:image/png;base64,iVBOR..."
-                header, b64data = last_image.split(",", 1)
+                header, b64data = turn.image.split(",", 1)
                 mime_type = header.split(":")[1].split(";")[0]
                 image_bytes = base64.b64decode(b64data)
-                # Provider-agnostic multimodal: each adapter converts to SDK format
-                return [text_prompt, {"bytes": image_bytes, "mime_type": mime_type}]
-            except Exception as e:
-                logger.warning(f"Failed to parse image for multimodal prompt: {e}")
+                parts.append({"bytes": image_bytes, "mime_type": mime_type})
+            except Exception:
+                pass
 
-        return text_prompt
+        return parts
+
+    # =========================================================================
+    # Conversation Compression (progressive, no LLM call)
+    # =========================================================================
+
+    @staticmethod
+    def _estimate_tokens(contents: list[dict]) -> int:
+        """Rough token estimate: ~4 chars per token."""
+        total_chars = sum(
+            len(str(part.get("text", "")))
+            for msg in contents for part in msg.get("parts", [])
+        )
+        return total_chars // 4
+
+    @classmethod
+    def _compress_contents(cls, contents: list[dict], max_tokens: int = 200_000) -> list[dict]:
+        """Progressive compression: skeleton/summary/full tiers. No LLM call.
+
+        First message (event context) always kept intact.
+        Atomic pair guard: model(functionCall) + user(response) never separated.
+        """
+        if len(contents) <= 3:
+            return contents
+
+        if cls._estimate_tokens(contents) < max_tokens:
+            return contents
+
+        context_msg = contents[0]
+        conv_msgs = contents[1:]
+        n = len(conv_msgs)
+
+        skeleton_end = max(0, n - 20)
+        summary_end = max(skeleton_end, n - 10)
+
+        # Build tier assignment per message, then enforce atomic pairs
+        tiers = []
+        for i in range(n):
+            if i < skeleton_end:
+                tiers.append("skeleton")
+            elif i < summary_end:
+                tiers.append("summary")
+            else:
+                tiers.append("full")
+
+        # Atomic pair guard: if a model msg has functionCall parts, promote
+        # it and the next user msg to the same tier (the less compressed one)
+        for i in range(n - 1):
+            msg = conv_msgs[i]
+            if msg["role"] == "model" and any(
+                isinstance(p, dict) and ("functionCall" in p or "function_call" in p)
+                for p in msg.get("parts", [])
+            ):
+                better = min(tiers[i], tiers[i + 1], key=["full", "summary", "skeleton"].index)
+                tiers[i] = better
+                tiers[i + 1] = better
+
+        compressed = [context_msg]
+        for i, msg in enumerate(conv_msgs):
+            tier = tiers[i]
+            if tier == "skeleton":
+                role = msg["role"]
+                first_text = ""
+                for p in msg.get("parts", []):
+                    if isinstance(p, dict) and "text" in p:
+                        first_text = p["text"][:60]
+                        break
+                compressed.append({"role": role, "parts": [{"text": f"(earlier turn: {first_text}...)"}]})
+            elif tier == "summary":
+                role = msg["role"]
+                parts = []
+                for p in msg.get("parts", []):
+                    if isinstance(p, dict) and "text" in p:
+                        sentences = p["text"].split(". ")
+                        parts.append({"text": sentences[0] + ("." if len(sentences) > 1 else "")})
+                    else:
+                        parts.append(p)
+                compressed.append({"role": role, "parts": parts or msg["parts"]})
+            else:
+                compressed.append(msg)
+
+        return compressed
 
     # =========================================================================
     # Function Call Dispatcher
@@ -695,6 +857,7 @@ class Brain:
         event_id: str,
         function_name: str,
         args: dict,
+        response_parts: list[dict] | None = None,
     ) -> bool:
         """
         Execute an LLM function call. Maps function names to real operations.
@@ -735,6 +898,7 @@ class Brain:
                 thoughts=f"Routing to {agent_name}: {task}",
                 selectedAgents=[agent_name],
                 taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
+                response_parts=response_parts,
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
@@ -1435,10 +1599,10 @@ class Brain:
             f"## Conversation",
             f"",
         ])
-        from datetime import datetime
+        from datetime import datetime, timezone
         prev_ts = event.conversation[0].timestamp if event.conversation else 0
         for turn in event.conversation:
-            ts_str = datetime.fromtimestamp(turn.timestamp).strftime('%H:%M:%S')
+            ts_str = datetime.fromtimestamp(turn.timestamp, tz=timezone.utc).strftime('%H:%M:%S')
             delta = int(turn.timestamp - prev_ts)
             delta_label = f"+{delta // 60}m {delta % 60}s" if delta > 0 else "+0s"
             lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action}) [{ts_str}] ({delta_label})")

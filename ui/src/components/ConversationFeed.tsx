@@ -313,9 +313,10 @@ function eventToMarkdown(event: { id: string; source: string; status: string; se
 interface ConversationFeedProps {
   eventId: string;
   onInvalidateActive: () => void;
+  onClose?: () => void;
 }
 
-export function ConversationFeed({ eventId, onInvalidateActive }: ConversationFeedProps) {
+export function ConversationFeed({ eventId, onInvalidateActive, onClose }: ConversationFeedProps) {
   const [brainThinking, setBrainThinking] = useState<{ eventId: string; text: string; isThought: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
   const [reportOpen, setReportOpen] = useState(false);
@@ -373,6 +374,13 @@ export function ConversationFeed({ eventId, onInvalidateActive }: ConversationFe
       {/* Sticky event header */}
       <div style={{ padding: '8px 12px', borderBottom: '1px solid #333', background: '#1e293b', flexShrink: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {onClose && (
+            <button
+              onClick={onClose}
+              style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px 4px', fontSize: 16, lineHeight: 1, display: 'flex', alignItems: 'center' }}
+              title="Back to Activity"
+            >←</button>
+          )}
           <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: 600 }}>{selectedEvent.service}</span>
           <StatusBadge status={selectedEvent.status} />
           <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{selectedEvent.id}</span>

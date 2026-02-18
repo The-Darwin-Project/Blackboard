@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -321,7 +321,7 @@ class EventInput(BaseModel):
     reason: str = Field(..., description="What triggered this event")
     evidence: "str | EventEvidence" = Field(..., description="Logs, metrics, event details")
     timeDate: str = Field(
-        default_factory=lambda: datetime.now().isoformat(),
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(),
         description="ISO 8601 timestamp",
     )
 
@@ -363,6 +363,7 @@ class ConversationTurn(BaseModel):
     status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
     source: Optional[str] = Field(None, description="Origin channel: 'dashboard' | 'slack' | None (legacy)")
     timestamp: float = Field(default_factory=time.time)
+    response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
 
 
 class EventDocument(BaseModel):

@@ -5,6 +5,8 @@
 # 3. [Gotcha]: Claude rejects temperature + top_p together -- only pass temperature (normalized).
 # 4. [Pattern]: Temperature normalization: config range 0.0-2.0 -> Claude range 0.0-1.0 (divide by 2).
 # 5. [Pattern]: Uses AsyncAnthropicVertex for Vertex AI authentication (same SA key as Brain).
+# 6. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
+# 7. [Pattern]: Structured contents map: model->assistant, functionCall->tool_use, functionResponse->tool_result.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
@@ -76,17 +78,32 @@ class ClaudeAdapter:
 
     @staticmethod
     def _convert_contents(contents: str | list) -> list[dict]:
-        """Convert provider-agnostic contents to Anthropic messages format."""
+        """Convert provider-agnostic contents to Anthropic messages format.
+
+        Three input formats:
+        - str: plain text (Aligner, simple prompts)
+        - list[dict] with "role" key: structured multi-turn (Brain)
+        - list[str | dict]: multimodal (text + images)
+        """
         if isinstance(contents, str):
             return [{"role": "user", "content": contents}]
 
-        # Multimodal: list of str / image dicts
+        # Structured multi-turn: [{role, parts}]
+        if contents and isinstance(contents[0], dict) and "role" in contents[0]:
+            return ClaudeAdapter._convert_structured(contents)
+
+        # Multimodal: [text_str, {"bytes": bytes, "mime_type": str}]
+        return ClaudeAdapter._convert_multimodal(contents)
+
+    @staticmethod
+    def _convert_multimodal(contents: list) -> list[dict]:
+        """Convert provider-agnostic multimodal list to Anthropic messages."""
+        import base64
         blocks = []
         for item in contents:
             if isinstance(item, str):
                 blocks.append({"type": "text", "text": item})
             elif isinstance(item, dict) and "bytes" in item:
-                import base64
                 blocks.append({
                     "type": "image",
                     "source": {
@@ -96,6 +113,79 @@ class ClaudeAdapter:
                     },
                 })
         return [{"role": "user", "content": blocks}]
+
+    @staticmethod
+    def _convert_structured(contents: list[dict]) -> list[dict]:
+        """Convert Gemini-format structured contents to Anthropic messages.
+
+        Role mapping: model->assistant, user->user.
+        functionCall parts -> tool_use content blocks.
+        After tool_use, the next user message becomes tool_result (Claude requires this).
+        """
+        import base64
+        messages = []
+        tool_call_counter = 0
+        pending_tool_id: str | None = None
+
+        for msg in contents:
+            role = "assistant" if msg["role"] == "model" else "user"
+            blocks = []
+
+            # If previous assistant had tool_use and this is the user response,
+            # wrap the entire user message as a tool_result
+            if pending_tool_id and role == "user":
+                text_parts = []
+                for p in msg.get("parts", []):
+                    if isinstance(p, dict) and "text" in p:
+                        text_parts.append(p["text"])
+                    elif isinstance(p, str):
+                        text_parts.append(p)
+                blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": pending_tool_id,
+                    "content": "\n".join(text_parts) if text_parts else "(no output)",
+                })
+                pending_tool_id = None
+                messages.append({"role": role, "content": blocks})
+                continue
+
+            pending_tool_id = None
+            for p in msg.get("parts", []):
+                if isinstance(p, dict) and "functionCall" in p:
+                    tool_call_counter += 1
+                    fc = p["functionCall"]
+                    tid = f"call_{tool_call_counter}"
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tid,
+                        "name": fc["name"],
+                        "input": fc.get("args", {}),
+                    })
+                    pending_tool_id = tid
+                elif isinstance(p, dict) and "functionResponse" in p:
+                    fr = p["functionResponse"]
+                    blocks.append({
+                        "type": "tool_result",
+                        "tool_use_id": f"call_{tool_call_counter}",
+                        "content": str(fr.get("response", "")),
+                    })
+                    pending_tool_id = None
+                elif isinstance(p, dict) and "bytes" in p:
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": p["mime_type"],
+                            "data": base64.b64encode(p["bytes"]).decode(),
+                        },
+                    })
+                elif isinstance(p, dict) and "text" in p:
+                    blocks.append({"type": "text", "text": p["text"]})
+                elif isinstance(p, str):
+                    blocks.append({"type": "text", "text": p})
+            if blocks:
+                messages.append({"role": role, "content": blocks})
+        return messages
 
     # -----------------------------------------------------------------
     # LLMPort: generate (blocking)

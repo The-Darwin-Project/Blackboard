@@ -16,10 +16,11 @@ import EventTicketCard from './EventTicketCard';
 
 interface EventTicketListProps {
   onEventSelect: (id: string) => void;
+  onEventClose?: () => void;
   selectedEventId: string | null;
 }
 
-export default function EventTicketList({ onEventSelect, selectedEventId }: EventTicketListProps) {
+export default function EventTicketList({ onEventSelect, onEventClose, selectedEventId }: EventTicketListProps) {
   const [showOlderClosed, setShowOlderClosed] = useState(false);
 
   const { data: activeEvents, isLoading } = useActiveEvents();
@@ -88,7 +89,7 @@ export default function EventTicketList({ onEventSelect, selectedEventId }: Even
             key={evt.id}
             event={evt}
             isSelected={selectedEventId === evt.id}
-            onSelect={() => onEventSelect(evt.id)}
+            onSelect={() => selectedEventId === evt.id && onEventClose ? onEventClose() : onEventSelect(evt.id)}
             onClose={handleClose}
           />
         ))}

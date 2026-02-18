@@ -42,6 +42,7 @@ class LLMChunk:
     function_call: Optional[FunctionCall] = None
     done: bool = False
     is_thought: bool = False  # True for thinking/reasoning tokens (Gemini ThinkingConfig)
+    raw_parts: Optional[list] = None  # Preserved response parts for thought_signature replay
 
 
 # =============================================================================

@@ -1467,14 +1467,14 @@ class BlackboardState:
         evidence: "str | EventEvidence",
     ) -> str:
         """Create a new event and add to the queue for Brain triage."""
-        from datetime import datetime
+        from datetime import datetime, timezone
         event = EventDocument(
             source=source,
             service=service,
             event=EventInput(
                 reason=reason,
                 evidence=evidence,
-                timeDate=datetime.now().isoformat(),
+                timeDate=datetime.now(timezone.utc).isoformat(),
             ),
         )
         # Store event document
@@ -1721,9 +1721,9 @@ class BlackboardState:
 
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""
-        from datetime import datetime
+        from datetime import datetime, timezone
         key = f"{self.JOURNAL_PREFIX}{service}"
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         await self.redis.rpush(key, f"[{timestamp}] {entry}")
         await self.redis.ltrim(key, -self.JOURNAL_MAX_ENTRIES, -1)
 
