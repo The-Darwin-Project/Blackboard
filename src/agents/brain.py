@@ -566,17 +566,17 @@ class Brain:
         Returns (thinking_level, temperature).
         """
         if not event.conversation or len(event.conversation) <= 1:
-            return "high", 0.8  # New event triage -- needs deep reasoning
+            return "low", 0.5    # New event triage -- low thinking to reduce token cost and latency
 
         recent = event.conversation[-3:]
         has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
         if last_is_user:
-            return "medium", 0.5  # User message -- moderate reasoning to understand intent
+            return "low", 0.4    # User message -- low thinking, fast response
         if has_agent_result:
             return "low", 0.3    # Agent reported back -- mechanical routing decision
-        return "medium", 0.5     # Default
+        return "low", 0.4        # Default -- keep thinking low until quota pressure resolves
 
     @staticmethod
     def _normalize_response_parts(raw_parts: list) -> list[dict]:
