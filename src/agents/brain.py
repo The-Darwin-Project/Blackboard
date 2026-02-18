@@ -777,6 +777,8 @@ class Brain:
         text = ""
         if turn.actor == "brain":
             text = turn.thoughts or ""
+            if turn.evidence:
+                text = f"{text}\n{turn.evidence}" if text else turn.evidence
         elif turn.actor == "user":
             text = turn.thoughts or ""
         elif turn.actor == "aligner":
@@ -1146,13 +1148,14 @@ class Brain:
 
         elif function_name == "consult_deep_memory":
             # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
+            ev = await self.blackboard.get_event(event_id)
             already_consulted = any(
-                t.action == "think" and t.evidence and "Deep memory results" in (t.evidence or "")
-                for t in (await self.blackboard.get_event(event_id) or EventDocument(id=event_id, source="", service="", status=EventStatus.CLOSED, event=EventInput(reason=""))).conversation
+                t.action == "think" and t.evidence and "Deep memory" in (t.evidence or "")
+                for t in (ev.conversation if ev else [])
             )
             if already_consulted:
-                logger.info(f"Deep memory already consulted for {event_id} -- skipping repeat call")
-                return True  # Continue to next LLM decision without re-querying
+                logger.info(f"Deep memory already consulted for {event_id} -- breaking loop")
+                return False  # Break the LLM loop; event re-enters via next event loop scan
 
             query = args.get("query", "")
             archivist = self.agents.get("_archivist_memory")
