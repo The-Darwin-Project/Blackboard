@@ -127,47 +127,49 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
         e.currentTarget.style.borderColor = domainColor.border + '88';
       }}
     >
-      {/* Header: source icon + service + badges */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+      {/* Row 1: icon + severity + domain */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <SourceIcon source={report.source} size={28} />
-        <strong style={{ color: '#e2e8f0', fontSize: 16, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {report.service}
-        </strong>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          <span style={{
-            background: severity.bg, color: severity.text,
-            padding: '2px 10px', borderRadius: 10, fontSize: 11, fontWeight: 600,
-          }}>
-            {severity.label}
-          </span>
-          <span style={{
-            background: domainColor.bg, color: domainColor.text,
-            padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 600,
-            textTransform: 'uppercase',
-          }}>
-            {domain}
-          </span>
-        </div>
+        <span style={{
+          background: severity.bg, color: severity.text,
+          padding: '3px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600,
+        }}>
+          {severity.label}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{
+          background: domainColor.bg, color: domainColor.text,
+          padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600,
+          textTransform: 'uppercase',
+        }}>
+          {domain}
+        </span>
       </div>
 
-      {/* Reason -- 3-line clamp for more detail */}
+      {/* Row 2: service + timestamp */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+        <strong style={{ color: '#e2e8f0', fontSize: 15, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {report.service}
+        </strong>
+        <span style={{ fontSize: 12, color: '#64748b', flexShrink: 0 }}>
+          {new Date(report.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+        </span>
+      </div>
+
+      {/* Row 3: reason */}
       <div style={{
-        color: '#94a3b8', fontSize: 14, marginBottom: 10, lineHeight: 1.5,
+        color: '#94a3b8', fontSize: 13, lineHeight: 1.5,
         overflow: 'hidden', display: '-webkit-box',
         WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+        marginBottom: 8,
       }} title={report.reason}>
         {report.reason}
       </div>
 
-      {/* Footer: turns + date */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, color: '#64748b' }}>
+      {/* Footer: turns + event ID */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: '#475569' }}>
         <span>{report.turns} turns</span>
-        <span>{new Date(report.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
-      </div>
-
-      {/* Event ID */}
-      <div style={{ fontSize: 11, color: '#475569', marginTop: 6, fontFamily: 'monospace' }}>
-        {report.event_id}
+        <span style={{ fontFamily: 'monospace' }}>{report.event_id}</span>
       </div>
     </div>
   );
