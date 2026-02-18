@@ -1,14 +1,15 @@
 // BlackBoard/ui/src/components/EventTicketCard.tsx
 // @ai-rules:
-// 1. [Pattern]: Cynefin domain color from DOMAIN_COLORS drives left border color.
+// 1. [Pattern]: STATUS_COLORS.border drives card left border (status-based). Domain pill badge still uses DOMAIN_COLORS.
 // 2. [Pattern]: Close uses window.confirm() -- KISS, matching existing ConversationFeed pattern.
 // 3. [Constraint]: Props use ActiveEvent type from api/types.ts.
 /**
- * Polymorphic event ticket card with Cynefin color coding.
- * Renders in EventTicketList inside the middle panel "Tickets" tab.
+ * Polymorphic event ticket card with status color coding.
+ * Renders in EventTicketList grid inside the middle panel "Tickets" tab.
  */
 import type { ActiveEvent } from '../api/types';
 import { DOMAIN_COLORS, STATUS_COLORS } from '../constants/colors';
+import SourceIcon from './SourceIcon';
 
 interface EventTicketCardProps {
   event: ActiveEvent;
@@ -36,10 +37,9 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
       onClick={onSelect}
       style={{
         padding: '10px 12px',
-        marginBottom: 6,
         borderRadius: 8,
         background: isSelected ? '#334155' : '#1e293b',
-        borderLeft: `4px solid ${domainColor.border}`,
+        borderLeft: `4px solid ${statusStyle.border}`,
         cursor: 'pointer',
         fontSize: 13,
         transition: 'background 0.15s',
@@ -68,7 +68,8 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
       {/* Reason */}
       <div style={{
         color: '#94a3b8', fontSize: 12, marginBottom: 4,
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        overflow: 'hidden', display: '-webkit-box',
+        WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
       }} title={event.reason}>
         {event.reason}
       </div>
@@ -84,8 +85,8 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
 
       {/* Footer: source + turns + close */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: '#64748b' }}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <span>{event.source}</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <SourceIcon source={event.source} size={14} />
           <span>{event.turns} turns</span>
         </div>
         {event.status !== 'closed' && (

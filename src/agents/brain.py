@@ -15,7 +15,7 @@
 # 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
-# 15. [Pattern]: _agent_sessions tracks session_id per event (Phase 2). Persists across task invocations, cleaned in cancel/close paths only.
+# 15. [Pattern]: _agent_sessions: dict[event_id, dict[agent_name, session_id]]. Nested dict prevents clobbering and allows O(1) cleanup on event close.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -236,7 +236,7 @@ class Brain:
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
-        self._agent_sessions: dict[str, str] = {}  # event_id -> session_id (Phase 2)
+        self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
@@ -1059,10 +1059,11 @@ class Brain:
                     event_md_path=event_md_path,
                     on_progress=on_progress,
                     mode=mode,
+                    session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
                 )
             # Track session for Phase 2 follow-ups (forward user messages instead of cancel)
             if session_id:
-                self._agent_sessions[event_id] = session_id
+                self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
             # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
@@ -1251,6 +1252,9 @@ class Brain:
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
+        for agent in self.agents.values():
+            if hasattr(agent, 'cleanup_event'):
+                agent.cleanup_event(event_id)
         # Complete any associated Plan (removes ghost node from graph)
         plan_id = self._event_plans.pop(event_id, None)
         if plan_id:
@@ -1289,6 +1293,9 @@ class Brain:
         self._active_tasks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
+        for agent in self.agents.values():
+            if hasattr(agent, 'cleanup_event'):
+                agent.cleanup_event(event_id)
         self._event_locks.pop(event_id, None)
         return True
 
@@ -1311,7 +1318,7 @@ class Brain:
         Used in Phase 2 to forward user messages to agents instead of killing them.
         The agent's followup() handles routing internally (e.g., Developer routes through Flash Manager).
         """
-        session_id = self._agent_sessions.get(event_id)
+        session_id = self._agent_sessions.get(event_id, {}).get(agent_name)
         if not session_id:
             return "No active session"
         agent = self.agents.get(agent_name)
@@ -1567,8 +1574,9 @@ class Brain:
                                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
                             user_turns = [t for t in unseen if t.actor == "user"]
                             if user_turns:
-                                session_id = self._agent_sessions.get(eid)
-                                if session_id:
+                                agent_name = self._active_agent_for_event.get(eid)
+                                session_id = self._agent_sessions.get(eid, {}).get(agent_name) if agent_name else None
+                                if session_id and agent_name:
                                     # Phase 2: Forward user message to agent via session.
                                     # Brain calls send_to_agent() uniformly for all agents.
                                     # Developer.followup() handles Huddle routing internally.
@@ -1576,15 +1584,11 @@ class Brain:
                                         t.thoughts for t in user_turns if t.thoughts
                                     )
                                     if not user_text:
-                                        continue  # Empty user message -- skip forwarding
-                                    agent_name = self._active_agent_for_event.get(eid)
-                                    if agent_name:
-                                        # Non-blocking: dispatch as tracked task so emergency_stop
-                                        # can cancel it. Replaces any existing task for this event.
-                                        fwd_task = asyncio.create_task(
-                                            self._forward_user_to_agent(eid, agent_name, user_text)
-                                        )
-                                        self._active_tasks[eid] = fwd_task
+                                        continue
+                                    fwd_task = asyncio.create_task(
+                                        self._forward_user_to_agent(eid, agent_name, user_text)
+                                    )
+                                    self._active_tasks[eid] = fwd_task
                                     continue
                                 else:
                                     # No session -- fall back to Phase 1 cancel behavior

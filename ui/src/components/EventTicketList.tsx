@@ -75,8 +75,14 @@ export default function EventTicketList({ onEventSelect, selectedEventId }: Even
         </button>
       </div>
 
-      {/* Scrollable ticket list */}
-      <div style={{ flex: 1, overflow: 'auto', padding: '8px 12px' }}>
+      {/* Scrollable ticket grid */}
+      <div style={{
+        flex: 1, overflow: 'auto', padding: '8px 12px',
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+        gap: 8,
+        alignContent: 'start',
+      }}>
         {allEvents.map((evt) => (
           <EventTicketCard
             key={evt.id}
@@ -87,7 +93,7 @@ export default function EventTicketList({ onEventSelect, selectedEventId }: Even
           />
         ))}
         {allEvents.length === 0 && (
-          <p style={{ color: '#64748b', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
+          <p style={{ color: '#64748b', fontSize: 13, padding: '12px 0', textAlign: 'center', gridColumn: '1 / -1' }}>
             No events
           </p>
         )}

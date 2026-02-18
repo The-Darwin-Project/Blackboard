@@ -42,6 +42,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-microservice-patterns**: Microservice technical patterns
 - **darwin-comms**: Report findings via `sendResults` / status via `sendMessage`
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
+- **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
 
 ## Hard Rules
 

@@ -18,7 +18,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
 const WebSocket = require('ws');
 
@@ -471,8 +471,9 @@ function setupGitLabCredentials(token, workDir) {
     // Store credentials using host-specific helper (coexists with GitHub credentials)
     const credFile = `/tmp/git-creds-gitlab-${Date.now()}`;
     fs.writeFileSync(credFile, `https://darwin-agent:${token}@${GITLAB_HOST}\n`, { mode: 0o600 });
-    execSync(`git config --global credential.https://${GITLAB_HOST}.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
-    console.log(`[${new Date().toISOString()}] GitLab git credentials configured for ${GITLAB_HOST}`);
+    execFileSync('git', ['config', '--global', `credential.https://${GITLAB_HOST}.helper`, `store --file=${credFile}`], { encoding: 'utf8' });
+    execFileSync('git', ['config', '--global', `http.https://${GITLAB_HOST}.sslVerify`, 'false'], { encoding: 'utf8' });
+    console.log(`[${new Date().toISOString()}] GitLab git credentials configured for ${GITLAB_HOST} (SSL verify disabled)`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] GitLab git config error:`, err.message);
     throw new Error(`Failed to configure GitLab git: ${err.message}`);
@@ -493,22 +494,30 @@ function setupGitLabTooling(token) {
 
     // Check if glab CLI exists (provides MCP server via `glab mcp serve`)
     let hasGlab = false;
-    try { execSync('which glab', { stdio: 'ignore' }); hasGlab = true; } catch { /* not installed */ }
+    try { execFileSync('which', ['glab'], { stdio: 'ignore' }); hasGlab = true; } catch { /* not installed */ }
 
     if (!hasGlab) {
         console.log(`[${new Date().toISOString()}] glab not installed, skipping GitLab MCP config`);
         return;
     }
 
+    // Configure glab to skip TLS verification for internal GitLab (self-signed certs).
+    // Host-scoped: only affects this host, not gitlab.com or other instances.
+    try {
+        execFileSync('glab', ['config', 'set', 'skip_tls_verify', 'true', '--host', GITLAB_HOST], { encoding: 'utf8' });
+        console.log(`[${new Date().toISOString()}] glab TLS verify disabled for ${GITLAB_HOST}`);
+    } catch (err) {
+        console.error(`[${new Date().toISOString()}] glab config set failed: ${err.message}`);
+    }
+
     // MCP config for both CLIs: use `glab mcp serve` (replaces deprecated @modelcontextprotocol/server-gitlab)
-    // glab reads GITLAB_TOKEN and GITLAB_HOST from env -- no extra env vars needed in MCP config
+    // glab reads GITLAB_TOKEN, GITLAB_HOST, and skip_tls_verify from its own config
     const mcpConfig = {
         command: 'glab',
         args: ['mcp', 'serve'],
         env: {
             GITLAB_TOKEN: token,
             GITLAB_HOST: GITLAB_HOST,
-            NODE_TLS_REJECT_UNAUTHORIZED: '0',  // Internal GitLab with self-signed certs
         },
     };
 
@@ -1208,6 +1217,7 @@ wss.on('connection', (ws) => {
       const prompt = msg.prompt;
       const workDir = msg.cwd || DEFAULT_WORK_DIR;
       const autoApprove = msg.autoApprove || false;
+      const sessionId = msg.session_id || null;
 
       if (!prompt) {
         ws.send(JSON.stringify({ type: 'error', event_id: eventId, message: 'Missing prompt' }));
@@ -1216,7 +1226,7 @@ wss.on('connection', (ws) => {
 
       // Reset callback result for new task
       _callbackResult = null;
-      console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars)`);
+      console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars, session: ${sessionId})`);
 
       // Setup git credentials + GitHub tooling
       if (hasGitHubCredentials()) {
@@ -1249,7 +1259,7 @@ wss.on('connection', (ws) => {
       // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event
       // enable --resume for follow-ups. No PTY needed -- env vars handle auth in headless.
       try {
-        const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir });
+        const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir, sessionId });
         wsSend(ws, {
           type: 'result',
           event_id: eventId,

@@ -40,6 +40,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-rollback**: GitOps rollback workflow -- git revert, verify sync (mode: rollback)
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
+- **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
 
 ## Safety Rules
 

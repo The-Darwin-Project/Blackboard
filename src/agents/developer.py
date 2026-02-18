@@ -6,6 +6,7 @@
 # 4. [Constraint]: Brain is unaware of QE. developer.process() returns merged result.
 # 5. [Gotcha]: flash_decide may fail to parse JSON. Fallback: done=True with raw text.
 # 6. [Pattern]: CancelledError propagation: cancels both dev_task + qe_task to prevent orphaned CLI processes.
+# 7. [Pattern]: session_id forwarded: Phase 1 passes Brain's session to dev; Phase 2 + followup() prefer internal _dev_sessions/_qe_sessions over Brain's (may be stale during rounds).
 """
 Developer agent with optional concurrent QE pair + Flash Manager moderation.
 
@@ -78,6 +79,12 @@ class Developer(AgentClient):
             )
             logger.info("QE pair enabled (concurrent dev + qe + Flash Manager)")
 
+    def cleanup_event(self, event_id: str) -> None:
+        """Clean up per-event state including internal dev/qe session maps."""
+        super().cleanup_event(event_id)
+        self._dev_sessions.pop(event_id, None)
+        self._qe_sessions.pop(event_id, None)
+
     async def _get_flash_client(self):
         """Lazy-init google-genai client for Flash Manager calls."""
         if self._flash_client is None:
@@ -146,6 +153,7 @@ class Developer(AgentClient):
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
         mode: str = "investigate",
+        session_id: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """Dev team dispatch with mode-based routing.
 
@@ -156,11 +164,11 @@ class Developer(AgentClient):
         """
         # investigate/execute -> Dev sidecar only, no QE
         if mode in ("investigate", "execute") or not self._qe_enabled:
-            return await super().process(event_id, task, event_md_path, on_progress, mode)
+            return await super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id)
 
         # test -> QE sidecar only, no Dev
         if mode == "test":
-            return await self.qe.process(event_id, task, event_md_path, on_progress, mode)
+            return await self.qe.process(event_id, task, event_md_path, on_progress, mode, session_id=session_id)
 
         # implement (default) -> full Huddle: Dev + QE + Flash Manager
 
@@ -172,7 +180,7 @@ class Developer(AgentClient):
 
         # Phase 1: Fire Dev + QE concurrently
         dev_task = asyncio.create_task(
-            super().process(event_id, task, event_md_path, on_progress, mode)
+            super().process(event_id, task, event_md_path, on_progress, mode, session_id=session_id)
         )
         qe_task = asyncio.create_task(
             self.qe.process(event_id, task, event_md_path, qe_on_progress, mode)
@@ -248,6 +256,8 @@ class Developer(AgentClient):
                         f"Your QE partner has feedback:\n\n{msg}\n\nAddress the issues.",
                         event_md_path,
                         on_progress,
+                        mode="implement",
+                        session_id=dev_session_id,
                     )
                     if dev_session_id:
                         self._dev_sessions[event_id] = dev_session_id
@@ -260,6 +270,8 @@ class Developer(AgentClient):
                         f"The Developer has updated their work:\n\n{msg}\n\nVerify and report.",
                         event_md_path,
                         qe_on_progress,
+                        mode="implement",
+                        session_id=self._qe_sessions.get(event_id),
                     )
                     if qe_sid:
                         self._qe_sessions[event_id] = qe_sid
@@ -292,14 +304,16 @@ class Developer(AgentClient):
         Dev, QE, or both. Brain calls this uniformly -- Huddle complexity stays encapsulated.
         """
         if not self._qe_enabled:
-            return await super().followup(event_id, session_id, message, on_progress)
+            dev_sid = self._dev_sessions.get(event_id, session_id)
+            return await super().followup(event_id, dev_sid, message, on_progress)
 
         # Flash Manager decides routing to Dev, QE, or both
         decision = await self._flash_decide(
             f"User says: {message}", "Huddle active (dev+qe working)", round_num=0)
         results = []
         if decision.get("dev_action", "none") != "none":
-            results.append(await super().followup(event_id, session_id, message, on_progress))
+            dev_sid = self._dev_sessions.get(event_id, session_id)
+            results.append(await super().followup(event_id, dev_sid, message, on_progress))
         if decision.get("qe_action", "none") != "none":
             qe_sid = self._qe_sessions.get(event_id, "")
             results.append(await self.qe.followup(event_id, qe_sid, message))

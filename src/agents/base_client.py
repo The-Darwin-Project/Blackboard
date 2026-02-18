@@ -5,7 +5,7 @@
 # 3. [Gotcha]: busy retry loop re-sends the task. Max 5 retries with exponential backoff (5s-60s).
 # 4. [Constraint]: Security check on prompt before sending. FORBIDDEN_PATTERNS from security.py.
 # 5. [Pattern]: connect() retries 5 times with exponential backoff (1-16s). _ensure_connected() pings first.
-# 6. [Pattern]: process() returns tuple[str, Optional[str]] = (result, session_id). session_id is None until Phase 2 sessions are wired.
+# 6. [Pattern]: process() accepts optional session_id for CLI --resume. Returns tuple[str, Optional[str]] = (result, session_id).
 # 7. [Pattern]: followup() sends a follow-up message to an active/resumable session. Same recv loop as process().
 """
 Base agent client -- shared WebSocket logic for all Darwin agent sidecars.
@@ -82,6 +82,10 @@ class AgentClient:
             self._connected = False
             logger.info(f"{self.agent_name} WebSocket closed")
 
+    def cleanup_event(self, event_id: str) -> None:
+        """Clean up per-event state. Called by Brain on event close/cancel."""
+        self._active_sessions.pop(event_id, None)
+
     async def _ensure_connected(self) -> bool:
         """Reconnect if disconnected."""
         if self._ws and self._connected:
@@ -100,16 +104,18 @@ class AgentClient:
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
         mode: str = "",
+        session_id: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """
         Send task to sidecar via WebSocket, stream progress, return (result, session_id).
 
-        session_id is returned when the sidecar reports one (Phase 2 sessions).
+        When session_id is provided, the sidecar passes --resume to the CLI so
+        the agent retains context from prior turns on this event.
         Returns (result, None) when sessions are unavailable.
         Serialized via asyncio.Lock to prevent concurrent WS recv conflicts.
         """
         async with self._lock:
-            return await self._process_inner(event_id, task, event_md_path, on_progress, mode)
+            return await self._process_inner(event_id, task, event_md_path, on_progress, mode, session_id)
 
     async def _process_inner(
         self,
@@ -118,6 +124,7 @@ class AgentClient:
         event_md_path: str = "",
         on_progress: Optional[Callable] = None,
         mode: str = "",
+        session_id: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """Inner process logic (called under lock). Returns (result, session_id)."""
         # Build prompt
@@ -143,13 +150,16 @@ class AgentClient:
 
         # Send task
         try:
-            await self._ws.send(json.dumps({
+            task_msg = {
                 "type": "task",
                 "event_id": event_id,
                 "prompt": prompt,
                 "cwd": self.cwd,
                 "autoApprove": True,
-            }))
+            }
+            if session_id:
+                task_msg["session_id"] = session_id
+            await self._ws.send(json.dumps(task_msg))
         except Exception as e:
             self._connected = False
             return f"Error: Failed to send task: {e}", None
@@ -230,13 +240,16 @@ class AgentClient:
                     logger.warning(f"{self.agent_name} busy [{event_id}], retry {retries}/5 in {delay}s...")
                     await asyncio.sleep(delay)
                     try:
-                        await self._ws.send(json.dumps({
+                        retry_msg = {
                             "type": "task",
                             "event_id": event_id,
                             "prompt": prompt,
                             "cwd": self.cwd,
                             "autoApprove": True,
-                        }))
+                        }
+                        if session_id:
+                            retry_msg["session_id"] = session_id
+                        await self._ws.send(json.dumps(retry_msg))
                     except Exception:
                         self._busy_retries.pop(event_id, None)
                         return json.dumps({
