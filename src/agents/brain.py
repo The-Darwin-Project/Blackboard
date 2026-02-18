@@ -466,6 +466,15 @@ class Brain:
         # Gemini 3 best practice: low reasoning for mechanical routing, high for complex analysis
         thinking_level, call_temp = self._determine_thinking_params(event)
 
+        # Signal UI that Brain is processing (visible even when LLM produces no text)
+        await self._broadcast({
+            "type": "brain_thinking",
+            "event_id": event_id,
+            "text": "",
+            "accumulated": "",
+            "is_thought": True,
+        })
+
         max_retries = 3
         last_error = None
         accumulated_text = ""
@@ -529,6 +538,11 @@ class Brain:
         # Normalize raw response parts for thought_signature preservation
         captured_parts = self._normalize_response_parts(raw_parts) if raw_parts else None
 
+        # Closed guard: event may have been force-closed during the LLM call
+        if await self._is_event_closed(event_id):
+            logger.info(f"Event {event_id} closed during LLM call -- discarding result")
+            return False
+
         # Process the final result
         if function_call:
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
@@ -562,21 +576,21 @@ class Brain:
     def _determine_thinking_params(event: "EventDocument") -> tuple[str, float]:
         """Adaptive thinking level + temperature based on conversation state.
 
-        Gemini 3 best practice: low reasoning for mechanical routing, high for complex analysis.
+        Gemini 3: high reasoning for triage/analysis, low for mechanical routing.
         Returns (thinking_level, temperature).
         """
         if not event.conversation or len(event.conversation) <= 1:
-            return "low", 0.5    # New event triage -- low thinking to reduce token cost and latency
+            return "medium", 0.6  # New event triage -- needs analysis to classify
 
         recent = event.conversation[-3:]
         has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
-        if last_is_user:
-            return "low", 0.4    # User message -- low thinking, fast response
         if has_agent_result:
-            return "low", 0.3    # Agent reported back -- mechanical routing decision
-        return "low", 0.4        # Default -- keep thinking low until quota pressure resolves
+            return "low", 0.3     # Agent reported back -- mechanical routing/close decision
+        if last_is_user:
+            return "medium", 0.5  # User message -- moderate reasoning to understand intent
+        return "low", 0.4         # Default -- routine event loop re-check
 
     @staticmethod
     def _normalize_response_parts(raw_parts: list) -> list[dict]:
