@@ -147,7 +147,7 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
       {/* Footer: turns + date */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, color: '#64748b' }}>
         <span>{report.turns} turns</span>
-        <span>{new Date(report.closed_at).toLocaleDateString()}</span>
+        <span>{new Date(report.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
       </div>
 
       {/* Event ID */}

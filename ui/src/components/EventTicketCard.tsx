@@ -87,9 +87,12 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         </div>
       )}
 
-      {/* Footer: turns + close */}
+      {/* Footer: turns + timestamp + close */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: '#64748b' }}>
-        <span>{event.turns} turns</span>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <span>{event.turns} turns</span>
+          {event.created && <span>{new Date(event.created).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>}
+        </div>
         {event.status !== 'closed' && (
           <button
             onClick={handleClose}
