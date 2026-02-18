@@ -599,7 +599,8 @@ class Brain:
                 p['functionCall'] = {"name": str(fc.name), "args": args}
             sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
             if sig:
-                p['thought_signature'] = sig.decode('utf-8') if isinstance(sig, bytes) else str(sig)
+                import base64
+                p['thought_signature'] = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else str(sig)
             if p:
                 preserved.append(p)
         return preserved or [{"text": ""}]

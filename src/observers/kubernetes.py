@@ -445,7 +445,6 @@ class KubernetesObserver:
                 )
                 
                 items = metrics.get("items", [])
-                logger.debug(f"Got metrics for {len(items)} pods in {ns}")
                 
                 for pod_metrics in items:
                     await self._process_pod_metrics(pod_metrics)
@@ -696,9 +695,7 @@ class KubernetesObserver:
             if limits.get("memory_limit"):
                 memory_percent = (total_memory_bytes / limits["memory_limit"]) * 100
             
-            logger.debug(
-                f"K8s metrics: {service_name} cpu={cpu_percent:.1f}% mem={memory_percent:.1f}%"
-            )
+            # Metrics logged at TRACE level only (per-service, every 5s = too noisy for DEBUG)
             
             # Ensure service is registered in topology (so it appears in UI)
             # This enables K8s-only services (postgres, redis) to show up

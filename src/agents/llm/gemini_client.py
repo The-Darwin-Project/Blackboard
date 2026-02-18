@@ -138,7 +138,17 @@ class GeminiAdapter:
                         data=p["bytes"], mime_type=p["mime_type"],
                     ))
                 elif isinstance(p, dict):
-                    parts.append(p)
+                    if "thought_signature" in p:
+                        import base64
+                        restored = dict(p)
+                        sig = restored["thought_signature"]
+                        try:
+                            restored["thought_signature"] = base64.b64decode(sig) if isinstance(sig, str) else sig
+                        except Exception:
+                            pass
+                        parts.append(restored)
+                    else:
+                        parts.append(p)
                 else:
                     parts.append(p)
             converted.append(types.Content(role=role, parts=parts))

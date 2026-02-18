@@ -702,7 +702,6 @@ class BlackboardState:
             mapping["gitops_config_path"] = gitops_config_path
         
         await self.redis.hset(key, mapping=mapping)
-        logger.debug(f"Updated metadata for {name}: cpu={cpu}, error_rate={error_rate}")
     
     async def update_service_discovery(
         self,

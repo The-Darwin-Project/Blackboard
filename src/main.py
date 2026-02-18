@@ -46,6 +46,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Squelch noisy loggers that pollute Brain output
+logging.getLogger("kubernetes.client.rest").setLevel(logging.WARNING)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+logging.getLogger("slack_bolt").setLevel(logging.INFO)
+logging.getLogger("slack_sdk").setLevel(logging.WARNING)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
