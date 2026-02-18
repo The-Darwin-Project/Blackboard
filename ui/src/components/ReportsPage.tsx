@@ -26,7 +26,7 @@ export default function ReportsPage() {
   );
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortBy, setSortBy] = useState<'date' | 'service'>('date');
+  const [sortBy, setSortBy] = useState<'date' | 'service' | 'domain' | 'severity'>('date');
 
   // Fetch report list
   const { data: reports = [] } = useQuery({
@@ -67,6 +67,11 @@ export default function ReportsPage() {
     }
     return [...filtered].sort((a, b) => {
       if (sortBy === 'service') return a.service.localeCompare(b.service);
+      if (sortBy === 'domain') return a.domain.localeCompare(b.domain);
+      if (sortBy === 'severity') {
+        const order = { critical: 0, warning: 1, info: 2 };
+        return (order[a.severity] ?? 3) - (order[b.severity] ?? 3);
+      }
       return new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime();
     });
   }, [reports, searchQuery, sortBy]);

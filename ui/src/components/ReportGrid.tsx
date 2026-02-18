@@ -22,8 +22,8 @@ interface ReportGridProps {
   onSelectReport: (eventId: string) => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
-  sortBy: 'date' | 'service';
-  onSortChange: (sort: 'date' | 'service') => void;
+  sortBy: 'date' | 'service' | 'domain' | 'severity';
+  onSortChange: (sort: 'date' | 'service' | 'domain' | 'severity') => void;
 }
 
 export default function ReportGrid({
@@ -39,6 +39,11 @@ export default function ReportGrid({
 
   const sorted = [...filtered].sort((a, b) => {
     if (sortBy === 'service') return a.service.localeCompare(b.service);
+    if (sortBy === 'domain') return a.domain.localeCompare(b.domain);
+    if (sortBy === 'severity') {
+      const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+      return (order[a.severity] ?? 3) - (order[b.severity] ?? 3);
+    }
     return new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime();
   });
 
@@ -56,15 +61,25 @@ export default function ReportGrid({
             borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 14,
           }}
         />
-        <button
-          onClick={() => onSortChange(sortBy === 'date' ? 'service' : 'date')}
-          style={{
-            background: '#334155', border: 'none', borderRadius: 6,
-            color: '#94a3b8', padding: '8px 12px', cursor: 'pointer', fontSize: 12,
-          }}
-        >
-          Sort: {sortBy === 'date' ? 'Newest' : 'Service'}
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+          <span style={{ fontSize: 12, color: '#64748b', marginRight: 8 }}>Sort:</span>
+          {([['date', 'Newest'], ['service', 'Service'], ['domain', 'Domain'], ['severity', 'Severity']] as const).map(([key, label], i, arr) => (
+            <button
+              key={key}
+              onClick={() => onSortChange(key)}
+              style={{
+                background: sortBy === key ? '#3b82f6' : '#1e293b',
+                border: sortBy === key ? '1px solid #60a5fa' : '1px solid #334155',
+                borderLeft: i === 0 ? undefined : sortBy === key || sortBy === (['date', 'service', 'domain', 'severity'] as const)[i - 1] ? undefined : 'none',
+                borderRadius: i === 0 ? '6px 0 0 6px' : i === arr.length - 1 ? '0 6px 6px 0' : 0,
+                color: sortBy === key ? '#ffffff' : '#94a3b8',
+                padding: '6px 14px', cursor: 'pointer', fontSize: 12, fontWeight: sortBy === key ? 600 : 400,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tile Grid */}
