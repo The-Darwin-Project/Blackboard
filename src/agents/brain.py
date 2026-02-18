@@ -583,21 +583,22 @@ class Brain:
     def _determine_thinking_params(event: "EventDocument") -> tuple[str, float]:
         """Adaptive thinking level + temperature based on conversation state.
 
-        Gemini 3: high reasoning for triage/analysis, low for mechanical routing.
+        Gemini 3 Pro supports only 'low' and 'high' (not 'medium' or 'minimal').
+        Use 'high' for analysis, 'low' for mechanical routing.
         Returns (thinking_level, temperature).
         """
         if not event.conversation or len(event.conversation) <= 1:
-            return "medium", 0.6  # New event triage -- needs analysis to classify
+            return "high", 0.6   # New event triage -- needs analysis to classify
 
         recent = event.conversation[-3:]
         has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
         if has_agent_result:
-            return "low", 0.3     # Agent reported back -- mechanical routing/close decision
+            return "low", 0.3    # Agent reported back -- mechanical routing/close decision
         if last_is_user:
-            return "medium", 0.5  # User message -- moderate reasoning to understand intent
-        return "low", 0.4         # Default -- routine event loop re-check
+            return "high", 0.5   # User message -- needs reasoning to understand intent
+        return "low", 0.4        # Default -- routine event loop re-check
 
     @staticmethod
     def _normalize_response_parts(raw_parts: list) -> list[dict]:
