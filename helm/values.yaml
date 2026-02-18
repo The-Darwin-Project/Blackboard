@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "84808b2" # Updated by CI to commit SHA
+  tag: "efdd372" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -254,9 +254,9 @@ observer:
 # =============================================================================
 aligner:
   thresholds:
-    cpu: "80.0"       # CPU % above which Flash analyzes the service
-    memory: "85.0"    # Memory % above which Flash analyzes the service
-    errorRate: "5.0"  # Error rate % above which Flash analyzes the service
+    cpu: "80.0" # CPU % above which Flash analyzes the service
+    memory: "85.0" # Memory % above which Flash analyzes the service
+    errorRate: "5.0" # Error rate % above which Flash analyzes the service
 # =============================================================================
 # Slack Integration (Socket Mode, bidirectional event mirroring)
 # =============================================================================
