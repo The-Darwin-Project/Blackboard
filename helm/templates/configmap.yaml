@@ -28,3 +28,7 @@ data:
   # Application Info
   APP_NAME: "{{ .Values.app.name }}"
   APP_VERSION: "{{ .Values.app.version }}"
+  
+  # AI Transparency & Compliance
+  DARWIN_CONTACT_EMAIL: "{{ .Values.app.contactEmail }}"
+  DARWIN_FEEDBACK_FORM_URL: "{{ .Values.app.feedbackFormUrl }}"

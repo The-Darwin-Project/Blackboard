@@ -8,6 +8,7 @@
  */
 import type {
   ActiveEvent,
+  AppConfig,
   ArchitectureEvent,
   ChatEventRequest,
   ChatEventResponse,
@@ -223,4 +224,33 @@ export async function getReports(
 
 export async function getReport(eventId: string): Promise<ReportFull> {
   return fetchApi<ReportFull>(`/reports/${encodeURIComponent(eventId)}`);
+}
+
+// =============================================================================
+// Configuration API (AI Transparency & Compliance)
+// =============================================================================
+
+export async function getConfig(): Promise<AppConfig> {
+  return fetchApi<AppConfig>('/config');
+}
+
+// =============================================================================
+// Feedback API (AI Transparency & Compliance)
+// =============================================================================
+
+export async function submitFeedback(
+  eventId: string,
+  turnNumber: number,
+  rating: 'positive' | 'negative',
+  comment?: string,
+): Promise<{ status: string }> {
+  return fetchApi<{ status: string }>('/feedback', {
+    method: 'POST',
+    body: JSON.stringify({
+      event_id: eventId,
+      turn_number: turnNumber,
+      rating,
+      comment: comment || '',
+    }),
+  });
 }

@@ -98,6 +98,17 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_ALIGNER
+            # AI Transparency & Compliance
+            - name: DARWIN_CONTACT_EMAIL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: DARWIN_CONTACT_EMAIL
+            - name: DARWIN_FEEDBACK_FORM_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: DARWIN_FEEDBACK_FORM_URL
             # Agent dispatch configuration (Brain-level)
             - name: BRAIN_PROGRESSIVE_SKILLS
               valueFrom:

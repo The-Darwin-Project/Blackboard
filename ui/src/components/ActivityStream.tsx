@@ -33,6 +33,7 @@ export default function ActivityStream() {
               {new Date(evt.timestamp * 1000).toLocaleTimeString()}
             </span>
             {' '}{evt.narrative || evt.type}
+            <span style={{ color: '#64748b', fontSize: 11, marginLeft: 6 }}>(AI-generated)</span>
           </div>
         ))
       ) : (

@@ -4,6 +4,7 @@
 # 2. [Pattern]: Uses google-genai SDK for both LLM summarization (Flash) and embedding (text-embedding-005).
 # 3. [Gotcha]: embed_content returns 768-dim vector. Qdrant collection must match.
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
+# 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "darwin_events"
+FEEDBACK_COLLECTION = "darwin_feedback"
 EMBEDDING_MODEL = "text-embedding-005"
 FLASH_MODEL = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
 
@@ -70,8 +72,9 @@ class Archivist:
             )
             self._vector_store = VectorStore()
             await self._vector_store.ensure_collection(COLLECTION_NAME, vector_size=768)
+            await self._vector_store.ensure_collection(FEEDBACK_COLLECTION, vector_size=768)
             self._initialized = True
-            logger.info("Archivist initialized (Flash + embedding + Qdrant)")
+            logger.info("Archivist initialized (Flash + embedding + Qdrant, darwin_events + darwin_feedback)")
             return True
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
@@ -201,3 +204,45 @@ class Archivist:
         except Exception as e:
             logger.warning(f"Deep memory search failed (non-fatal): {e}")
             return []
+
+    async def store_feedback(
+        self,
+        event_id: str,
+        turn_number: int,
+        rating: str,
+        turn_text: str,
+        comment: str = "",
+    ) -> bool:
+        """Store user feedback on an AI response to Qdrant for quality tracking.
+
+        Returns True on success, False on failure (non-fatal).
+        """
+        try:
+            if not await self._ensure_initialized():
+                return False
+
+            embed_response = await self._client.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=turn_text[:500],
+            )
+            vector = embed_response.embeddings[0].values
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"feedback:{event_id}:{turn_number}"))
+            payload = {
+                "event_id": event_id,
+                "turn_number": turn_number,
+                "rating": rating,
+                "comment": comment,
+                "turn_text": turn_text[:500],
+                "timestamp": time.time(),
+            }
+            await self._vector_store.upsert(
+                collection=FEEDBACK_COLLECTION,
+                point_id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Feedback stored: event={event_id} turn={turn_number} rating={rating}")
+            return True
+        except Exception as e:
+            logger.warning(f"Feedback storage failed (non-fatal): {e}")
+            return False

@@ -158,6 +158,8 @@ app:
   dryRun: false # Set to true for testing (no real changes)
   autoApprove: true # Enable closed-loop automation (values-only changes auto-approved)
   gitRepoPath: "/data/gitops"
+  contactEmail: "darwin-team@redhat.com" # Default contact, overridable per cluster
+  feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================

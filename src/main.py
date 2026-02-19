@@ -24,11 +24,12 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_blackboard, set_brain
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain
 from .models import HealthResponse
 from .routes import (
     chat_router,
     events_router,
+    feedback_router,
     metrics_router,
     queue_router,
     reports_router,
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
         
         aligner = Aligner(blackboard)
         archivist = Archivist()
+        set_archivist(archivist)
         architect = Architect()
         sysadmin = SysAdmin()
         developer = Developer()
@@ -264,6 +266,20 @@ async def health_check() -> HealthResponse:
 
 
 # =============================================================================
+# Public Configuration (AI Transparency & Compliance)
+# =============================================================================
+
+@app.get("/config", tags=["config"])
+async def get_config() -> dict:
+    """Public configuration for the UI (no secrets)."""
+    return {
+        "contactEmail": os.getenv("DARWIN_CONTACT_EMAIL", ""),
+        "feedbackFormUrl": os.getenv("DARWIN_FEEDBACK_FORM_URL", ""),
+        "appVersion": os.getenv("APP_VERSION", "1.0.0"),
+    }
+
+
+# =============================================================================
 # WebSocket Endpoint (UI real-time communication)
 # =============================================================================
 
@@ -411,6 +427,7 @@ app.include_router(queue_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)
+app.include_router(feedback_router)
 app.include_router(reports_router)
 
 

@@ -2,13 +2,14 @@
 // @ai-rules:
 // 1. [Pattern]: Header uses useTopology, useWSConnection, useActiveEvents for status and Emergency Stop.
 // 2. [Pattern]: Emergency Stop sends { type: "emergency_stop" } via WS; handles emergency_stop_ack to show cancelled count.
+// 3. [Pattern]: Footer consumes useConfig for contactEmail/feedbackFormUrl (AI Transparency compliance).
 /**
  * 3-pane "War Room" layout for Darwin Brain Dashboard.
  * Header with status badge, main content area with responsive grid.
  */
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Activity, AlertCircle, CheckCircle2, FileText, Home, Square, Wifi, WifiOff } from 'lucide-react';
-import { useTopology } from '../hooks';
+import { Activity, AlertCircle, BookOpen, CheckCircle2, FileText, Home, Square, Wifi, WifiOff } from 'lucide-react';
+import { useTopology, useConfig } from '../hooks';
 import { useActiveEvents } from '../hooks/useQueue';
 import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
 import WaitingBell from './WaitingBell';
@@ -18,6 +19,7 @@ function Layout() {
   const navigate = useNavigate();
   const onReports = location.pathname.startsWith('/reports');
   const { isError, isFetching } = useTopology();
+  const { data: config } = useConfig();
   const { connected, send } = useWSConnection();
   const { data: activeEvents } = useActiveEvents();
   const activeCount = activeEvents?.length ?? 0;
@@ -64,6 +66,15 @@ function Layout() {
           </button>
           <button
             type="button"
+            onClick={() => navigate('/guide')}
+            title="User Guide"
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Guide
+          </button>
+          <button
+            type="button"
             onClick={() => {
               if (!window.confirm('Emergency stop will cancel all active tasks. Continue?')) return;
               send({ type: 'emergency_stop' });
@@ -102,7 +113,12 @@ function Layout() {
       {/* Footer */}
       <footer className="flex-shrink-0 bg-bg-secondary border-t border-border px-6 py-2">
         <p className="text-xs text-text-muted text-center">
-          Darwin Brain v1.0.0 • Trinity Agents: Aligner, Architect, SysAdmin
+          AI-powered system — review responses for accuracy •{' '}
+          <button type="button" onClick={() => navigate('/guide')} className="underline hover:text-text-secondary cursor-pointer">User Guide</button>
+          {config?.feedbackFormUrl && (
+            <> • <a href={config.feedbackFormUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-text-secondary">Submit Feedback</a></>
+          )}
+          {' '}• Darwin Brain v{config?.appVersion || '1.0.0'}
         </p>
       </footer>
     </div>

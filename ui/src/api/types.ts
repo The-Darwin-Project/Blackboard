@@ -252,6 +252,16 @@ export interface HealthResponse {
 }
 
 // =============================================================================
+// Public Configuration (AI Transparency & Compliance)
+// =============================================================================
+
+export interface AppConfig {
+  contactEmail: string;
+  feedbackFormUrl: string;
+  appVersion: string;
+}
+
+// =============================================================================
 // Agent Mapping Helper
 // =============================================================================
 

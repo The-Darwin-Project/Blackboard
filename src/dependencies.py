@@ -9,6 +9,7 @@ from .state.redis_client import get_redis
 
 if TYPE_CHECKING:
     from .agents.aligner import Aligner
+    from .agents.archivist import Archivist
     from .agents.architect import Architect
     from .agents.brain import Brain
     from .agents.developer import Developer
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 # Global instances (initialized in main.py lifespan)
 _blackboard: Optional[BlackboardState] = None
 _aligner: Optional["Aligner"] = None
+_archivist: Optional["Archivist"] = None
 _architect: Optional["Architect"] = None
 _sysadmin: Optional["SysAdmin"] = None
 _developer: Optional["Developer"] = None
@@ -27,6 +29,12 @@ def set_blackboard(blackboard: BlackboardState) -> None:
     """Set the global Blackboard instance."""
     global _blackboard
     _blackboard = blackboard
+
+
+def set_archivist(archivist: "Archivist") -> None:
+    """Set the global Archivist instance."""
+    global _archivist
+    _archivist = archivist
 
 
 def set_agents(
@@ -58,6 +66,13 @@ async def get_blackboard() -> BlackboardState:
     if _blackboard is None:
         raise RuntimeError("Blackboard not initialized. Check startup sequence.")
     return _blackboard
+
+
+async def get_archivist() -> "Archivist":
+    """Get the Archivist instance."""
+    if _archivist is None:
+        raise RuntimeError("Archivist not initialized. Check startup sequence.")
+    return _archivist
 
 
 async def get_aligner() -> "Aligner":
