@@ -1,0 +1,4 @@
+thinking_level: "low"
+temperature: 0.4
+priority: 30
+description: "Route tasks to agents with proper context"

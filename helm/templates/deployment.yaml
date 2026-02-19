@@ -99,6 +99,11 @@ spec:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_ALIGNER
             # Agent dispatch configuration (Brain-level)
+            - name: BRAIN_PROGRESSIVE_SKILLS
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: BRAIN_PROGRESSIVE_SKILLS
             - name: SYSADMIN_DRY_RUN
               value: "{{ .Values.app.dryRun }}"
             - name: SYSADMIN_AUTO_APPROVE

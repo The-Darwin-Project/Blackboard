@@ -1,0 +1,4 @@
+thinking_level: "low"
+temperature: 0.2
+priority: 10
+description: "Wait-for-user protocol enforcement"

@@ -12,15 +12,15 @@
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 # 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
+# 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
+# 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
+# 15. [Pattern]: _agent_sessions: dict[event_id, dict[agent_name, session_id]]. Nested dict prevents clobbering and allows O(1) cleanup on event close.
+# 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 17. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 18. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 19. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 20. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
-# 21. [Pattern]: Adaptive thinking: _determine_thinking_params returns (thinking_level, temperature) per conversation state. High for triage, low for routing.
-# 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
-# 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
-# 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
-# 15. [Pattern]: _agent_sessions: dict[event_id, dict[agent_name, session_id]]. Nested dict prevents clobbering and allows O(1) cleanup on event close.
+# 21. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -42,11 +42,29 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus, PlanAction, PlanCreate, PlanStatus
+
+
+class ContextFlags(TypedDict, total=False):
+    """Typed context flags for phase matching and _build_contents cache."""
+    turn_count: int
+    source: str
+    service: str
+    is_waiting: bool
+    has_agent_result: bool
+    last_is_user: bool
+    has_related: bool
+    has_recent_closed: bool
+    has_graph_edges: bool
+    has_aligner_turns: bool
+    _cached_active_ids: list[str]
+    _cached_recent_closed: list[Any]
+    _cached_mermaid: str
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -237,6 +255,23 @@ VOLUME_PATHS = {
     "qe": "/data/gitops-qe",
 }
 
+# Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
+PHASE_CONDITIONS: dict[str, Any] = {
+    "always":     lambda e, c: True,
+    "triage":     lambda e, c: c["turn_count"] <= 2,
+    "dispatch":   lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
+    "post-agent": lambda e, c: c["has_agent_result"],
+    "waiting":    lambda e, c: c["is_waiting"],
+    "context":    lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
+    "source":     lambda e, c: True,
+}
+
+# Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
+PHASE_EXCLUSIONS: dict[str, list[str]] = {
+    "post-agent": ["triage", "dispatch"],
+    "waiting":    ["triage", "dispatch", "post-agent"],
+}
+
 
 
 class Brain:
@@ -289,7 +324,19 @@ class Brain:
         else:
             self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
         self._adapter = None  # Lazy-loaded via _get_adapter()
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, agents={list(self.agents.keys())})")
+        # Progressive skill loading (feature flag)
+        self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "false").lower() == "true"
+        self._skill_loader = None
+        if self._progressive_skills:
+            try:
+                from .brain_skill_loader import BrainSkillLoader
+                skills_path = Path(__file__).parent / "brain_skills"
+                self._skill_loader = BrainSkillLoader(str(skills_path))
+            except Exception as e:
+                logger.warning(f"Failed to load brain skills: {e}. Falling back to monolith.")
+                self._skill_loader = None
+        skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, agents={list(self.agents.keys())})")
 
     JOURNAL_CACHE_TTL = 60  # seconds
 
@@ -480,12 +527,18 @@ class Brain:
             logger.error(f"_process_with_llm called without adapter for {event_id}")
             return False
 
-        # Build structured contents from Redis conversation
-        prompt = await self._build_contents(event)
+        # Progressive skill loading: build phase-specific system prompt + LLM params
+        if self._progressive_skills and self._skill_loader:
+            context_flags = await self._extract_context_flags(event)
+            active_phases = self._match_phases(event, context_flags)
+            system_prompt = self._build_system_prompt(event, active_phases)
+            thinking_level, call_temp = self._resolve_llm_params(active_phases)
+        else:
+            system_prompt = BRAIN_SYSTEM_PROMPT
+            thinking_level, call_temp = self._determine_thinking_params_legacy(event)
+            context_flags = None
 
-        # Adaptive thinking level + temperature based on conversation state
-        # Gemini 3 best practice: low reasoning for mechanical routing, high for complex analysis
-        thinking_level, call_temp = self._determine_thinking_params(event)
+        prompt = await self._build_contents(event, context_cache=context_flags)
 
         # Signal UI that Brain is processing (visible even when LLM produces no text)
         await self._broadcast({
@@ -509,7 +562,7 @@ class Brain:
 
             try:
                 async for chunk in self._adapter.generate_stream(
-                    system_prompt=BRAIN_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     contents=prompt,
                     tools=BRAIN_TOOL_SCHEMAS,
                     temperature=call_temp,
@@ -593,26 +646,51 @@ class Brain:
         err_str = str(e)
         return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 
+    def _resolve_llm_params(self, active_phases: list[str]) -> tuple[str, float]:
+        """Resolve thinking_level + temperature from active phase _phase.yaml metadata.
+
+        Most specific phase wins (lowest priority number).
+        Falls back to legacy heuristic if loader unavailable.
+        """
+        if not self._skill_loader:
+            return "high", 0.5
+
+        best_priority = float("inf")
+        best_thinking = "high"
+        best_temp = 0.5
+
+        for phase_name in active_phases:
+            meta = self._skill_loader.get_phase_meta(phase_name)
+            if meta and "thinking_level" in meta:
+                priority = meta.get("priority", 50)
+                if priority < best_priority:
+                    best_priority = priority
+                    best_thinking = meta["thinking_level"]
+                    best_temp = meta.get("temperature", 0.5)
+
+        logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp} (priority={best_priority})")
+        return best_thinking, best_temp
+
     @staticmethod
-    def _determine_thinking_params(event: "EventDocument") -> tuple[str, float]:
-        """Adaptive thinking level + temperature based on conversation state.
+    def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
+        """Legacy adaptive thinking -- fallback when progressive skills are disabled.
 
         Gemini 3 Pro supports only 'low' and 'high' (not 'medium' or 'minimal').
         Use 'high' for analysis, 'low' for mechanical routing.
         Returns (thinking_level, temperature).
         """
         if not event.conversation or len(event.conversation) <= 1:
-            return "high", 0.6   # New event triage -- needs analysis to classify
+            return "high", 0.6
 
         recent = event.conversation[-3:]
         has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
         if has_agent_result:
-            return "low", 0.3    # Agent reported back -- mechanical routing/close decision
+            return "low", 0.3
         if last_is_user:
-            return "high", 0.5   # User message -- needs reasoning to understand intent
-        return "low", 0.4        # Default -- routine event loop re-check
+            return "high", 0.5
+        return "low", 0.4
 
     @staticmethod
     def _normalize_response_parts(raw_parts: list) -> list[dict]:
@@ -641,13 +719,172 @@ class Brain:
                 preserved.append(p)
         return preserved or [{"text": ""}]
 
-    async def _build_contents(self, event: EventDocument) -> list[dict]:
+    # =========================================================================
+    # Progressive Skill System -- Context Flags + Phase Matching
+    # =========================================================================
+
+    async def _extract_context_flags(self, event: EventDocument) -> ContextFlags:
+        """Extract boolean context flags for phase matching. Lightweight Redis reads.
+
+        Returns flags dict with cached raw data for _build_contents to reuse,
+        avoiding double Redis calls for active_events, mermaid, and recent_closed.
+        """
+        flags: ContextFlags = {
+            "turn_count": len(event.conversation),
+            "source": event.source,
+            "service": event.service,
+            "is_waiting": event.id in self._waiting_for_user,
+        }
+
+        recent = event.conversation[-3:] if event.conversation else []
+        flags["has_agent_result"] = any(
+            t.actor not in ("brain", "user", "aligner") for t in recent
+        )
+        flags["last_is_user"] = bool(recent and recent[-1].actor == "user")
+
+        active_ids = await self.blackboard.get_active_events()
+        flags["_cached_active_ids"] = active_ids
+        has_related = False
+        for eid in active_ids:
+            if eid == event.id:
+                continue
+            other = await self.blackboard.get_event(eid)
+            if other and other.service == event.service:
+                has_related = True
+                break
+        flags["has_related"] = has_related
+
+        recent_closed = await self.blackboard.get_recent_closed_for_service(
+            event.service, minutes=15
+        )
+        flags["_cached_recent_closed"] = recent_closed
+        flags["has_recent_closed"] = bool(recent_closed)
+
+        mermaid = ""
+        try:
+            mermaid = await self.blackboard.generate_mermaid()
+        except Exception:
+            pass
+        flags["_cached_mermaid"] = mermaid
+        flags["has_graph_edges"] = bool(mermaid and "-->" in mermaid)
+
+        flags["has_aligner_turns"] = any(
+            t.actor == "aligner" for t in event.conversation
+        )
+
+        return flags
+
+    def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
+        """Determine which skill phases are active for this event state."""
+        active = [
+            phase for phase, condition in PHASE_CONDITIONS.items()
+            if condition(event, ctx)
+        ]
+        excluded: set[str] = set()
+        for phase in active:
+            excluded.update(PHASE_EXCLUSIONS.get(phase, []))
+        return [p for p in active if p not in excluded]
+
+    def _build_system_prompt(
+        self, event: EventDocument, active_phases: list[str],
+    ) -> str:
+        """Assemble system prompt from matching skill phases + dependency resolution."""
+        if not self._skill_loader or not self._skill_loader.available_phases():
+            return BRAIN_SYSTEM_PROMPT
+
+        initial_paths: list[str] = []
+        for phase in active_phases:
+            if phase == "source":
+                source_file = f"source/{event.source}.md"
+                if source_file in self._skill_loader.get_all_paths_for_phase("source"):
+                    initial_paths.append(source_file)
+                else:
+                    logger.warning(f"No source skill for '{event.source}' -- close protocol guidance unavailable")
+            else:
+                initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
+
+        template_vars = {"event.source": event.source, "event.service": event.service}
+        resolved_contents = self._skill_loader.resolve_dependencies(
+            initial_paths, template_vars=template_vars
+        )
+
+        if "post-agent" in active_phases:
+            resolved_contents.append(self._surface_agent_recommendation(event))
+
+        prompt = "\n\n---\n\n".join(resolved_contents)
+
+        total_tokens = len(prompt) // 4
+        phase_str = ", ".join(active_phases)
+        logger.info(f"Brain skills: [{phase_str}] ({total_tokens} tokens) for {event.id}")
+
+        return prompt
+
+    @staticmethod
+    def _surface_agent_recommendation(event: EventDocument) -> str | None:
+        """Extract and promote last agent's recommendation to system-level priority."""
+        last_agent_turn = next(
+            (t for t in reversed(event.conversation)
+             if t.actor not in ("brain", "user", "aligner")),
+            None,
+        )
+        if not last_agent_turn:
+            return None
+
+        result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
+        rec = Brain._extract_recommendation(result_text)
+
+        if rec:
+            return (
+                f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor})\n"
+                f"The following is from the most recent agent execution. "
+                f"You MUST address this before closing:\n\n{rec}"
+            )
+        return (
+            f"## AGENT RESULT WITHOUT RECOMMENDATION\n"
+            f"Agent '{last_agent_turn.actor}' returned findings but no explicit recommendation.\n"
+            f"Before deciding your next action, route back to the SAME agent with mode=investigate "
+            f"and ask: 'Based on your findings, what is your recommended next step?'\n"
+            f"Do NOT close the event or make assumptions without agent input."
+        )
+
+    @staticmethod
+    def _extract_recommendation(text: str, max_tokens: int = 300) -> str | None:
+        """Extract recommendation section from agent result text.
+
+        Heuristics (no LLM call):
+        1. Look for ## Recommendation, ### Next Step, **Recommendation** headers
+        2. If no header, take the last paragraph
+        3. Cap at max_tokens (~1200 chars) to avoid re-bloating the prompt
+        """
+        patterns = [
+            r"(?:^|\n)##?\s*(?:Recommendation|Next Step|Suggested Action)s?\s*\n(.*?)(?=\n##?\s|\Z)",
+            r"\*\*(?:Recommendation|Next Step)\*\*:?\s*(.*?)(?=\n\n|\Z)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                rec = match.group(1).strip()
+                max_chars = max_tokens * 4
+                return rec[:max_chars] if len(rec) > max_chars else rec
+
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if paragraphs:
+            last = paragraphs[-1]
+            max_chars = max_tokens * 4
+            return last[:max_chars] if len(last) > max_chars else last
+
+        return None
+
+    async def _build_contents(
+        self, event: EventDocument, context_cache: ContextFlags | None = None,
+    ) -> list[dict]:
         """Build structured Gemini-format contents array from Redis conversation.
 
         Returns list of {role: str, parts: list[dict]} messages.
         First message = event context (user role).
         Subsequent messages alternate user/model based on ConversationTurn actor.
         Consecutive same-role turns are merged (Gemini requires alternating roles).
+        context_cache: if provided, reuse cached Redis data from _extract_context_flags.
         """
         from ..models import EventEvidence
 
@@ -688,17 +925,23 @@ class Brain:
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
             lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
 
-        mermaid = ""
-        try:
-            mermaid = await self.blackboard.generate_mermaid()
-        except Exception as e:
-            logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
+        if context_cache and "_cached_mermaid" in context_cache:
+            mermaid = context_cache["_cached_mermaid"]
+        else:
+            mermaid = ""
+            try:
+                mermaid = await self.blackboard.generate_mermaid()
+            except Exception as e:
+                logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
         if mermaid:
             lines.append("")
             lines.append("Architecture Diagram (Mermaid):")
             lines.append(mermaid)
 
-        active_event_ids = await self.blackboard.get_active_events()
+        if context_cache and "_cached_active_ids" in context_cache:
+            active_event_ids = context_cache["_cached_active_ids"]
+        else:
+            active_event_ids = await self.blackboard.get_active_events()
         related = []
         for eid in active_event_ids:
             if eid == event.id:
@@ -723,9 +966,12 @@ class Brain:
             lines.append("Related Active Events (same service -- consider before acting):")
             lines.extend(related)
 
-        recent_closed = await self.blackboard.get_recent_closed_for_service(
-            event.service, minutes=15
-        )
+        if context_cache and "_cached_recent_closed" in context_cache:
+            recent_closed = context_cache["_cached_recent_closed"]
+        else:
+            recent_closed = await self.blackboard.get_recent_closed_for_service(
+                event.service, minutes=15
+            )
         if recent_closed:
             lines.append("")
             lines.append("Recently Closed Events (same service, last 15 min):")

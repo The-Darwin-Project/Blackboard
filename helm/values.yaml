@@ -153,6 +153,7 @@ app:
   name: "darwin-brain"
   version: "1.0.0"
   debug: false
+  progressiveSkills: true # Progressive skill loading (phase-specific system prompts)
   # Agent dispatch settings (Brain-level, not sidecar-level)
   dryRun: false # Set to true for testing (no real changes)
   autoApprove: true # Enable closed-loop automation (values-only changes auto-approved)

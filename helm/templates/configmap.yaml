@@ -22,6 +22,9 @@ data:
   LLM_TEMPERATURE_BRAIN: "{{ .Values.gcp.temperature.brain }}"
   LLM_TEMPERATURE_ALIGNER: "{{ .Values.gcp.temperature.aligner }}"
   
+  # Brain Progressive Skills
+  BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"
+  
   # Application Info
   APP_NAME: "{{ .Values.app.name }}"
   APP_VERSION: "{{ .Values.app.version }}"
