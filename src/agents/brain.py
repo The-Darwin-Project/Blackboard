@@ -122,6 +122,14 @@ Deep memory returns past events with similar symptoms, their root causes, and wh
   2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
 - NEVER silently drop an agent's recommendation.
 
+## Compound User Instructions
+- When a user request contains conditional outcomes (e.g., "if pipeline fails notify X, if it passes merge it"):
+  1. These conditions describe the FINAL state after your best effort, not the current state.
+  2. If the current state matches a failure condition, FIRST attempt remediation (retest, rerun, fix).
+  3. Only trigger the failure notification AFTER remediation has been attempted and failed.
+  4. Example: "retest and notify me if it fails" means: retest -> wait for result -> THEN decide.
+  5. Do NOT short-circuit by matching the current state to a condition without trying to resolve it first.
+
 ## Wait-for-User Protocol
 - After calling wait_for_user OR request_user_approval, the system automatically pauses the event until the user responds.
 - Do NOT call defer_event after wait_for_user or request_user_approval. The wait is handled by the system.
@@ -1217,6 +1225,7 @@ class Brain:
                     slack_user_id = user_info["user"]["id"]
                     dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
                     dm_channel = dm["channel"]["id"]
+                    logger.info(f"notify_user_slack: user={slack_user_id} dm_channel={dm_channel} event={event_id}")
                     await slack_channel._app.client.chat_postMessage(
                         channel=dm_channel,
                         text=f":bell: *Darwin Notification*\n\n{message}",
