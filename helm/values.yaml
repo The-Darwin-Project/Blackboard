@@ -88,7 +88,7 @@ sidecars:
     interactive: true # Gemini PTY mode (multi-turn sessions like Claude --resume)
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
-    modelName: "gemini-3-pro-preview" # Pro for thorough verification
+    modelName: "gemini-3.1-pro-preview" # Pro for thorough verification
     permissionMode: "" # No permission mode for gemini
   # Shared image for all sidecars
   image:
@@ -116,7 +116,7 @@ gcp:
   location: "global"
   provider: "gemini" # Brain LLM provider: "gemini" or "claude"
   models:
-    pro: "gemini-3-pro-preview"
+    pro: "gemini-3.1-pro-preview"
     flash: "gemini-3-flash-preview"
     claude: "claude-opus-4-6" # Claude model ID (used when provider=claude)
   # LLM sampling parameters (0.0-2.0 range, normalized per provider)
