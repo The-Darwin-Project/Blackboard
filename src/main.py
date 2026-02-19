@@ -292,6 +292,7 @@ async def websocket_endpoint(websocket: WebSocket):
     Sends: conversation turns, progress updates, event lifecycle
     """
     await websocket.accept()
+    # TODO(dex): user = get_user_from_websocket(websocket); pass user.label to ConversationTurn(user_name=...)
     
     # Add to connected clients (set stored on app.state during lifespan)
     clients = getattr(app.state, 'connected_ui_clients', set())

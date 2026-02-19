@@ -192,7 +192,7 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange }
         {isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
         <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
-        <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{turn.actor}</span>
+        <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{turn.user_name ? `${turn.actor} (${turn.user_name})` : turn.actor}</span>
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}

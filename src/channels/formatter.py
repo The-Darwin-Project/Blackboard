@@ -104,7 +104,13 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     elif key in ("user.message", "user.approve", "user.reject"):
         text = turn.thoughts or turn.result or turn.action
-        blocks.append(_section(f":speech_balloon: {text}"))
+        if turn.user_name:
+            prefix = f"*{turn.user_name}:* "
+        elif turn.source == "slack":
+            prefix = "*(via Slack)* "
+        else:
+            prefix = "*(via Dashboard)* "
+        blocks.append(_section(f":speech_balloon: {prefix}{text}"))
 
     else:
         # Fallback: render whatever we have
@@ -118,6 +124,26 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         })
 
     return blocks
+
+
+def build_event_report_md(event_doc: "EventDocument") -> str:
+    """Build a Markdown report of the event conversation for Slack file attachment."""
+    lines = [
+        f"# Event: {event_doc.id}",
+        f"- **Source:** {event_doc.source}",
+        f"- **Service:** {event_doc.service}",
+        f"- **Status:** {event_doc.status}",
+        f"- **Reason:** {event_doc.event.reason}",
+        "",
+        "## Conversation",
+    ]
+    for t in event_doc.conversation:
+        name = t.user_name or t.actor
+        text = (t.thoughts or t.result or t.action or "")[:300]
+        lines.append(f"### Turn {t.turn} - {name} ({t.action})")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
 
 
 def format_event_summary(event_doc: "EventDocument") -> list[dict]:

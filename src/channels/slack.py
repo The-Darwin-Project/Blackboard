@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from slack_bolt.async_app import AsyncApp
@@ -42,9 +43,26 @@ class SlackChannel:
         self._blackboard = blackboard
         self._brain = brain
         self._handler: AsyncSocketModeHandler | None = None
+        self._user_name_cache: dict[str, tuple[str, float]] = {}
+        self._USER_CACHE_TTL = 3600
 
         self._app = AsyncApp(token=bot_token)
         self._register_handlers()
+
+    async def _resolve_display_name(self, client: Any, user_id: str) -> str:
+        """Resolve Slack user_id to display name with TTL cache."""
+        cached = self._user_name_cache.get(user_id)
+        if cached and (time.time() - cached[1]) < self._USER_CACHE_TTL:
+            return cached[0]
+        try:
+            info = await client.users_info(user=user_id)
+            profile = info["user"]["profile"]
+            name = profile.get("display_name") or info["user"].get("real_name", user_id)
+            self._user_name_cache[user_id] = (name, time.time())
+            return name
+        except Exception as e:
+            logger.warning(f"Failed to resolve display name for {user_id}: {e}")
+            return user_id
 
     def _register_handlers(self) -> None:
         """Register Slack event listeners on the Bolt app."""
@@ -116,16 +134,18 @@ class SlackChannel:
             event_doc = await self._blackboard.get_event(event_id)
             if not event_doc:
                 return
+            display_name = await self._resolve_display_name(client, user)
             turn = ConversationTurn(
                 turn=len(event_doc.conversation) + 1,
                 actor="user",
                 action="message",
                 thoughts=text,
                 source="slack",
+                user_name=display_name,
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
-            logger.info(f"Slack DM reply on {event_id} from {user}")
+            logger.info(f"Slack DM reply on {event_id} from {display_name} ({user})")
 
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:

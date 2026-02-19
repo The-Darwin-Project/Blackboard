@@ -362,6 +362,7 @@ class ConversationTurn(BaseModel):
     image: Optional[str] = Field(None, description="Base64 data URI of an attached image")
     status: "MessageStatus" = Field(default=MessageStatus.SENT, description="Message delivery status")
     source: Optional[str] = Field(None, description="Origin channel: 'dashboard' | 'slack' | None (legacy)")
+    user_name: Optional[str] = Field(None, description="Display name for multi-user conversations (e.g., 'Albert O.')")
     timestamp: float = Field(default_factory=time.time)
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
 

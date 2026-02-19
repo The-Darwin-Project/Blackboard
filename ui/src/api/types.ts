@@ -166,6 +166,7 @@ export interface EventInput {
   timeDate: string;
 }
 
+// TODO(dex): Add currentUser to WebSocket context for authenticated sessions
 export interface ConversationTurn {
   turn: number;
   actor: string;
@@ -182,12 +183,14 @@ export interface ConversationTurn {
   pendingApproval?: boolean;
   image?: string;
   status?: MessageStatus;
+  source?: string;
+  user_name?: string;
   timestamp: number;
 }
 
 export interface EventDocument {
   id: string;
-  source: 'aligner' | 'chat';
+  source: 'aligner' | 'chat' | 'slack';
   status: EventStatus;
   service: string;
   event: EventInput;
