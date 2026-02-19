@@ -809,7 +809,11 @@ class Brain:
         )
 
         if "post-agent" in active_phases:
-            resolved_contents.append(self._surface_agent_recommendation(event))
+            rec = self._surface_agent_recommendation(event)
+            if rec:
+                has_explicit = "LATEST AGENT RECOMMENDATION" in rec
+                logger.debug(f"Agent recommendation surfaced for {event.id}: {'explicit' if has_explicit else 'ask-agent directive'} ({len(rec)} chars)")
+                resolved_contents.append(rec)
 
         prompt = "\n\n---\n\n".join(resolved_contents)
 
@@ -1472,12 +1476,22 @@ class Brain:
                     dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
                     dm_channel = dm["channel"]["id"]
                     logger.info(f"notify_user_slack: user={slack_user_id} dm_channel={dm_channel} event={event_id}")
-                    await slack_channel._app.client.chat_postMessage(
+                    result = await slack_channel._app.client.chat_postMessage(
                         channel=dm_channel,
                         text=f":bell: *Darwin Notification*\n\n{message}",
                     )
-                    result_text = f"Slack DM sent to {user_email}."
-                    logger.info(f"Slack notification sent to {user_email} for event {event_id}")
+                    msg_ts = result["ts"]
+                    event_doc = await self.blackboard.get_event(event_id)
+                    if event_doc and not event_doc.slack_thread_ts:
+                        await self.blackboard.update_event_slack_context(
+                            event_id, dm_channel, msg_ts, slack_user_id,
+                        )
+                        await self.blackboard.set_slack_mapping(dm_channel, msg_ts, event_id)
+                        logger.info(f"Slack notification sent to {user_email} for event {event_id} (thread={msg_ts}, bidirectional)")
+                        result_text = f"Slack DM sent to {user_email}. They can reply in the thread to interact with this event."
+                    else:
+                        logger.info(f"Slack notification sent to {user_email} for event {event_id} (one-way, existing thread preserved)")
+                        result_text = f"Slack DM sent to {user_email}."
                 except Exception as e:
                     result_text = f"Failed to send Slack DM to {user_email}: {e}"
                     logger.warning(f"Slack notification failed for {user_email}: {e}")
