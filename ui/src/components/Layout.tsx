@@ -18,6 +18,7 @@ function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
   const onReports = location.pathname.startsWith('/reports');
+  const onGuide = location.pathname === '/guide';
   const { isError, isFetching } = useTopology();
   const { data: config } = useConfig();
   const { connected, send } = useWSConnection();
@@ -66,12 +67,12 @@ function Layout() {
           </button>
           <button
             type="button"
-            onClick={() => navigate('/guide')}
-            title="User Guide"
+            onClick={() => navigate(onGuide ? '/' : '/guide')}
+            title={onGuide ? 'Back to Dashboard' : 'User Guide'}
             className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
           >
-            <BookOpen className="w-3.5 h-3.5" />
-            Guide
+            {onGuide ? <Home className="w-3.5 h-3.5" /> : <BookOpen className="w-3.5 h-3.5" />}
+            {onGuide ? 'Dashboard' : 'Guide'}
           </button>
           <button
             type="button"
