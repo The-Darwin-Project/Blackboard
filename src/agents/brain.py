@@ -1338,7 +1338,7 @@ class Brain:
                 logger.warning(f"Ignoring defer_event for {event_id}: waiting for user response")
                 return False
             reason = args.get("reason", "Deferred by Brain")
-            delay = max(30, min(int(args.get("delay_seconds", 60)), 300))  # Clamp 30-300s
+            delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))  # Clamp 30s-60min
             defer_until = time.time() + delay
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),

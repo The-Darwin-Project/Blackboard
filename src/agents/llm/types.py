@@ -195,7 +195,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "How many seconds to wait before re-processing (30-300)",
+                    "description": "How many seconds to wait before re-processing (30-3600, i.e. up to 60 minutes)",
                 },
             },
             "required": ["reason", "delay_seconds"],
