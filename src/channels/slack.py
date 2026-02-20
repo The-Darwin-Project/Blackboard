@@ -45,6 +45,7 @@ class SlackChannel:
         self._handler: AsyncSocketModeHandler | None = None
         self._user_name_cache: dict[str, tuple[str, float]] = {}
         self._USER_CACHE_TTL = 3600
+        self._thinking_msg: dict[str, tuple[str, str]] = {}  # event_id -> (channel, msg_ts)
 
         self._app = AsyncApp(token=bot_token)
         self._register_handlers()
@@ -202,11 +203,33 @@ class SlackChannel:
     async def broadcast_handler(self, message: dict) -> None:
         """Receive broadcast messages from Brain and mirror to Slack threads.
 
-        Filters by type -- only acts on turn and event_closed.
-        UI-specific types (brain_thinking, attachment, progress) are ignored.
+        Handles: turn, event_closed, brain_thinking, brain_thinking_done.
+        brain_thinking posts a :thinking_face: indicator; the next turn replaces it in-place.
+        UI-specific types (attachment, progress) are ignored.
         """
         msg_type = message.get("type")
         event_id = message.get("event_id", "")
+
+        if msg_type == "brain_thinking":
+            if event_id in self._thinking_msg:
+                return  # already posted indicator for this event
+            event_doc = await self._blackboard.get_event(event_id)
+            if not event_doc or not event_doc.slack_thread_ts:
+                return
+            try:
+                result = await self._app.client.chat_postMessage(
+                    channel=event_doc.slack_channel_id,
+                    thread_ts=event_doc.slack_thread_ts,
+                    text=":thinkingemoji: Darwin is thinking...",
+                )
+                self._thinking_msg[event_id] = (event_doc.slack_channel_id, result["ts"])
+            except Exception as e:
+                logger.warning(f"Slack thinking indicator failed: {e}")
+            return
+
+        if msg_type == "brain_thinking_done":
+            self._thinking_msg.pop(event_id, None)
+            return
 
         if msg_type == "turn":
             event_doc = await self._blackboard.get_event(event_id)
@@ -233,7 +256,12 @@ class SlackChannel:
             # Don't echo Slack-originated user messages back to Slack
             if turn.actor == "user" and turn.source == "slack":
                 return
-            await self._send_turn_to_thread(event_doc, turn)
+
+            thinking = self._thinking_msg.pop(event_id, None)
+            if thinking:
+                await self._update_turn_in_thread(thinking, event_doc, turn)
+            else:
+                await self._send_turn_to_thread(event_doc, turn)
 
         elif msg_type == "event_closed":
             event_doc = await self._blackboard.get_event(event_id)
@@ -265,6 +293,22 @@ class SlackChannel:
         await self._post_to_thread(
             event_doc.slack_channel_id, event_doc.slack_thread_ts, fallback, blocks,
         )
+
+    async def _update_turn_in_thread(
+        self, thinking: tuple[str, str], event_doc: Any, turn: Any,
+    ) -> None:
+        """Replace the thinking indicator message with the formatted turn."""
+        channel, msg_ts = thinking
+        blocks = format_turn(turn, event_id=event_doc.id)
+        fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
+        try:
+            await self._app.client.chat_update(
+                channel=channel, ts=msg_ts, text=fallback,
+                **({"blocks": blocks} if blocks else {}),
+            )
+        except Exception as e:
+            logger.warning(f"Slack thinking->turn update failed, falling back to new post: {e}")
+            await self._send_turn_to_thread(event_doc, turn)
 
     async def _post_to_thread(
         self, channel: str, thread_ts: str, text: str, blocks: list | None = None,
