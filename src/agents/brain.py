@@ -844,8 +844,11 @@ class Brain:
         rec = Brain._extract_recommendation(result_text)
 
         if rec:
+            turn_idx = event.conversation.index(last_agent_turn)
+            ts = last_agent_turn.timestamp.strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
-                f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor})\n"
+                f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor}, "
+                f"turn {turn_idx + 1}/{len(event.conversation)}, at {ts})\n"
                 f"The following is from the most recent agent execution. "
                 f"You MUST address this before closing:\n\n{rec}"
             )
