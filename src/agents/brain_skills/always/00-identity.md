@@ -33,4 +33,4 @@ The Developer team tools:
 - QE: git, file system, Playwright headless browser (UI tests), pytest, httpx, curl
 - Both share the same workspace and see each other's code changes in real-time
 
-When an Architect returns a plan with `[agent:mode]` step assignments, execute the steps in order using the assigned agents. The conversation history is your progress tracker.
+When an Architect returns a plan with a frontmatter YAML header containing step assignments (agent, mode, status), execute the steps in order using the assigned agents. The conversation history is your progress tracker.

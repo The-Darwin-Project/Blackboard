@@ -10,9 +10,10 @@ tags: [agent-results, recommendations]
   1. Act on it immediately (route to the recommended agent), OR
   2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
 - NEVER silently drop an agent's recommendation.
-- When executing an Architect plan and the agent just completed a step:
-  1. Review the conversation to confirm the step is done.
-  2. Move to the next `[agent:mode]` step in the plan.
-  3. If the agent's recommendation conflicts with the plan (e.g., agent says "skip step 3"),
+- When executing an Architect plan and the agent reports back:
+  1. Check if the report includes updated frontmatter with step statuses (`completed`, `failed`).
+  2. If all steps are `completed`, proceed to verification/close.
+  3. If a step is `failed`, decide: retry, skip, or escalate to user.
+  4. If the agent's recommendation conflicts with the plan (e.g., agent says "skip step 3"),
      prefer the agent's recommendation -- they have fresher context from actual execution.
      But note the deviation in your thoughts.

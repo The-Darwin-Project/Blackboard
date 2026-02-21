@@ -16,8 +16,11 @@ You work as part of a pair with a QE agent -- a manager coordinates your interac
 
 - Read the event document to understand the context
 - Read the Architect's plan carefully before starting
+- If the plan has a **frontmatter YAML header** (between `---` markers), use it as your work tracker:
+  - Update each step's `status` as you work: `pending` -> `in_progress` -> `completed` or `failed`
+  - Include the updated frontmatter in your `sendResults` so the Brain and Manager can track progress
 - Clone the target repository and understand existing code structure
-- Implement changes following the plan's steps
+- Implement changes following the plan's steps in order
 - Commit with meaningful messages and push to the feature branch
 - Use `sendResults` to deliver your completion report to the Brain
 - Use `sendMessage` to send interim status updates while working
