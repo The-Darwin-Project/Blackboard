@@ -121,6 +121,8 @@ spec:
               value: "{{ .Values.app.autoApprove }}"
             - name: GIT_REPO_PATH
               value: "{{ .Values.app.gitRepoPath }}"
+            - name: AGENT_WS_MODE
+              value: {{ .Values.app.agentWsMode | quote }}
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs
             - name: ARCHITECT_SIDECAR_URL
@@ -354,6 +356,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.architect.port }}"
+            - name: BRAIN_WS_URL
+              value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: AGENT_ROLE
               value: "architect"
             - name: AGENT_PERMISSION_MODE
@@ -389,9 +393,9 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
             {{- end }}
-            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            {{- if or .Values.sidecars.architect.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
+              value: "/var/secrets/google/{{ if or .Values.sidecars.architect.gcpSecret .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.argocd.enabled }}
             - name: ARGOCD_SERVER
@@ -417,7 +421,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.agentExistingSecret }}
+            {{- if .Values.sidecars.architect.gcpSecret }}
+            - name: gcp-architect-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.agentExistingSecret }}
             - name: gcp-agent-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -488,6 +496,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.sysadmin.port }}"
+            - name: BRAIN_WS_URL
+              value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: GIT_USER_NAME
               value: "{{ .Values.sidecars.sysadmin.gitUserName }}"
             - name: GIT_USER_EMAIL
@@ -527,9 +537,9 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
             {{- end }}
-            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            {{- if or .Values.sidecars.sysadmin.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
+              value: "/var/secrets/google/{{ if or .Values.sidecars.sysadmin.gcpSecret .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.argocd.enabled }}
             - name: ARGOCD_SERVER
@@ -555,7 +565,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.agentExistingSecret }}
+            {{- if .Values.sidecars.sysadmin.gcpSecret }}
+            - name: gcp-sysadmin-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.agentExistingSecret }}
             - name: gcp-agent-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -629,6 +643,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.developer.port }}"
+            - name: BRAIN_WS_URL
+              value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: GIT_USER_NAME
               value: "{{ .Values.sidecars.developer.gitUserName }}"
             - name: GIT_USER_EMAIL
@@ -664,9 +680,9 @@ spec:
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
             {{- end }}
-            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            {{- if or .Values.sidecars.developer.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
+              value: "/var/secrets/google/{{ if or .Values.sidecars.developer.gcpSecret .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.gitlab.enabled }}
             - name: GITLAB_TOKEN_PATH
@@ -680,7 +696,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.agentExistingSecret }}
+            {{- if .Values.sidecars.developer.gcpSecret }}
+            - name: gcp-developer-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.agentExistingSecret }}
             - name: gcp-agent-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -741,6 +761,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.qe.port }}"
+            - name: BRAIN_WS_URL
+              value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: GIT_USER_NAME
               value: "{{ .Values.sidecars.qe.gitUserName }}"
             - name: GIT_USER_EMAIL
@@ -769,9 +791,9 @@ spec:
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
             {{- end }}
-            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            {{- if or .Values.sidecars.qe.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: "/var/secrets/google/{{ if .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
+              value: "/var/secrets/google/{{ if or .Values.sidecars.qe.gcpSecret .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
             {{- end }}
             {{- if .Values.gitlab.enabled }}
             - name: GITLAB_TOKEN_PATH
@@ -785,7 +807,11 @@ spec:
           resources:
             {{- toYaml .Values.sidecars.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.gcp.agentExistingSecret }}
+            {{- if .Values.sidecars.qe.gcpSecret }}
+            - name: gcp-qe-key
+              mountPath: /var/secrets/google
+              readOnly: true
+            {{- else if .Values.gcp.agentExistingSecret }}
             - name: gcp-agent-key
               mountPath: /var/secrets/google
               readOnly: true
@@ -842,6 +868,26 @@ spec:
         - name: gcp-agent-key
           secret:
             secretName: {{ .Values.gcp.agentExistingSecret }}
+        {{- end }}
+        {{- if .Values.sidecars.architect.gcpSecret }}
+        - name: gcp-architect-key
+          secret:
+            secretName: {{ .Values.sidecars.architect.gcpSecret }}
+        {{- end }}
+        {{- if .Values.sidecars.sysadmin.gcpSecret }}
+        - name: gcp-sysadmin-key
+          secret:
+            secretName: {{ .Values.sidecars.sysadmin.gcpSecret }}
+        {{- end }}
+        {{- if .Values.sidecars.developer.gcpSecret }}
+        - name: gcp-developer-key
+          secret:
+            secretName: {{ .Values.sidecars.developer.gcpSecret }}
+        {{- end }}
+        {{- if .Values.sidecars.qe.gcpSecret }}
+        - name: gcp-qe-key
+          secret:
+            secretName: {{ .Values.sidecars.qe.gcpSecret }}
         {{- end }}
         {{- if and .Values.redis.enabled .Values.redis.persistence.enabled }}
         - name: redis-data

@@ -64,6 +64,7 @@ sidecars:
     gitUserEmail: "darwin-architect@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI (deep planning, code analysis)
     permissionMode: "" # No hard restriction -- soft rules via architect.md + skills
+    gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   sysadmin:
     enabled: true
     port: 9092
@@ -73,6 +74,7 @@ sidecars:
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
     modelName: "gemini-3-flash-preview" # Gemini 3 Flash (fast investigation, low latency)
     permissionMode: "" # No permission mode for gemini
+    gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   developer:
     enabled: true
     port: 9093
@@ -81,6 +83,7 @@ sidecars:
     gitUserEmail: "darwin-developer@darwin-project.io"
     modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI
     permissionMode: "bypassPermissions" # Skip permission prompts for autonomous code changes
+    gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   qe:
     enabled: true
     port: 9094
@@ -90,6 +93,7 @@ sidecars:
     gitUserEmail: "darwin-qe@darwin-project.io"
     modelName: "gemini-3.1-pro-preview" # Pro for thorough verification
     permissionMode: "" # No permission mode for gemini
+    gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
@@ -126,7 +130,8 @@ gcp:
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
   existingSecret: "" # e.g., "gcp-sa-key"
-  # Agent SA -- separate SA for agent sidecars (avoids sharing 429 quota with Brain)
+  # Agent SA -- shared SA for agent sidecars (avoids sharing 429 quota with Brain)
+  # Each sidecar can override with its own sidecars.<role>.gcpSecret for per-agent quota isolation
   agentExistingSecret: "" # e.g., "gcp-agent-key"
 # =============================================================================
 # Service Configuration
@@ -160,6 +165,8 @@ app:
   gitRepoPath: "/data/gitops"
   contactEmail: "darwin-team@redhat.com" # Default contact, overridable per cluster
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
+  agentWsMode: "legacy"  # "legacy" or "reverse" -- gates dispatch path
+  agentWsPath: "/agent/ws"  # WebSocket endpoint path for agent connections
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
