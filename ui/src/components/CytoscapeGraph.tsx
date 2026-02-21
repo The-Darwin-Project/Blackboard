@@ -351,7 +351,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             'label': 'data(label)',
           },
         },
-        // Ticket node style (active events)
+        // Ticket node style (active events -- HTML label overlay provides the visual)
         {
           selector: 'node.ticket',
           style: {
@@ -362,7 +362,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             'border-width': 2,
             'border-style': 'solid',
             'border-color': '#f59e0b',
-            'label': 'data(label)',
+            'label': '',
           },
         },
         // Edge styles

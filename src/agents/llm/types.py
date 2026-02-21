@@ -30,9 +30,10 @@ class FunctionCall:
 
 @dataclass
 class LLMResponse:
-    """Blocking LLM response (used by Aligner)."""
+    """Blocking LLM response (used by Aligner + DevTeam Manager)."""
     function_call: Optional[FunctionCall] = None
     text: Optional[str] = None
+    raw_parts: Optional[list] = None
 
 
 @dataclass

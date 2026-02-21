@@ -112,13 +112,38 @@ class DevTeam:
                 if fn_result.get("_terminal"):
                     return fn_result["summary"], None
 
-                contents.append({"role": "model", "parts": [{"function_call": {"name": fn.name, "args": fn.args}}]})
+                model_parts = self._extract_model_parts(response, fn)
+                contents.append({"role": "model", "parts": model_parts})
                 contents.append({"role": "user", "parts": [{"function_response": {"name": fn.name, "response": fn_result}}]})
 
             elif response.text:
                 return response.text, None
 
         return "DevTeam exceeded max conversation rounds", None
+
+    @staticmethod
+    def _extract_model_parts(response, fn) -> list[dict]:
+        """Build model parts preserving thought_signature from raw response.
+        Gemini 3 requires thought_signature on function_call parts in multi-turn replay.
+        """
+        if response.raw_parts:
+            import base64
+            parts = []
+            for part in response.raw_parts:
+                p: dict = {}
+                if hasattr(part, 'thought') and part.thought and hasattr(part, 'text') and part.text:
+                    p['text'] = str(part.text)
+                    p['thought'] = True
+                if hasattr(part, 'function_call') and part.function_call:
+                    p['functionCall'] = {"name": fn.name, "args": fn.args}
+                sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
+                if sig:
+                    p['thought_signature'] = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else str(sig)
+                if p:
+                    parts.append(p)
+            if parts:
+                return parts
+        return [{"functionCall": {"name": fn.name, "args": fn.args}}]
 
     # ------------------------------------------------------------------
     # Function execution handlers

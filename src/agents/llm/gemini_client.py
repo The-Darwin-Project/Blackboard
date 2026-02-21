@@ -175,13 +175,20 @@ class GeminiAdapter:
             config=config,
         )
 
+        raw_parts = None
+        if response.candidates:
+            for candidate in response.candidates:
+                if candidate.content and candidate.content.parts:
+                    raw_parts = candidate.content.parts
+
         if response.function_calls:
             fc = response.function_calls[0]
             return LLMResponse(
                 function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                 text=response.text,
+                raw_parts=raw_parts,
             )
-        return LLMResponse(text=response.text)
+        return LLMResponse(text=response.text, raw_parts=raw_parts)
 
     # -----------------------------------------------------------------
     # LLMPort: generate_stream (async iterator)
