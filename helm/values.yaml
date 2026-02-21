@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "7b10106" # Updated by CI to commit SHA
+  tag: "872bc5c" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -165,8 +165,8 @@ app:
   gitRepoPath: "/data/gitops"
   contactEmail: "darwin-team@redhat.com" # Default contact, overridable per cluster
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
-  agentWsMode: "reverse"  # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
-  agentWsPath: "/agent/ws"  # WebSocket endpoint path for agent connections
+  agentWsMode: "reverse" # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
+  agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
