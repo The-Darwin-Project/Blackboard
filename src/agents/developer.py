@@ -280,14 +280,36 @@ class Developer(AgentClient):
             # Cancel BOTH sub-tasks to prevent orphaned CLI processes
             dev_task.cancel()
             qe_task.cancel()
-            # Wait briefly for cleanup to propagate (WS close -> SIGTERM)
             await asyncio.gather(dev_task, qe_task, return_exceptions=True)
             logger.info(f"Huddle cancelled for {event_id}: dev+qe tasks killed")
-            raise  # Re-raise so Brain sees the cancellation
+            raise
+
+        # Phase 3: Manager approved -- Dev opens PR and merges if pipeline passes
+        if on_progress:
+            await on_progress({"actor": "flash", "message": "Manager approved. Developer opening PR.", "event_id": event_id})
+        logger.info(f"Huddle {event_id}: Manager approved, sending Dev to open PR + merge")
+
+        pr_result, dev_session_id = await super().process(
+            event_id,
+            (
+                "Manager approved the implementation and QE tests. "
+                "Open a Pull Request with your feature branch (code + QE tests are on the branch). "
+                "Wait for the pipeline to run. If it passes, merge the PR. "
+                "If it fails, fix the issue, push again, and retry. "
+                "Report the final PR URL and merge status."
+            ),
+            event_md_path,
+            on_progress,
+            mode="execute",
+            session_id=dev_session_id,
+        )
+        if dev_session_id:
+            self._dev_sessions[event_id] = dev_session_id
 
         merged = (
             f"## Developer Result\n{dev_result}\n\n"
-            f"## QE Assessment\n{qe_result}"
+            f"## QE Assessment\n{qe_result}\n\n"
+            f"## PR & Merge\n{pr_result}"
         )
         return merged, dev_session_id
 

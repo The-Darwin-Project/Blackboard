@@ -63,6 +63,20 @@ if (!fs.existsSync(claudeSettingsPath)) {
 // Auth is handled by env vars in headless mode (no interactive wizard needed).
 const geminiDir = path.join(os.homedir(), '.gemini');
 fs.mkdirSync(geminiDir, { recursive: true });
+// Copy agent rules from staging mount into writable CLI dirs so save_memory can append
+const stagedRulesPath = '/tmp/agent-rules/GEMINI.md';
+if (fs.existsSync(stagedRulesPath)) {
+  const geminiRulesPath = path.join(geminiDir, 'GEMINI.md');
+  if (!fs.existsSync(geminiRulesPath)) {
+    fs.copyFileSync(stagedRulesPath, geminiRulesPath);
+    console.log(`Agent rules copied: ${stagedRulesPath} -> ${geminiRulesPath}`);
+  }
+  const claudeRulesPath = path.join(claudeDir, 'CLAUDE.md');
+  if (!fs.existsSync(claudeRulesPath)) {
+    fs.copyFileSync(stagedRulesPath, claudeRulesPath);
+    console.log(`Agent rules copied: ${stagedRulesPath} -> ${claudeRulesPath}`);
+  }
+}
 const geminiSettingsPath = path.join(geminiDir, 'settings.json');
 try {
   let geminiSettings = {};

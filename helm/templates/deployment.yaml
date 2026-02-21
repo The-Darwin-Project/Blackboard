@@ -429,15 +429,9 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-architect
               subPath: architect
-            {{- if eq (.Values.sidecars.architect.cliType | default "gemini") "claude" }}
             - name: gemini-rules
-              mountPath: /home/default/.claude/CLAUDE.md
+              mountPath: /tmp/agent-rules/GEMINI.md
               subPath: architect.md
-            {{- else }}
-            - name: gemini-rules
-              mountPath: /home/default/.gemini/GEMINI.md
-              subPath: architect.md
-            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -573,15 +567,9 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-sysadmin
               subPath: sysadmin
-            {{- if eq (.Values.sidecars.sysadmin.cliType | default "gemini") "claude" }}
             - name: gemini-rules
-              mountPath: /home/default/.claude/CLAUDE.md
+              mountPath: /tmp/agent-rules/GEMINI.md
               subPath: sysadmin.md
-            {{- else }}
-            - name: gemini-rules
-              mountPath: /home/default/.gemini/GEMINI.md
-              subPath: sysadmin.md
-            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -704,15 +692,9 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-developer
               subPath: developer
-            {{- if eq (.Values.sidecars.developer.cliType | default "gemini") "claude" }}
             - name: gemini-rules
-              mountPath: /home/default/.claude/CLAUDE.md
+              mountPath: /tmp/agent-rules/GEMINI.md
               subPath: developer.md
-            {{- else }}
-            - name: gemini-rules
-              mountPath: /home/default/.gemini/GEMINI.md
-              subPath: developer.md
-            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github
@@ -815,15 +797,9 @@ spec:
             - name: gitops-data
               mountPath: /data/gitops-qe
               subPath: developer
-            {{- if eq (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
             - name: gemini-rules
-              mountPath: /home/default/.claude/CLAUDE.md
+              mountPath: /tmp/agent-rules/GEMINI.md
               subPath: qe.md
-            {{- else }}
-            - name: gemini-rules
-              mountPath: /home/default/.gemini/GEMINI.md
-              subPath: qe.md
-            {{- end }}
             {{- if .Values.github.existingSecret }}
             - name: github-app-secret
               mountPath: /secrets/github

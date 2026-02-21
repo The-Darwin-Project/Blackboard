@@ -57,6 +57,20 @@ sendResults -m "## Status Report\n\nAction: Posted /retest on MR !14\nPipeline: 
 
 This frees your session for other events. The Brain will re-route you to check status after the deferral expires.
 
+## Team Workflow (implement mode)
+
+When working as part of the Developer team in `implement` mode:
+
+1. **Developer** implements code changes, commits to the feature branch. Does NOT open a PR yet.
+2. **QE** writes tests, commits to the **same feature branch** (shared workspace).
+3. Both send reports via `sendResults`. The **Manager** reviews both outputs.
+4. Manager approves → **Developer** opens PR (code + tests are on the branch together).
+5. Pipeline runs (QE's tests execute in CI).
+6. Pipeline green → Developer merges. Pipeline red → Developer fixes and retries.
+7. If Manager rejects → Developer and QE fix issues, resubmit.
+
+The Developer does NOT merge until the pipeline (with QE's tests) passes. The QE's deliverable is committed test code, not a post-merge report.
+
 ## Recommended workflow
 
 ```bash

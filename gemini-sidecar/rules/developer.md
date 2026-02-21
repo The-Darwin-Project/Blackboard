@@ -21,7 +21,14 @@ You work as part of a pair with a QE agent -- a manager coordinates your interac
   - Include the updated frontmatter in your `sendResults` so the Brain and Manager can track progress
 - Clone the target repository and understand existing code structure
 - Implement changes following the plan's steps in order
-- Commit with meaningful messages and push to the feature branch
+- Commit with meaningful messages and push to a **feature branch**
+- In `implement` mode (full team):
+  1. Implement changes and commit to the feature branch. Do NOT open a PR yet.
+  2. Send your report via `sendResults` and wait for the Manager's approval.
+  3. The QE is writing tests on the same branch concurrently.
+  4. After Manager approval: open the PR (code + QE tests are both on the branch).
+  5. If the pipeline passes: merge. If it fails: fix the broken code/tests and retry.
+- In `execute` mode (solo): push, open PR, and merge directly.
 - Use `sendResults` to deliver your completion report to the Brain
 - Use `sendMessage` to send interim status updates while working
 
