@@ -133,7 +133,7 @@ class DevTeam:
         event_md_path: str = "",
     ) -> dict:
         """Execute a Manager function call against the agent registry."""
-        from .dependencies import get_registry_and_bridge
+        from ..dependencies import get_registry_and_bridge
         registry, bridge = get_registry_and_bridge()
         if not registry or not bridge:
             return {"error": "Agent registry not initialized"}

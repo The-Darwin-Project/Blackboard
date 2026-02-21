@@ -1622,7 +1622,7 @@ class Brain:
                 "message": f"{agent_name} starting...",
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
-                from .dependencies import get_registry_and_bridge
+                from ..dependencies import get_registry_and_bridge
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
                     if agent_name == "developer" and self._dev_team:
@@ -1891,7 +1891,7 @@ class Brain:
         logger.warning(f"Cancelling active task for {event_id}: {reason}")
 
         if self._ws_mode == "reverse":
-            from .dependencies import get_registry_and_bridge
+            from ..dependencies import get_registry_and_bridge
             registry, bridge = get_registry_and_bridge()
             if registry and bridge:
                 await send_cancel(registry, bridge, event_id)
@@ -1936,7 +1936,7 @@ class Brain:
             return "No active session"
 
         if self._ws_mode == "reverse":
-            from .dependencies import get_registry_and_bridge
+            from ..dependencies import get_registry_and_bridge
             registry, bridge = get_registry_and_bridge()
             if registry and bridge:
                 # Find the agent_id that handled this event (session affinity)
