@@ -21,6 +21,7 @@
 # 19. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 20. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 21. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
+# 22. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -48,6 +49,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus, PlanAction, PlanCreate, PlanStatus
+from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
 class ContextFlags(TypedDict, total=False):
@@ -327,6 +329,13 @@ class Brain:
         else:
             self.model_name = os.getenv("VERTEX_MODEL_PRO", "gemini-3-pro-preview")
         self._adapter = None  # Lazy-loaded via _get_adapter()
+        self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
+        # DevTeam (Manager + dev + qe) -- initialized when ws_mode=reverse
+        self._dev_team = None
+        if self._ws_mode == "reverse":
+            from .dev_team import DevTeam
+            self._dev_team = DevTeam()
+            logger.info("DevTeam initialized (Manager + dev/qe via registry)")
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "false").lower() == "true"
         self._skill_loader = None
@@ -1612,16 +1621,54 @@ class Brain:
                 "actor": agent_name,
                 "message": f"{agent_name} starting...",
             })
-            # Acquire per-agent lock to prevent concurrent WS calls to the same sidecar
-            async with self._agent_locks[agent_name]:
-                result, session_id = await agent.process(
-                    event_id=event_id,
-                    task=task,
-                    event_md_path=event_md_path,
-                    on_progress=on_progress,
-                    mode=mode,
-                    session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
-                )
+            if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
+                from .dependencies import get_registry_and_bridge
+                registry, bridge = get_registry_and_bridge()
+                if registry and bridge:
+                    if agent_name == "developer" and self._dev_team:
+                        # DevTeam: Manager decides work split, dispatches to dev+qe internally
+                        result, session_id = await self._dev_team.process(
+                            event_id=event_id,
+                            task=task,
+                            on_progress=on_progress,
+                            event_md_path=event_md_path,
+                        )
+                    else:
+                        # Direct dispatch for architect, sysadmin
+                        result, session_id = await dispatch_to_agent(
+                            registry=registry,
+                            bridge=bridge,
+                            role=agent_name,
+                            event_id=event_id,
+                            task=task,
+                            on_progress=on_progress,
+                            session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                            event_md_path=event_md_path,
+                        )
+                else:
+                    logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")
+                    async with self._agent_locks[agent_name]:
+                        result, session_id = await agent.process(
+                            event_id=event_id, task=task, event_md_path=event_md_path,
+                            on_progress=on_progress, mode=mode,
+                            session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                        )
+            else:
+                async with self._agent_locks[agent_name]:
+                    result, session_id = await agent.process(
+                        event_id=event_id,
+                        task=task,
+                        event_md_path=event_md_path,
+                        on_progress=on_progress,
+                        mode=mode,
+                        session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                    )
+
+            if result == RETRYABLE_SENTINEL:
+                logger.info(f"Retryable error for {event_id}, deferring event")
+                await self.defer_event(event_id, "Agent returned retryable error")
+                return
+
             # Track session for Phase 2 follow-ups (forward user messages instead of cancel)
             if session_id:
                 self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
@@ -1837,18 +1884,18 @@ class Brain:
     # =========================================================================
 
     async def cancel_active_task(self, event_id: str, reason: str = "cancelled") -> bool:
-        """Cancel a running agent task for an event. Single kill path for all layers.
-
-        Cancels the asyncio.Task, which triggers CancelledError in base_client.process(),
-        which closes the WS to the sidecar, which SIGTERMs the CLI process.
-        Waits up to 3s for graceful cleanup before giving up.
-
-        Returns True if a task was cancelled, False if no active task existed.
-        """
+        """Cancel a running agent task for an event. Single kill path for all layers."""
         task = self._active_tasks.get(event_id)
         if not task or task.done():
             return False
         logger.warning(f"Cancelling active task for {event_id}: {reason}")
+
+        if self._ws_mode == "reverse":
+            from .dependencies import get_registry_and_bridge
+            registry, bridge = get_registry_and_bridge()
+            if registry and bridge:
+                await send_cancel(registry, bridge, event_id)
+
         task.cancel()
         try:
             await asyncio.wait_for(task, timeout=3.0)
@@ -1881,11 +1928,27 @@ class Brain:
         """Send a follow-up message to a running agent session.
 
         Used in Phase 2 to forward user messages to agents instead of killing them.
-        The agent's followup() handles routing internally (e.g., Developer routes through Flash Manager).
+        Reverse mode: dispatches via registry with session affinity (agent_id + session_id).
+        Legacy mode: uses agent.followup() directly.
         """
         session_id = self._agent_sessions.get(event_id, {}).get(agent_name)
         if not session_id:
             return "No active session"
+
+        if self._ws_mode == "reverse":
+            from .dependencies import get_registry_and_bridge
+            registry, bridge = get_registry_and_bridge()
+            if registry and bridge:
+                # Find the agent_id that handled this event (session affinity)
+                agent_conn = await registry.get_by_event(event_id)
+                agent_id = agent_conn.agent_id if agent_conn else None
+                result, _ = await dispatch_to_agent(
+                    registry=registry, bridge=bridge, role=agent_name,
+                    event_id=event_id, task=message,
+                    agent_id=agent_id, session_id=session_id,
+                )
+                return result
+
         agent = self.agents.get(agent_name)
         if not agent:
             return "Agent not found"

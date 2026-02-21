@@ -165,7 +165,7 @@ app:
   gitRepoPath: "/data/gitops"
   contactEmail: "darwin-team@redhat.com" # Default contact, overridable per cluster
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
-  agentWsMode: "legacy"  # "legacy" or "reverse" -- gates dispatch path
+  agentWsMode: "reverse"  # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
   agentWsPath: "/agent/ws"  # WebSocket endpoint path for agent connections
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)

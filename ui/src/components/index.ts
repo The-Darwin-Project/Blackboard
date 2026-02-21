@@ -20,3 +20,4 @@ export { default as ReportGrid } from './ReportGrid';
 export { default as ReportContent } from './ReportContent';
 export { default as ReportToolbar } from './ReportToolbar';
 export { default as ReportsPage } from './ReportsPage';
+export { default as AgentRegistryPanel } from './AgentRegistryPanel';

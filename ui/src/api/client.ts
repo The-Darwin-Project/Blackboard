@@ -8,6 +8,7 @@
  */
 import type {
   ActiveEvent,
+  AgentRegistryEntry,
   AppConfig,
   ArchitectureEvent,
   ChatEventRequest,
@@ -224,6 +225,14 @@ export async function getReports(
 
 export async function getReport(eventId: string): Promise<ReportFull> {
   return fetchApi<ReportFull>(`/reports/${encodeURIComponent(eventId)}`);
+}
+
+// =============================================================================
+// Agent Registry API (connected sidecars)
+// =============================================================================
+
+export async function getAgents(): Promise<AgentRegistryEntry[]> {
+  return fetchApi<AgentRegistryEntry[]>('/api/agents');
 }
 
 // =============================================================================

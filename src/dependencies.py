@@ -108,3 +108,23 @@ async def get_brain() -> "Brain":
     if _brain is None:
         raise RuntimeError("Brain not initialized. Check startup sequence.")
     return _brain
+
+
+# Registry + Bridge (set by main.py lifespan, read by brain.py dispatch)
+from .agents.agent_registry import AgentRegistry
+from .agents.task_bridge import TaskBridge
+
+_registry: AgentRegistry | None = None
+_bridge: TaskBridge | None = None
+
+
+def set_registry_and_bridge(registry: AgentRegistry, bridge: TaskBridge) -> None:
+    """Store AgentRegistry and TaskBridge for brain.py dispatch (avoids circular imports)."""
+    global _registry, _bridge
+    _registry = registry
+    _bridge = bridge
+
+
+def get_registry_and_bridge() -> tuple[AgentRegistry | None, TaskBridge | None]:
+    """Get AgentRegistry and TaskBridge from module-level state (set by main.py lifespan)."""
+    return _registry, _bridge

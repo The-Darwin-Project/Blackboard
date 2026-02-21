@@ -397,3 +397,104 @@ ALIGNER_TOOL_SCHEMAS: list[dict] = [
         },
     },
 ]
+
+
+# =============================================================================
+# Manager Tool Schemas (8 tools -- Dev Team Manager function calling)
+# =============================================================================
+
+MANAGER_TOOL_SCHEMAS: list[dict] = [
+    {
+        "name": "dispatch_developer",
+        "description": "Route task to the developer agent only. Use for code changes, MR operations, single write actions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "What the developer should do (specific and actionable)"},
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "dispatch_qe",
+        "description": "Route task to the QE agent only. Use for writing tests, verification, quality checks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "What QE should do (specific and actionable)"},
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "dispatch_both",
+        "description": "Dispatch to developer AND QE concurrently. Use for feature implementations that need both code and tests.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dev_task": {"type": "string", "description": "What the developer should implement"},
+                "qe_task": {"type": "string", "description": "What QE should test/verify"},
+            },
+            "required": ["dev_task", "qe_task"],
+        },
+    },
+    {
+        "name": "request_review",
+        "description": "Quality gate -- review the developer and QE outputs to decide next action.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dev_output": {"type": "string", "description": "Developer's result"},
+                "qe_output": {"type": "string", "description": "QE's result"},
+            },
+            "required": ["dev_output", "qe_output"],
+        },
+    },
+    {
+        "name": "approve_and_merge",
+        "description": "Outputs are approved. Tell developer to open PR and merge.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dev_agent_id": {"type": "string", "description": "The agent_id of the developer who implemented the change"},
+            },
+            "required": ["dev_agent_id"],
+        },
+    },
+    {
+        "name": "request_fix",
+        "description": "Send a fix or verify request to a specific agent (session affinity).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "The agent_id to send the fix request to"},
+                "feedback": {"type": "string", "description": "What needs to be fixed or verified"},
+            },
+            "required": ["agent_id", "feedback"],
+        },
+    },
+    {
+        "name": "report_to_brain",
+        "description": "Return merged result to the Brain. Call this when the team's work is complete.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Merged result summary (dev + qe + PR status)"},
+                "status": {"type": "string", "enum": ["success", "partial", "failed"], "description": "Overall outcome"},
+            },
+            "required": ["summary", "status"],
+        },
+    },
+    {
+        "name": "reply_to_agent",
+        "description": "Reply to a HuddleSendMessage from an agent. Sends the reply text back to the agent's CLI via the persistent WS.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent to reply to"},
+                "message": {"type": "string", "description": "Reply content"},
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
+]

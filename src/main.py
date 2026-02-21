@@ -5,6 +5,7 @@
 # 3. [Constraint]: Static files mount MUST be last -- API routes take precedence.
 # 4. [Pattern]: emergency_stop WS handler cancels all active tasks and responds with cancelled count.
 # 5. [Pattern]: Slack channel init is conditional on SLACK_BOT_TOKEN + SLACK_APP_TOKEN env vars. Graceful degradation if missing.
+# 6. [Pattern]: /agent/ws endpoint delegates to agent_ws_handler.py. Registry + Bridge on app.state, initialized in lifespan().
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -24,7 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_archivist, set_blackboard, set_brain
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_registry_and_bridge
 from .models import HealthResponse
 from .routes import (
     chat_router,
@@ -39,6 +40,9 @@ from .routes import (
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
+from .agents.agent_registry import AgentRegistry
+from .agents.task_bridge import TaskBridge
+from .agents.agent_ws_handler import agent_websocket_handler
 
 # Configure logging
 logging.basicConfig(
@@ -146,6 +150,15 @@ async def lifespan(app: FastAPI):
         app.state.connected_ui_clients = connected_ui_clients
         app.state.brain = brain
         logger.info("Brain orchestrator initialized with WebSocket agents + broadcast")
+        
+        # Initialize Agent Registry + TaskBridge (Phase A -- additive, no dispatch changes yet)
+        agent_registry = AgentRegistry()
+        task_bridge = TaskBridge()
+        agent_registry.set_task_orphaned_callback(task_bridge.put_error)
+        app.state.agent_registry = agent_registry
+        app.state.task_bridge = task_bridge
+        set_registry_and_bridge(agent_registry, task_bridge)
+        logger.info("AgentRegistry + TaskBridge initialized")
         
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
@@ -416,6 +429,34 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         clients.discard(websocket)
         logger.info(f"UI WebSocket disconnected ({len(clients)} clients)")
+
+
+# =============================================================================
+# Agent WebSocket Endpoint (sidecar connections -- reversed WS direction)
+# =============================================================================
+
+@app.websocket("/agent/ws")
+async def agent_ws_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for agent sidecar connections (reverse mode)."""
+    registry = getattr(app.state, 'agent_registry', None)
+    bridge = getattr(app.state, 'task_bridge', None)
+    if not registry or not bridge:
+        await websocket.close(code=1013, reason="Registry not initialized")
+        return
+    await agent_websocket_handler(websocket, registry, bridge)
+
+
+# =============================================================================
+# Agent Registry REST Endpoint
+# =============================================================================
+
+@app.get("/api/agents", tags=["agents"])
+async def list_agents() -> list[dict]:
+    """Connected agent sidecars with role, status, and current event."""
+    registry = getattr(app.state, "agent_registry", None)
+    if not registry:
+        return []
+    return await registry.list_agents()
 
 
 # =============================================================================

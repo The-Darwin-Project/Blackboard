@@ -16,6 +16,7 @@ from .types import (
     LLMChunk,
     LLMPort,
     LLMResponse,
+    MANAGER_TOOL_SCHEMAS,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "LLMPort",
     "BRAIN_TOOL_SCHEMAS",
     "ALIGNER_TOOL_SCHEMAS",
+    "MANAGER_TOOL_SCHEMAS",
 ]
 
 

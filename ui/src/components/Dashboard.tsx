@@ -15,6 +15,7 @@ import CytoscapeGraph from './CytoscapeGraph';
 import GraphContextMenu from './GraphContextMenu';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
+import AgentRegistryPanel from './AgentRegistryPanel';
 import ConversationFeed from './ConversationFeed';
 import AgentStreamCard from './AgentStreamCard';
 import TabPanel from './TabPanel';
@@ -45,6 +46,7 @@ const SS = {
   leftWidth: 'darwin:leftWidth',               // localStorage (persistent)
   agentCardHeight: 'darwin:agentCardHeight',   // localStorage (persistent)
   resourceCollapsed: 'darwin:resourceCollapsed', // localStorage (persistent)
+  rightTab: 'darwin:rightTab',                   // localStorage (persistent)
 } as const;
 
 function lsGet(key: string, fallback: string): string {
@@ -77,6 +79,10 @@ const MIDDLE_TABS: Tab[] = [
   { id: 'tickets', label: 'Tickets' },
   { id: 'architecture', label: 'Architecture' },
 ];
+const RIGHT_TABS: Tab[] = [
+  { id: 'resources', label: 'Resources' },
+  { id: 'agents', label: 'Agents' },
+];
 
 function DashboardInner() {
   // -- Graph / inspector state (unchanged) --
@@ -87,6 +93,7 @@ function DashboardInner() {
   const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(lsGet(SS.leftWidth, String(DEFAULT_SIDEBAR_WIDTH))));
   const [agentCardHeight, setAgentCardHeight] = useState(() => parseInt(lsGet(SS.agentCardHeight, '220')));
   const [resourceCollapsed, setResourceCollapsed] = useState(() => lsGet(SS.resourceCollapsed, 'false') === 'true');
+  const [rightTab, setRightTab] = useState(() => lsGet(SS.rightTab, 'resources'));
 
   // -- Tab state (localStorage-persisted) --
   const [leftTab, setLeftTab] = useState(() => lsGet(SS.leftTab, 'activity'));
@@ -129,6 +136,7 @@ function DashboardInner() {
   useEffect(() => { localStorage.setItem(SS.leftWidth, String(sidebarWidth)); }, [sidebarWidth]);
   useEffect(() => { localStorage.setItem(SS.agentCardHeight, String(agentCardHeight)); }, [agentCardHeight]);
   useEffect(() => { localStorage.setItem(SS.resourceCollapsed, String(resourceCollapsed)); }, [resourceCollapsed]);
+  useEffect(() => { localStorage.setItem(SS.rightTab, rightTab); }, [rightTab]);
   // selectedEventId stays in sessionStorage (volatile -- clears on tab close, keeps on refresh)
   useEffect(() => {
     if (selectedEventId) sessionStorage.setItem(SS.selectedEventId, selectedEventId);
@@ -374,9 +382,25 @@ function DashboardInner() {
             style={{ width: 280, transition: 'width 0.3s ease' }}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <div>
-                <h2 className="text-sm font-semibold text-text-primary">Resources</h2>
-                <p className="text-xs text-text-muted">CPU, Memory, Error Rate</p>
+              <div className="flex gap-2 flex-1 min-w-0">
+                {RIGHT_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => setRightTab(t.id)}
+                    style={{
+                      padding: '4px 10px',
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontWeight: rightTab === t.id ? 600 : 400,
+                      background: rightTab === t.id ? '#334155' : 'transparent',
+                      color: rightTab === t.id ? '#e2e8f0' : '#64748b',
+                      border: 'none',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                ))}
               </div>
               <button
                 onClick={() => setResourceCollapsed(true)}
@@ -389,8 +413,9 @@ function DashboardInner() {
                 &#x276F;
               </button>
             </div>
-            <div className="flex-1 p-4 overflow-auto">
-              <MetricChart />
+            <div className="flex-1 p-4 overflow-auto min-h-0">
+              {rightTab === 'resources' && <MetricChart />}
+              {rightTab === 'agents' && <AgentRegistryPanel />}
             </div>
           </div>
         )}

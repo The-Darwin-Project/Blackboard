@@ -265,10 +265,6 @@ export interface AppConfig {
 }
 
 // =============================================================================
-// Agent Mapping Helper
-// =============================================================================
-
-// =============================================================================
 // Reports (persisted event snapshots)
 // =============================================================================
 
@@ -285,6 +281,21 @@ export interface ReportMeta {
 
 export interface ReportFull extends ReportMeta {
   markdown: string;
+}
+
+// =============================================================================
+// Agent Registry (connected sidecars)
+// =============================================================================
+
+export interface AgentRegistryEntry {
+  agent_id: string;
+  role: string;
+  busy: boolean;
+  current_event_id: string | null;
+  current_task_id: string | null;
+  connected_at: number;
+  cli: string;
+  model: string;
 }
 
 // =============================================================================

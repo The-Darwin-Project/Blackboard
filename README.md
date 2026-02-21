@@ -40,6 +40,33 @@ graph TD
     Slack <-->|events| Brain
 ```
 
+### Reversed WebSocket Architecture
+
+In **reverse mode** (`AGENT_WS_MODE=reverse`), the connection direction is flipped: sidecars connect **to** the Brain's `/agent/ws` endpoint instead of the Brain connecting out to sidecars.
+
+| Component | Purpose |
+|-----------|---------|
+| **AgentRegistry** | Dynamic pool of connected agents with busy/idle tracking |
+| **TaskBridge** | Per-task `asyncio.Queue` bridging WS handler to dispatch coroutines |
+| **Feature flag** | `AGENT_WS_MODE` (`legacy` / `reverse`) |
+| **Dashboard** | `GET /api/agents` endpoint for visibility of connected agents |
+
+Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the Brain initiates WebSocket connections to sidecars.
+
+### WebSocket Message Protocol (Reverse Mode)
+
+| Direction | Type | Fields | When |
+|-----------|------|--------|------|
+| Sidecar → Brain | `register` | agent_id, role, capabilities, cli, model | On connect |
+| Sidecar → Brain | `progress` | task_id, event_id, message | During execution |
+| Sidecar → Brain | `result` | task_id, event_id, output, source, session_id | Task complete |
+| Sidecar → Brain | `error` | task_id, event_id, error, retryable | Task failed |
+| Sidecar → Brain | `huddle_message` | task_id, event_id, content | Agent-to-Manager communication |
+| Sidecar → Brain | `pong` | — | Heartbeat response |
+| Brain → Sidecar | `task` | task_id, event_id, prompt, cwd, autoApprove, session_id | New task |
+| Brain → Sidecar | `cancel` | task_id | Cancel running task |
+| Brain → Sidecar | `ping` | — | Heartbeat |
+
 ## Agents
 
 | Agent          | Role              | Technology                         | Capabilities                                                      |
@@ -50,6 +77,15 @@ graph TD
 | **Architect**  | Strategy          | Gemini CLI sidecar                 | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
 | **SysAdmin**   | Execution         | Gemini CLI sidecar                 | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
 | **Developer**  | Implementation    | Gemini CLI sidecar (team: Dev + QE + Manager) | Source code changes, feature implementation, QE verification, manager review |
+
+### Dev Team Manager Pattern
+
+The Developer agent is a **Dev Team** with a central **Manager** (Flash LLM) that decides work split:
+
+- Brain dispatches to **DevTeam**; the Manager receives the task and decides how to split work.
+- Manager uses function calling: `dispatch_developer`, `dispatch_qe`, `dispatch_both`, etc.
+- Skills are loaded from the `manager_skills/` directory (ConfigMap in production).
+- Manager progress is visible in the Dashboard conversation feed (`actor="manager"`).
 
 ## Progressive Skill System
 
@@ -218,6 +254,7 @@ kubectl get pods -l app=darwin-brain
 ```text
 GET /health         # {"status": "brain_online"}
 GET /info           # API information and available endpoints
+GET /api/agents     # Connected agents (AgentRegistry visibility for Dashboard)
 ```
 
 ### WebSocket (Real-time UI)
@@ -226,6 +263,9 @@ GET /info           # API information and available endpoints
 WS /ws              # Bidirectional WebSocket for live conversation updates
                     # Receives: turn, progress, event_created, event_closed, attachment
                     # Sends: chat, approve, reject, user_message
+
+WS /agent/ws        # Agent WebSocket (reverse mode): sidecars connect here
+                    # See "WebSocket Message Protocol (Reverse Mode)" above
 ```
 
 ### Conversation Queue
@@ -299,6 +339,7 @@ GET /events/                   # Architecture event timeline
 | `SLACK_BOT_TOKEN`       | Slack bot OAuth token     | (optional)               |
 | `SLACK_APP_TOKEN`       | Slack app-level token     | (optional)               |
 | `DEX_ENABLED`           | Enable Dex OIDC auth      | `false`                  |
+| `AGENT_WS_MODE`         | WebSocket mode: `legacy` (Brain→sidecar) or `reverse` (sidecar→Brain) | `legacy` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true`                |
 | `DEBUG`                 | Enable debug logging      | `false`                  |
 
@@ -336,6 +377,12 @@ BlackBoard/
       architect.py           # Thin subclass
       sysadmin.py            # Thin subclass
       developer.py           # Thin subclass
+      agent_registry.py      # AgentRegistry + AgentConnection (reverse mode pool)
+      task_bridge.py         # TaskBridge (asyncio.Queue per task_id)
+      agent_ws_handler.py    # /agent/ws WebSocket handler
+      dispatch.py            # Unified dispatch_to_agent + send_cancel
+      dev_team.py            # DevTeam with Manager function calling
+      manager_skills/        # Manager skill Markdown files (ConfigMap in production)
       llm/
         gemini_client.py     # Gemini API client (streaming, thought_signature handling)
         types.py             # Function declarations for Brain tools
@@ -360,6 +407,7 @@ BlackBoard/
   gemini-sidecar/
     Dockerfile               # Sidecar image (Node.js 22, CLI toolkit)
     server.js                # HTTP + WebSocket wrapper for Gemini/Claude CLI
+    ws-client.js             # WebSocket client mode (reverse: connect to Brain /agent/ws)
     rules/                   # Agent constitution files (architect.md, sysadmin.md, developer.md, qe.md)
     skills/                  # 12 agent skills (plan-template, code-review, gitops, investigate, etc.)
   helm/
