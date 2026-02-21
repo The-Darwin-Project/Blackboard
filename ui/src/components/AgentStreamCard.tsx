@@ -53,26 +53,31 @@ function ChatBubble({ msg }: { msg: HuddleMessage }) {
   );
 }
 
-/** Render agent messages as a flowing log (architect, sysadmin -- single continuous block). */
+/** Render agent messages as individual bubbles (matching brain turn style). */
 function MessageCards({ messages, color }: { messages: string[]; color: string }) {
   if (messages.length === 0) {
     return <div style={{ color: '#334155', fontStyle: 'italic', fontSize: 11 }}>Idle</div>;
   }
   return (
-    <div style={{
-      padding: '6px 10px',
-      borderRadius: 8,
-      borderLeft: `3px solid ${color}`,
-      background: `${color}12`,
-      fontSize: 12,
-      fontFamily: 'monospace',
-      lineHeight: '1.5',
-      wordBreak: 'break-word' as const,
-      whiteSpace: 'pre-wrap' as const,
-      color: '#94a3b8',
-    }}>
-      {messages.slice(-50).join('\n')}
-    </div>
+    <>
+      {messages.slice(-50).map((line, i) => (
+        <div key={i} style={{
+          marginBottom: 4,
+          padding: '4px 10px',
+          borderRadius: 8,
+          borderLeft: `3px solid ${color}`,
+          background: `${color}12`,
+          fontSize: 12,
+          fontFamily: 'monospace',
+          lineHeight: '1.4',
+          wordBreak: 'break-word' as const,
+          whiteSpace: 'pre-wrap' as const,
+          color: '#94a3b8',
+        }}>
+          {line}
+        </div>
+      ))}
+    </>
   );
 }
 
