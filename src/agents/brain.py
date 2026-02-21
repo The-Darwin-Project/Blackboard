@@ -300,6 +300,7 @@ class Brain:
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
+        self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # Per-agent locks -- prevents concurrent dispatch to the same agent
@@ -1603,6 +1604,7 @@ class Brain:
             mode_label = f" (mode={mode})" if mode else ""
             logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
             self._active_agent_for_event[event_id] = agent_name
+            self._routing_turn_for_event[event_id] = routing_turn_num or 0
             # Immediate progress so UI shows activity during CLI cold start
             await self._broadcast({
                 "type": "progress",
@@ -1723,6 +1725,7 @@ class Brain:
             # Clean up active task tracking
             self._active_tasks.pop(event_id, None)
             self._active_agent_for_event.pop(event_id, None)
+            self._routing_turn_for_event.pop(event_id, None)
             # Note: _agent_sessions is NOT cleaned here -- sessions persist across
             # task invocations for Phase 2 follow-ups. Cleaned in cancel/close paths.
 
@@ -1853,6 +1856,7 @@ class Brain:
             pass
         self._active_tasks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
+        self._routing_turn_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
@@ -2140,7 +2144,8 @@ class Brain:
                             if unseen:
                                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                            user_turns = [t for t in unseen if t.actor == "user"]
+                            routing_turn = self._routing_turn_for_event.get(eid, 0)
+                            user_turns = [t for t in unseen if t.actor == "user" and t.turn > routing_turn]
                             if user_turns:
                                 agent_name = self._active_agent_for_event.get(eid)
                                 session_id = self._agent_sessions.get(eid, {}).get(agent_name) if agent_name else None
