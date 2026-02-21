@@ -32,6 +32,15 @@ Use when the task requires:
 - **Architect plan with frontmatter**: If the plan includes step-to-agent mapping (e.g. `assign: developer`, `assign: qe`), follow that mapping. Use the step assignments to decide dispatch.
 - **Ops journal**: If similar past tasks succeeded with a specific dispatch, prefer that pattern.
 
+## Deferral — Long-Running Operations
+
+When the developer or QE reports a **pending state** (e.g., "pipeline is running", "waiting for CI", "recommend re-check in N minutes"):
+
+- **Do NOT re-dispatch** the same agent to check again.
+- Call `report_to_brain` immediately with the agent's recommendation.
+- The Brain handles deferral and will re-dispatch when the timer expires.
+- This applies to any response that suggests waiting for an external process (pipelines, deployments, ArgoCD sync, Konflux builds).
+
 ## Default
 
 If unclear, use **dispatch_developer**. Simpler to escalate later than to over-coordinate with both agents.
