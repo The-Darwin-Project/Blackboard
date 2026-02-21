@@ -845,7 +845,8 @@ class Brain:
 
         if rec:
             turn_idx = event.conversation.index(last_agent_turn)
-            ts = last_agent_turn.timestamp.strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
+            from datetime import datetime, timezone
+            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
                 f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor}, "
                 f"turn {turn_idx + 1}/{len(event.conversation)}, at {ts})\n"
