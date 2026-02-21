@@ -87,7 +87,8 @@ class DevTeam:
                 system_prompt=system_prompt,
                 contents=contents,
                 tools=MANAGER_TOOL_SCHEMAS,
-                temperature=0.7,
+                temperature=0.4,
+                thinking_level="low",
             )
 
             if response.function_call:

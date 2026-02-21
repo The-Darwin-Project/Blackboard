@@ -61,6 +61,7 @@ class LLMPort(Protocol):
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
     ) -> LLMResponse: ...
 
     async def generate_stream(
@@ -71,6 +72,7 @@ class LLMPort(Protocol):
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
     ) -> AsyncIterator[LLMChunk]: ...
 
 
@@ -476,12 +478,12 @@ MANAGER_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "report_to_brain",
-        "description": "Return merged result to the Brain. Call this when the team's work is complete.",
+        "description": "Return result to the Brain. Call when: (1) work is complete, (2) work is pending/waiting on an external process (pipeline, deploy, CI), or (3) work failed. The Brain handles deferral for pending states -- do NOT re-dispatch agents to poll.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Merged result summary (dev + qe + PR status)"},
-                "status": {"type": "string", "enum": ["success", "partial", "failed"], "description": "Overall outcome"},
+                "summary": {"type": "string", "description": "Result summary including agent recommendations (e.g., 're-check in 10 minutes')"},
+                "status": {"type": "string", "enum": ["success", "partial", "failed", "pending"], "description": "Outcome: success (done), partial (needs more work), failed (unrecoverable), pending (waiting on external process)"},
             },
             "required": ["summary", "status"],
         },
