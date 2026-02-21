@@ -22,8 +22,8 @@ Use this structure for all plans:
 [Why this change is needed, based on evidence]
 
 ## Steps
-1. [Specific step]
-2. [Specific step]
+1. [agent:mode] Specific action
+2. [agent:mode] Specific action
 
 ## Risk Assessment
 - Risk level: [low/medium/high]
@@ -33,6 +33,28 @@ Use this structure for all plans:
 - [How will we know the change worked?]
 - [What metric or signal confirms success?]
 ```
+
+## Available Agents for Step Assignment
+
+When creating plans, assign each step to a specific agent and mode using `[agent:mode]` tags:
+
+- **sysAdmin** -- Kubernetes and GitOps operations
+  - `investigate` -- Read-only: kubectl get, logs, describe
+  - `execute` -- GitOps: clone repo, modify values.yaml, commit, push
+  - `rollback` -- Git revert, verify ArgoCD sync
+
+- **developer** -- Code and Git platform operations
+  - `investigate` -- Check MR/PR status, code inspection, read-only
+  - `execute` -- Single write actions: post comment, merge MR, tag release
+  - `implement` -- Full team: Developer implements, QE verifies, Manager reviews
+  - `test` -- QE solo: run tests, verify deployments via browser
+
+- **architect** -- Planning and review (use sparingly, avoid self-referential loops)
+  - `review` -- Code/MR review with severity findings
+  - `analyze` -- Information gathering and status report
+
+Each step MUST include the `[agent:mode]` tag so the Brain knows exactly who executes it.
+For COMPLICATED plans with multiple options, present options WITHOUT tags. Only the selected option's execution steps get `[agent:mode]` tags.
 
 ## Domain Classification
 

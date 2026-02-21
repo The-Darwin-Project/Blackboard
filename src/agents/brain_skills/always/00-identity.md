@@ -32,3 +32,5 @@ The Developer team tools:
 - Developer: git, file system, glab, gh (code implementation, MR/PR inspection)
 - QE: git, file system, Playwright headless browser (UI tests), pytest, httpx, curl
 - Both share the same workspace and see each other's code changes in real-time
+
+When an Architect returns a plan with `[agent:mode]` step assignments, execute the steps in order using the assigned agents. The conversation history is your progress tracker.
