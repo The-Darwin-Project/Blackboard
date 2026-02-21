@@ -113,10 +113,23 @@ export interface GhostNode {
   params: Record<string, unknown>;
 }
 
+export interface TicketNode {
+  event_id: string;
+  status: EventStatus;
+  source: string;
+  reason: string;
+  turn_count: number;
+  elapsed_seconds: number;
+  current_agent: string | null;
+  defer_count: number;
+  has_work_plan: boolean;
+}
+
 export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
   plans: GhostNode[];
+  tickets: TicketNode[];
 }
 
 // =============================================================================
@@ -190,7 +203,7 @@ export interface ConversationTurn {
 
 export interface EventDocument {
   id: string;
-  source: 'aligner' | 'chat' | 'slack';
+  source: 'aligner' | 'chat' | 'slack' | 'headhunter';
   status: EventStatus;
   service: string;
   event: EventInput;

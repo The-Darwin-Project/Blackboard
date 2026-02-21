@@ -5,7 +5,7 @@
 # 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
-# 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Keep them in sync.
+# 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
@@ -62,6 +62,7 @@ from ..models import (
     Service,
     Snapshot,
     TelemetryPayload,
+    TicketNode,
     TopologySnapshot,
 )
 
@@ -550,13 +551,17 @@ class BlackboardState:
                     f"target service '{plan.service}' not in graph"
                 )
         
+        # Build ticket nodes from active general/headhunter events
+        ticket_nodes = await self._get_ticket_nodes()
+
         # Debug: Log final graph state
         logger.debug(
-            f"Graph response: {len(nodes)} nodes, {len(edges)} edges, {len(ghost_nodes)} ghost nodes. "
+            f"Graph response: {len(nodes)} nodes, {len(edges)} edges, "
+            f"{len(ghost_nodes)} ghost nodes, {len(ticket_nodes)} ticket nodes. "
             f"Node IDs: {[n.id for n in nodes]}"
         )
         
-        return GraphResponse(nodes=nodes, edges=edges, plans=ghost_nodes)
+        return GraphResponse(nodes=nodes, edges=edges, plans=ghost_nodes, tickets=ticket_nodes)
     
     async def generate_mermaid(self) -> str:
         """
@@ -648,6 +653,16 @@ class BlackboardState:
                 lines.append(f"    {get_node_def(service)}")
                 defined_nodes.add(service)
         
+        # Add ticket nodes from active general/headhunter events
+        ticket_nodes = await self._get_ticket_nodes()
+        ticket_ids: list[str] = []
+        for ticket in ticket_nodes:
+            tid = f"ticket_{ticket.event_id.replace('-', '_')}"
+            ticket_ids.append(tid)
+            agent = ticket.current_agent or "pending"
+            label = f"{ticket.event_id}<br/>{ticket.status} | {agent}<br/>turns: {ticket.turn_count}"
+            lines.append(f'    {tid}["{label}"]')
+
         # Add style classes for health status
         lines.append("")
         lines.append("    %% Health-based styling")
@@ -655,6 +670,7 @@ class BlackboardState:
         lines.append("    classDef warning fill:#eab308,stroke:#a16207,color:#000")
         lines.append("    classDef critical fill:#ef4444,stroke:#dc2626,color:#fff")
         lines.append("    classDef unknown fill:#64748b,stroke:#475569,color:#fff")
+        lines.append("    classDef ticket fill:#f59e0b,stroke:#d97706,color:#000")
         
         # Apply classes only to filtered nodes
         for service in filtered_services:
@@ -662,6 +678,9 @@ class BlackboardState:
             data = service_data.get(service, {"status": "unknown"})
             status = data.get("status", "unknown")
             lines.append(f"    class {svc_id} {status}")
+
+        for tid in ticket_ids:
+            lines.append(f"    class {tid} ticket")
         
         return "\n".join(lines)
     
@@ -1678,6 +1697,65 @@ class BlackboardState:
     async def get_active_events(self) -> list[str]:
         """Get all active event IDs."""
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
+
+    async def _get_ticket_nodes(self) -> list[TicketNode]:
+        """Batch-load active general/headhunter events as ticket nodes.
+
+        Uses redis.mget() for O(1) roundtrips regardless of event count.
+        Shared by get_graph_data() and generate_mermaid().
+        """
+        event_ids = await self.get_active_events()
+        if not event_ids:
+            return []
+
+        keys = [f"{self.EVENT_PREFIX}{eid}" for eid in event_ids]
+        raw_values = await self.redis.mget(keys)
+
+        tickets: list[TicketNode] = []
+        now = time.time()
+
+        for eid, raw in zip(event_ids, raw_values):
+            if not raw:
+                continue
+            event = EventDocument(**json.loads(raw))
+
+            if event.service != "general" and event.source != "headhunter":
+                continue
+
+            # Elapsed time from event creation
+            try:
+                created = datetime.fromisoformat(event.event.timeDate).timestamp()
+                elapsed = now - created
+            except (ValueError, AttributeError):
+                elapsed = 0.0
+
+            # Current agent: last route turn's selectedAgents[0]
+            current_agent: str | None = None
+            defer_count = 0
+            for turn in reversed(event.conversation):
+                if current_agent is None and turn.action == "route" and turn.selectedAgents:
+                    current_agent = turn.selectedAgents[0]
+                if turn.action == "defer":
+                    defer_count += 1
+
+            # HeadHunter work plan detection (YAML frontmatter)
+            has_plan = event.event.reason.lstrip().startswith("---")
+            if not has_plan and isinstance(event.event.evidence, EventEvidence):
+                has_plan = event.event.evidence.source_type == "headhunter"
+
+            tickets.append(TicketNode(
+                event_id=eid,
+                status=event.status.value,
+                source=event.source,
+                reason=event.event.reason[:80],
+                turn_count=len(event.conversation),
+                elapsed_seconds=round(elapsed, 1),
+                current_agent=current_agent,
+                defer_count=defer_count,
+                has_work_plan=has_plan,
+            ))
+
+        return tickets
 
     async def get_recent_closed_for_service(
         self, service: str, minutes: int = 15

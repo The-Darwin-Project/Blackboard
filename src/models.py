@@ -200,11 +200,25 @@ class GhostNode(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict, description="Plan parameters")
 
 
+class TicketNode(BaseModel):
+    """An ephemeral node representing an active event/ticket in the graph."""
+    event_id: str
+    status: str = Field(..., description="EventStatus value: new, active, deferred, waiting_approval")
+    source: str = Field(..., description="aligner, chat, slack, headhunter (future)")
+    reason: str = Field(..., description="Truncated event reason (first 80 chars)")
+    turn_count: int
+    elapsed_seconds: float
+    current_agent: str | None = None
+    defer_count: int = 0
+    has_work_plan: bool = False
+
+
 class GraphResponse(BaseModel):
     """Response for /topology/graph endpoint."""
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
     plans: list[GhostNode] = Field(default_factory=list, description="Pending plans as ghost nodes")
+    tickets: list[TicketNode] = Field(default_factory=list, description="Active event tickets as ephemeral nodes")
 
 
 # =============================================================================
@@ -370,7 +384,7 @@ class ConversationTurn(BaseModel):
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    source: Literal["aligner", "chat", "slack"]
+    source: Literal["aligner", "chat", "slack", "headhunter"]
     status: EventStatus = EventStatus.NEW
     service: str = Field(..., description="Target service name")
     event: EventInput

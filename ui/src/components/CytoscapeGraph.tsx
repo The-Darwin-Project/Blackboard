@@ -16,7 +16,7 @@ import coseBilkent from 'cytoscape-cose-bilkent';
 import nodeHtmlLabel from 'cytoscape-node-html-label';
 import { Loader2, Network, ZoomIn, ZoomOut, RotateCcw, Maximize2 } from 'lucide-react';
 import { useGraph } from '../hooks';
-import type { GraphNode, GhostNode, HealthStatus, NodeType } from '../api/types';
+import type { GraphNode, GhostNode, TicketNode, HealthStatus, NodeType } from '../api/types';
 
 // Register extensions safely (only once, with error handling)
 let extensionsRegistered = false;
@@ -190,6 +190,39 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     `;
   }, []);
 
+  // Build ticket node HTML label (amber/orange for active events)
+  const buildTicketLabel = useCallback((ticket: TicketNode) => {
+    const STATUS_COLORS: Record<string, string> = {
+      new: '#3b82f6', active: '#22c55e', deferred: '#a855f7', waiting_approval: '#eab308',
+    };
+    const badgeColor = STATUS_COLORS[ticket.status] || '#64748b';
+    const agent = ticket.current_agent || 'pending';
+    const elapsed = ticket.elapsed_seconds < 60
+      ? `${Math.round(ticket.elapsed_seconds)}s`
+      : `${Math.round(ticket.elapsed_seconds / 60)}m`;
+    const planIcon = ticket.has_work_plan ? '📋 ' : '';
+    return `
+      <div class="cyto-ticket-label" style="
+        background: rgba(245, 158, 11, 0.15);
+        border: 2px solid #f59e0b;
+        border-radius: 8px;
+        padding: 6px 10px;
+        color: #fbbf24;
+        font-size: 11px;
+        text-align: center;
+        min-width: 120px;
+      ">
+        <div style="font-size: 14px; margin-bottom: 2px;">🎫</div>
+        <div style="font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${planIcon}${ticket.event_id}</div>
+        <div style="font-size: 9px; margin-top: 2px;">
+          <span style="background:${badgeColor}; color:#fff; padding:1px 5px; border-radius:3px;">${ticket.status}</span>
+          <span style="opacity:0.8; margin-left:4px;">${agent}</span>
+        </div>
+        <div style="font-size: 9px; opacity: 0.7; margin-top: 2px;">turns: ${ticket.turn_count} · ${elapsed}</div>
+      </div>
+    `;
+  }, []);
+
   // Load view state from localStorage
   const loadViewState = useCallback((): ViewState | null => {
     try {
@@ -318,6 +351,20 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             'label': 'data(label)',
           },
         },
+        // Ticket node style (active events)
+        {
+          selector: 'node.ticket',
+          style: {
+            'width': 180,
+            'height': 90,
+            'background-color': '#f59e0b',
+            'background-opacity': 0.1,
+            'border-width': 2,
+            'border-style': 'solid',
+            'border-color': '#f59e0b',
+            'label': 'data(label)',
+          },
+        },
         // Edge styles
         {
           selector: 'edge',
@@ -430,6 +477,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       const node = evt.target;
       if (node.isNode()) {
         const nodeData = node.data();
+        if (nodeData.isTicket) return;
         if (nodeData.isGhost && onPlanClick) {
           onPlanClick(nodeData.planId);
         } else if (onNodeClick) {
@@ -516,6 +564,20 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       });
     });
 
+    // Add ticket nodes from active events (free-floating, no edges)
+    (data.tickets ?? []).forEach((ticket) => {
+      const ticketId = `ticket-${ticket.event_id}`;
+      elements.push({
+        data: {
+          id: ticketId,
+          label: ticket.event_id,
+          isTicket: true,
+          ...ticket,
+        },
+        classes: 'ticket',
+      });
+    });
+
     console.log('[CytoscapeGraph] Constructed elements:', elements);
 
     // Clean up existing HTML labels before removing elements (prevents memory leaks)
@@ -587,6 +649,17 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
               });
             },
           },
+          {
+            query: 'node.ticket',
+            halign: 'center',
+            valign: 'center',
+            halignBox: 'center',
+            valignBox: 'center',
+            tpl: (nodeData: unknown) => {
+              const d = nodeData as TicketNode & { id: string; label: string };
+              return buildTicketLabel(d);
+            },
+          },
         ]);
 
         // Size the Cytoscape node to match the HTML label so edges connect at the card boundary.
@@ -607,6 +680,15 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           .style({
             'width': 180,
             'height': 70,
+            'shape': 'round-rectangle',
+            'corner-radius': 8,
+            'background-opacity': 0,
+            'border-width': 0,
+          })
+          .selector('node.ticket')
+          .style({
+            'width': 180,
+            'height': 90,
             'shape': 'round-rectangle',
             'corner-radius': 8,
             'background-opacity': 0,
@@ -656,7 +738,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       console.log('[CytoscapeGraph] Node position:', node.id(), pos);
     });
 
-  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, cleanupHtmlLabels, hasUserInteracted, loadViewState, saveViewState]);
+  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, buildTicketLabel, cleanupHtmlLabels, hasUserInteracted, loadViewState, saveViewState]);
 
   if (isLoading) {
     console.log('[CytoscapeGraph] Rendering: LOADING');
