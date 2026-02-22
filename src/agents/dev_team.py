@@ -112,7 +112,11 @@ class DevTeam:
 
                 if fn_result.get("_terminal"):
                     status = fn_result.get("status", "success")
-                    return fn_result["summary"], status
+                    rec = fn_result.get("recommendation", "")
+                    summary = fn_result["summary"]
+                    if rec:
+                        summary = f"{summary}\n\n## Recommendation\n{rec}"
+                    return summary, status
 
                 model_parts = self._extract_model_parts(response, fn)
                 contents.append({"role": "model", "parts": model_parts})
@@ -214,6 +218,7 @@ class DevTeam:
                 "_terminal": True,
                 "summary": args.get("summary", ""),
                 "status": args.get("status", "success"),
+                "recommendation": args.get("recommendation", ""),
             }
 
         if fn_name == "reply_to_agent":

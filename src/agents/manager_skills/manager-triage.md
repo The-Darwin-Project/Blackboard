@@ -37,9 +37,21 @@ Use when the task requires:
 When the developer or QE reports a **pending state** (e.g., "pipeline is running", "waiting for CI", "recommend re-check in N minutes"):
 
 - **Do NOT re-dispatch** the same agent to check again.
-- Call `report_to_brain` immediately with the agent's recommendation.
+- Call `report_to_brain` with:
+  - `status: "pending"`
+  - `summary`: the agent's full status report
+  - `recommendation`: the agent's specific next-step (e.g., "re-check in 10 minutes, merge if pass, close with note if fail")
 - The Brain handles deferral and will re-dispatch when the timer expires.
 - This applies to any response that suggests waiting for an external process (pipelines, deployments, ArgoCD sync, Konflux builds).
+
+## report_to_brain — When to Call
+
+Always call `report_to_brain` to return results. Never let the conversation end with plain text.
+
+- After agent work completes successfully: `status: "success"`, include `recommendation` if the agent suggested follow-up actions.
+- After agent reports waiting/pending: `status: "pending"`, always include `recommendation` with the agent's re-check guidance.
+- After agent fails: `status: "failed"`, include `recommendation` if the agent suggested remediation.
+- Extract the `recommendation` from the agent's output — look for "Recommendation", "Next Step", or similar sections.
 
 ## Default
 

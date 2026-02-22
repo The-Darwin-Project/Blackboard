@@ -482,8 +482,9 @@ MANAGER_TOOL_SCHEMAS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Result summary including agent recommendations (e.g., 're-check in 10 minutes')"},
+                "summary": {"type": "string", "description": "Result summary from the agent(s)"},
                 "status": {"type": "string", "enum": ["success", "partial", "failed", "pending"], "description": "Outcome: success (done), partial (needs more work), failed (unrecoverable), pending (waiting on external process)"},
+                "recommendation": {"type": "string", "description": "Specific next-step recommendation for the Brain (e.g., 're-check pipeline in 10 minutes, merge if pass, close with note if fail'). Extract this from the agent's output."},
             },
             "required": ["summary", "status"],
         },

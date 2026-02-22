@@ -712,6 +712,20 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       cy.layout({ name: 'grid' }).run();
     }
 
+    // Position ticket nodes in row 0 (above all service nodes)
+    const ticketNodes = cy.nodes('.ticket');
+    const serviceNodes = cy.nodes('.service');
+    if (ticketNodes.length > 0 && serviceNodes.length > 0) {
+      const topServiceY = Math.min(...serviceNodes.map((n: any) => n.position('y')));
+      const ticketRowY = topServiceY - 140;
+      const centerX = serviceNodes.reduce((sum: number, n: any) => sum + n.position('x'), 0) / serviceNodes.length;
+      const ticketSpacing = 220;
+      const startX = centerX - ((ticketNodes.length - 1) * ticketSpacing) / 2;
+      ticketNodes.forEach((node: any, i: number) => {
+        node.position({ x: startX + i * ticketSpacing, y: ticketRowY });
+      });
+    }
+
     // Restore view state: preserve user's view if they've interacted, otherwise fit to viewport
     const savedViewState = loadViewState();
     if (previousViewState) {
