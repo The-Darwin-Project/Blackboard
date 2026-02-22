@@ -178,11 +178,16 @@ class EventType(str, Enum):
     HIGH_MEMORY_DETECTED = "high_memory_detected"
     HIGH_ERROR_RATE_DETECTED = "high_error_rate_detected"
     ANOMALY_RESOLVED = "anomaly_resolved"
-    ALIGNER_OBSERVATION = "aligner_observation"  # Generic: Flash describes what it sees
+    ALIGNER_OBSERVATION = "aligner_observation"
     # Architect autonomous analysis
     ARCHITECT_ANALYZING = "architect_analyzing"
     # SysAdmin execution
     SYSADMIN_EXECUTING = "sysadmin_executing"
+    # Brain lifecycle (visible in Activity stream)
+    BRAIN_EVENT_CREATED = "brain_event_created"
+    BRAIN_AGENT_ROUTED = "brain_agent_routed"
+    BRAIN_EVENT_CLOSED = "brain_event_closed"
+    BRAIN_EVENT_DEFERRED = "brain_event_deferred"
 
 
 class ArchitectureEvent(BaseModel):

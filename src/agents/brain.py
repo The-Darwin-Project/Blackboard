@@ -48,7 +48,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
-from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus
+from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
@@ -443,6 +443,13 @@ class Brain:
                         f"Duplicate: merged with existing event {eid} for {event.service}.",
                     )
                     return
+
+        if not event.conversation:
+            await self.blackboard.record_event(
+                EventType.BRAIN_EVENT_CREATED,
+                {"event_id": event_id, "service": event.service, "source": event.event.source if event.event else "unknown"},
+                narrative=f"New event {event_id} ({event.service}): {event.event.reason[:80] if event.event else 'unknown'}",
+            )
 
         # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
         agent_turns = sum(
@@ -1215,6 +1222,11 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            await self.blackboard.record_event(
+                EventType.BRAIN_AGENT_ROUTED,
+                {"event_id": event_id, "agent": agent_name},
+                narrative=f"Routed {event_id} to {agent_name}: {task[:80]}",
+            )
 
             # Broadcast the event MD as attachment
             event = await self.blackboard.get_event(event_id)
@@ -1364,6 +1376,11 @@ class Brain:
                     str(defer_until),
                     ex=delay + 60,  # Auto-expire the key after delay + buffer
                 )
+            await self.blackboard.record_event(
+                EventType.BRAIN_EVENT_DEFERRED,
+                {"event_id": event_id, "delay_seconds": delay},
+                narrative=f"Event {event_id} deferred for {delay}s: {reason[:80]}",
+            )
             logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
             return False
 
@@ -1859,6 +1876,11 @@ class Brain:
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
+        await self.blackboard.record_event(
+            EventType.BRAIN_EVENT_CLOSED,
+            {"event_id": event_id, "service": event.service if event else "unknown"},
+            narrative=f"Event {event_id} closed: {summary[:120]}",
+        )
         await self._broadcast({
             "type": "event_closed",
             "event_id": event_id,

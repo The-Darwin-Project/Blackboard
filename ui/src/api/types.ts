@@ -35,7 +35,12 @@ export type EventType =
   // Architect autonomous
   | 'architect_analyzing'
   // SysAdmin execution
-  | 'sysadmin_executing';
+  | 'sysadmin_executing'
+  // Brain lifecycle
+  | 'brain_event_created'
+  | 'brain_agent_routed'
+  | 'brain_event_closed'
+  | 'brain_event_deferred';
 
 // =============================================================================
 // Service & Topology
@@ -326,6 +331,12 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     // SysAdmin events (execution)
     case 'sysadmin_executing':
       return 'sysadmin';
+    // Brain lifecycle events
+    case 'brain_event_created':
+    case 'brain_agent_routed':
+    case 'brain_event_closed':
+    case 'brain_event_deferred':
+      return 'brain';
     default:
       return 'architect';
   }

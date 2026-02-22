@@ -997,8 +997,11 @@ class BlackboardState:
         
         events = []
         for event_json in results:
-            data = json.loads(event_json)
-            events.append(ArchitectureEvent(**data))
+            try:
+                data = json.loads(event_json)
+                events.append(ArchitectureEvent(**data))
+            except Exception as e:
+                logger.debug(f"Skipping malformed architecture event: {e}")
         
         return events
 
