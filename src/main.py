@@ -107,13 +107,15 @@ async def lifespan(app: FastAPI):
         sysadmin = SysAdmin()
         developer = Developer()
         
-        # Connect agent WebSocket clients (async with retry)
-        await architect.connect()
-        await sysadmin.connect()
-        await developer.connect()
+        # Connect agent WebSocket clients (legacy mode only -- sidecars connect to Brain in reverse mode)
+        ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
+        if ws_mode != "reverse":
+            await architect.connect()
+            await sysadmin.connect()
+            await developer.connect()
         
         set_agents(aligner, architect, sysadmin, developer)
-        logger.info("Agents initialized + WebSocket connected (Aligner, Architect, SysAdmin, Developer)")
+        logger.info(f"Agents initialized (ws_mode={ws_mode})")
         
         # UI WebSocket broadcast function (wired in Step 4)
         # For now, a no-op until the /ws endpoint is added

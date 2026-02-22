@@ -28,15 +28,8 @@ async def list_events(
     """
     Get architecture events for the agent activity stream.
     
-    Events are sorted by timestamp descending (most recent first).
+    Events are returned newest first (ZREVRANGEBYSCORE from Redis).
     """
     if service:
-        events = await blackboard.get_events_for_service(service, start_time, end_time)
-    else:
-        events = await blackboard.get_events_in_range(start_time, end_time)
-    
-    # Sort by timestamp descending (most recent first)
-    events.sort(key=lambda e: e.timestamp, reverse=True)
-    
-    # Apply limit
-    return events[:limit]
+        return await blackboard.get_events_for_service(service, start_time, end_time, limit=limit)
+    return await blackboard.get_events_in_range(start_time, end_time, limit=limit)

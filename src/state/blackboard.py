@@ -988,12 +988,15 @@ class BlackboardState:
         self,
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
+        limit: int = 200,
     ) -> List[ArchitectureEvent]:
-        """Get events within time range."""
+        """Get most recent events within time range (newest first)."""
         start = start_time if start_time else 0
         end = end_time if end_time else time.time()
         
-        results = await self.redis.zrangebyscore("darwin:events", start, end)
+        results = await self.redis.zrevrangebyscore(
+            "darwin:events", end, start, start=0, num=limit,
+        )
         
         events = []
         for event_json in results:
@@ -1051,13 +1054,14 @@ class BlackboardState:
         service: str,
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
+        limit: int = 200,
     ) -> List[ArchitectureEvent]:
         """Get events filtered by service name in details."""
-        all_events = await self.get_events_in_range(start_time, end_time)
+        all_events = await self.get_events_in_range(start_time, end_time, limit=limit * 5)
         return [
             e for e in all_events 
             if e.details.get("service") == service
-        ]
+        ][:limit]
     
     # =========================================================================
     # Snapshot (Context for Architect)
