@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/components/AgentStreamCard.tsx
 // @ai-rules:
-// 1. [Pattern]: All agents use bubble/card layout. Developer card has multi-actor bubbles (dev/qe/flash).
-// 2. [Pattern]: Three bubble styles: dev (left green), qe (right purple), flash (center gray).
+// 1. [Pattern]: All agents use bubble/card layout. Developer card has multi-actor bubbles (dev/qe/manager).
+// 2. [Pattern]: Three bubble styles: dev (left green), qe (right purple), manager (left orange).
 // 3. [Pattern]: Architect and SysAdmin render single-actor message cards with their agent color.
 // 4. [Pattern]: FloatingWindow also supports chat mode via huddleMessages prop.
 /**
@@ -22,31 +22,33 @@ interface AgentStreamCardProps {
 
 /** Render a single chat bubble (used by both inline card and FloatingWindow). */
 function ChatBubble({ msg }: { msg: HuddleMessage }) {
+  const isManager = msg.actor === 'flash';
+  const isQe = msg.actor === 'qe';
   return (
     <div style={{
       display: 'flex',
-      justifyContent: msg.actor === 'developer' ? 'flex-start'
-                    : msg.actor === 'qe' ? 'flex-end'
-                    : 'center',
+      justifyContent: isQe ? 'flex-end' : 'flex-start',
       marginBottom: 4,
     }}>
       <div style={{
         maxWidth: '80%',
         padding: '4px 10px',
         borderRadius: 8,
-        fontSize: msg.actor === 'flash' ? 11 : 12,
+        fontSize: 12,
         fontFamily: 'monospace',
         lineHeight: '1.4',
         wordBreak: 'break-word' as const,
         whiteSpace: 'pre-wrap' as const,
-        background: msg.actor === 'developer' ? 'rgba(16, 185, 129, 0.12)'
-                  : msg.actor === 'qe' ? 'rgba(168, 85, 247, 0.12)'
-                  : 'rgba(100, 116, 139, 0.08)',
-        borderLeft: msg.actor === 'developer' ? '3px solid #22c55e' : 'none',
-        borderRight: msg.actor === 'qe' ? '3px solid #8b5cf6' : 'none',
-        color: msg.actor === 'flash' ? '#64748b' : '#94a3b8',
-        fontStyle: msg.actor === 'flash' ? 'italic' : 'normal',
+        background: isManager ? 'rgba(6, 182, 212, 0.12)'
+                  : isQe ? 'rgba(251, 113, 133, 0.12)'
+                  : 'rgba(16, 185, 129, 0.12)',
+        borderLeft: isManager ? '3px solid #06b6d4'
+                  : isQe ? 'none'
+                  : '3px solid #22c55e',
+        borderRight: isQe ? '3px solid #fb7185' : 'none',
+        color: '#94a3b8',
       }}>
+        {isManager && <span style={{ fontSize: 10, color: '#06b6d4', fontWeight: 600 }}>manager: </span>}
         {msg.text}
       </div>
     </div>
@@ -130,7 +132,7 @@ function FloatingWindow({
             {agentName}
           </span>
           {agentName === 'developer' && (
-            <span style={{ background: ACTOR_COLORS['qe'] || '#a855f7', color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
+            <span style={{ background: ACTOR_COLORS['qe'] || '#fb7185', color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
               qe
             </span>
           )}
@@ -199,7 +201,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
               {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}
             </span>
             {agentName === 'developer' && (
-              <span style={{ background: ACTOR_COLORS['qe'] || '#a855f7', color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
+              <span style={{ background: ACTOR_COLORS['qe'] || '#fb7185', color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
                 qe
               </span>
             )}

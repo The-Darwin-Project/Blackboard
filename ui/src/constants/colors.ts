@@ -9,9 +9,9 @@ export const ACTOR_COLORS: Record<string, string> = {
   architect: '#3b82f6',
   sysadmin: '#f59e0b',
   developer: '#10b981',
-  manager: '#ea580c',  // Orange -- Flash Manager moderator (distinct from amber sysadmin)
-  qe: '#a855f7',      // Purple -- QE pair partner
-  flash: '#64748b',    // Slate gray -- Flash Manager moderator
+  manager: '#06b6d4',  // Cyan -- Manager moderator (distinct from amber sysadmin)
+  qe: '#fb7185',      // Coral -- QE pair partner
+  flash: '#06b6d4',    // Cyan -- Manager moderator (alias for manager)
   aligner: '#6b7280',
   user: '#ec4899',
 };

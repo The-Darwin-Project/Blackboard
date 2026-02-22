@@ -1774,12 +1774,17 @@ class Brain:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
                 )
+            # Clean up BEFORE re-entry so process_event doesn't hit "task already active"
+            self._active_tasks.pop(event_id, None)
+            self._active_agent_for_event.pop(event_id, None)
+            self._routing_turn_for_event.pop(event_id, None)
+
             # Re-evaluate (skip if event was closed concurrently)
             if not await self._is_event_closed(event_id):
                 await self.process_event(event_id)
 
         finally:
-            # Clean up active task tracking
+            # Safety net -- ensure cleanup even if re-entry threw
             self._active_tasks.pop(event_id, None)
             self._active_agent_for_event.pop(event_id, None)
             self._routing_turn_for_event.pop(event_id, None)

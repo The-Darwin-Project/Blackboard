@@ -17,14 +17,12 @@
  *   {"type":"error","message":"Non-fatal warning or error"}
  *   {"type":"result","status":"success","stats":{"tool_calls":0,...}}
  *
- * Claude stream-json schema (updated 2026-02-22):
- *   {"type":"system","subtype":"init","session_id":"..."}
- *   {"type":"content_block_start","content_block":{"type":"tool_use","name":"Read","id":"..."}}
- *   {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
- *   {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"..."}}
- *   {"type":"tool_result","tool_use_id":"...","content":[{"type":"text","text":"..."}]}
+ * Claude stream-json schema (verified via podman 2026-02-22):
+ *   {"type":"system","subtype":"init","session_id":"...","tools":[...],"model":"..."}
+ *   {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","id":"...","input":{...}}]}}
+ *   {"type":"user","message":{"content":[{"tool_use_id":"...","type":"tool_result","content":"..."}]}}
  *   {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
- *   {"type":"result","result":"..."}
+ *   {"type":"result","subtype":"success","result":"...","duration_ms":...}
  */
 function parseStreamLine(line) {
     try {
@@ -40,26 +38,32 @@ function parseStreamLine(line) {
             return { text: obj.content, sessionId: null, toolCalls: null, done: false };
         }
 
-        // --- Claude: content_block_start (tool_use -- surface tool activity) ---
-        if (obj.type === 'content_block_start' && obj.content_block?.type === 'tool_use') {
-            const name = obj.content_block.name || 'tool';
-            return { text: `[tool] ${name}`, sessionId: null, toolCalls: null, done: false };
-        }
-
-        // --- Claude: content_block_delta (incremental token) ---
-        if (obj.type === 'content_block_delta' && obj.delta?.text) {
-            return { text: obj.delta.text, sessionId: null, toolCalls: null, done: false };
-        }
-
-        // --- Claude: assistant message (summarized) ---
+        // --- Claude: assistant message (text + tool_use blocks) ---
         if (obj.type === 'assistant' && obj.message?.content) {
-            const texts = obj.message.content
-                .filter(c => c.type === 'text')
-                .map(c => c.text);
-            return { text: texts.join('\n') || null, sessionId: null, toolCalls: null, done: false };
+            const parts = [];
+            for (const block of obj.message.content) {
+                if (block.type === 'text' && block.text) {
+                    parts.push(block.text);
+                } else if (block.type === 'tool_use' && block.name) {
+                    const hint = block.input?.file_path || block.input?.command || block.input?.query || '';
+                    const suffix = hint ? `: ${hint.toString().slice(0, 120)}` : '';
+                    parts.push(`[tool] ${block.name}${suffix}`);
+                }
+            }
+            return { text: parts.join('\n') || null, sessionId: null, toolCalls: null, done: false };
         }
 
-        // --- Gemini: tool_use event (Claude uses content_block_start instead) ---
+        // --- Claude: user message with tool_result (tool output) ---
+        if (obj.type === 'user' && obj.tool_use_result) {
+            const file = obj.tool_use_result?.file;
+            if (file?.filePath) {
+                const preview = (file.content || '').slice(0, 200).replace(/\n/g, ' ');
+                return { text: `[${file.filePath}] → ${preview}${(file.content || '').length > 200 ? '...' : ''}`, sessionId: null, toolCalls: null, done: false };
+            }
+            return null;
+        }
+
+        // --- Gemini: tool_use event (top-level, not nested in assistant message) ---
         if (obj.type === 'tool_use' && obj.tool_name) {
             const hint = obj.parameters?.file_path || obj.parameters?.command || obj.parameters?.query || '';
             const suffix = hint ? `: ${hint.toString().slice(0, 120)}` : '';

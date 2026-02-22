@@ -5,12 +5,15 @@
 # sendResults -- pushes a deliverable (stored as the agent's result, last-write-wins)
 # sendMessage -- pushes a progress note (shown in UI, does NOT overwrite deliverable)
 #
-# Usage:
-#   sendResults -m "inline report text"      Send inline string as result
-#   sendResults ./path/to/report.md          Send file contents as result
-#   echo "text" | sendResults                Send stdin as result
+# Usage (PREFER file or pipe for multiline content):
+#   sendResults ./path/to/report.md          BEST: Send file contents as result
+#   echo "text" | sendResults                GOOD: Send stdin as result
+#   sendResults -m "short single-line text"  OK for short messages only
 #   sendMessage -m "status update"           Send inline string as progress note
 #   sendMessage ./path/to/notes.md           Send file contents as progress note
+#
+# WARNING: -m with multiline text breaks in bash (newlines split the command).
+# For reports, ALWAYS write to a file first, then: sendResults ./results/findings.md
 
 set -euo pipefail
 

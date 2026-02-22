@@ -27,6 +27,11 @@ Use when the task requires:
 - Bug fixes that need tests to verify the fix
 - Architect plans with dev and QE steps; both agents work on the same scope
 
+**PR Gate**: When using dispatch_both, both agents will report back via huddle messages. Review BOTH reports before approving. Only tell the Developer to open a PR after:
+1. Developer reports implementation is complete (pushed to branch)
+2. QE reports tests are written and committed to the same branch
+3. You have reviewed both outputs and are satisfied
+
 ## Guidance Overrides
 
 - **Architect plan with frontmatter**: If the plan includes step-to-agent mapping (e.g. `assign: developer`, `assign: qe`), follow that mapping. Use the step assignments to decide dispatch.

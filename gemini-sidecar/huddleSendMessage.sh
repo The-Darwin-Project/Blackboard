@@ -5,10 +5,12 @@
 # This is team-internal communication (dev/qe -> Manager).
 # For Brain/system communication, use sendMessage or sendResults.
 #
-# Usage:
-#   huddleSendMessage -m "step 1 is unclear, need clarification from the architect"
-#   huddleSendMessage ./question.md
-#   echo "should I fix tests first?" | huddleSendMessage
+# Usage (PREFER file or pipe for multiline content):
+#   huddleSendMessage ./report.md                  BEST: Send file contents
+#   echo "tests done" | huddleSendMessage           GOOD: Pipe stdin
+#   huddleSendMessage -m "short single-line msg"    OK for short messages only
+#
+# WARNING: -m with multiline text breaks in bash. Write to file first.
 
 set -euo pipefail
 

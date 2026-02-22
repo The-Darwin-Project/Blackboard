@@ -38,7 +38,12 @@ class DevTeam:
     def __init__(self):
         self._adapter: LLMPort | None = None
         self._skills_text: str = ""
+        self._sessions: dict[str, dict[str, str | None]] = {}
         self._load_skills()
+
+    def cleanup_event(self, event_id: str) -> None:
+        """Release session cache for a closed event."""
+        self._sessions.pop(event_id, None)
 
     def _load_skills(self) -> None:
         """Glob manager_skills/*.md relative to this file. Concatenate with headers."""
@@ -188,22 +193,28 @@ class DevTeam:
 
         if fn_name == "approve_and_merge":
             agent_id = args.get("dev_agent_id") or None
-            result, _ = await dispatch_to_agent(
+            prev_sid = self._sessions.get(event_id, {}).get("developer")
+            result, sid = await dispatch_to_agent(
                 registry, bridge, "developer", event_id,
                 "Open a Pull Request, wait for pipeline, merge if green. Report PR URL and status.",
                 on_progress=on_progress, agent_id=agent_id,
+                session_id=prev_sid,
                 event_md_path=event_md_path,
             )
+            self._sessions.setdefault(event_id, {})["developer"] = sid
             return {"pr_result": result}
 
         if fn_name == "request_fix":
             agent_id = args.get("agent_id") or None
             role = "qe" if (agent_id or "").startswith("qe") else "developer"
-            result, _ = await dispatch_to_agent(
+            prev_sid = self._sessions.get(event_id, {}).get(role)
+            result, sid = await dispatch_to_agent(
                 registry, bridge, role, event_id, args.get("feedback", ""),
                 on_progress=on_progress, agent_id=agent_id,
+                session_id=prev_sid,
                 event_md_path=event_md_path,
             )
+            self._sessions.setdefault(event_id, {})[role] = sid
             return {"fix_result": result}
 
         if fn_name == "request_review":
@@ -253,11 +264,14 @@ class DevTeam:
         conn = await registry.get_available(role)
         if not conn:
             return {"error": f"No {role} agent available"}
+        prev_session = self._sessions.get(event_id, {}).get(role)
         result, session_id = await dispatch_to_agent(
             registry, bridge, role, event_id, task,
             on_progress=on_progress, agent_id=conn.agent_id,
+            session_id=prev_session,
             event_md_path=event_md_path,
         )
+        self._sessions.setdefault(event_id, {})[role] = session_id
         return {"result": result, "session_id": session_id, "agent_id": conn.agent_id}
 
     async def _dispatch_both(
@@ -276,14 +290,17 @@ class DevTeam:
             if on_progress:
                 await on_progress({**d, "actor": "qe"})
 
+        prev = self._sessions.get(event_id, {})
         dev_task = asyncio.create_task(dispatch_to_agent(
             registry, bridge, "developer", event_id, args["dev_task"],
             on_progress=on_progress, agent_id=dev_conn.agent_id,
+            session_id=prev.get("developer"),
             event_md_path=event_md_path,
         ))
         qe_task = asyncio.create_task(dispatch_to_agent(
             registry, bridge, "qe", event_id, args["qe_task"],
             on_progress=_qe_on_progress, agent_id=qe_conn.agent_id,
+            session_id=prev.get("qe"),
             event_md_path=event_md_path,
         ))
 
@@ -297,6 +314,7 @@ class DevTeam:
             await asyncio.gather(dev_task, qe_task, return_exceptions=True)
             raise
 
+        self._sessions.setdefault(event_id, {}).update({"developer": dev_sid, "qe": qe_sid})
         return {
             "dev_result": dev_result, "dev_session_id": dev_sid,
             "dev_agent_id": dev_conn.agent_id,

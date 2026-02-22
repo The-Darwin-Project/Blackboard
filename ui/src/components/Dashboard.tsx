@@ -174,12 +174,13 @@ function DashboardInner() {
   useWSMessage((msg) => {
     if (msg.type === 'progress' && msg.actor) {
       const actor = msg.actor as string;
-      if (actor === 'qe' || actor === 'flash') {
+      if (actor === 'qe' || actor === 'flash' || actor === 'manager') {
         setAgentStreams((prev) => {
           const dev = prev['developer'] || { messages: [], huddleMessages: [], eventId: null, isActive: false };
+          const displayActor = actor === 'manager' ? 'flash' : actor;
           const huddle = [...dev.huddleMessages, {
             text: msg.message as string,
-            actor: actor as 'qe' | 'flash',
+            actor: displayActor as 'qe' | 'flash',
             timestamp: Date.now(),
           }].slice(-MAX_BUFFER);
           return { ...prev, developer: { ...dev, huddleMessages: huddle, isActive: true, eventId: (msg.event_id as string) || dev.eventId } };
