@@ -1,0 +1,46 @@
+---
+description: Darwin pod annotation schema for K8s Observer passive service discovery
+alwaysApply: true
+---
+
+# Darwin Annotation Schema
+
+## Annotation Contract
+
+The K8s Observer discovers services by scanning pod annotations in configured namespaces. This is the **only** supported discovery mechanism (the `/telemetry` push endpoint returns HTTP 410).
+
+| Annotation | Required | Value | Example |
+|---|---|---|---|
+| `darwin.io/monitored` | Yes | `"true"` | `"true"` |
+| `darwin.io/service-name` | Yes | Unique service identifier | `"kubevirt"`, `"hco"` |
+| `darwin.io/source-repo` | Yes | Source code repository URL | `"https://gitlab.cee.redhat.com/..."` |
+| `darwin.io/gitops-repo` | Yes | GitOps config repository URL | `"https://gitlab.cee.redhat.com/..."` |
+| `darwin.io/config-path` | Yes | Path to Helm chart or Kustomize dir in gitops repo | `"sync-controller/chart"` |
+
+## Discovery Behavior
+
+- Observer polls every 5 seconds across all namespaces in `K8S_OBSERVER_NAMESPACE` (comma-separated).
+- Only pods with `darwin.io/monitored: "true"` are registered.
+- Pods are grouped by `darwin.io/service-name` for replica counting.
+- First pod per service wins for metadata (source-repo, gitops-repo, config-path).
+- Covers all workload types (Deployment, StatefulSet, DaemonSet, Job, bare pods).
+- Reconciliation cycle runs every 12 polls (~60s) to remove stale services.
+
+## Integration Patterns
+
+1. **Direct chart annotations** -- Add `podAnnotations` to `values.yaml` (simple, single instance).
+2. **ApplicationSet Helm params** -- Inject via `podAnnotations.darwin\.io/*` parameters (multi-instance, used by sync-controller).
+3. **Kustomize overlay** -- Patch pod template annotations (external charts without `podAnnotations` support).
+
+## Constants (source of truth)
+
+Defined in `observers/kubernetes.py` lines 35-40:
+
+- `DARWIN_ANNOTATION_PREFIX = "darwin.io/"`
+- `DARWIN_MONITORED`, `DARWIN_SERVICE_NAME`, `DARWIN_SOURCE_REPO`, `DARWIN_GITOPS_REPO`, `DARWIN_CONFIG_PATH`
+
+## Consumed By
+
+- `KubernetesObserver._discover_from_pod_annotations()` -- feeds the Blackboard service registry
+- Blackboard topology graph -- builds service dependency map from registered metadata
+- Aligner anomaly detection -- monitors registered services for metric deviations
