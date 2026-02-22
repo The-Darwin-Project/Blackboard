@@ -251,8 +251,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
+            initialDelaySeconds: 60
             periodSeconds: 5
-            failureThreshold: 24
+            failureThreshold: 12
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -472,8 +473,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
+            initialDelaySeconds: 60
             periodSeconds: 5
-            failureThreshold: 24
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
@@ -622,8 +624,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
+            initialDelaySeconds: 60
             periodSeconds: 5
-            failureThreshold: 24
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
@@ -749,8 +752,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
+            initialDelaySeconds: 60
             periodSeconds: 5
-            failureThreshold: 24
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
@@ -866,8 +870,9 @@ spec:
             httpGet:
               path: /health
               port: 8000
+            initialDelaySeconds: 60
             periodSeconds: 5
-            failureThreshold: 24
+            failureThreshold: 12
           livenessProbe:
             httpGet:
               path: /health
