@@ -2159,6 +2159,12 @@ class Brain:
                     event.service,
                     f"{event.event.reason} -- stale closure on restart ({len(event.conversation)} turns)"
                 )
+                # Broadcast closure to UI + Slack (notifies active threads)
+                await self._broadcast({
+                    "type": "event_closed",
+                    "event_id": eid,
+                    "summary": stale_summary,
+                })
                 # Archive to deep memory (same as _close_and_broadcast path)
                 archivist = self.agents.get("_archivist_memory")
                 if archivist and hasattr(archivist, "archive_event"):
