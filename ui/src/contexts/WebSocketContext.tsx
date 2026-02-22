@@ -49,7 +49,6 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const retryRef = useRef(0);
-  const maxRetries = 10;
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
@@ -101,13 +100,11 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
       ws.onclose = () => {
         setConnected(false);
         wsRef.current = null;
-        if (retryRef.current < maxRetries) {
-          const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
-          retryRef.current++;
-          setReconnecting(true);
-          console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
-          reconnectTimerRef.current = setTimeout(connect, delay);
-        }
+        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
+        retryRef.current++;
+        setReconnecting(true);
+        console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
+        reconnectTimerRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = (err) => {
