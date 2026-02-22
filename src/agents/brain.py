@@ -2281,12 +2281,22 @@ class Brain:
                     if not event or not event.conversation:
                         continue
 
-                    # Check if event is deferred -- skip until delay expires
+                    # Check if event is deferred -- skip until delay expires OR user interrupts
                     if event.status == EventStatus.DEFERRED:
                         defer_key = f"{self.blackboard.EVENT_PREFIX}{eid}:defer_until"
                         defer_until = await self.blackboard.redis.get(defer_key)
                         if defer_until and time.time() < float(defer_until):
-                            continue  # Still deferred, skip
+                            last_defer_idx = next(
+                                (i for i, t in enumerate(reversed(event.conversation))
+                                 if t.actor == "brain" and t.action == "defer"), None
+                            )
+                            user_after_defer = last_defer_idx is not None and any(
+                                t.actor == "user"
+                                for t in event.conversation[len(event.conversation) - last_defer_idx:]
+                            )
+                            if not user_after_defer:
+                                continue  # Still deferred, no user interrupt
+                            logger.info(f"User message interrupted defer for {eid} -- waking early")
                         # Delay expired -- atomically re-activate (WATCH/MULTI/EXEC)
                         # to avoid losing turns appended during the defer window.
                         transitioned = await self.blackboard.transition_event_status(
