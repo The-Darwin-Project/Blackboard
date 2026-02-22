@@ -1276,7 +1276,16 @@ class BlackboardState:
         reason: str,
         evidence: "str | EventEvidence",
     ) -> str:
-        """Create a new event and add to the queue for Brain triage."""
+        """Create a new event and add to the queue for Brain triage.
+
+        Evidence contract: callers MUST pass a structured EventEvidence object.
+        Plain strings are accepted only for backward compat (_coerce_evidence).
+
+        Source patterns:
+          aligner    -- source_type="aligner", LLM domain/severity, EventMetrics
+          chat/slack -- source_type="chat"/"slack", domain="complicated", severity="info"
+          headhunter -- source_type="headhunter", domain="complicated", severity="info"
+        """
         from datetime import datetime, timezone
         event = EventDocument(
             source=source,

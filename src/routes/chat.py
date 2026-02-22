@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..dependencies import get_blackboard
-from ..models import ConversationTurn
+from ..models import ConversationTurn, EventEvidence
 from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,12 @@ async def create_chat_event(
             source="chat",
             service=request.service,
             reason=request.message,
-            evidence="User request via chat interface",
+            evidence=EventEvidence(
+                display_text=request.message,
+                source_type="chat",
+                domain="complicated",
+                severity="info",
+            ),
         )
         # Add user message as the first conversation turn
         user_turn = ConversationTurn(

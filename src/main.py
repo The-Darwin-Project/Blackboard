@@ -320,7 +320,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if msg_type == "chat":
                 # Create event from chat message
                 from .dependencies import _blackboard
-                from .models import ConversationTurn
+                from .models import ConversationTurn, EventEvidence
                 if _blackboard:
                     message = data.get("message", "")
                     service = data.get("service", "general")
@@ -328,7 +328,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         source="chat",
                         service=service,
                         reason=message,
-                        evidence="User request via WebSocket chat",
+                        evidence=EventEvidence(
+                            display_text=message,
+                            source_type="chat",
+                            domain="complicated",
+                            severity="info",
+                        ),
                     )
                     # Extract optional image (with size guard)
                     image = data.get("image")

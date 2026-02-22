@@ -17,6 +17,7 @@ from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .formatter import format_turn, format_event_summary
+from ..models import EventEvidence
 
 if TYPE_CHECKING:
     from ..agents.brain import Brain
@@ -81,7 +82,15 @@ class SlackChannel:
 
             # Create event in Blackboard
             event_id = await self._blackboard.create_event(
-                source="slack", service="general", reason=text, evidence=text,
+                source="slack",
+                service="general",
+                reason=text,
+                evidence=EventEvidence(
+                    display_text=text,
+                    source_type="slack",
+                    domain="complicated",
+                    severity="info",
+                ),
             )
 
             # Post visible thread-parent message

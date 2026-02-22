@@ -1,0 +1,32 @@
+---
+description: Event evidence contract -- all event sources MUST provide structured EventEvidence
+alwaysApply: true
+---
+
+# Event Evidence Contract
+
+## Rule: No Plain-String Evidence
+
+Every call to `blackboard.create_event()` MUST pass a structured `EventEvidence` object, never a plain string.
+
+The `_coerce_evidence` validator in `EventInput` exists only for backward compatibility with legacy Redis data. New code MUST NOT rely on it.
+
+## Required Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `display_text` | Yes | The user's actual message or anomaly description. Never a generic label. |
+| `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"` |
+| `domain` | Yes | Cynefin classification: `"clear"`, `"complicated"`, `"complex"`, `"chaotic"`. Default `"complicated"` for user requests. |
+| `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. |
+| `metrics` | Conditional | Required for aligner events (`EventMetrics` with cpu/memory/error_rate/replicas). `None` for user-initiated events. |
+
+## Source-Specific Patterns
+
+* **Aligner**: Full evidence with LLM-classified domain/severity + metrics snapshot. Gold standard.
+* **Chat/Slack**: `source_type` matches source, `severity="info"`, `domain="complicated"`, `display_text` = user message, no metrics.
+* **Headhunter** (future): Same as chat/slack but `source_type="headhunter"`. Include work plan description in `display_text`.
+
+## Why This Matters
+
+Structured evidence directly affects Brain triage speed. Events with rich evidence (real source_type, domain, severity) are triaged faster than events with `source_type="unknown"` and default fields.
