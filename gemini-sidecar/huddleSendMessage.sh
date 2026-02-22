@@ -16,12 +16,14 @@ set -euo pipefail
 
 CALLBACK_URL="http://localhost:${PORT:-9090}/callback"
 
-# Read content from: -m flag, file argument, or stdin
+# Read content from: -m flag, file argument, bare string, or stdin
 CONTENT=""
 if [ "${1:-}" = "-m" ] && [ -n "${2:-}" ]; then
   CONTENT="$2"
 elif [ -n "${1:-}" ] && [ -f "$1" ]; then
   CONTENT="$(cat "$1")"
+elif [ -n "${1:-}" ]; then
+  CONTENT="$1"
 elif [ ! -t 0 ]; then
   CONTENT="$(cat -)"
 else
