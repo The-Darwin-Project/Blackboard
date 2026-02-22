@@ -1626,13 +1626,14 @@ class Brain:
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
                     if agent_name == "developer" and self._dev_team:
-                        # DevTeam: Manager decides work split, dispatches to dev+qe internally
-                        result, session_id = await self._dev_team.process(
+                        # DevTeam returns (summary, status) -- status is success/partial/failed/pending/None
+                        result, dev_status = await self._dev_team.process(
                             event_id=event_id,
                             task=task,
                             on_progress=on_progress,
                             event_md_path=event_md_path,
                         )
+                        session_id = None
                     else:
                         # Direct dispatch for architect, sysadmin
                         result, session_id = await dispatch_to_agent(

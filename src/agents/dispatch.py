@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_SENTINEL = "__RETRYABLE__"
 
+AGENT_VOLUME_PATHS = {
+    "architect": "/data/gitops-architect",
+    "sysadmin": "/data/gitops-sysadmin",
+    "developer": "/data/gitops-developer",
+    "qe": "/data/gitops-qe",
+}
+
 
 def _build_prompt(task: str, event_md_path: str) -> str:
     if event_md_path:
@@ -74,7 +81,7 @@ async def dispatch_to_agent(
             "task_id": task_id,
             "event_id": event_id,
             "prompt": prompt,
-            "cwd": cwd or "/data/gitops",
+            "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/gitops"),
             "autoApprove": True,
             "session_id": session_id,
         })

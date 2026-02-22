@@ -111,7 +111,8 @@ class DevTeam:
                     )
 
                 if fn_result.get("_terminal"):
-                    return fn_result["summary"], None
+                    status = fn_result.get("status", "success")
+                    return fn_result["summary"], status
 
                 model_parts = self._extract_model_parts(response, fn)
                 contents.append({"role": "model", "parts": model_parts})
