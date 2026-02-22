@@ -247,6 +247,12 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -462,6 +468,12 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
@@ -606,6 +618,12 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
@@ -727,6 +745,12 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
@@ -838,6 +862,12 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
           livenessProbe:
             httpGet:
               path: /health
