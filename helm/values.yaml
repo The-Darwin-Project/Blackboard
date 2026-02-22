@@ -7,7 +7,7 @@
 
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "bb6f283" # Updated by CI to commit SHA
+  tag: "ca1cfe1" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
