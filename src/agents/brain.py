@@ -846,7 +846,9 @@ class Brain:
 
     @staticmethod
     def _surface_agent_recommendation(event: EventDocument) -> str | None:
-        """Extract and promote last agent's recommendation to system-level priority."""
+        """Extract and promote last agent's recommendation to system-level priority.
+        Skips if a brain.defer already addressed it (prevents stale defer loops).
+        """
         last_agent_turn = next(
             (t for t in reversed(event.conversation)
              if t.actor not in ("brain", "user", "aligner")),
@@ -855,16 +857,23 @@ class Brain:
         if not last_agent_turn:
             return None
 
+        agent_idx = event.conversation.index(last_agent_turn)
+        has_defer_after = any(
+            t.actor == "brain" and t.action == "defer"
+            for t in event.conversation[agent_idx + 1:]
+        )
+        if has_defer_after:
+            return None
+
         result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
         rec = Brain._extract_recommendation(result_text)
 
         if rec:
-            turn_idx = event.conversation.index(last_agent_turn)
             from datetime import datetime, timezone
             ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
                 f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor}, "
-                f"turn {turn_idx + 1}/{len(event.conversation)}, at {ts})\n"
+                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
                 f"The following is from the most recent agent execution. "
                 f"You MUST address this before closing:\n\n{rec}"
             )
