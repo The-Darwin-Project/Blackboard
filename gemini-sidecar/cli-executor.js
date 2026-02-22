@@ -9,7 +9,7 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
-const { AGENT_CLI, AGENT_MODEL, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
@@ -28,7 +28,8 @@ function buildCLICommand(prompt, options = {}) {
         if (options.sessionId) {
             args.push('--resume', options.sessionId);
         }
-        args.push('-p', prompt);
+        const thinkPrefix = AGENT_ROLE === 'architect' ? 'Think harder. ' : '';
+        args.push('-p', thinkPrefix + prompt);
         return { binary: 'claude', args };
     }
     const args = [];
