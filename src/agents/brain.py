@@ -1736,6 +1736,10 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Agent task completed: {agent_name} for {event_id}")
 
+            # Write architect plan as standalone file to agent volumes
+            if agent_name == "architect" and result_str.lstrip().startswith("---"):
+                await self._write_plan_to_volumes(event_id, result_str)
+
             # Mark routing turn as EVALUATED (agent completed its work)
             if routing_turn_num:
                 await self.blackboard.mark_turn_status(
@@ -2012,6 +2016,25 @@ class Brain:
         content = self._event_to_markdown(event, service_meta, mermaid)
         file_path.write_text(content)
         logger.debug(f"Wrote event MD to {file_path}")
+
+    async def _write_plan_to_volumes(self, event_id: str, plan_content: str) -> None:
+        """Write architect plan as standalone .plan.md file to agent volumes.
+        Agents read this directly -- same pattern as Cursor .cursor/plans/*.plan.md files.
+        Deduplicates by resolved path to avoid race conditions on shared subPaths.
+        """
+        filename = f"plan-{event_id}.md"
+        written: set[str] = set()
+        for role, base_path in VOLUME_PATHS.items():
+            if role == "architect":
+                continue
+            plans_dir = Path(base_path) / "plans"
+            resolved = str(plans_dir.resolve())
+            if resolved in written:
+                continue
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / filename).write_text(plan_content)
+            written.add(resolved)
+        logger.info(f"Wrote plan {filename} to {len(written)} unique volume(s)")
 
     @staticmethod
     def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:

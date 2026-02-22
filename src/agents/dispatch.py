@@ -32,12 +32,16 @@ AGENT_VOLUME_PATHS = {
 
 
 def _build_prompt(task: str, event_md_path: str) -> str:
+    parts = []
     if event_md_path:
-        return (
-            f"Read the event document at {event_md_path} for full context, "
-            f"then execute the following task:\n\n{task}"
+        parts.append(f"Read the event document at {event_md_path} for full context.")
+        plan_path = event_md_path.replace("events/event-", "plans/plan-")
+        parts.append(
+            f"If a plan file exists at {plan_path}, read it for the architect's "
+            f"implementation plan. Update the frontmatter step status as you complete each step."
         )
-    return task
+    parts.append(f"Execute the following task:\n\n{task}")
+    return " ".join(parts) if event_md_path else task
 
 
 def _check_security(prompt: str) -> None:
