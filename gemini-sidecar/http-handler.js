@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: HTTP routing for /health, /callback, /execute. All state access via state.js getters/setters.
 // 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message — task_id and event_id from state.getCurrentTask().
-// 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 45s timeout.
+// 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 10min timeout.
 // 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set. Credentials setup before executeCLI.
 
 const { executeCLI } = require('./cli-executor');
@@ -114,9 +114,9 @@ async function handleRequest(req, res) {
               res.writeHead(408, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Manager reply timeout' }));
               state.clearPendingHuddleReply();
-              console.log(`[${new Date().toISOString()}] [${eid3}] Huddle reply timed out (45s)`);
+              console.log(`[${new Date().toISOString()}] [${eid3}] Huddle reply timed out (10min)`);
             }
-          }, 45000);
+          }, 600000);
           state.setPendingHuddleReply({ res, timeout });
           return; // do NOT respond yet -- response sent when huddle_reply arrives
         }

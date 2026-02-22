@@ -35,8 +35,8 @@ if [ -z "$CONTENT" ]; then
 fi
 
 # POST to sidecar callback. The sidecar HOLDS this request open until the Manager replies.
-# Timeout: 50s (sidecar timeout is 45s -- 5s buffer for network).
-RESPONSE=$(curl -s -m 50 -w "\n%{http_code}" -X POST "$CALLBACK_URL" \
+# Timeout: 600s (10 min) -- Manager needs time for LLM thinking, reviewing both dev+QE, function calling.
+RESPONSE=$(curl -s -m 600 -w "\n%{http_code}" -X POST "$CALLBACK_URL" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg type "huddle_message" --arg content "$CONTENT" '{type: $type, content: $content}')")
 
