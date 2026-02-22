@@ -447,7 +447,7 @@ class Brain:
         if not event.conversation:
             await self.blackboard.record_event(
                 EventType.BRAIN_EVENT_CREATED,
-                {"event_id": event_id, "service": event.service, "source": event.event.source if event.event else "unknown"},
+                {"event_id": event_id, "service": event.service, "source": event.source},
                 narrative=f"New event {event_id} ({event.service}): {event.event.reason[:80] if event.event else 'unknown'}",
             )
 
