@@ -1,6 +1,7 @@
 ---
 name: darwin-plan-template
 description: Structured plan template for the Architect agent. Use when creating infrastructure or code change plans.
+roles: [architect]
 ---
 
 # Darwin Plan Template

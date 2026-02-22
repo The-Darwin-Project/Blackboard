@@ -1,6 +1,7 @@
 ---
 name: darwin-dockerfile-safety
 description: Safety rules for modifying Dockerfiles and Containerfiles. Use when editing container build files.
+roles: [sysadmin, developer]
 ---
 
 # Dockerfile Safety Rules

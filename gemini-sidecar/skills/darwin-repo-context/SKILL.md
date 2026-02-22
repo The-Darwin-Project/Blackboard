@@ -1,6 +1,7 @@
 ---
 name: darwin-repo-context
 description: Discover and load project-specific AI context from cloned repositories. Activates when cloning or pulling a repository to check for .gemini, .claude, or .cursor configuration directories.
+roles: [architect, sysadmin, developer, qe]
 ---
 
 # Repository Context Discovery

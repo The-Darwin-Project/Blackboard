@@ -4,6 +4,7 @@
 // 2. [Constraint]: Idempotent — checks fs.existsSync before creating; skips overwrite of existing settings/rules.
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
+// 5. [Pattern]: filterSkillsByRole reads YAML frontmatter `roles:` from each SKILL.md and removes skills not matching AGENT_ROLE.
 
 const fs = require('fs');
 const path = require('path');
@@ -74,6 +75,43 @@ function initializeCLISettings() {
         console.log('Gemini trustedFolders.json created (object format)');
     } catch (err) {
         console.error(`Gemini trustedFolders.json error: ${err.message}`);
+    }
+
+    filterSkillsByRole(geminiDir, claudeDir);
+}
+
+/**
+ * Remove skills that don't match AGENT_ROLE.
+ * Reads `roles: [...]` from each SKILL.md frontmatter.
+ * If roles is present and AGENT_ROLE is not in the list, delete the skill directory.
+ */
+function filterSkillsByRole(geminiDir, claudeDir) {
+    const role = (process.env.AGENT_ROLE || '').toLowerCase();
+    if (!role) return;
+
+    const geminiSkillsDir = path.join(geminiDir, 'skills');
+    const claudeSkillsDir = path.join(claudeDir, 'skills');
+    if (!fs.existsSync(geminiSkillsDir)) return;
+
+    let kept = 0, removed = 0;
+    for (const entry of fs.readdirSync(geminiSkillsDir)) {
+        const skillMd = path.join(geminiSkillsDir, entry, 'SKILL.md');
+        if (!fs.existsSync(skillMd)) continue;
+
+        const head = fs.readFileSync(skillMd, 'utf8').slice(0, 500);
+        const match = head.match(/^roles:\s*\[([^\]]*)\]/m);
+        if (!match) { kept++; continue; }
+
+        const roles = match[1].split(',').map(r => r.trim().toLowerCase());
+        if (roles.includes(role)) { kept++; continue; }
+
+        fs.rmSync(path.join(geminiSkillsDir, entry), { recursive: true, force: true });
+        const claudeLink = path.join(claudeSkillsDir, entry);
+        if (fs.existsSync(claudeLink)) fs.rmSync(claudeLink, { recursive: true, force: true });
+        removed++;
+    }
+    if (removed > 0) {
+        console.log(`Skills filtered for ${role}: ${kept} kept, ${removed} removed`);
     }
 }
 

@@ -1,6 +1,7 @@
 ---
 name: darwin-code-review
 description: Code and MR/PR review workflow. Activates for Mode:review tasks or when reviewing merge requests, pull requests, or code changes.
+roles: [architect]
 ---
 
 # Darwin Code Review Workflow

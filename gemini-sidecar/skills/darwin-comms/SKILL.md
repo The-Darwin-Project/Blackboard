@@ -1,6 +1,7 @@
 ---
 name: darwin-comms
 description: Report findings and status updates to the Darwin Brain. Use when you have results to deliver, progress to report, or need to communicate status back to the orchestrator.
+roles: [architect, sysadmin, developer, qe]
 ---
 
 # Communicating with the Darwin Brain

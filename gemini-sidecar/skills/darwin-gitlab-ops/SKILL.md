@@ -1,6 +1,7 @@
 ---
 name: darwin-gitlab-ops
 description: GitLab API interaction patterns for internal GitLab instances. Use when working with GitLab merge requests, pipelines, projects, or any GitLab API call.
+roles: [architect, sysadmin, developer]
 ---
 
 # GitLab Operations

@@ -1,6 +1,7 @@
 ---
 name: darwin-hexagonal
 description: Hexagonal Architecture (Ports & Adapters) patterns for code review and planning. Use when reviewing code structure, planning new features, or evaluating coupling.
+roles: [architect]
 ---
 
 # Hexagonal Architecture (Ports & Adapters)

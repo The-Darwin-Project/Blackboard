@@ -1,6 +1,7 @@
 ---
 name: darwin-team-huddle
 description: Team communication with the DevTeam Manager via huddleSendMessage. Use in implement mode when working as developer/QE pair.
+roles: [developer, qe]
 ---
 
 # Team Huddle -- Developer/QE to Manager Communication

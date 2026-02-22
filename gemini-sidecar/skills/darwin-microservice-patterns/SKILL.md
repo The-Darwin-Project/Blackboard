@@ -1,6 +1,7 @@
 ---
 name: darwin-microservice-patterns
 description: Microservice technical patterns for infrastructure and API design. Use when planning service changes, reviewing API contracts, or evaluating deployment strategies.
+roles: [architect]
 ---
 
 # Microservice Technical Patterns

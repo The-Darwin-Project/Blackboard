@@ -1,6 +1,7 @@
 ---
 name: darwin-gitops
 description: GitOps workflow rules for modifying infrastructure via git. Use when cloning repos, modifying Helm values, committing, pushing, or verifying deployments.
+roles: [sysadmin, developer, qe]
 ---
 
 # Darwin GitOps Workflow
