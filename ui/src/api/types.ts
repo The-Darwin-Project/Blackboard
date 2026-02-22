@@ -1,4 +1,9 @@
 // BlackBoard/ui/src/api/types.ts
+// @ai-rules:
+// 1. [Constraint]: All interfaces use snake_case to match Python API exactly -- no camelCase transformation.
+// 2. [Pattern]: GraphResponse is the /topology/graph contract: nodes + edges + tickets. No plans field.
+// 3. [Pattern]: TicketNode.resolved_service is nullable -- populated by future probe heuristic (currently always null from backend).
+// 4. [Pattern]: getAgentFromEventType() maps EventType to agent name for UI coloring. Keep in sync with Python EventType enum.
 /**
  * TypeScript interfaces matching Python models.
  * Using snake_case to match API exactly (no transformation).
@@ -27,12 +32,6 @@ export type EventType =
   | 'high_error_rate_detected'
   | 'anomaly_resolved'
   | 'aligner_observation'
-  // Plan lifecycle
-  | 'plan_created'
-  | 'plan_approved'
-  | 'plan_rejected'
-  | 'plan_executed'
-  | 'plan_failed'
   // Architect autonomous
   | 'architect_analyzing'
   // SysAdmin execution
@@ -105,14 +104,6 @@ export interface GraphEdge {
   type: string;  // 'hard' or 'async'
 }
 
-export interface GhostNode {
-  plan_id: string;
-  target_node: string;
-  action: string;
-  status: string;
-  params: Record<string, unknown>;
-}
-
 export interface TicketNode {
   event_id: string;
   status: EventStatus;
@@ -123,12 +114,12 @@ export interface TicketNode {
   current_agent: string | null;
   defer_count: number;
   has_work_plan: boolean;
+  resolved_service: string | null;
 }
 
 export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  plans: GhostNode[];
   tickets: TicketNode[];
 }
 
@@ -330,15 +321,10 @@ export function getAgentFromEventType(eventType: EventType): Agent {
     case 'aligner_observation':
       return 'aligner';
     // Architect events (strategy)
-    case 'plan_created':
-    case 'plan_approved':
-    case 'plan_rejected':
     case 'architect_analyzing':
       return 'architect';
     // SysAdmin events (execution)
     case 'sysadmin_executing':
-    case 'plan_executed':
-    case 'plan_failed':
       return 'sysadmin';
     default:
       return 'architect';

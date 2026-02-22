@@ -70,7 +70,7 @@ async def get_graph_data(
     Get topology as rich graph data for Cytoscape.js visualization.
     
     Returns nodes with health status, edges with protocol metadata,
-    and pending plans as ghost nodes per GRAPH_SPEC.md.
+    and ticket nodes for active events.
     
     This is the Architecture Graph (Visualization #1) - Cytoscape format.
     """

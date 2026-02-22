@@ -1,11 +1,17 @@
 // BlackBoard/ui/src/components/CytoscapeGraph.tsx
+// @ai-rules:
+// 1. [Pattern]: Three node types rendered: service (health-colored), ticket (source-colored via TICKET_COLORS), and standard edges.
+// 2. [Pattern]: cytoscape-html-node extension renders HTML labels -- register once via useRef guard.
+// 3. [Gotcha]: TICKET_COLORS must be at module scope (not in component body) to avoid defeating useCallback memoization.
+// 4. [Pattern]: View state (zoom/pan) persisted in localStorage with VIEW_STATE_KEY. Restored on data updates only if user hasn't interacted.
+// 5. [Constraint]: buildNodeLabel, buildTicketLabel are useCallback with [] deps -- they reference only module-scope constants.
 /**
  * Cytoscape.js-based architecture graph visualization.
  * 
  * Features:
  * - Health-based node colors (green/yellow/red/grey)
  * - Node type icons (service/database/cache/external)
- * - Ghost nodes for pending plans
+ * - Source-colored ticket nodes (aligner=red, chat=amber, slack=violet, headhunter=cyan)
  * - cose-bilkent auto-layout
  * - Navigation controls (zoom in/out/reset, pan)
  * - View state persistence in localStorage
@@ -16,7 +22,7 @@ import coseBilkent from 'cytoscape-cose-bilkent';
 import nodeHtmlLabel from 'cytoscape-node-html-label';
 import { Loader2, Network, ZoomIn, ZoomOut, RotateCcw, Maximize2 } from 'lucide-react';
 import { useGraph } from '../hooks';
-import type { GraphNode, GhostNode, TicketNode, HealthStatus, NodeType } from '../api/types';
+import type { GraphNode, TicketNode, HealthStatus, NodeType } from '../api/types';
 
 // Register extensions safely (only once, with error handling)
 let extensionsRegistered = false;
@@ -74,6 +80,13 @@ const LAYOUT_OPTIONS = extensionsRegistered
 // LocalStorage key for view state persistence
 const VIEW_STATE_KEY = 'darwin:graph:view';
 
+const TICKET_COLORS: Record<string, string> = {
+  aligner: '#ef4444',
+  chat: '#f59e0b',
+  slack: '#8b5cf6',
+  headhunter: '#06b6d4',
+};
+
 interface ViewState {
   zoom: number;
   pan: { x: number; y: number };
@@ -81,10 +94,9 @@ interface ViewState {
 
 interface CytoscapeGraphProps {
   onNodeClick?: (serviceName: string) => void;
-  onPlanClick?: (planId: string) => void;
 }
 
-function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
+function CytoscapeGraph({ onNodeClick }: CytoscapeGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cyRef = useRef<any>(null);
@@ -170,32 +182,13 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     `;
   }, []);
 
-  // Build ghost node HTML label
-  const buildGhostLabel = useCallback((ghost: GhostNode) => {
-    return `
-      <div class="cyto-ghost-label" style="
-        background: rgba(99, 102, 241, 0.3);
-        border: 2px dashed #6366f1;
-        border-radius: 8px;
-        padding: 6px 10px;
-        color: #a5b4fc;
-        font-size: 11px;
-        text-align: center;
-        min-width: 80px;
-      ">
-        <div style="font-size: 14px; margin-bottom: 2px;">👻</div>
-        <div style="font-weight: 600; text-transform: uppercase;">${ghost.action}</div>
-        <div style="font-size: 9px; opacity: 0.8;">${ghost.target_node}</div>
-      </div>
-    `;
-  }, []);
-
-  // Build ticket node HTML label (amber/orange for active events)
+  // Build ticket node HTML label (color-coded by source)
   const buildTicketLabel = useCallback((ticket: TicketNode) => {
     const STATUS_COLORS: Record<string, string> = {
       new: '#3b82f6', active: '#22c55e', deferred: '#a855f7', waiting_approval: '#eab308',
     };
     const badgeColor = STATUS_COLORS[ticket.status] || '#64748b';
+    const color = TICKET_COLORS[ticket.source] || '#f59e0b';
     const agent = ticket.current_agent || 'pending';
     const elapsed = ticket.elapsed_seconds < 60
       ? `${Math.round(ticket.elapsed_seconds)}s`
@@ -203,11 +196,11 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     const planIcon = ticket.has_work_plan ? '📋 ' : '';
     return `
       <div class="cyto-ticket-label" style="
-        background: rgba(245, 158, 11, 0.15);
-        border: 2px solid #f59e0b;
+        background: ${color}26;
+        border: 2px solid ${color};
         border-radius: 8px;
         padding: 6px 10px;
-        color: #fbbf24;
+        color: ${color};
         font-size: 11px;
         text-align: center;
         min-width: 120px;
@@ -337,20 +330,6 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             'background-color': '#ef4444',
           },
         },
-        // Ghost node style
-        {
-          selector: 'node.ghost',
-          style: {
-            'width': 90,
-            'height': 60,
-            'background-color': '#6366f1',
-            'background-opacity': 0.1,
-            'border-width': 2,
-            'border-style': 'dashed',
-            'border-color': '#6366f1',
-            'label': 'data(label)',
-          },
-        },
         // Ticket node style (active events -- HTML label overlay provides the visual)
         {
           selector: 'node.ticket',
@@ -384,12 +363,14 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
           },
         },
         {
-          selector: 'edge.ghost-edge',
+          selector: 'edge.ticket-edge',
           style: {
-            'line-style': 'dotted',
-            'line-color': '#6366f1',
-            'target-arrow-color': '#6366f1',
-            'opacity': 0.5,
+            'line-style': 'dashed',
+            'line-color': '#f59e0b',
+            'target-arrow-color': '#f59e0b',
+            'target-arrow-shape': 'triangle',
+            'width': 1.5,
+            'opacity': 0.6,
           },
         },
         // Edge labels
@@ -478,9 +459,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       if (node.isNode()) {
         const nodeData = node.data();
         if (nodeData.isTicket) return;
-        if (nodeData.isGhost && onPlanClick) {
-          onPlanClick(nodeData.planId);
-        } else if (onNodeClick) {
+        if (onNodeClick) {
           onNodeClick(nodeData.id);
         }
       }
@@ -490,7 +469,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
     return () => {
       cy.off('tap', 'node', handleTap);
     };
-  }, [onNodeClick, onPlanClick]);
+  }, [onNodeClick]);
 
   // Update graph when data changes
   useEffect(() => {
@@ -537,34 +516,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       });
     });
 
-    // Add ghost nodes from pending plans
-    data.plans.forEach((plan) => {
-      const ghostId = `ghost-${plan.plan_id}`;
-      
-      // Ghost node
-      elements.push({
-        data: {
-          id: ghostId,
-          label: `${plan.action}: ${plan.target_node}`,
-          isGhost: true,
-          planId: plan.plan_id,
-          action: plan.action,
-        },
-        classes: 'ghost',
-      });
-
-      // Ghost edge connecting to target
-      elements.push({
-        data: {
-          id: `ghost-edge-${plan.plan_id}`,
-          source: plan.target_node,
-          target: ghostId,
-        },
-        classes: 'ghost-edge',
-      });
-    });
-
-    // Add ticket nodes from active events (free-floating, no edges)
+    // Add ticket nodes from active events (with edges to resolved services)
     (data.tickets ?? []).forEach((ticket) => {
       const ticketId = `ticket-${ticket.event_id}`;
       elements.push({
@@ -576,6 +528,17 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
         },
         classes: 'ticket',
       });
+
+      if (ticket.resolved_service) {
+        elements.push({
+          data: {
+            id: `ticket-edge-${ticket.event_id}`,
+            source: `ticket-${ticket.event_id}`,
+            target: ticket.resolved_service,
+          },
+          classes: 'ticket-edge',
+        });
+      }
     });
 
     console.log('[CytoscapeGraph] Constructed elements:', elements);
@@ -633,23 +596,6 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             },
           },
           {
-            query: 'node.ghost',
-            halign: 'center',
-            valign: 'center',
-            halignBox: 'center',
-            valignBox: 'center',
-            tpl: (nodeData: unknown) => {
-              const d = nodeData as { planId: string; action: string; label: string };
-              return buildGhostLabel({
-                plan_id: d.planId,
-                target_node: d.label.split(': ')[1] || '',
-                action: d.action,
-                status: 'pending',
-                params: {},
-              });
-            },
-          },
-          {
             query: 'node.ticket',
             halign: 'center',
             valign: 'center',
@@ -673,15 +619,6 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
             'shape': 'round-rectangle',
             'corner-radius': 8,
             'label': '',
-            'background-opacity': 0,
-            'border-width': 0,
-          })
-          .selector('node.ghost')
-          .style({
-            'width': 180,
-            'height': 70,
-            'shape': 'round-rectangle',
-            'corner-radius': 8,
             'background-opacity': 0,
             'border-width': 0,
           })
@@ -752,7 +689,7 @@ function CytoscapeGraph({ onNodeClick, onPlanClick }: CytoscapeGraphProps) {
       console.log('[CytoscapeGraph] Node position:', node.id(), pos);
     });
 
-  }, [data, isInitialized, buildNodeLabel, buildGhostLabel, buildTicketLabel, cleanupHtmlLabels, hasUserInteracted, loadViewState, saveViewState]);
+  }, [data, isInitialized, buildNodeLabel, buildTicketLabel, cleanupHtmlLabels, hasUserInteracted, loadViewState, saveViewState]);
 
   if (isLoading) {
     console.log('[CytoscapeGraph] Rendering: LOADING');

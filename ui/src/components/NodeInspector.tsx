@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/components/NodeInspector.tsx
 /**
- * Slide-over drawer for service details and plan actions.
- * Shows metrics, dependencies, recent events, and plan approval buttons.
+ * Slide-over drawer for service details.
+ * Shows metrics, dependencies, and recent events.
  */
 import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch, Zap } from 'lucide-react';
 import { useService, useEvents } from '../hooks';
@@ -17,10 +17,6 @@ const EVENT_LABELS: Record<string, string> = {
   anomaly_resolved: 'Resolved',
   aligner_observation: 'Observation',
   architect_analyzing: 'Analyzing',
-  plan_created: 'Plan Created',
-  plan_approved: 'Plan Approved',
-  plan_executed: 'Plan Executed',
-  plan_failed: 'Plan Failed',
   sysadmin_executing: 'Executing',
 };
 

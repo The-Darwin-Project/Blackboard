@@ -87,55 +87,6 @@ class Service(BaseModel):
 
 
 # =============================================================================
-# Plan Layer
-# =============================================================================
-
-class PlanStatus(str, Enum):
-    """Plan lifecycle states."""
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    EXECUTING = "executing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class PlanAction(str, Enum):
-    """Supported plan actions (from Architect tools)."""
-    SCALE = "scale"
-    ROLLBACK = "rollback"
-    RECONFIG = "reconfig"
-    FAILOVER = "failover"
-    OPTIMIZE = "optimize"
-
-
-class Plan(BaseModel):
-    """
-    An infrastructure modification plan created by the Architect.
-    
-    Plans live forever in the Blackboard (no TTL).
-    """
-    id: str = Field(default_factory=lambda: f"plan-{uuid.uuid4().hex[:8]}")
-    action: PlanAction
-    service: str = Field(..., description="Target service name from topology")
-    params: dict[str, Any] = Field(default_factory=dict, description="Action-specific parameters")
-    reason: str = Field(..., description="Justification based on metrics/topology")
-    status: PlanStatus = PlanStatus.PENDING
-    created_at: float = Field(default_factory=time.time)
-    approved_at: Optional[float] = None
-    executed_at: Optional[float] = None
-    result: Optional[str] = Field(None, description="Execution result or error message")
-
-
-class PlanCreate(BaseModel):
-    """Schema for creating a new plan (from Architect function call)."""
-    action: PlanAction
-    service: str
-    params: dict[str, Any] = Field(default_factory=dict)
-    reason: str
-
-
-# =============================================================================
 # Metrics History (Time-Series Layer)
 # =============================================================================
 
@@ -191,15 +142,6 @@ class GraphEdge(BaseModel):
     type: str = Field("hard", description="Dependency type: 'hard' or 'async'")
 
 
-class GhostNode(BaseModel):
-    """A ghost node representing a pending plan."""
-    plan_id: str = Field(..., description="Associated plan ID")
-    target_node: str = Field(..., description="Target service this plan affects")
-    action: str = Field(..., description="Plan action (scale, rollback, etc.)")
-    status: str = Field(..., description="Plan status")
-    params: dict[str, Any] = Field(default_factory=dict, description="Plan parameters")
-
-
 class TicketNode(BaseModel):
     """An ephemeral node representing an active event/ticket in the graph."""
     event_id: str
@@ -211,13 +153,13 @@ class TicketNode(BaseModel):
     current_agent: str | None = None
     defer_count: int = 0
     has_work_plan: bool = False
+    resolved_service: str | None = None
 
 
 class GraphResponse(BaseModel):
     """Response for /topology/graph endpoint."""
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
-    plans: list[GhostNode] = Field(default_factory=list, description="Pending plans as ghost nodes")
     tickets: list[TicketNode] = Field(default_factory=list, description="Active event tickets as ephemeral nodes")
 
 
@@ -237,12 +179,6 @@ class EventType(str, Enum):
     HIGH_ERROR_RATE_DETECTED = "high_error_rate_detected"
     ANOMALY_RESOLVED = "anomaly_resolved"
     ALIGNER_OBSERVATION = "aligner_observation"  # Generic: Flash describes what it sees
-    # Plan lifecycle events
-    PLAN_CREATED = "plan_created"
-    PLAN_APPROVED = "plan_approved"
-    PLAN_REJECTED = "plan_rejected"
-    PLAN_EXECUTED = "plan_executed"
-    PLAN_FAILED = "plan_failed"
     # Architect autonomous analysis
     ARCHITECT_ANALYZING = "architect_analyzing"
     # SysAdmin execution
@@ -271,11 +207,10 @@ class Snapshot(BaseModel):
     """
     Complete Blackboard snapshot for Architect context.
     
-    Combines Structure + Metadata + Plans for AI reasoning.
+    Combines Structure + Metadata for AI reasoning.
     """
     topology: TopologySnapshot = Field(default_factory=TopologySnapshot)
     services: dict[str, Service] = Field(default_factory=dict, description="service_name -> Service")
-    pending_plans: list[Plan] = Field(default_factory=list)
 
 
 # =============================================================================

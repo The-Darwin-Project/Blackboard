@@ -48,7 +48,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
-from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus, PlanAction, PlanCreate, PlanStatus
+from ..models import ConversationTurn, EventDocument, EventStatus, MessageStatus
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
@@ -310,8 +310,6 @@ class Brain:
         self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Per-event locks -- prevents concurrent process_event calls for same event
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # Plan Layer: track event_id -> plan_id so ghost nodes appear on the graph
-        self._event_plans: dict[str, str] = {}  # event_id -> plan_id
         # Wait-for-user state: events where LLM called wait_for_user
         self._waiting_for_user: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
@@ -1230,14 +1228,6 @@ class Brain:
                     "content": self._event_to_markdown(event, svc_meta),
                 })
 
-            # Create a Plan (ghost node) for executing agents if none exists yet.
-            # ask_agent_for_state is info-gathering only -- no plan needed.
-            if function_name == "select_agent" and agent_name in ("sysadmin", "developer"):
-                if event_id not in self._event_plans:
-                    event = event or await self.blackboard.get_event(event_id)
-                    if event:
-                        await self._create_plan_for_event(event_id, event.service, task)
-
             # Launch agent task (non-blocking)
             agent = self.agents.get(agent_name)
             if agent:
@@ -1277,8 +1267,6 @@ class Brain:
                     f"{self.blackboard.EVENT_PREFIX}{event_id}",
                     json.dumps(event.model_dump()),
                 )
-                # Create Plan in the Blackboard Plan Layer (ghost node on graph)
-                await self._create_plan_for_event(event_id, event.service, plan_summary)
             return False
 
         elif function_name == "re_trigger_aligner":
@@ -1871,13 +1859,6 @@ class Brain:
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
-        # Complete any associated Plan (removes ghost node from graph)
-        plan_id = self._event_plans.pop(event_id, None)
-        if plan_id:
-            try:
-                await self.blackboard.update_plan_status(plan_id, PlanStatus.COMPLETED, result=summary)
-            except Exception as e:
-                logger.warning(f"Failed to complete plan {plan_id}: {e}")
         await self._broadcast({
             "type": "event_closed",
             "event_id": event_id,
@@ -2121,11 +2102,10 @@ class Brain:
 
     async def _cleanup_stale_events(self) -> None:
         """
-        Startup cleanup: close stale events and orphaned plans from a previous Brain instance.
+        Startup cleanup: close stale events from a previous Brain instance.
         
         On restart, active events may be orphaned (agent tasks were in-flight,
         WebSocket connections dropped). Close them so they don't block the system.
-        Also completes any PENDING plans so ghost nodes don't linger on the graph.
         """
         # --- Migrate pre-MessageStatus events: mark all existing turns as EVALUATED ---
         # Prevents mass re-processing on first deploy with the new unread-message scan.
@@ -2137,19 +2117,6 @@ class Brain:
                 logger.info(f"Startup migration: marked turns EVALUATED for {len(migrate_ids)} active events")
         except Exception as e:
             logger.warning(f"Startup migration failed (non-fatal): {e}")
-
-        # --- Clean up orphaned PENDING plans (ghost nodes from previous instance) ---
-        try:
-            pending_plans = await self.blackboard.get_pending_plans()
-            if pending_plans:
-                for plan in pending_plans:
-                    await self.blackboard.update_plan_status(
-                        plan.id, PlanStatus.FAILED,
-                        result="Stale: closed on Brain restart.",
-                    )
-                logger.info(f"Startup cleanup: completed {len(pending_plans)} orphaned pending plans")
-        except Exception as e:
-            logger.warning(f"Failed to clean up orphaned plans on startup: {e}")
 
         # --- Clean up stale active events ---
         active_ids = await self.blackboard.get_active_events()
@@ -2343,34 +2310,3 @@ class Brain:
             return len(event.conversation) + 1
         return 1
 
-    @staticmethod
-    def _infer_plan_action(text: str) -> PlanAction:
-        """Infer PlanAction from a task description or plan summary."""
-        lower = text.lower()
-        if any(w in lower for w in ("scale", "replica", "hpa")):
-            return PlanAction.SCALE
-        if any(w in lower for w in ("rollback", "revert", "undo")):
-            return PlanAction.ROLLBACK
-        if any(w in lower for w in ("config", "env", "values", "helm", "setting")):
-            return PlanAction.RECONFIG
-        if any(w in lower for w in ("failover", "drain", "migrate")):
-            return PlanAction.FAILOVER
-        return PlanAction.OPTIMIZE  # default for code changes, perf, etc.
-
-    async def _create_plan_for_event(
-        self, event_id: str, service: str, description: str,
-    ) -> None:
-        """Create a Plan in the Blackboard so it appears as a ghost node on the graph."""
-        if event_id in self._event_plans:
-            return  # Already has a plan
-        try:
-            action = self._infer_plan_action(description)
-            plan = await self.blackboard.create_plan(PlanCreate(
-                action=action,
-                service=service,
-                reason=description,
-            ))
-            self._event_plans[event_id] = plan.id
-            logger.info(f"Created plan {plan.id} ({action.value}) for event {event_id} -> {service}")
-        except Exception as e:
-            logger.warning(f"Failed to create plan for event {event_id}: {e}")

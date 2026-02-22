@@ -223,7 +223,6 @@ function DashboardInner() {
   const handleNodeClick = useCallback((serviceName: string) => {
     setSelectedService(serviceName);
   }, []);
-  const handlePlanClick = useCallback((_planId: string) => {}, []);
   const handleCloseContextMenu = useCallback(() => { setContextMenu(null); }, []);
 
   // -- Sidebar width resize --
@@ -353,7 +352,6 @@ function DashboardInner() {
             <div style={{ display: middleTab === 'architecture' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative' }}>
               <CytoscapeGraph
                 onNodeClick={handleNodeClick}
-                onPlanClick={handlePlanClick}
               />
             </div>
           </TabPanel>

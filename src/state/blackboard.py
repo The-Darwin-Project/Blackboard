@@ -10,10 +10,9 @@
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
-Implements the Blackboard Pattern with three layers:
+Implements the Blackboard Pattern with two layers:
 - Structure Layer: Topology graph (services and edges)
 - Metadata Layer: Service health and version info
-- Plan Layer: Infrastructure modification plans
 
 Redis Schema (Flat Keys - PoC Simple):
     darwin:services                     SET     [service names]
@@ -21,8 +20,6 @@ Redis Schema (Flat Keys - PoC Simple):
     darwin:edge:{source}:{target}       HASH    {protocol, type, env_var, created_at}
     darwin:service:{name}               HASH    {version, cpu, memory, error_rate, last_seen}
     darwin:metrics:{service}:{metric}   ZSET    {timestamp: value}
-    darwin:plans                        SET     [plan ids]
-    darwin:plan:{id}                    HASH    {plan fields}
     darwin:events                       ZSET    {timestamp: event_json}
     darwin:ip:{ip_address}              STRING  {service_name}  TTL=60s
 """
@@ -47,7 +44,6 @@ from ..models import (
     EventInput,
     EventStatus,
     EventType,
-    GhostNode,
     GraphEdge,
     GraphNode,
     GraphResponse,
@@ -56,9 +52,6 @@ from ..models import (
     MetricPoint,
     MetricSeries,
     NodeType,
-    Plan,
-    PlanCreate,
-    PlanStatus,
     Service,
     Snapshot,
     TelemetryPayload,
@@ -423,10 +416,10 @@ class BlackboardState:
         Combines:
         - Services with health status and metadata
         - Edges with protocol information
-        - Pending plans as ghost nodes
+        - Ticket nodes from active events
         
         Returns:
-            GraphResponse with nodes, edges, and ghost nodes
+            GraphResponse with nodes, edges, and ticket nodes
         """
         topology = await self.get_topology()
         
@@ -530,38 +523,16 @@ class BlackboardState:
                     type=edge_meta.get("type", "hard"),
                 ))
         
-        # Build ghost nodes from pending plans (only if target exists in graph)
-        plans = await self.get_pending_plans()
-        ghost_nodes: list[GhostNode] = []
-        known_services = {n.id for n in nodes}  # Set of known service IDs
-        
-        for plan in plans:
-            # Only include ghost nodes if target service exists in the graph
-            if plan.service in known_services:
-                ghost_nodes.append(GhostNode(
-                    plan_id=plan.id,
-                    target_node=plan.service,
-                    action=plan.action.value,
-                    status=plan.status.value,
-                    params=plan.params,
-                ))
-            else:
-                logger.warning(
-                    f"Skipping ghost node for plan {plan.id}: "
-                    f"target service '{plan.service}' not in graph"
-                )
-        
         # Build ticket nodes from active general/headhunter events
         ticket_nodes = await self._get_ticket_nodes()
 
-        # Debug: Log final graph state
         logger.debug(
             f"Graph response: {len(nodes)} nodes, {len(edges)} edges, "
-            f"{len(ghost_nodes)} ghost nodes, {len(ticket_nodes)} ticket nodes. "
+            f"{len(ticket_nodes)} ticket nodes. "
             f"Node IDs: {[n.id for n in nodes]}"
         )
         
-        return GraphResponse(nodes=nodes, edges=edges, plans=ghost_nodes, tickets=ticket_nodes)
+        return GraphResponse(nodes=nodes, edges=edges, tickets=ticket_nodes)
     
     async def generate_mermaid(self) -> str:
         """
@@ -990,155 +961,6 @@ class BlackboardState:
         return metrics
     
     # =========================================================================
-    # Plan Layer
-    # =========================================================================
-    
-    async def create_plan(self, plan_data: PlanCreate) -> Plan:
-        """Create a new plan and store in Redis."""
-        plan = Plan(
-            action=plan_data.action,
-            service=plan_data.service,
-            params=plan_data.params,
-            reason=plan_data.reason,
-        )
-        
-        # Add to plans set
-        await self.redis.sadd("darwin:plans", plan.id)
-        
-        # Store plan data as hash
-        key = f"darwin:plan:{plan.id}"
-        await self.redis.hset(key, mapping={
-            "action": plan.action.value,
-            "service": plan.service,
-            "params": json.dumps(plan.params),
-            "reason": plan.reason,
-            "status": plan.status.value,
-            "created_at": str(plan.created_at),
-            "approved_at": "",
-            "executed_at": "",
-            "result": "",
-        })
-        
-        # Record event with full plan details for UI visibility
-        reason_preview = plan.reason if plan.reason else "No reason provided"
-        await self.record_event(
-            EventType.PLAN_CREATED,
-            {
-                "plan_id": plan.id,
-                "action": plan.action.value,
-                "service": plan.service,
-                "reason": plan.reason if plan.reason else "",
-                "params": plan.params,
-            },
-            narrative=f"Based on my analysis, I recommend: {plan.action.value} {plan.service}. Reason: {reason_preview}",
-        )
-        
-        logger.info(f"Created plan: {plan.id} - {plan.action.value} {plan.service}")
-        return plan
-    
-    async def get_plan(self, plan_id: str) -> Optional[Plan]:
-        """Get a plan by ID."""
-        key = f"darwin:plan:{plan_id}"
-        data = await self.redis.hgetall(key)
-        
-        if not data:
-            return None
-        
-        return Plan(
-            id=plan_id,
-            action=data["action"],
-            service=data["service"],
-            params=json.loads(data.get("params", "{}")),
-            reason=data["reason"],
-            status=data["status"],
-            created_at=float(data.get("created_at", 0)),
-            approved_at=float(data["approved_at"]) if data.get("approved_at") else None,
-            executed_at=float(data["executed_at"]) if data.get("executed_at") else None,
-            result=data.get("result") or None,
-        )
-    
-    async def update_plan_status(
-        self,
-        plan_id: str,
-        status: PlanStatus,
-        result: Optional[str] = None,
-    ) -> Optional[Plan]:
-        """Update plan status."""
-        key = f"darwin:plan:{plan_id}"
-        
-        updates: dict[str, str] = {"status": status.value}
-        
-        if status == PlanStatus.APPROVED:
-            updates["approved_at"] = str(time.time())
-            # Get plan to include service and action in event
-            plan = await self.get_plan(plan_id)
-            await self.record_event(
-                EventType.PLAN_APPROVED,
-                {
-                    "plan_id": plan_id,
-                    "service": plan.service if plan else None,
-                    "action": plan.action.value if plan else None,
-                },
-                narrative=f"Plan approved: {plan.action.value} on {plan.service}" if plan else f"Plan {plan_id} approved",
-            )
-        elif status in (PlanStatus.COMPLETED, PlanStatus.FAILED):
-            updates["executed_at"] = str(time.time())
-            plan = await self.get_plan(plan_id)
-            
-            if status == PlanStatus.COMPLETED:
-                await self.record_event(
-                    EventType.PLAN_EXECUTED,
-                    {
-                        "plan_id": plan_id,
-                        "service": plan.service if plan else None,
-                        "action": plan.action.value if plan else None,
-                        "status": "success",
-                        "summary": f"{plan.action.value} {plan.service}" if plan else None,
-                        "result": result if result else "",
-                    },
-                    narrative=f"Successfully executed {plan.action.value} on {plan.service}." if plan else None,
-                )
-            else:  # FAILED
-                await self.record_event(
-                    EventType.PLAN_FAILED,
-                    {
-                        "plan_id": plan_id,
-                        "service": plan.service if plan else None,
-                        "action": plan.action.value if plan else None,
-                        "status": "failed",
-                        "error": result if result else "",
-                    },
-                    narrative=f"Failed to execute plan for {plan.service}: {result}" if plan and result else None,
-                )
-        
-        if result:
-            updates["result"] = result
-        
-        await self.redis.hset(key, mapping=updates)
-        
-        logger.info(f"Updated plan {plan_id} status to {status.value}")
-        return await self.get_plan(plan_id)
-    
-    async def list_plans(self, status: Optional[PlanStatus] = None) -> List[Plan]:
-        """List all plans, optionally filtered by status."""
-        plan_ids = await self.redis.smembers("darwin:plans")
-        plans = []
-        
-        for plan_id in plan_ids:
-            plan = await self.get_plan(plan_id)
-            if plan:
-                if status is None or plan.status == status:
-                    plans.append(plan)
-        
-        # Sort by created_at descending (newest first)
-        plans.sort(key=lambda p: p.created_at, reverse=True)
-        return plans
-    
-    async def get_pending_plans(self) -> list[Plan]:
-        """Get all pending plans."""
-        return await self.list_plans(status=PlanStatus.PENDING)
-    
-    # =========================================================================
     # Architecture Events (for correlation)
     # =========================================================================
     
@@ -1221,32 +1043,6 @@ class BlackboardState:
             return task
         return None
     
-    async def enqueue_plan_for_execution(self, plan_id: str) -> None:
-        """
-        DEPRECATED: Use event conversation turns instead.
-        
-        Enqueue approved plan for SysAdmin execution.
-        
-        Called after plan is approved (either manually or auto-approved).
-        """
-        await self.redis.lpush(self.TASK_KEY_SYSADMIN, plan_id)
-        logger.debug(f"Enqueued plan for execution: {plan_id}")
-    
-    async def dequeue_plan_for_execution(self) -> Optional[str]:
-        """
-        DEPRECATED: Use event conversation turns instead.
-        
-        Dequeue next plan_id for SysAdmin (blocking pop with timeout).
-        
-        Returns plan_id or None if queue is empty after timeout.
-        """
-        result = await self.redis.brpop(self.TASK_KEY_SYSADMIN, timeout=5)
-        if result:
-            _, plan_id = result
-            logger.debug(f"Dequeued plan for execution: {plan_id}")
-            return plan_id
-        return None
-    
     async def get_events_for_service(
         self,
         service: str,
@@ -1268,16 +1064,14 @@ class BlackboardState:
         """
         Get complete Blackboard snapshot for Architect context.
         
-        Combines topology, service metadata, and pending plans.
+        Combines topology and service metadata for AI reasoning.
         """
         topology = await self.get_topology()
         services = await self.get_all_services()
-        pending_plans = await self.get_pending_plans()
         
         return Snapshot(
             topology=topology,
             services=services,
-            pending_plans=pending_plans,
         )
     
     # =========================================================================
@@ -1742,6 +1536,16 @@ class BlackboardState:
             has_plan = event.event.reason.lstrip().startswith("---")
             if not has_plan and isinstance(event.event.evidence, EventEvidence):
                 has_plan = event.event.evidence.source_type == "headhunter"
+
+            # PROBE: log Brain think-turn evidence for resolved_service heuristic discovery
+            if logger.isEnabledFor(logging.DEBUG):
+                for turn in event.conversation:
+                    if turn.actor == "brain" and turn.action == "triage" and turn.thoughts:
+                        logger.debug(
+                            f"[resolved_service probe] event={eid} "
+                            f"actor={turn.actor} action={turn.action} "
+                            f"thoughts={turn.thoughts[:120]}"
+                        )
 
             tickets.append(TicketNode(
                 event_id=eid,
