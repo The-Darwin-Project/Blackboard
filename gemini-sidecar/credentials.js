@@ -22,7 +22,7 @@ const GITLAB_HOST = process.env.GITLAB_HOST || '';
 
 // --- CLI Logins ---
 let _lastCLILoginTime = 0;
-const CLI_LOGIN_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+const CLI_LOGIN_INTERVAL_MS = 5 * 60 * 1000; // 5 min -- ArgoCD sessions can expire early
 
 /**
  * Find the private key file in the secrets directory
