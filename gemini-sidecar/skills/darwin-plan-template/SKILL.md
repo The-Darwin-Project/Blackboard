@@ -38,6 +38,12 @@ steps:
 1. Specific action with implementation details
 2. Specific action with implementation details
 
+## UX Considerations (include when plan touches frontend/UI)
+- User goal: [what the user is trying to accomplish]
+- Current friction: [what's wrong with the current experience]
+- Interaction pattern: [expand/collapse, modal, inline edit, etc.]
+- States: [loading, empty, error -- how each is handled]
+
 ## Risk Assessment
 - Risk level: [low/medium/high]
 - Rollback: [how to undo]
@@ -96,3 +102,4 @@ Only the selected option's execution steps get `agent` and `mode` fields.
 - Every plan MUST include a Feedback mechanism (metric or signal)
 - Break large changes into small, independently deployable batches
 - If your plan has more than 5 steps, ask: am I overcomplicating this?
+- If the plan changes frontend/UI, include the "UX Considerations" section and apply the darwin-ux-patterns skill

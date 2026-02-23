@@ -24,6 +24,7 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 ## Available Tools
 
 - `git`, `kubectl`, `oc`, `argocd`, `kargo`, `tkn`, `gh`, `helm`, `jq`, `yq`
+- **ArgoCD/Kargo CLIs are pre-authenticated.** Run commands directly (e.g., `argocd app list`, `kargo get stages`). Do NOT use `--server`, `--auth-token`, or read token files. The session is managed by the sidecar.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)
 - File system (read/write for GitOps modifications)

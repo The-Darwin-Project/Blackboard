@@ -91,14 +91,23 @@ class DevTeam:
 
         fix_count = 0
 
-        for _ in range(MAX_CONVERSATION_ROUNDS):
-            response = await adapter.generate(
-                system_prompt=system_prompt,
-                contents=contents,
-                tools=MANAGER_TOOL_SCHEMAS,
-                temperature=0.4,
-                thinking_level="low",
-            )
+        for round_num in range(MAX_CONVERSATION_ROUNDS):
+            try:
+                response = await adapter.generate(
+                    system_prompt=system_prompt,
+                    contents=contents,
+                    tools=MANAGER_TOOL_SCHEMAS,
+                    temperature=0.4,
+                    thinking_level="low",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Manager LLM call failed (round %d, event %s): %s", round_num, event_id, exc)
+                if contents and contents[-1].get("role") != "user":
+                    contents.append({"role": "user", "parts": [
+                        {"text": "[system: LLM error, please call report_to_brain with current status]"}]})
+                continue
 
             if response.function_call:
                 fn = response.function_call
@@ -130,6 +139,9 @@ class DevTeam:
                     return summary, status
 
                 model_parts = self._extract_model_parts(response, fn)
+                if contents and contents[-1].get("role") == "model":
+                    contents.append({"role": "user", "parts": [
+                        {"text": "[system: dispatch completed, resuming Manager conversation]"}]})
                 contents.append({"role": "model", "parts": model_parts})
                 contents.append({"role": "user", "parts": [{"function_response": {"name": fn.name, "response": fn_result}}]})
 
@@ -298,7 +310,8 @@ class DevTeam:
                                "message": f"Huddle from {agent_id}: {content[:80]}"})
         contents.append({"role": "user", "parts": [{"text":
             f"[HUDDLE from {agent_id}]: {content}\n\n"
-            f"Reply using reply_to_agent with the agent_id and your response."}]})
+            f"You MUST reply using reply_to_agent(agent_id=\"{agent_id}\", message=\"your response\"). "
+            f"Do NOT call any dispatch or report function -- the agent is waiting for your reply."}]})
         try:
             resp = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,

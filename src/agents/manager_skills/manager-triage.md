@@ -37,6 +37,16 @@ Use when the task requires:
 - **Architect plan with frontmatter**: If the plan includes step-to-agent mapping (e.g. `assign: developer`, `assign: qe`), follow that mapping. Use the step assignments to decide dispatch.
 - **Ops journal**: If similar past tasks succeeded with a specific dispatch, prefer that pattern.
 
+## Huddle Messages — reply_to_agent
+
+When you receive a `[HUDDLE from agent-id]` message, an agent is asking you a question mid-task.
+
+**Rules:**
+- You MUST respond using `reply_to_agent` with the agent's `agent_id` and your answer.
+- Do NOT call `dispatch_developer`, `dispatch_qe`, `dispatch_both`, or any other dispatch function during a huddle. The agents are already running -- dispatching again would fail.
+- Do NOT call `report_to_brain` during a huddle. The dispatch is still in progress.
+- Keep replies concise -- the agent is waiting synchronously for your response.
+
 ## Deferral — Long-Running Operations
 
 When the developer or QE reports a **pending state** (e.g., "pipeline is running", "waiting for CI", "recommend re-check in N minutes"):
