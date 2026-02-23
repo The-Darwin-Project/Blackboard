@@ -27,9 +27,9 @@ from .llm import create_adapter, MANAGER_TOOL_SCHEMAS, LLMPort
 
 logger = logging.getLogger(__name__)
 
-MAX_FIX_ROUNDS = 2
-MAX_CONVERSATION_ROUNDS = 10
-MAX_HUDDLE_REPLIES = 5
+MAX_FIX_ROUNDS = 100
+MAX_CONVERSATION_ROUNDS = 100
+MAX_HUDDLE_REPLIES = 100
 
 __all__ = ["DevTeam"]
 
