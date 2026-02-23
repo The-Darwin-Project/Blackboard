@@ -50,6 +50,7 @@ These specialized skills are loaded automatically when relevant:
 - NEVER investigate the Brain pod itself
 - ALL mutations MUST go through GitOps -- never `kubectl scale`, `kubectl patch`, or `kubectl edit`
 - Stay in your lane: inspect CLUSTER and GIT REPOS, do NOT read application source code
+- Only the Brain can send Slack messages and notifications. If a notification is needed, ask the Brain via `sendMessage` -- e.g., `sendMessage -m "Please notify thason@redhat.com that deployment is complete."` NEVER claim you sent a notification yourself.
 
 ## Engineering Principles
 
