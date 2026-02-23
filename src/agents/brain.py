@@ -1586,6 +1586,12 @@ class Brain:
     # Agent Task Runner (non-blocking via create_task)
     # =========================================================================
 
+    def _release_task_state(self, event_id: str) -> None:
+        """Clear active task tracking for an event. Used before re-entry and in finally."""
+        self._active_tasks.pop(event_id, None)
+        self._active_agent_for_event.pop(event_id, None)
+        self._routing_turn_for_event.pop(event_id, None)
+
     async def _run_agent_task(
         self,
         event_id: str,
@@ -1602,6 +1608,7 @@ class Brain:
         On completion: appends result turn, broadcasts, triggers next Brain decision.
         Tracks bidirectional message status for the brain.route turn.
         """
+        current_task = asyncio.current_task()
         try:
             agent_acked = False  # Track first progress (= agent received task)
 
@@ -1712,6 +1719,7 @@ class Brain:
                         )
                         await self.blackboard.append_turn(event_id, turn)
                         await self._broadcast_turn(event_id, turn)
+                        self._release_task_state(event_id)
                         if not await self._is_event_closed(event_id):
                             await self.process_event(event_id)
                         return
@@ -1726,6 +1734,7 @@ class Brain:
                         await self.blackboard.append_turn(event_id, turn)
                         await self._broadcast_turn(event_id, turn)
                         logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
+                        self._release_task_state(event_id)
                         if not await self._is_event_closed(event_id):
                             await self.process_event(event_id)
                         return
@@ -1744,6 +1753,7 @@ class Brain:
                 await self.blackboard.append_turn(event_id, turn)
                 await self._broadcast_turn(event_id, turn)
                 logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
+                self._release_task_state(event_id)
                 if not await self._is_event_closed(event_id):
                     await self.process_event(event_id)
                 return
@@ -1772,6 +1782,9 @@ class Brain:
                     event_id, "evaluated", turns=[routing_turn_num],
                 )
 
+            self._release_task_state(event_id)
+            self._last_processed[event_id] = time.time()
+
             # Trigger next Brain decision (skip if event was closed while agent ran)
             if not await self._is_event_closed(event_id):
                 await self.process_event(event_id)
@@ -1792,20 +1805,18 @@ class Brain:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
                 )
-            # Clean up BEFORE re-entry so process_event doesn't hit "task already active"
-            self._active_tasks.pop(event_id, None)
-            self._active_agent_for_event.pop(event_id, None)
-            self._routing_turn_for_event.pop(event_id, None)
+            self._release_task_state(event_id)
+            self._last_processed[event_id] = time.time()
 
             # Re-evaluate (skip if event was closed concurrently)
             if not await self._is_event_closed(event_id):
                 await self.process_event(event_id)
 
         finally:
-            # Safety net -- ensure cleanup even if re-entry threw
-            self._active_tasks.pop(event_id, None)
-            self._active_agent_for_event.pop(event_id, None)
-            self._routing_turn_for_event.pop(event_id, None)
+            # Safety net -- only clean up if _active_tasks still holds OUR task.
+            # Re-entry (process_event) may have created a NEW task; don't clobber it.
+            if self._active_tasks.get(event_id) is current_task:
+                self._release_task_state(event_id)
             # Note: _agent_sessions is NOT cleaned here -- sessions persist across
             # task invocations for Phase 2 follow-ups. Cleaned in cancel/close paths.
 
@@ -1932,9 +1943,7 @@ class Brain:
             await asyncio.wait_for(task, timeout=3.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-        self._active_tasks.pop(event_id, None)
-        self._active_agent_for_event.pop(event_id, None)
-        self._routing_turn_for_event.pop(event_id, None)
+        self._release_task_state(event_id)
         self._agent_sessions.pop(event_id, None)
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):

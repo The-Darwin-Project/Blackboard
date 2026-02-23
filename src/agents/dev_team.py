@@ -4,9 +4,9 @@
 # 2. [Pattern]: Manager uses function calling (MANAGER_TOOL_SCHEMAS). No raw JSON parsing, no mode routing if/else.
 # 3. [Pattern]: CancelledError propagation: cancel all active dispatch asyncio.Tasks on cancel.
 # 4. [Pattern]: on_progress with actor="manager" for all Manager decisions. Dev/QE progress uses their own actor names.
-# 5. [Constraint]: Max 2 fix rounds, then force approve. Prevents infinite loops.
+# 5. [Constraint]: MAX_FIX_ROUNDS caps fix iterations, then force approve. Prevents infinite loops.
 # 6. [Pattern]: Session affinity via agent_id -- follow-up rounds route to the same agent that did the original work.
-# 7. [Pattern]: Concurrent huddle drain in _dispatch_both. Drain loop is sole contents writer during gather.
+# 7. [Pattern]: Concurrent huddle drain in ALL dispatch paths via _dispatch_with_drain and _drain_loop.
 """
 Dev Team -- Manager (Flash LLM) coordinates developer + QE agents.
 
@@ -191,12 +191,14 @@ class DevTeam:
             return await self._dispatch_single(
                 registry, bridge, "developer", event_id, args["task"],
                 on_progress, event_md_path,
+                contents=contents, adapter=adapter, system_prompt=system_prompt,
             )
 
         if fn_name == "dispatch_qe":
             return await self._dispatch_single(
                 registry, bridge, "qe", event_id, args["task"],
                 on_progress, event_md_path,
+                contents=contents, adapter=adapter, system_prompt=system_prompt,
             )
 
         if fn_name == "dispatch_both":
@@ -208,13 +210,15 @@ class DevTeam:
         if fn_name == "approve_and_merge":
             agent_id = args.get("dev_agent_id") or None
             prev_sid = self._sessions.get(event_id, {}).get("developer")
-            result, sid = await dispatch_to_agent(
-                registry, bridge, "developer", event_id,
-                "Open a Pull Request, wait for pipeline, merge if green. Report PR URL and status.",
-                on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
-                agent_id=agent_id,
-                session_id=prev_sid,
-                event_md_path=event_md_path,
+            result, sid = await self._dispatch_with_drain(
+                event_id,
+                dispatch_to_agent(
+                    registry, bridge, "developer", event_id,
+                    "Open a Pull Request, wait for pipeline, merge if green. Report PR URL and status.",
+                    on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
+                    agent_id=agent_id, session_id=prev_sid, event_md_path=event_md_path,
+                ),
+                contents, adapter, system_prompt, on_progress,
             )
             self._sessions.setdefault(event_id, {})["developer"] = sid
             return {"pr_result": result}
@@ -223,12 +227,14 @@ class DevTeam:
             agent_id = args.get("agent_id") or None
             role = "qe" if (agent_id or "").startswith("qe") else "developer"
             prev_sid = self._sessions.get(event_id, {}).get(role)
-            result, sid = await dispatch_to_agent(
-                registry, bridge, role, event_id, args.get("feedback", ""),
-                on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
-                agent_id=agent_id,
-                session_id=prev_sid,
-                event_md_path=event_md_path,
+            result, sid = await self._dispatch_with_drain(
+                event_id,
+                dispatch_to_agent(
+                    registry, bridge, role, event_id, args.get("feedback", ""),
+                    on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
+                    agent_id=agent_id, session_id=prev_sid, event_md_path=event_md_path,
+                ),
+                contents, adapter, system_prompt, on_progress,
             )
             self._sessions.setdefault(event_id, {})[role] = sid
             return {"fix_result": result}
@@ -280,34 +286,113 @@ class DevTeam:
             logger.info("Huddle message queued from %s for %s", data.get("agent_id", "?"), event_id)
         return on_huddle
 
-    async def _drain_huddles(self, event_id: str, contents: list, adapter, system_prompt: str, on_progress) -> None:
-        """Process any pending huddle messages through the Manager LLM."""
-        queue = self._pending_huddles.get(event_id)
-        if not queue:
-            return
-        from ..dependencies import get_registry_and_bridge
-        registry, _ = get_registry_and_bridge()
-        while not queue.empty():
-            msg = queue.get_nowait()
-            agent_id = msg.get("agent_id", "")
-            content = msg.get("content", "")
-            if on_progress:
-                await on_progress({"actor": "manager", "event_id": event_id, "message": f"Huddle from {agent_id}: {content[:80]}"})
-            contents.append({"role": "user", "parts": [{"text": f"[HUDDLE from {agent_id}]: {content}\n\nReply using reply_to_agent with the agent_id and your response."}]})
-            response = await adapter.generate(
+    async def _process_huddle_message(
+        self, event_id: str, msg: dict, contents: list,
+        adapter, system_prompt: str, on_progress,
+    ) -> bool:
+        """Process one huddle message through Manager LLM. Returns True if reply sent."""
+        agent_id = msg.get("agent_id", "")
+        content = msg.get("content", "")
+        if on_progress:
+            await on_progress({"actor": "manager", "event_id": event_id,
+                               "message": f"Huddle from {agent_id}: {content[:80]}"})
+        contents.append({"role": "user", "parts": [{"text":
+            f"[HUDDLE from {agent_id}]: {content}\n\n"
+            f"Reply using reply_to_agent with the agent_id and your response."}]})
+        try:
+            resp = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
                 tools=MANAGER_TOOL_SCHEMAS, temperature=0.4, thinking_level="low",
             )
-            if response.function_call and response.function_call.name == "reply_to_agent":
-                fn_result = await self._execute_function(
-                    response.function_call.name, response.function_call.args,
-                    event_id, on_progress,
+        except Exception:
+            contents.pop()
+            raise
+        if resp.function_call and resp.function_call.name == "reply_to_agent":
+            fn_result = await self._execute_function(
+                resp.function_call.name, resp.function_call.args,
+                event_id, on_progress,
+            )
+            model_parts = self._extract_model_parts(resp, resp.function_call)
+            contents.append({"role": "model", "parts": model_parts})
+            contents.append({"role": "user", "parts": [
+                {"function_response": {"name": "reply_to_agent", "response": fn_result}}]})
+            return True
+        elif resp.function_call:
+            logger.warning("Drain: ignoring %s during huddle", resp.function_call.name)
+            contents.append({"role": "model", "parts": [
+                {"text": f"[deferred: {resp.function_call.name} not allowed during huddle drain]"}]})
+        elif resp.text:
+            contents.append({"role": "model", "parts": [{"text": resp.text}]})
+        return False
+
+    async def _drain_huddles(self, event_id: str, contents: list, adapter, system_prompt: str, on_progress) -> None:
+        """Process any already-queued huddle messages (non-blocking, no wait)."""
+        queue = self._pending_huddles.get(event_id)
+        if not queue:
+            return
+        while not queue.empty():
+            msg = queue.get_nowait()
+            try:
+                await self._process_huddle_message(event_id, msg, contents, adapter, system_prompt, on_progress)
+            except Exception as exc:
+                logger.warning("Drain huddles error for %s: %s", event_id, exc)
+
+    async def _drain_loop(
+        self, event_id: str, watched_tasks: list[asyncio.Task],
+        contents: list | None, adapter, system_prompt: str, on_progress,
+    ) -> None:
+        """Concurrent drain: process huddles while watched tasks run.
+
+        Concurrency safety: the caller is suspended at an await (gather or single task).
+        This loop is the sole contents writer. Exits when all watched tasks complete.
+        """
+        queue = self._pending_huddles.get(event_id)
+        if not queue or not contents or not adapter:
+            return
+        replies = 0
+        while replies < MAX_HUDDLE_REPLIES:
+            try:
+                msg = await asyncio.wait_for(queue.get(), timeout=5.0)
+            except asyncio.TimeoutError:
+                if all(t.done() for t in watched_tasks):
+                    break
+                continue
+            try:
+                replied = await self._process_huddle_message(
+                    event_id, msg, contents, adapter, system_prompt, on_progress,
                 )
-                model_parts = self._extract_model_parts(response, response.function_call)
-                contents.append({"role": "model", "parts": model_parts})
-                contents.append({"role": "user", "parts": [{"function_response": {"name": "reply_to_agent", "response": fn_result}}]})
-            elif response.text:
-                contents.append({"role": "model", "parts": [{"text": response.text}]})
+                if replied:
+                    replies += 1
+            except asyncio.CancelledError:
+                contents.append({"role": "model", "parts": [{"text": "[drain cancelled]"}]})
+                raise
+            except Exception as exc:
+                logger.warning("Drain loop error for %s: %s", event_id, exc)
+        logger.info("Drain loop: %d huddle replies for event %s", replies, event_id)
+
+    async def _dispatch_with_drain(
+        self, event_id: str, dispatch_coro: asyncio.coroutines,
+        contents: list | None, adapter: LLMPort | None,
+        system_prompt: str, on_progress: Optional[Callable],
+    ) -> tuple[str, str | None]:
+        """Run a dispatch coroutine as a task with concurrent huddle drain.
+
+        Returns the dispatch result. CancelledError-safe with proper cleanup.
+        """
+        agent_task = asyncio.create_task(dispatch_coro)
+        drain_task = asyncio.create_task(self._drain_loop(
+            event_id, [agent_task], contents, adapter, system_prompt, on_progress,
+        ))
+        try:
+            return await agent_task
+        except asyncio.CancelledError:
+            agent_task.cancel()
+            drain_task.cancel()
+            await asyncio.gather(agent_task, drain_task, return_exceptions=True)
+            raise
+        finally:
+            drain_task.cancel()
+            await asyncio.gather(drain_task, return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Dispatch helpers
@@ -316,19 +401,29 @@ class DevTeam:
     async def _dispatch_single(
         self, registry, bridge, role: str, event_id: str, task: str,
         on_progress: Optional[Callable], event_md_path: str,
+        *,
+        contents: list | None = None,
+        adapter: LLMPort | None = None,
+        system_prompt: str = "",
     ) -> dict:
-        """Resolve agent, dispatch, return result with agent_id for session affinity."""
+        """Resolve agent, dispatch with concurrent huddle drain, return result."""
         conn = await registry.get_available(role)
         if not conn:
             return {"error": f"No {role} agent available"}
         prev_session = self._sessions.get(event_id, {}).get(role)
-        result, session_id = await dispatch_to_agent(
-            registry, bridge, role, event_id, task,
-            on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
-            agent_id=conn.agent_id,
-            session_id=prev_session,
-            event_md_path=event_md_path,
+
+        result, session_id = await self._dispatch_with_drain(
+            event_id,
+            dispatch_to_agent(
+                registry, bridge, role, event_id, task,
+                on_progress=on_progress, on_huddle=self._make_on_huddle(event_id),
+                agent_id=conn.agent_id,
+                session_id=prev_session,
+                event_md_path=event_md_path,
+            ),
+            contents, adapter, system_prompt, on_progress,
         )
+
         self._sessions.setdefault(event_id, {})[role] = session_id
         return {"result": result, "session_id": session_id, "agent_id": conn.agent_id}
 
@@ -340,12 +435,11 @@ class DevTeam:
         adapter: LLMPort | None = None,
         system_prompt: str = "",
     ) -> dict:
-        """Concurrent developer + QE dispatch with inline huddle drain.
+        """Concurrent developer + QE dispatch with huddle drain.
 
-        Safety: during asyncio.gather, process() is suspended at the await chain
-        (process -> _execute_function -> _dispatch_both -> gather). The drain loop
-        is the sole writer to ``contents``. After gather returns, drain is cancelled
-        and process() resumes as sole writer.
+        Safety: during asyncio.gather, process() is suspended at the await chain.
+        The drain loop is the sole writer to contents. After gather returns, drain
+        is cancelled and process() resumes as sole writer.
         """
         dev_conn = await registry.get_available("developer")
         qe_conn = await registry.get_available("qe")
@@ -375,56 +469,9 @@ class DevTeam:
             event_md_path=event_md_path,
         ))
 
-        async def _huddle_drain_loop() -> None:
-            queue = self._pending_huddles.get(event_id)
-            if not queue or not contents or not adapter:
-                return
-            replies = 0
-            while replies < MAX_HUDDLE_REPLIES:
-                try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    if dev_task.done() and qe_task.done():
-                        break
-                    continue
-                agent_id = msg.get("agent_id", "")
-                content = msg.get("content", "")
-                if on_progress:
-                    await on_progress({"actor": "manager", "event_id": event_id,
-                                       "message": f"Huddle from {agent_id}: {content[:80]}"})
-                try:
-                    contents.append({"role": "user", "parts": [{"text":
-                        f"[HUDDLE from {agent_id}]: {content}\n\n"
-                        f"Reply using reply_to_agent with the agent_id and your response."}]})
-                    resp = await adapter.generate(
-                        system_prompt=system_prompt, contents=contents,
-                        tools=MANAGER_TOOL_SCHEMAS, temperature=0.4,
-                        thinking_level="low",
-                    )
-                    if resp.function_call and resp.function_call.name == "reply_to_agent":
-                        fn_result = await self._execute_function(
-                            resp.function_call.name, resp.function_call.args,
-                            event_id, on_progress,
-                        )
-                        model_parts = self._extract_model_parts(resp, resp.function_call)
-                        contents.append({"role": "model", "parts": model_parts})
-                        contents.append({"role": "user", "parts": [
-                            {"function_response": {"name": "reply_to_agent", "response": fn_result}}]})
-                        replies += 1
-                    elif resp.function_call:
-                        logger.warning("Drain: ignoring %s during huddle", resp.function_call.name)
-                        contents.append({"role": "model", "parts": [
-                            {"text": f"[deferred: {resp.function_call.name} not allowed during huddle drain]"}]})
-                    elif resp.text:
-                        contents.append({"role": "model", "parts": [{"text": resp.text}]})
-                except asyncio.CancelledError:
-                    contents.append({"role": "model", "parts": [{"text": "[drain cancelled]"}]})
-                    raise
-                except Exception as exc:
-                    logger.warning("Huddle drain error for %s: %s", event_id, exc)
-            logger.info("Drain loop: %d huddle replies for event %s", replies, event_id)
-
-        drain_task = asyncio.create_task(_huddle_drain_loop())
+        drain_task = asyncio.create_task(self._drain_loop(
+            event_id, [dev_task, qe_task], contents, adapter, system_prompt, on_progress,
+        ))
 
         try:
             (dev_result, dev_sid), (qe_result, qe_sid) = await asyncio.gather(
