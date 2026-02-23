@@ -38,9 +38,18 @@ fi
 
 # POST to sidecar callback. The sidecar HOLDS this request open until the Manager replies.
 # Timeout: 600s (10 min) -- Manager needs time for LLM thinking, reviewing both dev+QE, function calling.
+# Background heartbeat keeps the CLI from killing us for "no output" (Gemini CLI 5min inactivity timeout).
+echo "Waiting for Manager reply..."
+(while true; do sleep 30; echo "Still waiting for Manager..."; done) &
+HEARTBEAT_PID=$!
+trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
+
 RESPONSE=$(curl -s -m 600 -w "\n%{http_code}" -X POST "$CALLBACK_URL" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg type "huddle_message" --arg content "$CONTENT" '{type: $type, content: $content}')")
+
+kill $HEARTBEAT_PID 2>/dev/null
+trap - EXIT
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
