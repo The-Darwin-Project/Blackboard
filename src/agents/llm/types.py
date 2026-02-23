@@ -403,7 +403,7 @@ ALIGNER_TOOL_SCHEMAS: list[dict] = [
 
 
 # =============================================================================
-# Manager Tool Schemas (8 tools -- Dev Team Manager function calling)
+# Manager Tool Schemas (9 tools -- Dev Team Manager function calling)
 # =============================================================================
 
 MANAGER_TOOL_SCHEMAS: list[dict] = [
@@ -497,6 +497,22 @@ MANAGER_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_id": {"type": "string", "description": "Agent to reply to"},
                 "message": {"type": "string", "description": "Reply content"},
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
+    {
+        "name": "message_agent",
+        "description": (
+            "Send a proactive message to an agent. Unlike reply_to_agent (which responds to a huddle), "
+            "this pushes a NEW message the agent sees at its next tool boundary. "
+            "Use for urgent coordination: 'QE found issues, hold off on PR'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Agent to message (e.g., developer-..., qe-...)"},
+                "message": {"type": "string", "description": "Message content"},
             },
             "required": ["agent_id", "message"],
         },

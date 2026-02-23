@@ -5,10 +5,65 @@
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
 // 5. [Pattern]: filterSkillsByRole reads YAML frontmatter `roles:` from each SKILL.md and removes skills not matching AGENT_ROLE.
+// 6. [Pattern]: TeamChat MCP server registered for both CLIs. Hooks: Gemini AfterTool, Claude PreToolUse.
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+/**
+ * Register TeamChat MCP server + inbox hooks into a CLI settings object.
+ * @param {object} settings - The settings object to modify (gemini or claude)
+ * @param {string} cli - 'gemini' or 'claude'
+ */
+function registerTeamChat(settings, cli) {
+    const role = process.env.AGENT_ROLE || '';
+    const port = process.env.PORT || '9090';
+    const peerPort = process.env.PEER_SIDECAR_PORT || '';
+
+    settings.mcpServers = settings.mcpServers || {};
+    settings.mcpServers.TeamChat = {
+        command: 'node', args: ['/app/team-chat-mcp.js'],
+        env: { AGENT_ROLE: role, SIDECAR_PORT: port, AGENT_CLI: cli, PEER_PORT: peerPort },
+    };
+
+    settings.hooks = settings.hooks || {};
+    if (cli === 'gemini') {
+        settings.hooks.AfterTool = settings.hooks.AfterTool || [];
+        if (!settings.hooks.AfterTool.some(h => h.hooks?.some(hh => hh.name === 'team-inbox'))) {
+            settings.hooks.AfterTool.push({
+                matcher: '*',
+                hooks: [{ name: 'team-inbox', type: 'command',
+                           command: '/app/hooks/check-inbox.sh', timeout: 2000,
+                           description: 'Check for pending team messages after each tool call' }],
+            });
+        }
+        settings.hooks.SessionStart = settings.hooks.SessionStart || [];
+        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.name === 'team-inbox-reinject'))) {
+            settings.hooks.SessionStart.push({
+                matcher: 'compact',
+                hooks: [{ name: 'team-inbox-reinject', type: 'command',
+                           command: '/app/hooks/check-inbox.sh', timeout: 2000 }],
+            });
+        }
+    } else {
+        settings.hooks.PreToolUse = settings.hooks.PreToolUse || [];
+        if (!settings.hooks.PreToolUse.some(h => h.hooks?.some(hh => hh.command === '/app/hooks/check-inbox.sh'))) {
+            settings.hooks.PreToolUse.push({
+                matcher: '',
+                hooks: [{ type: 'command', command: '/app/hooks/check-inbox.sh' }],
+            });
+        }
+        settings.hooks.SessionStart = settings.hooks.SessionStart || [];
+        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.command === '/app/hooks/check-inbox.sh'))) {
+            settings.hooks.SessionStart.push({
+                matcher: 'compact',
+                hooks: [{ type: 'command', command: '/app/hooks/check-inbox.sh' }],
+            });
+        }
+    }
+    console.log(`TeamChat MCP + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);
+}
 
 /**
  * Initialize CLI settings at startup:
@@ -55,10 +110,24 @@ function initializeCLISettings() {
         geminiSettings.security.folderTrust = { enabled: false };
         // Preserve any existing MCP server configs
         geminiSettings.mcpServers = geminiSettings.mcpServers || {};
+        registerTeamChat(geminiSettings, 'gemini');
         fs.writeFileSync(geminiSettingsPath, JSON.stringify(geminiSettings, null, 2));
-        console.log('Gemini settings.json created (trust disabled)');
+        console.log('Gemini settings.json created (trust disabled, TeamChat MCP registered)');
     } catch (err) {
         console.error(`Gemini settings.json error: ${err.message}`);
+    }
+    // Update Claude settings with TeamChat MCP + hooks
+    try {
+        let claudeSettings = {};
+        if (fs.existsSync(claudeSettingsPath)) {
+            try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
+        }
+        claudeSettings.mcpServers = claudeSettings.mcpServers || {};
+        registerTeamChat(claudeSettings, 'claude');
+        fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+        console.log('Claude settings.json updated (TeamChat MCP registered)');
+    } catch (err) {
+        console.error(`Claude TeamChat registration error: ${err.message}`);
     }
     // Trusted folders: JSON object format (path -> trust level), not array.
     // Even with trust disabled, an invalid file causes a warning on every run.

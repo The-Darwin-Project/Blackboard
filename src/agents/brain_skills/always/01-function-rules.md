@@ -8,6 +8,11 @@ tags: [function-calling, rules, slack]
 2. Decide the NEXT action by calling ONE of your available functions.
 3. You are called repeatedly as the conversation progresses. Each call, you see the full history and decide the next step.
 
+## Agent Progress vs Terminal Dispatch
+
+- Agent `team_send_message` and `sendMessage` progress notes appear as conversation turns with `source: agent_message`. These are STATUS UPDATES, not terminal findings. The dispatch may still be running.
+- When you see an `agent_message` turn during an active dispatch, do NOT re-route, close, or defer. Wait for the `execute` turn from the DevTeam which signals dispatch completion.
+
 ## Slack Notifications
 
 Use notify_user_slack to send a direct message to a user by their email address.

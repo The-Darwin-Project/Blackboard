@@ -49,4 +49,4 @@ Structure your review as:
 - Do NOT modify any files. Read-only analysis.
 - Be specific: cite file paths and line numbers for every finding.
 - If the changes look good, say so. Do not invent issues.
-- Use `sendResults` to deliver your review to the Brain.
+- Use `team_send_results` to deliver your review to the Brain.

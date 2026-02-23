@@ -5,6 +5,7 @@
 // 3. [Pattern]: Per-task timeout timer resets on progress. SIGTERM/SIGKILL on expiry.
 // 4. [Pattern]: Reconnect backoff: 1s, 2s, 4s, 8s, max 30s. Re-register after reconnect.
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId (fixes pre-existing bug from legacy mode).
+// 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -41,6 +42,9 @@ function startWSClient(brainUrl) {
 
     ws.on('open', () => {
       console.log(`[${new Date().toISOString()}] Connected to Brain: ${brainUrl}`);
+      if (backoff > BACKOFF_MIN) {
+        console.warn(`[${new Date().toISOString()}] WS reconnected -- inbound messages during disconnect were lost`);
+      }
       backoff = BACKOFF_MIN;
       wsSend(ws, {
         type: 'register', agent_id: agentId, role: AGENT_ROLE,
@@ -64,6 +68,12 @@ function startWSClient(brainUrl) {
           state.clearPendingHuddleReply();
           console.log(`[${new Date().toISOString()}] Huddle reply delivered (${(msg.content || '').length} chars)`);
         }
+      } else if (msg.type === 'proactive_message') {
+        state.pushInboundMessage({
+          from: msg.from || 'manager',
+          content: msg.content || '',
+        });
+        console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars)`);
       }
     });
 

@@ -17,7 +17,7 @@ You are in rollback mode. The Brain has determined that the last change caused a
 3. **Revert exactly one commit**: `git revert HEAD --no-edit`
 4. **Verify the revert**: `git diff HEAD~1` -- confirm the revert undoes the problem
 5. **Push**: `git push`
-6. **Report**: Use `sendResults` to confirm the revert was pushed
+6. **Report**: Use `team_send_results` to confirm the revert was pushed
 
 ## Rules
 

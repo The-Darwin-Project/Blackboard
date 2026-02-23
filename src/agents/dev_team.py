@@ -284,6 +284,26 @@ class DevTeam:
                     return {"error": f"Failed to send reply: {e}"}
             return {"error": f"Agent {agent_id} not found or not connected"}
 
+        if fn_name == "message_agent":
+            agent_id = args.get("agent_id", "")
+            message = args.get("message", "")
+            agent = await registry.get_by_id(agent_id) if agent_id else None
+            if agent and agent.ws:
+                try:
+                    await agent.ws.send_json({
+                        "type": "proactive_message",
+                        "from": "manager",
+                        "content": message,
+                    })
+                    logger.info("Proactive message sent to %s (%d chars)", agent_id, len(message))
+                    if on_progress:
+                        await on_progress({"actor": "manager", "event_id": event_id,
+                                           "message": f"[proactive] -> {agent_id}: {message[:80]}"})
+                    return {"status": "sent", "agent_id": agent_id}
+                except Exception as e:
+                    return {"error": f"Failed to send: {e}"}
+            return {"error": f"Agent {agent_id} not found or not connected"}
+
         return {"error": f"Unknown function: {fn_name}"}
 
     # ------------------------------------------------------------------

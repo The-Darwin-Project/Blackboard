@@ -108,7 +108,8 @@ RUN npm install --omit=dev
 
 # Copy server code (modular -- entrypoint + 10 modules)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
-     credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js ./
+     credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
+     team-chat-mcp.js ./
 
 # Install agent-to-brain callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
@@ -118,6 +119,10 @@ RUN chmod +x /usr/local/bin/sendResults && \
 # Install agent-to-manager callback script (huddleSendMessage -- team communication)
 COPY huddleSendMessage.sh /usr/local/bin/huddleSendMessage
 RUN chmod +x /usr/local/bin/huddleSendMessage
+
+# Install inbox check hook (team message delivery via CLI hooks)
+COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
+RUN chmod +x /app/hooks/check-inbox.sh
 
 # Create CLI config directories (rules come from ConfigMap mount)
 RUN mkdir -p /home/default/.gemini && \

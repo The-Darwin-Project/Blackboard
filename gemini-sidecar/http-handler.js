@@ -1,9 +1,10 @@
 // gemini-sidecar/http-handler.js
 // @ai-rules:
-// 1. [Pattern]: HTTP routing for /health, /callback, /execute. All state access via state.js getters/setters.
-// 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message — task_id and event_id from state.getCurrentTask().
+// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute. All state via state.js.
+// 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message/teammate_forward — task_id and event_id from state.getCurrentTask().
 // 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 10min timeout.
-// 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set. Credentials setup before executeCLI.
+// 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set.
+// 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
 
 const { executeCLI } = require('./cli-executor');
 const {
@@ -68,6 +69,22 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // Inbound message inbox (Manager proactive messages, drained on read)
+  if (url.pathname === '/messages' && req.method === 'GET') {
+    const msgs = state.drainInboundMessages();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(msgs));
+    return;
+  }
+
+  // Teammate notes (forwarded by peer, drained on read by the peer's GET)
+  if (url.pathname === '/teammate-notes' && req.method === 'GET') {
+    const msgs = state.drainTeammateMessages();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(msgs));
+    return;
+  }
+
   // Agent callback endpoint (sendResults / sendMessage)
   if (url.pathname === '/callback' && req.method === 'POST') {
     try {
@@ -124,6 +141,10 @@ async function handleRequest(req, res) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'No active task connection' }));
         return;
+      } else if (callbackType === 'teammate_forward') {
+        // Teammate direct message: store in teammate queue (peer reads via GET /teammate-notes)
+        state.pushTeammateMessage({ from: body.from || 'unknown', content });
+        console.log(`[${new Date().toISOString()}] Teammate message stored (${content.length} chars, from: ${body.from || 'unknown'})`);
       } else {
         // sendMessage: forward as progress note (do NOT overwrite deliverable)
         const task2 = state.getCurrentTask();

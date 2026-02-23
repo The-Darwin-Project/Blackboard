@@ -664,6 +664,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.developer.port }}"
+            - name: PEER_SIDECAR_PORT
+              value: "{{ .Values.sidecars.qe.port }}"
             - name: BRAIN_WS_URL
               value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: GIT_USER_NAME
@@ -789,6 +791,8 @@ spec:
           env:
             - name: PORT
               value: "{{ .Values.sidecars.qe.port }}"
+            - name: PEER_SIDECAR_PORT
+              value: "{{ .Values.sidecars.developer.port }}"
             - name: BRAIN_WS_URL
               value: "ws://localhost:8000{{ .Values.app.agentWsPath }}"
             - name: GIT_USER_NAME

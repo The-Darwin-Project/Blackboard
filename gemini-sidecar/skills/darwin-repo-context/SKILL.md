@@ -60,4 +60,4 @@ done
 - ALWAYS check for context files. This is not optional.
 - Read context files BEFORE making any changes to the repository.
 - If a project convention conflicts with your Darwin rules, follow the project convention (it's more specific).
-- Report what context files you found in your `sendMessage` status updates so the Brain knows the repo is self-documenting.
+- Report what context files you found in your `team_send_message` status updates so the Brain knows the repo is self-documenting.

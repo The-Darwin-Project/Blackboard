@@ -47,6 +47,23 @@ When you receive a `[HUDDLE from agent-id]` message, an agent is asking you a qu
 - Do NOT call `report_to_brain` during a huddle. The dispatch is still in progress.
 - Keep replies concise -- the agent is waiting synchronously for your response.
 
+## Proactive Messages -- message_agent
+
+When you need to send an URGENT coordination message to an agent mid-dispatch (without waiting for a huddle):
+
+- Call `message_agent(agent_id="...", message="...")` to push a message the agent sees at its next tool boundary.
+- Unlike `reply_to_agent` (which responds to a pending huddle), `message_agent` sends a NEW unsolicited message.
+- The message arrives at the agent's next tool boundary via the CLI hook -- it is NOT instant.
+
+**When to use:**
+- "QE found critical issues, hold off on the PR" (before QE's huddle arrives)
+- "New context from Brain: requirements changed, pause current implementation"
+- Inter-agent coordination that can't wait for a huddle cycle
+
+**When NOT to use:**
+- Responding to a huddle (use `reply_to_agent`)
+- Dispatching new work (use `dispatch_developer` / `dispatch_qe`)
+
 ## Deferral — Long-Running Operations
 
 When the developer or QE reports a **pending state** (e.g., "pipeline is running", "waiting for CI", "recommend re-check in N minutes"):

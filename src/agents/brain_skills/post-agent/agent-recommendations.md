@@ -20,6 +20,7 @@ tags: [agent-results, recommendations]
   "I will review their outputs once they report back", "both agents have been notified",
   "implementation is underway". These mean the Manager has finished its coordination
   round -- it is NOT a signal to defer.
+- Agent progress messages (source=agent_message) arriving during an active dispatch are NOT recommendations to act on. They are informational status updates from an agent still working. Only the final dispatch result (from DevTeam.process or direct agent result) contains actionable recommendations. Do NOT defer or re-route based on a progress message.
 - When executing an Architect plan and the agent reports back:
   1. Check if the report includes updated frontmatter with step statuses (`completed`, `failed`).
   2. If all steps are `completed`, proceed to verification/close.

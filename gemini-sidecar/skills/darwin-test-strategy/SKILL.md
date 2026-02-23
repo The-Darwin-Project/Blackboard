@@ -19,7 +19,7 @@ You are in test-only mode. The Brain wants you to write and/or run tests, NOT im
    - Frontend changes: use Playwright for UI verification
    - API changes: use `httpx` or `curl` for endpoint verification
 4. **Run the tests**: Execute and capture results
-5. **Report**: Use `sendResults` to deliver the test report
+5. **Report**: Use `team_send_results` to deliver the test report
 
 ## Output Format
 
@@ -47,4 +47,4 @@ You are in test-only mode. The Brain wants you to write and/or run tests, NOT im
 - You MAY fix trivial bugs found during testing (typos, missing imports) -- document what you fixed.
 - If tests fail, report the failures clearly. Do NOT rewrite the implementation.
 - Commit test files to a `feat/` branch so CI can pick them up.
-- Use `sendResults` to deliver your test report to the Brain.
+- Use `team_send_results` to deliver your test report to the Brain.
