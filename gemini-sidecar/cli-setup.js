@@ -5,7 +5,7 @@
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
 // 5. [Pattern]: filterSkillsByRole reads YAML frontmatter `roles:` from each SKILL.md and removes skills not matching AGENT_ROLE.
-// 6. [Pattern]: TeamChat MCP server registered for both CLIs. Hooks: Gemini AfterTool, Claude PreToolUse.
+// 6. [Pattern]: TeamChat MCP: Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool, Claude PreToolUse (both in settings.json).
 
 const fs = require('fs');
 const path = require('path');
@@ -31,6 +31,26 @@ function resolveCommand(name) {
     return resolved;
 }
 
+const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+
+/**
+ * Write an MCP server config into ~/.claude.json (the file Claude Code reads).
+ * Read-modify-write: preserves existing keys (userID, skillUsage, etc.).
+ * NOT atomic -- callers must be sequential (no concurrent writes).
+ * Safe in Node.js single-thread when callers don't yield between read and write.
+ * @param {string} name - Server name (e.g. 'TeamChat', 'GitHub')
+ * @param {object} config - { command, args, env }
+ */
+function writeClaudeMcpServer(name, config) {
+    let data = {};
+    if (fs.existsSync(CLAUDE_JSON_PATH)) {
+        try { data = JSON.parse(fs.readFileSync(CLAUDE_JSON_PATH, 'utf8')); } catch { /* fresh */ }
+    }
+    data.mcpServers = data.mcpServers || {};
+    data.mcpServers[name] = config;
+    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(data, null, 2));
+}
+
 /**
  * Register TeamChat MCP server + inbox hooks into a CLI settings object.
  * @param {object} settings - The settings object to modify (gemini or claude)
@@ -41,11 +61,16 @@ function registerTeamChat(settings, cli) {
     const port = process.env.PORT || '9090';
     const peerPort = process.env.PEER_SIDECAR_PORT || '';
 
-    settings.mcpServers = settings.mcpServers || {};
-    settings.mcpServers.TeamChat = {
+    const mcpConfig = {
         command: resolveCommand('node'), args: ['/app/team-chat-mcp.js'],
         env: { AGENT_ROLE: role, SIDECAR_PORT: port, AGENT_CLI: cli, PEER_PORT: peerPort },
     };
+    if (cli === 'gemini') {
+        settings.mcpServers = settings.mcpServers || {};
+        settings.mcpServers.TeamChat = mcpConfig;
+    } else {
+        writeClaudeMcpServer('TeamChat', mcpConfig);
+    }
 
     settings.hooks = settings.hooks || {};
     if (cli === 'gemini') {
@@ -136,16 +161,15 @@ function initializeCLISettings() {
     } catch (err) {
         console.error(`Gemini settings.json error: ${err.message}`);
     }
-    // Update Claude settings with TeamChat MCP + hooks
+    // Update Claude settings with TeamChat hooks (MCP goes to ~/.claude.json via writeClaudeMcpServer)
     try {
         let claudeSettings = {};
         if (fs.existsSync(claudeSettingsPath)) {
             try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
         }
-        claudeSettings.mcpServers = claudeSettings.mcpServers || {};
         registerTeamChat(claudeSettings, 'claude');
         fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
-        console.log('Claude settings.json updated (TeamChat MCP registered)');
+        console.log('Claude settings.json updated (TeamChat hooks registered)');
     } catch (err) {
         console.error(`Claude TeamChat registration error: ${err.message}`);
     }
@@ -204,4 +228,4 @@ function filterSkillsByRole(geminiDir, claudeDir) {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer };

@@ -1,8 +1,10 @@
 # Pre-Refactor Documentation: `gemini-sidecar/server.js`
 
-> **File:** `gemini-sidecar/server.js` (1390 lines)
+> **File:** `gemini-sidecar/server.js` (1390 lines -- pre-refactor monolith)
 > **Generated:** 2026-02-21
 > **Purpose:** Validate no logic is lost during modular split.
+>
+> **Note:** Line numbers in the tables below reference the original monolith, not the current modular files (`cli-setup.js`, `credentials.js`, `cli-executor.js`, etc.). Function names and descriptions are kept accurate.
 
 ---
 
@@ -19,11 +21,11 @@
 | 7 | `generateInstallationToken` | 256–293 | _(none)_ | `Promise<string>` | Side-effect (fs read + HTTP POST) | Reads GitHub App credentials, creates JWT (RS256), exchanges it for an installation access token via GitHub API. Token valid ~1 hour. |
 | 8 | `setupGitCredentials` | 301–329 | `token: string, workDir: string` | `void` | Side-effect (fs write + execSync) | Creates workDir, configures git user globally, marks dir as safe, sets up host-specific credential store for `github.com`. |
 | 9 | `setupCLILogins` | 339–393 | _(none)_ | `Promise<void>` | Side-effect (spawn) | Logs into ArgoCD and Kargo CLIs. Deduplicates via `_lastCLILoginTime` (30-min cooldown). Each login has 10s timeout. Failures are non-fatal (logged, resolved). |
-| 10 | `setupGitHubTooling` | 402–451 | `token: string` | `void` | Side-effect (env + fs write) | Sets `GH_TOKEN` env var, configures GitHub MCP server in both `~/.gemini/settings.json` and `~/.claude/settings.json`. |
+| 10 | `setupGitHubTooling` | 402–451 | `token: string` | `void` | Side-effect (env + fs write) | Sets `GH_TOKEN` env var, configures GitHub MCP server in `~/.gemini/settings.json` (Gemini) and `~/.claude.json` (Claude via `writeClaudeMcpServer`). |
 | 11 | `hasGitLabCredentials` | 456–458 | _(none)_ | `boolean` | Side-effect (fs read) | Checks if GitLab token file exists AND `GITLAB_HOST` is set. |
 | 12 | `readGitLabToken` | 465–470 | _(none)_ | `string` | Side-effect (fs read) | Reads GitLab PAT from mounted secret path. Throws if missing. |
 | 13 | `setupGitLabCredentials` | 478–495 | `token: string, workDir: string` | `void` | Side-effect (fs write + execFileSync) | Creates workDir, sets up host-specific credential store for GitLab host, disables SSL verify for internal GitLab. |
-| 14 | `setupGitLabTooling` | 504–573 | `token: string` | `void` | Side-effect (env + fs + exec) | Sets `GITLAB_TOKEN` / `GITLAB_HOST` env vars, checks for `glab` binary, configures `skip_tls_verify`, writes GitLab MCP server config (`glab mcp serve`) into both `~/.gemini/settings.json` and `~/.claude/settings.json`. |
+| 14 | `setupGitLabTooling` | 504–573 | `token: string` | `void` | Side-effect (env + fs + exec) | Sets `GITLAB_TOKEN` / `GITLAB_HOST` env vars, checks for `glab` binary, configures `skip_tls_verify`, writes GitLab MCP server config (`glab mcp serve`) into `~/.gemini/settings.json` (Gemini) and `~/.claude.json` (Claude via `writeClaudeMcpServer`). |
 | 15 | `wsSend` | 578–582 | `ws: WebSocket, data: object` | `void` | Side-effect (WS send) | JSON-serializes and sends data only if socket is OPEN. |
 | 16 | `readFindings` | 592–612 | `workDir: string` | `string \| null` | Side-effect (fs read + delete) | Reads `${workDir}/results/findings.md`, checks freshness (30s), deletes file after read. Returns null if missing, stale, or empty. |
 | 17 | `stdoutFallback` | 627–637 | `effectiveOutput: string` | `string` | Pure | Returns the last 3000 chars of stdout as a fallback result. Prepends truncation notice if clipped. |
@@ -77,7 +79,7 @@ The `currentTask` object is loosely typed with these observed fields:
 | `ANSI_RE` | 48 | Regex | Pattern matching ANSI escape sequences |
 | `AGENT_ROLE` | 51 | `process.env.AGENT_ROLE \|\| ''` | Agent role (architect, sysadmin, developer, qe) |
 | `claudeDir` | 54 | `~/.claude` | Claude config directory |
-| `claudeSettingsPath` | 56 | `~/.claude/settings.json` | Claude settings file |
+| `claudeSettingsPath` | 56 | `~/.claude/settings.json` | Claude settings file (hooks only; MCP servers in `~/.claude.json` via `writeClaudeMcpServer`) |
 | `geminiDir` | 64 | `~/.gemini` | Gemini config directory |
 | `stagedRulesPath` | 67 | `'/tmp/agent-rules/GEMINI.md'` | Source path for agent rules (K8s ConfigMap mount) |
 | `geminiSettingsPath` | 80 | `~/.gemini/settings.json` | Gemini settings file |

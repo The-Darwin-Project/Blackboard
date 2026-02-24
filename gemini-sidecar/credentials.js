@@ -1,7 +1,7 @@
 // gemini-sidecar/credentials.js
 // @ai-rules:
 // 1. [Constraint]: Consolidates ALL authentication, credential setup, and CLI login logic.
-// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT.
+// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT. Claude MCP -> ~/.claude.json (via writeClaudeMcpServer); Gemini MCP -> ~/.gemini/settings.json.
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
 // 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
@@ -9,7 +9,7 @@
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
-const { resolveCommand } = require('./cli-setup');
+const { resolveCommand, writeClaudeMcpServer } = require('./cli-setup');
 
 // --- GitHub App ---
 const SECRETS_PATH = '/secrets/github';
@@ -163,22 +163,12 @@ function setupGitHubTooling(token) {
     console.error(`[${new Date().toISOString()}] GitHub MCP config (Gemini) failed: ${err.message}`);
   }
 
-  // 3. Configure GitHub MCP server for Claude Code
-  const claudeSettingsDir = `${process.env.HOME}/.claude`;
-  const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
+  // 3. Configure GitHub MCP server for Claude Code (writes to ~/.claude.json)
   try {
-    fs.mkdirSync(claudeSettingsDir, { recursive: true });
-    let claudeSettings = {};
-    if (fs.existsSync(claudeSettingsPath)) {
-      try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
-    }
-    claudeSettings.mcpServers = claudeSettings.mcpServers || {};
-    claudeSettings.mcpServers.GitHub = {
-      command: ghMcpBin,
-      args: ['stdio'],
+    writeClaudeMcpServer('GitHub', {
+      command: ghMcpBin, args: ['stdio'],
       env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
-    };
-    fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+    });
     console.log(`[${new Date().toISOString()}] GitHub MCP configured for Claude Code`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] GitHub MCP config (Claude) failed: ${err.message}`);
@@ -288,18 +278,9 @@ function setupGitLabTooling(token) {
     console.error(`[${new Date().toISOString()}] GitLab MCP config (Gemini) failed: ${err.message}`);
   }
 
-  // 3. Configure GitLab MCP for Claude Code
-  const claudeSettingsDir = `${process.env.HOME}/.claude`;
-  const claudeSettingsPath = `${claudeSettingsDir}/settings.json`;
+  // 3. Configure GitLab MCP for Claude Code (writes to ~/.claude.json)
   try {
-    fs.mkdirSync(claudeSettingsDir, { recursive: true });
-    let claudeSettings = {};
-    if (fs.existsSync(claudeSettingsPath)) {
-      try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
-    }
-    claudeSettings.mcpServers = claudeSettings.mcpServers || {};
-    claudeSettings.mcpServers.GitLab = mcpConfig;
-    fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+    writeClaudeMcpServer('GitLab', mcpConfig);
     console.log(`[${new Date().toISOString()}] GitLab MCP configured for Claude Code (glab mcp serve)`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] GitLab MCP config (Claude) failed: ${err.message}`);
@@ -374,16 +355,9 @@ async function setupArgoCDMCP() {
     console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Gemini) failed: ${err.message}`);
   }
 
-  const claudeSettingsPath = `${process.env.HOME}/.claude/settings.json`;
+  // Configure ArgoCD MCP for Claude Code (writes to ~/.claude.json)
   try {
-    fs.mkdirSync(`${process.env.HOME}/.claude`, { recursive: true });
-    let claudeSettings = {};
-    if (fs.existsSync(claudeSettingsPath)) {
-      try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh */ }
-    }
-    claudeSettings.mcpServers = claudeSettings.mcpServers || {};
-    claudeSettings.mcpServers.ArgoCD = mcpConfig;
-    fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+    writeClaudeMcpServer('ArgoCD', mcpConfig);
     console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for Claude Code${readOnly ? ' (read-only)' : ''}`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Claude) failed: ${err.message}`);
