@@ -10,6 +10,26 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFileSync } = require('child_process');
+
+/**
+ * Resolve a command name to its absolute path via `which`.
+ * In headless mode (-p), Claude Code's MCP server spawner may not inherit
+ * the full PATH. Absolute paths prevent silent spawn failures.
+ * Results are memoized -- `which` is called at most once per binary name.
+ */
+const _resolvedPaths = new Map();
+function resolveCommand(name) {
+    if (_resolvedPaths.has(name)) return _resolvedPaths.get(name);
+    let resolved = name;
+    try {
+        resolved = execFileSync('which', [name], { encoding: 'utf8' }).trim();
+    } catch {
+        console.warn(`resolveCommand: '${name}' not found in PATH, using relative`);
+    }
+    _resolvedPaths.set(name, resolved);
+    return resolved;
+}
 
 /**
  * Register TeamChat MCP server + inbox hooks into a CLI settings object.
@@ -23,7 +43,7 @@ function registerTeamChat(settings, cli) {
 
     settings.mcpServers = settings.mcpServers || {};
     settings.mcpServers.TeamChat = {
-        command: 'node', args: ['/app/team-chat-mcp.js'],
+        command: resolveCommand('node'), args: ['/app/team-chat-mcp.js'],
         env: { AGENT_ROLE: role, SIDECAR_PORT: port, AGENT_CLI: cli, PEER_PORT: peerPort },
     };
 
@@ -184,4 +204,4 @@ function filterSkillsByRole(geminiDir, claudeDir) {
     }
 }
 
-module.exports = { initializeCLISettings };
+module.exports = { initializeCLISettings, resolveCommand };

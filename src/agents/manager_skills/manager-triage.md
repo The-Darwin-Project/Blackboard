@@ -27,7 +27,15 @@ Use when the task requires:
 - Bug fixes that need tests to verify the fix
 - Architect plans with dev and QE steps; both agents work on the same scope
 
-**PR Gate**: When using dispatch_both, both agents will report back via huddle messages. Review BOTH reports before approving. Only tell the Developer to open a PR after:
+**PR Gate**: When using dispatch_both, both agents report back via huddle messages.
+
+**Acknowledge immediately, approve only when both are in:**
+
+- When ONE agent huddles while the other is still working: reply with "Acknowledged, standing by for [other agent]." This keeps the agent informed and prevents timeout.
+- When BOTH agents have reported: review both outputs, then tell the Developer to open a PR.
+
+**Approval checklist** (all 3 required before telling Developer to open PR):
+
 1. Developer reports implementation is complete (pushed to branch)
 2. QE reports tests are written and committed to the same branch
 3. You have reviewed both outputs and are satisfied
@@ -42,6 +50,7 @@ Use when the task requires:
 When you receive a `[HUDDLE from agent-id]` message, an agent is asking you a question mid-task.
 
 **Rules:**
+
 - You MUST respond using `reply_to_agent` with the agent's `agent_id` and your answer.
 - Do NOT call `dispatch_developer`, `dispatch_qe`, `dispatch_both`, or any other dispatch function during a huddle. The agents are already running -- dispatching again would fail.
 - Do NOT call `report_to_brain` during a huddle. The dispatch is still in progress.
@@ -56,11 +65,13 @@ When you need to send an URGENT coordination message to an agent mid-dispatch (w
 - The message arrives at the agent's next tool boundary via the CLI hook -- it is NOT instant.
 
 **When to use:**
+
 - "QE found critical issues, hold off on the PR" (before QE's huddle arrives)
 - "New context from Brain: requirements changed, pause current implementation"
 - Inter-agent coordination that can't wait for a huddle cycle
 
 **When NOT to use:**
+
 - Responding to a huddle (use `reply_to_agent`)
 - Dispatching new work (use `dispatch_developer` / `dispatch_qe`)
 

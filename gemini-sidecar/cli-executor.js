@@ -4,20 +4,31 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
-// 5. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
+// 4. [Pattern]: Claude headless mode requires --mcp-config pointing to ~/.claude/settings.json for MCP tool discovery.
+// 5. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
+// 6. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 
+const CLAUDE_MCP_CONFIG = (() => {
+    const p = path.join(os.homedir(), '.claude', 'settings.json');
+    return fs.existsSync(p) ? p : null;
+})();
+
 function buildCLICommand(prompt, options = {}) {
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
     if (AGENT_CLI === 'claude') {
         const args = [];
+        if (CLAUDE_MCP_CONFIG) {
+            args.push('--mcp-config', CLAUDE_MCP_CONFIG);
+        }
         if (permissionMode === 'plan') {
             args.push('--permission-mode', 'plan');
         } else if (options.autoApprove) {

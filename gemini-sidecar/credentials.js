@@ -9,6 +9,7 @@
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
 const jwt = require('jsonwebtoken');
+const { resolveCommand } = require('./cli-setup');
 
 // --- GitHub App ---
 const SECRETS_PATH = '/secrets/github';
@@ -137,7 +138,9 @@ function setupGitHubTooling(token) {
   // 1. Set GH_TOKEN for gh CLI (persists in process env for child processes)
   process.env.GH_TOKEN = token;
 
-  // 2. Configure GitHub MCP server for Gemini CLI
+  // 2. Configure GitHub MCP server for both CLIs
+  // Hoisted above try blocks: resolveCommand never throws (catches internally, falls back to relative name)
+  const ghMcpBin = resolveCommand('github-mcp-server');
   const geminiSettingsDir = `${process.env.HOME}/.gemini`;
   const geminiSettingsPath = `${geminiSettingsDir}/settings.json`;
   try {
@@ -150,7 +153,7 @@ function setupGitHubTooling(token) {
     // Add/update GitHub MCP server config (stdio transport -- CLI spawns server as child)
     settings.mcpServers = settings.mcpServers || {};
     settings.mcpServers.GitHub = {
-      command: 'github-mcp-server',
+      command: ghMcpBin,
       args: ['stdio'],
       env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
     };
@@ -171,7 +174,7 @@ function setupGitHubTooling(token) {
     }
     claudeSettings.mcpServers = claudeSettings.mcpServers || {};
     claudeSettings.mcpServers.GitHub = {
-      command: 'github-mcp-server',
+      command: ghMcpBin,
       args: ['stdio'],
       env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
     };
@@ -260,7 +263,7 @@ function setupGitLabTooling(token) {
 
   // MCP config for both CLIs: use `glab mcp serve` (replaces deprecated @modelcontextprotocol/server-gitlab)
   const mcpConfig = {
-    command: 'glab',
+    command: resolveCommand('glab'),
     args: ['mcp', 'serve'],
     env: {
       GITLAB_TOKEN: token,
@@ -346,7 +349,7 @@ async function setupArgoCDMCP() {
   const readOnly = (role === 'architect');
 
   const mcpConfig = {
-    command: 'argocd-mcp',
+    command: resolveCommand('argocd-mcp'),
     args: ['stdio'],
     env: {
       ARGOCD_BASE_URL: baseUrl,

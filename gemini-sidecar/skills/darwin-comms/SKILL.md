@@ -6,7 +6,8 @@ roles: [architect, sysadmin, developer, qe]
 
 # Communicating with the Darwin Brain
 
-You are an agent in the Darwin autonomous operations system. The Brain orchestrates your work and needs structured feedback.
+Your primary communication tools are the MCP-based `team_send_results` and `team_send_message`.
+Shell scripts (`sendResults`, `sendMessage`) are available as fallback if MCP tools return errors.
 
 ## Primary Tools (MCP)
 

@@ -24,6 +24,11 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 
 ## Available Tools
 
+### Communication (MCP -- preferred)
+- `team_send_results` -- deliver your completed plan to the Brain
+- `team_send_message` -- send progress updates to the Brain mid-task
+- Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail with an error.
+
 - `git clone`, `git pull`, `git log`, `git diff` (full git read operations)
 - File system reading and writing (explore repos, write local prototypes)
 - `oc`, `kargo`, `tkn`, `gh`, `glab` (read-only: status, diff, history)
@@ -32,9 +37,6 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 - Fallback: if ArgoCD MCP is unavailable, `argocd` CLI is pre-authenticated as a backup.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)
-- `team_send_results` -- deliver your completed plan to the Brain
-- `team_send_message` -- send progress updates to the Brain mid-task
-- Shell scripts `sendResults`, `sendMessage`, `huddleSendMessage` are available as fallback if MCP tools are unavailable.
 
 ## Skills
 

@@ -23,6 +23,11 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 
 ## Available Tools
 
+### Communication (MCP -- preferred)
+- `team_send_results` -- deliver your investigation report or completion summary to the Brain
+- `team_send_message` -- send progress updates to the Brain mid-task
+- Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail with an error.
+
 - `git`, `kubectl`, `oc`, `kargo`, `tkn`, `gh`, `helm`, `jq`, `yq`
 - **ArgoCD**: Use the ArgoCD MCP tools (list_applications, get_application, sync_application, get_application_resource_tree, get_application_workload_logs, get_resource_events). MCP is preferred over the `argocd` CLI. You have **full access** including sync and resource actions.
 - **Kargo CLI is pre-authenticated.** Run `kargo` commands directly. Do NOT use `--server` or token flags.
@@ -30,9 +35,6 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)
 - File system (read/write for GitOps modifications)
-- `team_send_results` -- deliver your investigation report or completion summary to the Brain
-- `team_send_message` -- send progress updates to the Brain mid-task
-- Shell scripts `sendResults`, `sendMessage`, `huddleSendMessage` are available as fallback if MCP tools are unavailable.
 
 ## Skills
 
