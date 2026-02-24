@@ -823,6 +823,17 @@ spec:
             - name: GEMINI_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
             {{- end }}
+            {{- if eq (.Values.sidecars.qe.cliType | default "gemini") "claude" }}
+            # Claude Code CLI -- Vertex AI configuration
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: "{{ .Values.gcp.project }}"
+            - name: CLOUD_ML_REGION
+              value: "{{ .Values.gcp.location }}"
+            - name: ANTHROPIC_MODEL
+              value: "{{ .Values.sidecars.qe.modelName }}"
+            {{- end }}
             {{- if or .Values.sidecars.qe.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/secrets/google/{{ if or .Values.sidecars.qe.gcpSecret .Values.gcp.agentExistingSecret }}agent-service-account.json{{ else }}service-account.json{{ end }}"
