@@ -406,6 +406,12 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
     });
 }
 
+function is429Error(stderr) {
+    if (!stderr) return false;
+    const lower = stderr.toLowerCase();
+    return lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('rate limit');
+}
+
 module.exports = {
     buildCLICommand,
     executeCLI,
@@ -415,4 +421,5 @@ module.exports = {
     stdoutFallback,
     requestFindings,
     prepareResultsDir,
+    is429Error,
 };

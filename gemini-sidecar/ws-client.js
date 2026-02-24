@@ -6,17 +6,21 @@
 // 4. [Pattern]: Reconnect backoff: 1s, 2s, 4s, 8s, max 30s. Re-register after reconnect.
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId (fixes pre-existing bug from legacy mode).
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
+// 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 
 const WebSocket = require('ws');
 const os = require('os');
-const { executeCLIStreaming } = require('./cli-executor');
+const { executeCLIStreaming, prepareResultsDir, is429Error } = require('./cli-executor');
 const {
   hasGitHubCredentials, generateInstallationToken, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
   setupArgoCDMCP, setupCLILogins, GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
-const { DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE } = require('./config');
+const {
+  DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE,
+  CLI_429_MAX_RETRIES, CLI_429_INITIAL_DELAY_MS, CLI_429_BACKOFF_MULTIPLIER,
+} = require('./config');
 const { wsSend } = require('./ws-utils');
 
 const BACKOFF_MIN = 1000;
@@ -196,7 +200,55 @@ async function handleTask(ws, msg) {
     state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null });
     resetTimer();
 
-    const result = await executeCLIStreaming(wsProxy, eventId, prompt, { autoApprove, cwd: workDir, sessionId });
+    let result;
+    let retryDelay = CLI_429_INITIAL_DELAY_MS;
+    let retriesTaken = 0;
+
+    for (let attempt = 0; attempt <= CLI_429_MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        resetTimer();
+        console.log(`[429-RETRY] attempt ${attempt}/${CLI_429_MAX_RETRIES}, waiting ${retryDelay / 1000}s (event: ${eventId})`);
+        sendMsg(ws, taskId, {
+          type: 'progress', event_id: eventId,
+          message: `Rate limited (429). Retrying in ${retryDelay / 1000}s... (attempt ${attempt + 1})`,
+        });
+        await new Promise(r => setTimeout(r, retryDelay));
+        retryDelay *= CLI_429_BACKOFF_MULTIPLIER;
+
+        prepareResultsDir(workDir);
+        state.resetCallbackResult();
+        resetTimer();
+        retriesTaken = attempt;
+      }
+
+      try {
+        result = await executeCLIStreaming(wsProxy, eventId, prompt, {
+          autoApprove, cwd: workDir, sessionId,
+        });
+      } catch (spawnErr) {
+        if (attempt < CLI_429_MAX_RETRIES) {
+          console.log(`[429-RETRY] spawn error on attempt ${attempt + 1}, will retry: ${spawnErr.message}`);
+          result = { status: 'failed', stderr: spawnErr.message, stdout: '' };
+          continue;
+        }
+        throw spawnErr;
+      }
+
+      if (result.status !== 'failed') break;
+      if (!is429Error(result.stderr)) break;
+      if (state.getCallbackResult()) {
+        result = { ...result, status: 'success', output: state.getCallbackResult(), source: 'callback' };
+        break;
+      }
+    }
+
+    if (result.status !== 'failed' && retriesTaken > 0) {
+      console.log(`[429-RETRY] Recovered after ${retriesTaken} retries for ${eventId}`);
+    }
+    if (result.status === 'failed' && is429Error(result.stderr)) {
+      console.log(`[429-RETRY] All retries exhausted for ${eventId}, returning failed result`);
+    }
+
     const cur = state.getCurrentTask();
     if (cur?.timer) clearTimeout(cur.timer);
     if (cur?.taskId === taskId) {

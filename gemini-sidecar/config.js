@@ -17,6 +17,11 @@ const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[process.env
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 const DEFAULT_WORK_DIR = '/data/gitops';
 
+// 429 retry -- sidecar-level backoff when Gemini CLI exhausts its internal retries
+const CLI_429_MAX_RETRIES = 2;              // 3 total attempts (1 initial + 2 retries)
+const CLI_429_INITIAL_DELAY_MS = 60000;     // 60s -- quota typically recovers in 1 min
+const CLI_429_BACKOFF_MULTIPLIER = 2;       // 60s, then 120s
+
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
 const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
@@ -37,6 +42,9 @@ module.exports = {
   AGENT_CLI,
   AGENT_MODEL,
   AGENT_ROLE,
+  CLI_429_MAX_RETRIES,
+  CLI_429_INITIAL_DELAY_MS,
+  CLI_429_BACKOFF_MULTIPLIER,
   ANSI_RE,
   stripAnsi,
 };
