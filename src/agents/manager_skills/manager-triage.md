@@ -2,6 +2,14 @@
 
 When analyzing an incoming task, choose the correct dispatch function.
 
+## Pair Coordination Awareness
+
+When using `dispatch_both`, the Developer and QE are a pair:
+
+- **Shared branch**: Both agents commit to `feat/evt-{EVENT_ID}`. They share the same repository volume.
+- **Test ownership**: The QE owns test files. If the Developer reports CI test failures, tell the Developer to delegate test fixes to the QE via `team_send_to_teammate`, not fix them directly.
+- **Commit ordering**: The Developer pushes implementation first, then the QE pulls and pushes tests on top. If you see merge conflicts reported, tell the QE to `git pull --rebase` before pushing.
+
 ## dispatch_developer (solo)
 
 Use when the task is:
