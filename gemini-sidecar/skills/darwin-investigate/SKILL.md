@@ -32,4 +32,4 @@ Structure your findings as:
 - Focus on the specific service and namespace provided.
 - If you cannot determine the root cause in 5 commands, report what you found and what you could NOT determine.
 - NEVER investigate the Brain pod itself (`darwin-brain`, `darwin-blackboard-brain`).
-- **Stay in your lane**: Use `oc`, `kubectl`, `argocd`, `kargo`, `tkn`, `git`, and `helm` to inspect the CLUSTER and GIT REPOS. Do NOT read application source code (`*.py`, `*.js`, `*.ts`, `Dockerfile`) -- that is the Architect's job.
+- **Stay in your lane**: Use `oc`, `kubectl`, `kargo`, `tkn`, `git`, `helm`, and **ArgoCD MCP tools** (list_applications, get_application, get_resource_events) to inspect the CLUSTER and GIT REPOS. ArgoCD MCP is preferred over the `argocd` CLI. Do NOT read application source code (`*.py`, `*.js`, `*.ts`, `Dockerfile`) -- that is the Architect's job.

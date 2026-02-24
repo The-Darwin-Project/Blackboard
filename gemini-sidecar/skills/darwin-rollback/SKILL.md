@@ -25,7 +25,7 @@ You are in rollback mode. The Brain has determined that the last change caused a
 - NEVER use `git reset` -- always use `git revert` to preserve history.
 - NEVER force push.
 - After pushing, report: "Revert committed and pushed. The CD controller will handle the rollout."
-- Do NOT verify ArgoCD sync yourself -- the Brain will trigger verification separately.
+- Do NOT verify ArgoCD sync yourself -- the Brain will trigger verification separately. If asked to check sync status, use the ArgoCD MCP `get_application` tool (shows sync status, health, and conditions).
 
 ## What to Report
 

@@ -16,6 +16,7 @@ const {
   readGitLabToken,
   setupGitLabCredentials,
   setupGitLabTooling,
+  setupArgoCDMCP,
   setupCLILogins,
   GITLAB_HOST,
 } = require('./credentials');
@@ -214,6 +215,9 @@ async function handleRequest(req, res) {
           console.log(`[${new Date().toISOString()}] Continuing without GitLab credentials`);
         }
       }
+
+      // Configure ArgoCD MCP server (session API -> JWT per-task)
+      await setupArgoCDMCP();
 
       // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
       await setupCLILogins();

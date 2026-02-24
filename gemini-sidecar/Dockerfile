@@ -79,6 +79,11 @@ RUN npm install -g @anthropic-ai/claude-code@latest && \
     ln -sf "$(npm prefix -g)/bin/claude" /usr/local/bin/claude && \
     /usr/local/bin/claude --version || echo "Claude CLI linked"
 
+# Install ArgoCD MCP server (native ArgoCD tools for Gemini + Claude CLIs, replaces CLI session auth)
+RUN npm install -g argocd-mcp@latest && \
+    ln -sf "$(npm prefix -g)/bin/argocd-mcp" /usr/local/bin/argocd-mcp && \
+    /usr/local/bin/argocd-mcp --help 2>&1 | head -1 || echo "argocd-mcp installed"
+
 # Install skopeo (container image inspection -- no daemon required)
 RUN dnf install -y skopeo && dnf clean all && skopeo --version
 

@@ -15,6 +15,7 @@ const {
   readGitLabToken,
   setupGitLabCredentials,
   setupGitLabTooling,
+  setupArgoCDMCP,
   setupCLILogins,
   GITLAB_HOST,
 } = require('./credentials');
@@ -84,6 +85,9 @@ function setupWSServer(wss) {
             wsSend(ws, { type: 'progress', event_id: eventId, message: `GitLab credentials failed: ${err.message}, continuing...` });
           }
         }
+
+        // Configure ArgoCD MCP server (session API -> JWT per-task)
+        await setupArgoCDMCP();
 
         // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
         await setupCLILogins();

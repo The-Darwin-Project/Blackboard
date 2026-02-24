@@ -26,8 +26,10 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 
 - `git clone`, `git pull`, `git log`, `git diff` (full git read operations)
 - File system reading and writing (explore repos, write local prototypes)
-- `oc`, `argocd`, `kargo`, `tkn`, `gh`, `glab` (read-only: status, diff, history)
-- **ArgoCD/Kargo CLIs are pre-authenticated.** Run commands directly. Do NOT use `--server`, `--auth-token`, or read token files.
+- `oc`, `kargo`, `tkn`, `gh`, `glab` (read-only: status, diff, history)
+- **ArgoCD**: Use the ArgoCD MCP tools (list_applications, get_application, get_application_resource_tree, get_application_workload_logs). MCP is preferred over the `argocd` CLI. Your MCP access is **read-only**.
+- **Kargo CLI is pre-authenticated.** Run `kargo` commands directly. Do NOT use `--server` or token flags.
+- Fallback: if ArgoCD MCP is unavailable, `argocd` CLI is pre-authenticated as a backup.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)
 - `team_send_results` -- deliver your completed plan to the Brain

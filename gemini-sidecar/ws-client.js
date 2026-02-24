@@ -13,7 +13,7 @@ const { executeCLIStreaming } = require('./cli-executor');
 const {
   hasGitHubCredentials, generateInstallationToken, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
-  setupCLILogins, GITLAB_HOST,
+  setupArgoCDMCP, setupCLILogins, GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
 const { DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE } = require('./config');
@@ -152,6 +152,8 @@ async function handleTask(ws, msg) {
       sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: `GitLab creds failed: ${err.message}, continuing...` });
     }
   }
+  await setupArgoCDMCP();
+  sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'ArgoCD MCP configured' });
   await setupCLILogins();
 
   const mode = msg.mode || '';

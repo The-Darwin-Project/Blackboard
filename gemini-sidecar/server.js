@@ -15,7 +15,7 @@ const { handleRequest } = require('./http-handler');
 const { setupWSServer } = require('./ws-server');
 const { startWSClient } = require('./ws-client');
 const {
-  hasGitHubCredentials, hasGitLabCredentials, setupCLILogins,
+  hasGitHubCredentials, hasGitLabCredentials, setupArgoCDMCP, setupCLILogins,
   GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
 } = require('./credentials');
 
@@ -47,7 +47,10 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] ArgoCD credentials: ${fs.existsSync('/secrets/argocd/auth-token') ? 'available' : 'not configured'}`);
   console.log(`[${new Date().toISOString()}] Kargo credentials: ${fs.existsSync('/secrets/kargo/auth-token') ? 'available' : 'not configured'}`);
 
-  // Warm up CLI logins at startup (pod ready before first task)
+  // Warm up ArgoCD MCP + CLI logins at startup (pod ready before first task)
+  setupArgoCDMCP().catch((err) => {
+    console.log(`[${new Date().toISOString()}] Startup ArgoCD MCP setup failed: ${err.message}`);
+  });
   setupCLILogins().catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup CLI login failed: ${err.message}`);
   });

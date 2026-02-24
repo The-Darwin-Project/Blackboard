@@ -1,9 +1,10 @@
 // gemini-sidecar/credentials.js
 // @ai-rules:
 // 1. [Constraint]: Consolidates ALL authentication, credential setup, and CLI login logic.
-// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT.
+// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT.
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
+// 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -305,6 +306,88 @@ function setupGitLabTooling(token) {
 }
 
 /**
+ * Configure ArgoCD MCP server for Gemini CLI and Claude Code.
+ * Exchanges the existing ArgoCD password for a session JWT via the ArgoCD API,
+ * then registers argocd-mcp as an MCP server in both CLI settings.
+ * Architect gets read-only access; all other roles get full access.
+ * Falls back silently to argocd CLI if session API is unreachable.
+ */
+async function setupArgoCDMCP() {
+  const server = process.env.ARGOCD_SERVER;
+  if (!server) return;
+
+  const authTokenPath = '/secrets/argocd/auth-token';
+  if (!fs.existsSync(authTokenPath)) return;
+  const password = fs.readFileSync(authTokenPath, 'utf8').trim();
+  if (!password) return;
+
+  const insecure = process.env.ARGOCD_INSECURE === 'true';
+  const baseUrl = `https://${server}`;
+  const username = process.env.ARGOCD_USERNAME || 'admin';
+
+  let sessionJwt;
+  try {
+    if (insecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    const response = await fetch(`${baseUrl}/api/v1/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!response.ok) throw new Error(`ArgoCD session API returned ${response.status}`);
+    const data = await response.json();
+    sessionJwt = data.token;
+    if (!sessionJwt) throw new Error('ArgoCD session API returned no token');
+  } catch (err) {
+    console.log(`[${new Date().toISOString()}] ArgoCD MCP: session API failed (${err.message}), agents use argocd CLI fallback`);
+    return;
+  }
+
+  const role = process.env.AGENT_ROLE || '';
+  const readOnly = (role === 'architect');
+
+  const mcpConfig = {
+    command: 'argocd-mcp',
+    args: ['stdio'],
+    env: {
+      ARGOCD_BASE_URL: baseUrl,
+      ARGOCD_API_TOKEN: sessionJwt,
+      ...(readOnly ? { MCP_READ_ONLY: 'true' } : {}),
+      ...(insecure ? { NODE_TLS_REJECT_UNAUTHORIZED: '0' } : {}),
+    },
+  };
+
+  const geminiSettingsPath = `${process.env.HOME}/.gemini/settings.json`;
+  try {
+    fs.mkdirSync(`${process.env.HOME}/.gemini`, { recursive: true });
+    let settings = {};
+    if (fs.existsSync(geminiSettingsPath)) {
+      try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { /* fresh */ }
+    }
+    settings.mcpServers = settings.mcpServers || {};
+    settings.mcpServers.ArgoCD = mcpConfig;
+    fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+    console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for Gemini CLI${readOnly ? ' (read-only)' : ''}`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Gemini) failed: ${err.message}`);
+  }
+
+  const claudeSettingsPath = `${process.env.HOME}/.claude/settings.json`;
+  try {
+    fs.mkdirSync(`${process.env.HOME}/.claude`, { recursive: true });
+    let claudeSettings = {};
+    if (fs.existsSync(claudeSettingsPath)) {
+      try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh */ }
+    }
+    claudeSettings.mcpServers = claudeSettings.mcpServers || {};
+    claudeSettings.mcpServers.ArgoCD = mcpConfig;
+    fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
+    console.log(`[${new Date().toISOString()}] ArgoCD MCP configured for Claude Code${readOnly ? ' (read-only)' : ''}`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ArgoCD MCP config (Claude) failed: ${err.message}`);
+  }
+}
+
+/**
  * Login to ArgoCD/Kargo CLIs (awaitable, with deduplication).
  * Returns a Promise that resolves when both logins complete (or timeout after 10s).
  * Skips login if already logged in within the last 30 minutes.
@@ -374,6 +457,7 @@ module.exports = {
   readGitLabToken,
   setupGitLabCredentials,
   setupGitLabTooling,
+  setupArgoCDMCP,
   setupCLILogins,
   GITLAB_HOST,
   CLI_LOGIN_INTERVAL_MS,

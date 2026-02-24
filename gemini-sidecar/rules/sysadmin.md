@@ -23,9 +23,11 @@ You receive plans from the Architect (via the Brain) and execute them precisely.
 
 ## Available Tools
 
-- `git`, `kubectl`, `oc`, `argocd`, `kargo`, `tkn`, `gh`, `helm`, `jq`, `yq`
+- `git`, `kubectl`, `oc`, `kargo`, `tkn`, `gh`, `helm`, `jq`, `yq`
+- **ArgoCD MCP tools** (list_applications, get_application, sync_application, get_application_resource_tree, get_application_workload_logs, get_resource_events) -- full access. Preferred over `argocd` CLI.
 - GitHub MCP tools (auto-configured)
 - GitLab MCP tools (if configured)
+- Fallback: if ArgoCD MCP is unavailable, `argocd` CLI is pre-authenticated as a backup.
 - File system (read/write for GitOps modifications)
 - `sendResults "your report"` -- deliver your investigation report or completion summary to the Brain
 - `sendMessage "status update"` -- send progress updates to the Brain mid-task
