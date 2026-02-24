@@ -260,20 +260,22 @@ VOLUME_PATHS = {
 
 # Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
 PHASE_CONDITIONS: dict[str, Any] = {
-    "always":     lambda e, c: True,
-    "triage":     lambda e, c: c["turn_count"] <= 2,
-    "dispatch":   lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
-    "post-agent": lambda e, c: c["has_agent_result"],
-    "waiting":    lambda e, c: c["is_waiting"],
-    "context":    lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
-    "source":     lambda e, c: True,
-    "multi-user": lambda e, c: c.get("has_slack_participant", False),
+    "always":      lambda e, c: True,
+    "triage":      lambda e, c: c["turn_count"] <= 2,
+    "dispatch":    lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
+    "post-agent":  lambda e, c: c["has_agent_result"],
+    "waiting":     lambda e, c: c["is_waiting"],
+    "defer-wake":  lambda e, c: c.get("is_defer_wakeup", False),
+    "context":     lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
+    "source":      lambda e, c: True,
+    "multi-user":  lambda e, c: c.get("has_slack_participant", False),
 }
 
 # Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
 PHASE_EXCLUSIONS: dict[str, list[str]] = {
-    "post-agent": ["triage", "dispatch"],
-    "waiting":    ["triage", "dispatch", "post-agent"],
+    "post-agent":  ["triage", "dispatch"],
+    "defer-wake":  ["triage", "dispatch"],
+    "waiting":     ["triage", "dispatch", "post-agent", "defer-wake"],
 }
 
 
@@ -548,7 +550,7 @@ class Brain:
         if self._progressive_skills and self._skill_loader:
             context_flags = await self._extract_context_flags(event)
             active_phases = self._match_phases(event, context_flags)
-            system_prompt = self._build_system_prompt(event, active_phases)
+            system_prompt = self._build_system_prompt(event, active_phases, context_flags)
             thinking_level, call_temp = self._resolve_llm_params(active_phases)
         else:
             system_prompt = BRAIN_SYSTEM_PROMPT
@@ -793,6 +795,15 @@ class Brain:
             and any(t.actor == "user" and t.source == "slack" for t in event.conversation)
         )
 
+        consecutive_defers = 0
+        for t in reversed(event.conversation):
+            if t.actor == "brain" and t.action == "defer":
+                consecutive_defers += 1
+            else:
+                break
+        flags["is_defer_wakeup"] = consecutive_defers > 0
+        flags["consecutive_defers"] = consecutive_defers
+
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
@@ -808,6 +819,7 @@ class Brain:
 
     def _build_system_prompt(
         self, event: EventDocument, active_phases: list[str],
+        context_flags: dict | None = None,
     ) -> str:
         """Assemble system prompt from matching skill phases + dependency resolution."""
         if not self._skill_loader or not self._skill_loader.available_phases():
@@ -835,6 +847,20 @@ class Brain:
                 has_explicit = "LATEST AGENT RECOMMENDATION" in rec
                 logger.debug(f"Agent recommendation surfaced for {event.id}: {'explicit' if has_explicit else 'ask-agent directive'} ({len(rec)} chars)")
                 resolved_contents.append(rec)
+
+        if "defer-wake" in active_phases and context_flags:
+            consecutive = context_flags.get("consecutive_defers", 0)
+            raw_reason = next(
+                (t.thoughts for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.action == "defer"),
+                "unknown",
+            )
+            last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
+            resolved_contents.append(
+                f"**DEFER STATUS:** This event has been deferred {consecutive} consecutive time(s).\n"
+                f"Last deferral reason: {last_reason}\n"
+                f"{'⚠️ You have deferred 2+ times for the same reason. You MUST route an agent to verify the current state. Do NOT defer again with the same reason.' if consecutive >= 2 else ''}"
+            )
 
         prompt = "\n\n---\n\n".join(resolved_contents)
 
