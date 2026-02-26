@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from .formatter import format_turn, format_event_summary
+from .formatter import format_turn, format_event_summary, get_turn_attachment_color
 from ..models import EventEvidence
 
 if TYPE_CHECKING:
@@ -298,8 +298,10 @@ class SlackChannel:
         """Format a ConversationTurn and post it to the event's Slack thread."""
         blocks = format_turn(turn, event_id=event_doc.id)
         fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
+        color = get_turn_attachment_color(turn)
         await self._post_to_thread(
-            event_doc.slack_channel_id, event_doc.slack_thread_ts, fallback, blocks,
+            event_doc.slack_channel_id, event_doc.slack_thread_ts, fallback,
+            blocks, attachment_color=color,
         )
 
     async def _update_turn_in_thread(
@@ -309,24 +311,36 @@ class SlackChannel:
         channel, msg_ts = thinking
         blocks = format_turn(turn, event_id=event_doc.id)
         fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
+        color = get_turn_attachment_color(turn)
         try:
-            await self._app.client.chat_update(
-                channel=channel, ts=msg_ts, text=fallback,
-                **({"blocks": blocks} if blocks else {}),
-            )
+            kwargs: dict[str, Any] = {"channel": channel, "ts": msg_ts, "text": fallback}
+            if color and blocks:
+                kwargs["attachments"] = [{"color": color, "blocks": blocks}]
+            elif blocks:
+                kwargs["blocks"] = blocks
+            await self._app.client.chat_update(**kwargs)
         except Exception as e:
             logger.warning(f"Slack thinking->turn update failed, falling back to new post: {e}")
             await self._send_turn_to_thread(event_doc, turn)
 
     async def _post_to_thread(
-        self, channel: str, thread_ts: str, text: str, blocks: list | None = None,
+        self, channel: str, thread_ts: str, text: str,
+        blocks: list | None = None, attachment_color: str | None = None,
     ) -> None:
-        """Post a message to a Slack thread."""
+        """Post a message to a Slack thread.
+
+        If attachment_color is set, blocks are wrapped in a legacy attachment
+        to render a colored side bar (per-agent visual identity).
+        """
         try:
-            await self._app.client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts, text=text,
-                **({"blocks": blocks} if blocks else {}),
-            )
+            kwargs: dict[str, Any] = {
+                "channel": channel, "thread_ts": thread_ts, "text": text,
+            }
+            if attachment_color and blocks:
+                kwargs["attachments"] = [{"color": attachment_color, "blocks": blocks}]
+            elif blocks:
+                kwargs["blocks"] = blocks
+            await self._app.client.chat_postMessage(**kwargs)
         except Exception as e:
             logger.warning(f"Slack post failed: {e}")
 

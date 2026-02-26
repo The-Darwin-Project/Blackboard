@@ -14,6 +14,13 @@ if TYPE_CHECKING:
 # Slack section text limit (Block Kit)
 _MAX_TEXT = 2900
 
+AGENT_COLORS: dict[str, str] = {
+    "developer": "#4A90D9",
+    "qe": "#9B59B6",
+    "architect": "#E67E22",
+    "sysadmin": "#27AE60",
+}
+
 
 import re
 
@@ -101,6 +108,10 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     elif key == "brain.close":
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))
 
+    elif turn.action == "message" and turn.actor in AGENT_COLORS:
+        text = turn.thoughts or ""
+        blocks.append(_section(f"*{turn.actor}:* {text}"))
+
     elif turn.actor in ("architect", "sysadmin", "developer", "qe") and turn.result:
         result = _md_to_mrkdwn(_truncate(turn.result))
         blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n{result}"))
@@ -130,6 +141,17 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         })
 
     return blocks
+
+
+def get_turn_attachment_color(turn: "ConversationTurn") -> str | None:
+    """Return a color hex for turns that should use the Slack attachment color bar.
+
+    Agent progress messages get a per-agent color strip for visual distinction.
+    Returns None for turns that use standard block formatting.
+    """
+    if turn.action == "message" and turn.actor in AGENT_COLORS:
+        return AGENT_COLORS[turn.actor]
+    return None
 
 
 def build_event_report_md(event_doc: "EventDocument") -> str:
