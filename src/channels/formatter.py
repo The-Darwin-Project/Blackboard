@@ -15,10 +15,10 @@ if TYPE_CHECKING:
 _MAX_TEXT = 2900
 
 AGENT_COLORS: dict[str, str] = {
-    "developer": "#4A90D9",
-    "qe": "#9B59B6",
-    "architect": "#E67E22",
-    "sysadmin": "#27AE60",
+    "architect": "#3b82f6",
+    "sysadmin": "#f59e0b",
+    "developer": "#10b981",
+    "qe": "#fb7185",
 }
 
 
