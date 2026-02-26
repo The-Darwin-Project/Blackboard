@@ -151,10 +151,13 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
 
 def get_agent_notification_text(turn: "ConversationTurn") -> str:
-    """Short text for attachment messages (mobile push notifications, search)."""
+    """Short text for attachment messages (mobile push notifications, search).
+
+    Keep this minimal -- Slack renders top-level text ABOVE attachments,
+    so anything here appears as a separate visible line before the color bar.
+    """
     emoji = AGENT_EMOJI.get(turn.actor, "\U0001f916")
-    summary = (turn.thoughts or turn.result or "")[:100]
-    return f"{emoji} {turn.actor}: {summary}"
+    return f"{emoji} {turn.actor}"
 
 
 def get_turn_attachment_color(turn: "ConversationTurn") -> str | None:
