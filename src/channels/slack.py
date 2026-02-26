@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from .formatter import format_turn, format_event_summary, get_turn_attachment_color
+from .formatter import format_turn, format_event_summary, get_turn_attachment_color, get_agent_notification_text
 from ..models import EventEvidence
 
 if TYPE_CHECKING:
@@ -301,7 +301,7 @@ class SlackChannel:
         color = get_turn_attachment_color(turn)
         await self._post_to_thread(
             event_doc.slack_channel_id, event_doc.slack_thread_ts,
-            " " if color else fallback,
+            get_agent_notification_text(turn) if color else fallback,
             blocks, attachment_color=color,
         )
 
@@ -314,7 +314,7 @@ class SlackChannel:
         fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
         color = get_turn_attachment_color(turn)
         try:
-            kwargs: dict[str, Any] = {"channel": channel, "ts": msg_ts, "text": " " if color else fallback}
+            kwargs: dict[str, Any] = {"channel": channel, "ts": msg_ts, "text": get_agent_notification_text(turn) if color else fallback}
             if color and blocks:
                 kwargs["attachments"] = [{"color": color, "blocks": blocks}]
             elif blocks:

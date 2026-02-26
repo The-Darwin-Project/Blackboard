@@ -21,6 +21,13 @@ AGENT_COLORS: dict[str, str] = {
     "qe": "#fb7185",
 }
 
+AGENT_EMOJI: dict[str, str] = {
+    "architect": "\U0001f4d0",
+    "sysadmin": "\U0001f527",
+    "developer": "\U0001f4bb",
+    "qe": "\U0001f9ea",
+}
+
 
 import re
 
@@ -141,6 +148,13 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         })
 
     return blocks
+
+
+def get_agent_notification_text(turn: "ConversationTurn") -> str:
+    """Short text for attachment messages (mobile push notifications, search)."""
+    emoji = AGENT_EMOJI.get(turn.actor, "\U0001f916")
+    summary = (turn.thoughts or turn.result or "")[:100]
+    return f"{emoji} {turn.actor}: {summary}"
 
 
 def get_turn_attachment_color(turn: "ConversationTurn") -> str | None:
