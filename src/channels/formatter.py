@@ -89,13 +89,19 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         })
 
     elif key == "brain.wait":
+        if turn.thoughts:
+            blocks.append(_section(_md_to_mrkdwn(turn.thoughts)))
         waiting = turn.waitingFor or "user input"
         blocks.append(_section(f":hourglass_flowing_sand: Waiting for {waiting}"))
+
+    elif key == "brain.defer":
+        reason = turn.thoughts or "Deferred"
+        blocks.append(_section(f":double_vertical_bar: *Event paused:* {reason}"))
 
     elif key == "brain.close":
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))
 
-    elif turn.actor in ("architect", "sysadmin", "developer") and turn.result:
+    elif turn.actor in ("architect", "sysadmin", "developer", "qe") and turn.result:
         result = _md_to_mrkdwn(_truncate(turn.result))
         blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n{result}"))
 

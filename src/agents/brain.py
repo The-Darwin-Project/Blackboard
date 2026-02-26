@@ -456,7 +456,7 @@ class Brain:
         # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
         agent_turns = sum(
             1 for t in event.conversation
-            if t.actor in ("architect", "sysadmin", "developer")
+            if t.actor in ("architect", "sysadmin", "developer", "qe")
         )
         if agent_turns >= MAX_TURNS_PER_EVENT:
             logger.warning(f"Event {event_id} hit max agent turns ({agent_turns}/{MAX_TURNS_PER_EVENT})")

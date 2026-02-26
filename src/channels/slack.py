@@ -237,7 +237,6 @@ class SlackChannel:
             return
 
         if msg_type == "brain_thinking_done":
-            self._thinking_msg.pop(event_id, None)
             return
 
         if msg_type == "turn":
