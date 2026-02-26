@@ -16,6 +16,7 @@ Provides endpoints for the unified group chat UI to:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -24,7 +25,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..dependencies import get_blackboard, get_brain
+from ..dependencies import get_archivist, get_blackboard, get_brain
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus
 from ..state.blackboard import BlackboardState
 
@@ -273,3 +274,48 @@ async def list_closed_events(
                 "created": event.event.timeDate,
             })
     return events
+
+
+@router.post("/admin/rebuild-deep-memory")
+async def rebuild_deep_memory(
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Re-archive all closed events to Qdrant deep memory.
+
+    Idempotent: Archivist uses deterministic uuid5 point IDs so
+    re-running upserts over existing vectors without duplication.
+    Rate-limited to ~2 calls/sec to respect Gemini Flash API quotas.
+    """
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+
+    closed_ids = await blackboard.redis.zrange(blackboard.EVENT_CLOSED, 0, -1)
+    if not closed_ids:
+        return {"archived": 0, "skipped": 0, "failed": 0, "total": 0}
+
+    archived, skipped, failed = 0, 0, 0
+    for eid in closed_ids:
+        event = await blackboard.get_event(eid)
+        if not event or not event.conversation:
+            skipped += 1
+            continue
+        try:
+            await archivist.archive_event(event)
+            archived += 1
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.warning(f"Rebuild archive failed for {eid}: {e}")
+            failed += 1
+
+    logger.info(
+        f"Deep memory rebuild: {archived} archived, "
+        f"{skipped} skipped, {failed} failed (total {len(closed_ids)})"
+    )
+    return {
+        "archived": archived,
+        "skipped": skipped,
+        "failed": failed,
+        "total": len(closed_ids),
+    }
