@@ -2258,7 +2258,10 @@ class Brain:
         Agent responses are handled via _run_agent_task callbacks (non-blocking).
         No agent response scanning needed -- WebSocket agents complete asynchronously.
         """
+        from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+
         self._running = True
+        _redis_backoff = 2  # seconds, doubles on consecutive Redis failures (max 60s)
 
         # Startup: clean up stale events from previous Brain instance
         await self._cleanup_stale_events()
@@ -2272,6 +2275,8 @@ class Brain:
                 if event_id:
                     logger.info(f"New event from queue: {event_id}")
                     await self.process_event(event_id)
+
+                _redis_backoff = 2  # reset on successful Redis call
 
                 # 2. Scan active events: status-driven two-phase scan
                 active = await self.blackboard.get_active_events()
@@ -2369,6 +2374,12 @@ class Brain:
                         if not is_waiting and time_since_process > 60:
                             logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")
                             await self.process_event(eid, prefetched_event=event)
+
+            except (RedisConnectionError, RedisTimeoutError) as e:
+                logger.warning(f"Redis connection lost, retrying in {_redis_backoff}s: {e}")
+                await asyncio.sleep(_redis_backoff)
+                _redis_backoff = min(_redis_backoff * 2, 60)
+                continue
 
             except Exception as e:
                 logger.error(f"Brain event loop error: {e}", exc_info=True)
