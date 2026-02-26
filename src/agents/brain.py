@@ -118,13 +118,6 @@ Use notify_user_slack to send a direct message to a user by their email address.
 - Use for: pipeline failure alerts, escalations, status updates to specific users.
 - The message is delivered as a DM from the Darwin bot in Slack.
 
-## Deep Memory
-Before routing to an agent, call consult_deep_memory with a short query describing the symptom or task.
-Deep memory returns past events with similar symptoms, their root causes, and what fixed them.
-- If a past event matches closely (score > 0.6), use its root cause and fix to skip investigation and act directly.
-- If no match or low scores, proceed normally with investigation.
-- This is especially valuable for recurring infrastructure issues and repeated MR/pipeline patterns.
-
 ## Decision Guidelines
 - For infrastructure anomalies (high CPU, pod issues): consult deep memory first, then sysAdmin to investigate [see §Cynefin: CLEAR/COMPLICATED].
 - For user feature requests: start with Architect to plan, then Developer to implement [see §Cynefin: COMPLEX].

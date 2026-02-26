@@ -1,7 +1,7 @@
 ---
 description: "Verify stale assumptions after defer wake-up before re-deferring"
 requires:
-  - triage/deep-memory.md
+  - always/04-deep-memory.md
 tags: [defer, memory, verification]
 ---
 # Post-Defer Verification
