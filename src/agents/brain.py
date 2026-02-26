@@ -118,18 +118,6 @@ Use notify_user_slack to send a direct message to a user by their email address.
 - Use for: pipeline failure alerts, escalations, status updates to specific users.
 - The message is delivered as a DM from the Darwin bot in Slack.
 
-## Decision Guidelines
-- For infrastructure anomalies (high CPU, pod issues): consult deep memory first, then sysAdmin to investigate [see §Cynefin: CLEAR/COMPLICATED].
-- For user feature requests: start with Architect to plan, then Developer to implement [see §Cynefin: COMPLEX].
-- For scaling/config changes: sysAdmin can handle directly via GitOps [see §Execution Method].
-- Structural changes (source code, templates) REQUIRE user approval via request_user_approval.
-- Values-only changes (scaling, config toggles) can proceed without approval.
-- After execution, verify the change took effect using the correct method [see §Post-Execution].
-- Before acting on anomalies, check if related events explain the issue [see §Cross-Event Awareness].
-- When the issue is resolved and verified, close the event with a summary [see §When to Close].
-- If an agent asks for another agent's help (requestingAgent field), route to that agent.
-- If an agent reports "busy" after retries, use defer_event to re-process later instead of closing.
-
 ## Agent Recommendations
 - When an agent's response includes an explicit recommendation or unresolved issue, you MUST either:
   1. Act on it immediately (route to the recommended agent), OR
@@ -171,41 +159,6 @@ Check the event **source** field in the prompt header before closing:
 ## Safety
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
 - If an agent responds with the same answer 3 times, close the event as stuck.
-
-## Cynefin Sense-Making Framework
-
-Before deciding how to respond to an event, classify it into a domain:
-
-### CLEAR (Known knowns -- Best Practice)
-- Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
-- Constraints: Tightly constrained, no creativity needed
-- Flow: Sense -> Categorize -> Respond
-- Action: Skip Architect. Send sysAdmin directly with the established fix.
-- Example: "CPU > 80% on a service with 1 replica" -> scale to 2 via GitOps
-
-### COMPLICATED (Known unknowns -- Good Practices)
-- Pattern: Issue needs expert analysis (e.g., intermittent errors, performance degradation)
-- Constraints: Governing constraints, multiple valid approaches
-- Flow: Sense -> Analyze -> Respond
-- Action: Send sysAdmin to investigate, then Architect to analyze options, then decide.
-- Example: "Error rate spike from unknown cause" -> investigate -> plan -> execute
-
-### COMPLEX (Unknown unknowns -- Emergent Practice)
-- Pattern: Novel situation, no clear cause-effect (e.g., cascading failures, new feature request)
-- Constraints: Enabling constraints, high freedom
-- Flow: Probe -> Sense -> Respond
-- Action: Run a small safe-to-fail probe first. Observe result. Adapt.
-- Example: "User asks to add a feature" -> Architect reviews codebase (probe) -> plan based on findings
-
-### CHAOTIC (Crisis -- Novel Practice)
-- Pattern: System down, cascading failures, critical security breach
-- Constraints: No constraints, act first
-- Flow: Act -> Sense -> Respond
-- Action: Immediate stabilization (rollback, scale up, disable feature flag). Investigate AFTER stable.
-- Example: "All pods CrashLoopBackOff" -> rollback last deployment immediately -> then investigate
-
-### DISORDER (Default)
-- You don't know which domain. Ask sysAdmin to investigate first to gather data.
 
 ## Control Theory
 - The user's request is the Setpoint (SP)
@@ -254,7 +207,6 @@ VOLUME_PATHS = {
 # Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
 PHASE_CONDITIONS: dict[str, Any] = {
     "always":      lambda e, c: True,
-    "triage":      lambda e, c: c["turn_count"] <= 2,
     "dispatch":    lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
     "post-agent":  lambda e, c: c["has_agent_result"],
     "waiting":     lambda e, c: c["is_waiting"],
@@ -266,9 +218,9 @@ PHASE_CONDITIONS: dict[str, Any] = {
 
 # Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
 PHASE_EXCLUSIONS: dict[str, list[str]] = {
-    "post-agent":  ["triage", "dispatch"],
-    "defer-wake":  ["triage", "dispatch"],
-    "waiting":     ["triage", "dispatch", "post-agent", "defer-wake"],
+    "post-agent":  ["dispatch"],
+    "defer-wake":  ["dispatch"],
+    "waiting":     ["dispatch", "post-agent", "defer-wake"],
 }
 
 
