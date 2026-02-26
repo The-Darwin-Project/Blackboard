@@ -117,7 +117,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     elif turn.action == "message" and turn.actor in AGENT_COLORS:
         text = turn.thoughts or ""
-        blocks.append(_section(f"*{turn.actor}:* {text}"))
+        blocks.append(_section(text))
 
     elif turn.actor in ("architect", "sysadmin", "developer", "qe") and turn.result:
         result = _md_to_mrkdwn(_truncate(turn.result))
