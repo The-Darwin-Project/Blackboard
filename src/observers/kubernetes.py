@@ -121,7 +121,9 @@ class KubernetesObserver:
         self._task = asyncio.create_task(self._polling_loop())
         logger.info(
             f"KubernetesObserver started: namespace={self.namespace}, "
-            f"interval={self.interval}s, label_selector={self.label_selector or 'none'}"
+            f"interval={self.interval}s, label_selector={self.label_selector or 'none'}, "
+            f"anomaly_callback={'SET' if self.anomaly_callback else 'NONE'}, "
+            f"pod_health_callback={'SET' if self.pod_health_callback else 'NONE'}"
         )
     
     async def stop(self) -> None:
@@ -661,7 +663,6 @@ class KubernetesObserver:
             # Get service name from pod labels
             service_name = await self._get_service_name(pod_name, namespace)
             if not service_name:
-                logger.debug(f"Skipping pod {pod_name}: no service name mapping")
                 return
             
             # Skip self-monitoring: Brain should never create anomaly events for itself
@@ -738,6 +739,8 @@ class KubernetesObserver:
                 logger.debug(f"Injecting error_rate=100% for {service_name}: {self._active_warnings[service_name]}")
             
             if self.anomaly_callback:
+                if cpu_percent >= 70 or memory_percent >= 70 or error_rate > 0:
+                    logger.info(f"Anomaly callback: {service_name} CPU={cpu_percent:.1f}% MEM={memory_percent:.1f}% ERR={error_rate:.1f}%")
                 await self.anomaly_callback(
                     service_name, cpu_percent, memory_percent, "kubernetes",
                     error_rate=error_rate,

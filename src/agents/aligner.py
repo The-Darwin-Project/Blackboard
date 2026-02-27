@@ -424,10 +424,12 @@ class Aligner:
             and max_mem < MEMORY_THRESHOLD * 0.7
             and max_err < ERROR_RATE_THRESHOLD * 0.5
             and not has_active):
-            logger.debug(f"Metrics normal for {service} (CPU={max_cpu:.1f}% MEM={max_mem:.1f}% ERR={max_err:.2f}%), skipping Flash")
+            logger.info(f"Aligner pre-filter: {service} normal (CPU={max_cpu:.1f}% MEM={max_mem:.1f}% ERR={max_err:.2f}%), skipping Flash")
             self._last_analysis_time[service] = time.time()
             self._metrics_analysis_pending[service] = False
             return
+
+        logger.info(f"Aligner analysis triggered for {service}: max_cpu={max_cpu:.1f}% max_mem={max_mem:.1f}% max_err={max_err:.2f}% buffer_size={len(buffer)} has_active={has_active}")
 
         # Format observations for Flash
         observations = "\n".join(
