@@ -70,10 +70,9 @@ When creating events, classify the situation into a domain. This tells the Brain
 
 | Domain      | Meaning                          | You see...                                                    | Response pattern              |
 |-------------|----------------------------------|---------------------------------------------------------------|-------------------------------|
-| clear       | Known problem, known fix         | CPU pegged, single replica, no errors -- just needs scaling   | sense-categorize-respond      |
-| complicated | Known unknowns, needs analysis   | Intermittent errors, unclear root cause, multiple symptoms     | sense-analyze-respond         |
-| complex     | Unknown unknowns, novel          | Cascading failures, never-seen-before pattern, contradictory data | probe-sense-respond       |
-| chaotic     | Crisis, system down              | All pods crashing, complete service outage, data loss risk     | act-sense-respond             |
+| complicated | Known unknowns, needs analysis   | Intermittent errors, gradual degradation, multiple symptoms    | sense-analyze-respond         |
+| complex     | Unknown unknowns, novel          | Contradictory data, never-seen-before pattern, unclear cause   | probe-sense-respond           |
+| chaotic     | Sustained saturation or crisis   | CPU/memory >= 90% sustained, pods crashing, service degraded  | act-sense-respond             |
 
 Domain classification:
 - "chaotic": Sustained metric saturation (CPU >= 90% or memory >= 90% across the window). Act immediately.
