@@ -720,8 +720,8 @@ class Aligner:
         effective_last = self._last_analysis_time.get(service, now - 120 + stagger)
         time_since_analysis = now - effective_last
         pending = self._metrics_analysis_pending.get(service, False)
-        if cpu >= 70 and time_since_analysis >= 60:
-            logger.info(f"Aligner gate [{service}]: time_since={time_since_analysis:.0f}s pending={pending} buffer={len(self._metrics_buffer.get(service, []))} stagger={stagger}")
+        if service == "darwin-store":
+            logger.info(f"Aligner gate [{service}]: cpu={cpu:.1f}% time_since={time_since_analysis:.0f}s pending={pending} buffer={len(self._metrics_buffer.get(service, []))} stagger={stagger}")
         if time_since_analysis >= 120 and not pending:
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
