@@ -1,7 +1,7 @@
 # BlackBoard/src/agents/archivist.py
 # @ai-rules:
 # 1. [Constraint]: archive_event() is fire-and-forget. MUST NOT block event closure.
-# 2. [Pattern]: Uses google-genai SDK for both LLM summarization (Flash) and embedding (text-embedding-005).
+# 2. [Pattern]: Uses google-genai SDK for both LLM summarization (LLM_MODEL_ARCHIVIST) and embedding (text-embedding-005).
 # 3. [Gotcha]: embed_content returns 768-dim vector. Qdrant collection must match.
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
@@ -9,7 +9,7 @@
 Archivist: Summarizes closed events into vectorized deep memory.
 
 Triggered by Brain._close_and_broadcast(). Runs async, non-blocking.
-Uses Gemini Flash for summarization, text-embedding-005 for vectors,
+Uses Gemini (LLM_MODEL_ARCHIVIST) for summarization, text-embedding-005 for vectors,
 and Qdrant for storage.
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
 EMBEDDING_MODEL = "text-embedding-005"
-FLASH_MODEL = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
+ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
 
 SUMMARIZE_PROMPT = """Summarize this incident conversation into a structured JSON object.
 Include these fields:
@@ -74,7 +74,7 @@ class Archivist:
             await self._vector_store.ensure_collection(COLLECTION_NAME, vector_size=768)
             await self._vector_store.ensure_collection(FEEDBACK_COLLECTION, vector_size=768)
             self._initialized = True
-            logger.info("Archivist initialized (Flash + embedding + Qdrant, darwin_events + darwin_feedback)")
+            logger.info("Archivist initialized (LLM + embedding + Qdrant, darwin_events + darwin_feedback)")
             return True
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
@@ -109,16 +109,16 @@ class Archivist:
                 last_ts = event.conversation[-1].timestamp
                 duration = int(last_ts - first_ts)
 
-            # Step 1: Summarize with Flash
+            # Step 1: Summarize with LLM
             from google.genai import types
 
             prompt = SUMMARIZE_PROMPT.format(conversation=conversation_text[:5000])
             response = await self._client.aio.models.generate_content(
-                model=FLASH_MODEL,
+                model=ARCHIVIST_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
-                    max_output_tokens=1024,
+                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
                 ),
             )
 

@@ -116,15 +116,26 @@ sidecars:
 gcp:
   project: "" # Required: GCP project ID (set via --set or override file)
   location: "global"
-  provider: "gemini" # Brain LLM provider: "gemini" or "claude"
-  models:
-    pro: "gemini-3.1-pro-preview"
-    flash: "gemini-3.1-pro-preview"
-    claude: "claude-opus-4-6" # Claude model ID (used when provider=claude)
-  # LLM sampling parameters (0.0-2.0 range, normalized per provider)
-  temperature:
-    brain: "0.8" # Brain orchestrator decisions
-    aligner: "0.3" # Aligner metrics analysis (Flash)
+  provider: "gemini" # Brain LLM provider: "gemini" or "claude" (controls Brain adapter)
+  # Per-component LLM configuration
+  llm:
+    brain:
+      model: "gemini-3.1-pro-preview" # If provider=claude, set to "claude-opus-4-6"
+      temperature: "0.8"
+      maxOutputTokens: "65000"
+    manager:
+      model: "gemini-3.1-pro-preview"
+      temperature: "0.4"
+      thinkingLevel: "low"
+      maxOutputTokens: "4096"
+    aligner:
+      model: "gemini-3.1-pro-preview"
+      temperature: "0.3"
+      thinkingLevel: "low"
+      maxOutputTokens: "4096"
+    archivist:
+      model: "gemini-3.1-pro-preview" # Event summarization for deep memory
+      maxOutputTokens: "4096"
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
   existingSecret: "" # e.g., "gcp-sa-key"

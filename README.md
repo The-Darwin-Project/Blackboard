@@ -330,8 +330,10 @@ GET /events/                   # Architecture event timeline
 | `REDIS_PASSWORD`        | Redis password            | (empty)                  |
 | `GCP_PROJECT`           | GCP project ID            | (required)               |
 | `GCP_LOCATION`          | Vertex AI location        | `global`                 |
-| `VERTEX_MODEL_PRO`      | Brain model               | `gemini-3-pro-preview`   |
-| `VERTEX_MODEL_FLASH`    | Aligner/Archivist model   | `gemini-3-flash-preview` |
+| `LLM_MODEL_BRAIN`       | Brain model               | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_MANAGER`     | Manager (DevTeam) model   | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_ALIGNER`     | Aligner model             | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_ARCHIVIST`   | Archivist model           | `gemini-3.1-pro-preview` |
 | `ARCHITECT_SIDECAR_URL` | Architect WebSocket       | `http://localhost:9091`  |
 | `SYSADMIN_SIDECAR_URL`  | sysAdmin WebSocket        | `http://localhost:9092`  |
 | `DEVELOPER_SIDECAR_URL` | Developer WebSocket       | `http://localhost:9093`  |

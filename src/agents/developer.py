@@ -1,18 +1,18 @@
 # BlackBoard/src/agents/developer.py
 # @ai-rules:
 # 1. [Pattern]: QE is opt-in via QE_SIDECAR_URL. Without it, behavior is pre-probe baseline.
-# 2. [Pattern]: asyncio.wait(FIRST_COMPLETED) runs dev+qe concurrently. Flash Manager moderates.
-# 3. [Pattern]: as_completed processes first finisher immediately (flash_note).
+# 2. [Pattern]: asyncio.wait(FIRST_COMPLETED) runs dev+qe concurrently. Manager LLM moderates.
+# 3. [Pattern]: as_completed processes first finisher immediately (_manager_note).
 # 4. [Constraint]: Brain is unaware of QE. developer.process() returns merged result.
-# 5. [Gotcha]: flash_decide may fail to parse JSON. Fallback: done=True with raw text.
+# 5. [Gotcha]: _manager_decide may fail to parse JSON. Fallback: done=True with raw text.
 # 6. [Pattern]: CancelledError propagation: cancels both dev_task + qe_task to prevent orphaned CLI processes.
 # 7. [Pattern]: session_id forwarded: Phase 1 passes Brain's session to dev; Phase 2 + followup() prefer internal _dev_sessions/_qe_sessions over Brain's (may be stale during rounds).
 """
-Developer agent with optional concurrent QE pair + Flash Manager moderation.
+Developer agent with optional concurrent QE pair + Manager LLM moderation.
 
 When QE_SIDECAR_URL is set:
   Phase 1: Fire Dev + QE concurrently (asyncio.gather)
-  Phase 2: Flash Manager reviews, triggers fix/verify rounds (max 2)
+  Phase 2: Manager LLM reviews, triggers fix/verify rounds (max 2)
   Returns merged result to Brain.
 
 When QE_SIDECAR_URL is not set:
@@ -30,7 +30,8 @@ from .base_client import AgentClient
 
 logger = logging.getLogger(__name__)
 
-FLASH_MODEL = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
+MANAGER_MODEL = os.getenv("LLM_MODEL_MANAGER", "gemini-3.1-pro-preview")
+MANAGER_TEMPERATURE = 0.7  # Higher than DevTeam Manager (0.4) -- legacy moderation needs creative latitude
 MAX_REVIEW_ROUNDS = 2
 
 MANAGER_SYSTEM = """You are the Huddle Manager moderating a Developer + QE pair.
@@ -115,11 +116,11 @@ class Developer(AgentClient):
         )
         try:
             response = await client.aio.models.generate_content(
-                model=FLASH_MODEL, contents=prompt,
+                model=MANAGER_MODEL, contents=prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=MANAGER_SYSTEM,
-                    temperature=0.7,
-                    max_output_tokens=65000,
+                    temperature=MANAGER_TEMPERATURE,
+                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_MANAGER", "4096")),
                 ),
             )
             text = response.text.strip()
@@ -138,9 +139,12 @@ class Developer(AgentClient):
         from google.genai import types
         try:
             response = await client.aio.models.generate_content(
-                model=FLASH_MODEL,
+                model=MANAGER_MODEL,
                 contents=f"The {agent} agent just finished. One-sentence quality assessment:\n\n{output[:2000]}",
-                config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=65000),
+                config=types.GenerateContentConfig(
+                    temperature=MANAGER_TEMPERATURE,
+                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_MANAGER", "4096")),
+                ),
             )
             return response.text.strip()
         except Exception:

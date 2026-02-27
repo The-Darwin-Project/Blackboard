@@ -1,6 +1,6 @@
 # BlackBoard/src/agents/dev_team.py
 # @ai-rules:
-# 1. [Pattern]: Manager (Flash LLM) is the team entry point. Brain dispatches to DevTeam, Manager decides work split.
+# 1. [Pattern]: Manager LLM is the team entry point. Brain dispatches to DevTeam, Manager decides work split.
 # 2. [Pattern]: Manager uses function calling (MANAGER_TOOL_SCHEMAS). No raw JSON parsing, no mode routing if/else.
 # 3. [Pattern]: CancelledError propagation: cancel all active dispatch asyncio.Tasks on cancel.
 # 4. [Pattern]: on_progress with actor="manager" for all Manager decisions. Dev/QE progress uses their own actor names.
@@ -8,7 +8,7 @@
 # 6. [Pattern]: Session affinity via agent_id -- follow-up rounds route to the same agent that did the original work.
 # 7. [Pattern]: Concurrent huddle drain in ALL dispatch paths via _dispatch_with_drain and _drain_loop.
 """
-Dev Team -- Manager (Flash LLM) coordinates developer + QE agents.
+Dev Team -- Manager LLM coordinates developer + QE agents.
 
 Brain dispatches to DevTeam.process(). The Manager LLM triages the task,
 dispatches to developer/QE via function calling, reviews outputs, and
@@ -35,7 +35,7 @@ __all__ = ["DevTeam"]
 
 
 class DevTeam:
-    """Dev Team -- Manager (Flash LLM) coordinates developer + QE agents."""
+    """Dev Team -- Manager LLM coordinates developer + QE agents."""
 
     def __init__(self):
         self._adapter: LLMPort | None = None
@@ -60,13 +60,13 @@ class DevTeam:
         logger.info("DevTeam loaded %d manager skill files", len(parts))
 
     def _get_adapter(self) -> LLMPort:
-        """Lazy-init Flash LLM adapter for Manager reasoning."""
+        """Lazy-init Manager LLM adapter (model from LLM_MODEL_MANAGER)."""
         if self._adapter is None:
             self._adapter = create_adapter(
                 provider="gemini",
                 project=os.getenv("GCP_PROJECT", ""),
                 location=os.getenv("GCP_LOCATION", "global"),
-                model_name=os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview"),
+                model_name=os.getenv("LLM_MODEL_MANAGER", "gemini-3.1-pro-preview"),
             )
         return self._adapter
 
@@ -97,8 +97,8 @@ class DevTeam:
                     system_prompt=system_prompt,
                     contents=contents,
                     tools=MANAGER_TOOL_SCHEMAS,
-                    temperature=0.4,
-                    thinking_level="low",
+                    temperature=float(os.getenv("LLM_TEMPERATURE_MANAGER", "0.4")),
+                    thinking_level=os.getenv("LLM_THINKING_MANAGER", "low"),
                 )
             except asyncio.CancelledError:
                 raise
@@ -335,7 +335,9 @@ class DevTeam:
         try:
             resp = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
-                tools=MANAGER_TOOL_SCHEMAS, temperature=0.4, thinking_level="low",
+                tools=MANAGER_TOOL_SCHEMAS,
+                temperature=float(os.getenv("LLM_TEMPERATURE_MANAGER", "0.4")),
+                thinking_level=os.getenv("LLM_THINKING_MANAGER", "low"),
             )
         except Exception:
             contents.pop()

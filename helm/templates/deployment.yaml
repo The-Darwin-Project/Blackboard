@@ -68,36 +68,77 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: GCP_LOCATION
-            - name: VERTEX_MODEL_PRO
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: VERTEX_MODEL_PRO
-            - name: VERTEX_MODEL_FLASH
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: VERTEX_MODEL_FLASH
-            - name: VERTEX_MODEL_CLAUDE
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: VERTEX_MODEL_CLAUDE
+            # LLM configuration (per-component)
             - name: LLM_PROVIDER
               valueFrom:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_PROVIDER
+            - name: LLM_MODEL_BRAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_BRAIN
             - name: LLM_TEMPERATURE_BRAIN
               valueFrom:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_BRAIN
+            - name: LLM_MAX_TOKENS_BRAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_BRAIN
+            - name: LLM_MODEL_MANAGER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_MANAGER
+            - name: LLM_TEMPERATURE_MANAGER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_MANAGER
+            - name: LLM_THINKING_MANAGER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_MANAGER
+            - name: LLM_MAX_TOKENS_MANAGER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_MANAGER
+            - name: LLM_MODEL_ALIGNER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_ALIGNER
             - name: LLM_TEMPERATURE_ALIGNER
               valueFrom:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TEMPERATURE_ALIGNER
+            - name: LLM_THINKING_ALIGNER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_ALIGNER
+            - name: LLM_MAX_TOKENS_ALIGNER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_ALIGNER
+            - name: LLM_MODEL_ARCHIVIST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_ARCHIVIST
+            - name: LLM_MAX_TOKENS_ARCHIVIST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_ARCHIVIST
             # AI Transparency & Compliance
             - name: DARWIN_CONTACT_EMAIL
               valueFrom:

@@ -4,13 +4,13 @@
 # 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
 # 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
-# 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
-# 6. [Pattern]: Aligner always uses GeminiAdapter (Pro, low thinking) -- never Claude. Provider is hardcoded to "gemini".
+# 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (via LLM_MAX_TOKENS_ALIGNER or per-call override).
+# 6. [Pattern]: Aligner uses GeminiAdapter (model from LLM_MODEL_ALIGNER, thinking from LLM_THINKING_ALIGNER). Provider hardcoded to "gemini".
 """
 Agent 1: The Aligner (The Listener)
 
 Role: Truth Maintenance & Noise Filtering
-Nature: Hybrid Daemon (Python + Gemini Flash via google-genai for configuration)
+Nature: Hybrid Daemon (Python + Gemini LLM via google-genai for configuration)
 
 The Aligner processes incoming telemetry and updates the Blackboard layers.
 It can be configured via natural language (e.g., "Ignore errors for 1h").
@@ -18,9 +18,9 @@ It can be configured via natural language (e.g., "Ignore errors for 1h").
 CLOSED-LOOP: The Aligner detects anomalies and triggers the Architect
 for autonomous analysis, completing the observation → strategy loop.
 
-AIR GAP: This module may import google-genai (for Flash model) but NOT kubernetes or git.
+AIR GAP: This module may import google-genai (for Aligner LLM) but NOT kubernetes or git.
 """
-# NOTE: Aligner uses GeminiAdapter (Flash model) via .llm subpackage.
+# NOTE: Aligner uses GeminiAdapter via .llm subpackage (model from LLM_MODEL_ALIGNER).
 # Independent of Brain's Pro model. Always uses "gemini" provider.
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ class Aligner:
         self.filter_rules: list[FilterRule] = []
         self._adapter = None
         
-        # LLM config -- Aligner always uses Gemini Flash
+        # LLM config -- Aligner always uses Gemini (model from LLM_MODEL_ALIGNER)
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE_ALIGNER", "0.3"))
         
@@ -177,14 +177,14 @@ class Aligner:
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
     
     async def _get_adapter(self):
-        """Lazy-load LLM adapter (always Gemini Flash for Aligner)."""
+        """Lazy-load LLM adapter (always Gemini for Aligner, model from LLM_MODEL_ALIGNER)."""
         if self._adapter is None and self._llm_enabled:
             try:
                 from .llm import create_adapter
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("VERTEX_MODEL_FLASH", "gemini-3-flash-preview")
+                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.1-pro-preview")
                 
                 self._adapter = create_adapter("gemini", project, location, model_name)
                 logger.info(f"Aligner LLM adapter initialized: gemini/{model_name}")
@@ -229,7 +229,7 @@ class Aligner:
             
             response = await adapter.generate(
                 system_prompt="", contents=prompt, max_output_tokens=1024,
-                thinking_level="low",
+                thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
             )
             
             import json
@@ -491,8 +491,8 @@ class Aligner:
                     contents=prompt,
                     tools=ALIGNER_TOOL_SCHEMAS,
                     temperature=self.temperature,
-                    max_output_tokens=4096,
-                    thinking_level="low",
+                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ALIGNER", "4096")),
+                    thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
                 )
 
                 # Handle function calls from Flash

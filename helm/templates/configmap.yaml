@@ -12,15 +12,25 @@ data:
   GCP_PROJECT: {{ .Values.gcp.project | default "not-configured" | quote }}
   GCP_LOCATION: "{{ .Values.gcp.location }}"
   
-  # Vertex AI Models
-  VERTEX_MODEL_PRO: "{{ .Values.gcp.models.pro }}"
-  VERTEX_MODEL_FLASH: "{{ .Values.gcp.models.flash }}"
-  VERTEX_MODEL_CLAUDE: "{{ .Values.gcp.models.claude }}"
-  
-  # LLM Provider & Temperature
+  # LLM Configuration (per-component)
   LLM_PROVIDER: "{{ .Values.gcp.provider }}"
-  LLM_TEMPERATURE_BRAIN: "{{ .Values.gcp.temperature.brain }}"
-  LLM_TEMPERATURE_ALIGNER: "{{ .Values.gcp.temperature.aligner }}"
+  # Brain
+  LLM_MODEL_BRAIN: "{{ .Values.gcp.llm.brain.model }}"
+  LLM_TEMPERATURE_BRAIN: "{{ .Values.gcp.llm.brain.temperature }}"
+  LLM_MAX_TOKENS_BRAIN: "{{ .Values.gcp.llm.brain.maxOutputTokens }}"
+  # Manager (DevTeam + legacy developer.py)
+  LLM_MODEL_MANAGER: "{{ .Values.gcp.llm.manager.model }}"
+  LLM_TEMPERATURE_MANAGER: "{{ .Values.gcp.llm.manager.temperature }}"
+  LLM_THINKING_MANAGER: "{{ .Values.gcp.llm.manager.thinkingLevel }}"
+  LLM_MAX_TOKENS_MANAGER: "{{ .Values.gcp.llm.manager.maxOutputTokens }}"
+  # Aligner
+  LLM_MODEL_ALIGNER: "{{ .Values.gcp.llm.aligner.model }}"
+  LLM_TEMPERATURE_ALIGNER: "{{ .Values.gcp.llm.aligner.temperature }}"
+  LLM_THINKING_ALIGNER: "{{ .Values.gcp.llm.aligner.thinkingLevel }}"
+  LLM_MAX_TOKENS_ALIGNER: "{{ .Values.gcp.llm.aligner.maxOutputTokens }}"
+  # Archivist (event summarization for deep memory)
+  LLM_MODEL_ARCHIVIST: "{{ .Values.gcp.llm.archivist.model }}"
+  LLM_MAX_TOKENS_ARCHIVIST: "{{ .Values.gcp.llm.archivist.maxOutputTokens }}"
   
   # Brain Progressive Skills
   BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"
