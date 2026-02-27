@@ -5,7 +5,7 @@
 # 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
 # 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (1024 for text, 4096 for tool-calling).
-# 6. [Pattern]: Aligner always uses GeminiAdapter (Flash) -- never Claude. Provider is hardcoded to "gemini".
+# 6. [Pattern]: Aligner always uses GeminiAdapter (Pro, low thinking) -- never Claude. Provider is hardcoded to "gemini".
 """
 Agent 1: The Aligner (The Listener)
 
@@ -229,6 +229,7 @@ class Aligner:
             
             response = await adapter.generate(
                 system_prompt="", contents=prompt, max_output_tokens=1024,
+                thinking_level="low",
             )
             
             import json
@@ -491,6 +492,7 @@ class Aligner:
                     tools=ALIGNER_TOOL_SCHEMAS,
                     temperature=self.temperature,
                     max_output_tokens=4096,
+                    thinking_level="low",
                 )
 
                 # Handle function calls from Flash

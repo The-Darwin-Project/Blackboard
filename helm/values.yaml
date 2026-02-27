@@ -119,7 +119,7 @@ gcp:
   provider: "gemini" # Brain LLM provider: "gemini" or "claude"
   models:
     pro: "gemini-3.1-pro-preview"
-    flash: "gemini-3-flash-preview"
+    flash: "gemini-3.1-pro-preview"
     claude: "claude-opus-4-6" # Claude model ID (used when provider=claude)
   # LLM sampling parameters (0.0-2.0 range, normalized per provider)
   temperature:
