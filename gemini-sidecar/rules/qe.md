@@ -22,7 +22,7 @@ You work as a pair with a **Developer agent**. Load the `darwin-pair-programming
 
 1. Read the event document to understand what needs to be implemented
 2. Clone the target repository and review the existing code
-3. Check the feature branch (`feat/evt-{EVENT_ID}`) for the Developer's commits -- `git pull --rebase` before pushing
+3. Check the feature branch (`{type}/evt-{EVENT_ID}`) for the Developer's commits -- `git pull --rebase` before pushing
 4. Write tests for the expected behavior
 5. Review the Developer's code changes (shared workspace)
 6. Run your tests to verify correctness
@@ -58,7 +58,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-gitops**: Git safety rules, branch conventions
 - **darwin-test-strategy**: QE test strategy and execution workflow (mode: test)
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
-- **darwin-branch-naming**: Feature branch naming convention (mode: implement)
+- **darwin-branch-naming**: Discovery-based branch naming convention (mode: implement)
 
 ## Testing Guidelines
 

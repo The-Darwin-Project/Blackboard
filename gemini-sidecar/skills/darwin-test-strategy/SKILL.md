@@ -46,5 +46,5 @@ You are in test-only mode. The Brain wants you to write and/or run tests, NOT im
 - Do NOT implement features. You test, not build.
 - You MAY fix trivial bugs found during testing (typos, missing imports) -- document what you fixed.
 - If tests fail, report the failures clearly. Do NOT rewrite the implementation.
-- Commit test files to a `feat/` branch so CI can pick them up.
+- Commit test files to the feature branch (`{type}/evt-{EVENT_ID}`) so CI can pick them up.
 - Use `team_send_results` to deliver your test report to the Brain.

@@ -55,7 +55,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-dockerfile-safety**: Dockerfile modification safety rules
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
-- **darwin-branch-naming**: Feature branch naming convention (mode: implement)
+- **darwin-branch-naming**: Discovery-based branch naming convention (mode: implement)
 
 ## Implement Mode -- PR Gate
 

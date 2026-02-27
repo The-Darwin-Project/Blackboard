@@ -40,6 +40,6 @@ Before acting on a deployment, assess how the application is deployed:
 ## Developer Git Workflow
 
 - Create a feature branch for changes (not main)
-- Branch name MUST start with `feat/` to trigger CI
+- Branch name MUST use `{type}/evt-{EVENT_ID}` format (see `darwin-branch-naming` skill for prefix selection)
 - Do NOT push directly to main -- CI validates and auto-merges
 - Use pre-configured GIT_USER_NAME and GIT_USER_EMAIL for commits
