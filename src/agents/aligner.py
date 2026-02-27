@@ -172,7 +172,7 @@ class Aligner:
         self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
         self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
         self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
-        self._service_analysis_offset: dict[str, float] = {}  # service -> stagger offset (0-120s)
+        
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
     
@@ -383,17 +383,10 @@ class Aligner:
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger analysis every 120s (time since last analysis, not buffer age).
-        # Buffer is retained between windows so Flash sees continuity.
-        # Stagger: on first analysis per service, offset by 0-120s to avoid
-        # all 15 services firing Flash simultaneously on pod startup (causes 429).
-        if service not in self._service_analysis_offset:
-            import hashlib
-            h = int(hashlib.md5(service.encode()).hexdigest()[:8], 16)
-            self._service_analysis_offset[service] = h % 120
-        stagger = self._service_analysis_offset[service]
-        effective_last = self._last_analysis_time.get(service, now - 120 + stagger)
-        time_since_analysis = now - effective_last
+        # Trigger analysis every 120s
+        if service not in self._last_analysis_time:
+            self._last_analysis_time[service] = now
+        time_since_analysis = now - self._last_analysis_time[service]
         if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
@@ -711,17 +704,11 @@ class Aligner:
             m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
         ]
 
-        # Trigger analysis every 120s -- staggered to avoid startup burst
-        if service not in self._service_analysis_offset:
-            import hashlib
-            h = int(hashlib.md5(service.encode()).hexdigest()[:8], 16)
-            self._service_analysis_offset[service] = h % 120
-        stagger = self._service_analysis_offset[service]
-        effective_last = self._last_analysis_time.get(service, now - 120 + stagger)
-        time_since_analysis = now - effective_last
+        # Trigger analysis every 120s
+        if service not in self._last_analysis_time:
+            self._last_analysis_time[service] = now
+        time_since_analysis = now - self._last_analysis_time[service]
         pending = self._metrics_analysis_pending.get(service, False)
-        if service == "darwin-store":
-            logger.info(f"Aligner gate [{service}]: cpu={cpu:.1f}% time_since={time_since_analysis:.0f}s pending={pending} buffer={len(self._metrics_buffer.get(service, []))} stagger={stagger}")
         if time_since_analysis >= 120 and not pending:
             self._metrics_analysis_pending[service] = True
             await self._analyze_metrics_signals(service)
