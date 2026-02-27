@@ -330,10 +330,11 @@ ALIGNER_TOOL_SCHEMAS: list[dict] = [
                 },
                 "domain": {
                     "type": "string",
-                    "enum": ["clear", "complicated", "complex", "chaotic"],
+                    "enum": ["complicated", "complex", "chaotic"],
                     "description": (
-                        "Cynefin domain: clear (known fix), complicated (needs analysis), "
-                        "complex (unknown cause), chaotic (system down)"
+                        "Cynefin domain: complicated (needs expert analysis), "
+                        "complex (unknown cause, needs investigation), "
+                        "chaotic (sustained saturation, service degraded, act immediately)"
                     ),
                 },
                 "execution_mode": {

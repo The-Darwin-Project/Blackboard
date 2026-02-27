@@ -75,8 +75,10 @@ When creating events, classify the situation into a domain. This tells the Brain
 | complex     | Unknown unknowns, novel          | Cascading failures, never-seen-before pattern, contradictory data | probe-sense-respond       |
 | chaotic     | Crisis, system down              | All pods crashing, complete service outage, data loss risk     | act-sense-respond             |
 
-Most infrastructure anomalies are "clear" (known fix) or "complicated" (needs investigation).
-Use "complex" or "chaotic" only when the data is genuinely confusing or the system is in crisis.
+Domain classification:
+- "chaotic": Sustained metric saturation (CPU >= 90% or memory >= 90% across the window). Act immediately.
+- "complicated": Elevated metrics that need expert analysis (intermittent spikes, gradual degradation).
+- "complex": Unknown cause, contradictory signals, needs investigation.
 
 ## When to call create_event
 - Sustained metrics above threshold across multiple observations (not a single spike)
@@ -517,16 +519,10 @@ class Aligner:
                         # Notify active events if one exists (dual path for ongoing investigations)
                         if has_active:
                             await self._notify_active_events(service, observation)
-                        # "clear" domain = recovery signal, NOT a new anomaly.
-                        # Only notify active events (above), never create new ones.
-                        if domain == "clear":
-                            logger.info(f"Skipping event creation for {service} ({severity}_{domain}): recovery signal, not actionable")
-                        else:
-                            # Dedup + create Brain event (anomaly_type used for dedup key only)
-                            await self._trigger_architect(
-                                service, f"{severity}_{domain}",
-                                domain=domain, severity_level=severity,
-                            )
+                        await self._trigger_architect(
+                            service, f"{severity}_{domain}",
+                            domain=domain, severity_level=severity,
+                        )
 
                     elif func_name == "update_active_event":
                         await self._notify_active_events(service, observation)
