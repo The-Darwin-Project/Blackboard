@@ -695,6 +695,9 @@ class Aligner:
         """
         now = time.time()
 
+        if cpu >= 70:
+            logger.info(f"Aligner ENTRY [{service}]: cpu={cpu:.1f}% mem={memory:.1f}% err={error_rate:.1f}%")
+
         # Get replica info for context
         svc = await self.blackboard.get_service(service)
         replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
