@@ -5,6 +5,7 @@
 // 3. [Pattern]: StatusBadge is exported for use in ConversationFeed event header.
 // 4. [Gotcha]: Transient errors (429, 503) rendered as "Brain retrying..." with spinner, not full bubble.
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { approveEvent, rejectEvent, submitFeedback } from '../api/client';
 import type { ConversationTurn, MessageStatus } from '../api/types';
 import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
@@ -76,7 +77,7 @@ function RejectButton({ eventId, onStatusChange }: { eventId: string; onStatusCh
   return (
     <>
       <button onClick={() => setShowModal(true)} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Reject</button>
-      {showModal && (
+      {showModal && createPortal(
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
           <div style={{ background: '#1e293b', borderRadius: 12, padding: 20, width: 480, border: '1px solid #334155', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
             <h3 style={{ color: '#e2e8f0', margin: '0 0 12px', fontSize: 16 }}>Reject Plan</h3>
@@ -92,7 +93,8 @@ function RejectButton({ eventId, onStatusChange }: { eventId: string; onStatusCh
               <button onClick={handleSubmit} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Reject</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

@@ -18,11 +18,6 @@ data:
   LLM_MODEL_BRAIN: "{{ .Values.gcp.llm.brain.model }}"
   LLM_TEMPERATURE_BRAIN: "{{ .Values.gcp.llm.brain.temperature }}"
   LLM_MAX_TOKENS_BRAIN: "{{ .Values.gcp.llm.brain.maxOutputTokens }}"
-  # Manager (DevTeam + legacy developer.py)
-  LLM_MODEL_MANAGER: "{{ .Values.gcp.llm.manager.model }}"
-  LLM_TEMPERATURE_MANAGER: "{{ .Values.gcp.llm.manager.temperature }}"
-  LLM_THINKING_MANAGER: "{{ .Values.gcp.llm.manager.thinkingLevel }}"
-  LLM_MAX_TOKENS_MANAGER: "{{ .Values.gcp.llm.manager.maxOutputTokens }}"
   # Aligner
   LLM_MODEL_ALIGNER: "{{ .Values.gcp.llm.aligner.model }}"
   LLM_TEMPERATURE_ALIGNER: "{{ .Values.gcp.llm.aligner.temperature }}"

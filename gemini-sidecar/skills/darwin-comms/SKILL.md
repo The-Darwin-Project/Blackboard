@@ -12,9 +12,9 @@ modes: [execute, investigate, plan]
 | Mode | How to deliver results | Why |
 |------|----------------------|-----|
 | execute, investigate, plan | `team_send_results` | Solo task -- you report directly to Brain |
-| implement | `team_huddle` | Paired task -- report to Manager, NOT to Brain. See darwin-team-huddle skill. |
+| implement | `team_huddle` | Paired task -- report to Brain via huddle. See darwin-team-huddle skill. |
 
-If you are in **implement mode**, STOP reading this skill. Use `team_huddle` to report to your Manager. Do NOT call `team_send_results` -- the Manager delivers results to the Brain on your behalf.
+If you are in **implement mode**, STOP reading this skill. Use `team_huddle` to coordinate with the Brain. Do NOT call `team_send_results` -- use huddles for mid-task communication and let the task complete normally.
 
 ## Solo Mode Tools (execute / investigate / plan)
 
@@ -34,7 +34,7 @@ Use for status updates, phase transitions, or interim observations during long-r
 
 ### `team_check_messages` -- Poll for incoming messages
 
-Messages from the Manager and teammates are delivered automatically via CLI hooks. If automatic delivery doesn't fire, call `team_check_messages` between work phases.
+Messages from the Brain and teammates are delivered automatically via CLI hooks. If automatic delivery doesn't fire, call `team_check_messages` between work phases.
 
 ## Shell Fallback
 
@@ -60,7 +60,7 @@ If your action triggers a process that takes more than 60 seconds (CI/CD pipelin
 3. **Return immediately** with current state and a recommendation:
 
 In solo mode: use `team_send_results`.
-In implement mode: use `team_huddle` to report "pending" to the Manager.
+In implement mode: use `team_huddle` to report "pending" to the Brain.
 
 **NEVER** poll, sleep, or loop waiting for completion. The Brain manages wait cycles.
 

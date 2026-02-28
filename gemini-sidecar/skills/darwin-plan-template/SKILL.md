@@ -54,7 +54,7 @@ steps:
 - [What metric or signal confirms success?]
 ```
 
-The frontmatter YAML header is machine-readable by the Developer team's Manager, QE, and Brain.
+The frontmatter YAML header is machine-readable by the Brain and executing agents (Developer, QE).
 The `status` field starts as `pending` and the executing team updates it to `in_progress`, `completed`, or `failed` as they work through the steps.
 The Markdown body below the frontmatter contains the full human-readable details for each step.
 
@@ -67,25 +67,25 @@ Assign each step in the frontmatter `steps:` array to an agent and mode:
   - `execute` -- GitOps: clone repo, modify values.yaml, commit, push
   - `rollback` -- Git revert, verify ArgoCD sync
 
-- **developer** -- A development TEAM, not a single agent
-  - `investigate` -- Developer solo. Read-only: check MR/PR status, code inspection
-  - `execute` -- Developer solo. Single write actions: post comment, merge MR, tag release
-  - `implement` -- **Full team**: Developer implements, QE verifies quality, Manager reviews and approves.
-    The plan is sent as ONE work order to the team. The Manager reads the frontmatter steps and
-    orchestrates: Developer works through implementation steps, QE handles verification/test steps.
-    You do NOT need separate steps for "implement" and "test" -- the team handles both internally.
-  - `test` -- QE solo. Run tests, verify deployments via browser (use only when no code changes needed)
+- **developer** -- Code implementation agent
+  - `investigate` -- Read-only: check MR/PR status, code inspection
+  - `execute` -- Single write actions: post comment, merge MR, tag release
+  - `implement` -- Code changes. Brain dispatches Developer first, then QE for verification.
+
+- **qe** -- Quality verification agent
+  - `test` -- Run tests, verify deployments via browser (Playwright)
+  - `investigate` -- Read-only test status checks
 
 - **architect** -- Planning and review (use sparingly, avoid self-referential loops)
   - `review` -- Code/MR review with severity findings
   - `analyze` -- Information gathering and status report
 
-**How to write steps for the developer team:**
+**How to write steps for developer and QE:**
 
-- For code changes that need verification: use `mode: implement` for ALL steps (implementation + testing).
-  The team's internal QE handles the verification. Do NOT split into separate implement/test steps.
-- For read-only checks (MR status, code inspection): use `mode: investigate`.
-- For single Git actions (merge, comment, tag): use `mode: execute`.
+- For code changes that need verification: assign implementation steps to `developer` with `mode: implement`,
+  and verification steps to `qe` with `mode: test`. Brain dispatches them sequentially.
+- For read-only checks (MR status, code inspection): use `developer` with `mode: investigate`.
+- For single Git actions (merge, comment, tag): use `developer` with `mode: execute`.
 
 For COMPLICATED plans with multiple options, present options WITHOUT step assignments in the frontmatter.
 Only the selected option's execution steps get `agent` and `mode` fields.

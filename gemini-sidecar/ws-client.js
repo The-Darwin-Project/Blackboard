@@ -69,7 +69,7 @@ function startWSClient(brainUrl) {
       else if (msg.type === 'cancel') handleCancel(msg);
       else if (msg.type === 'ping') wsSend(ws, { type: 'pong' });
       else if (msg.type === 'huddle_reply') {
-        // Manager replied to a HuddleSendMessage -- resolve the held HTTP response
+        // Brain replied to a HuddleSendMessage -- resolve the held HTTP response
         const pending = state.getPendingHuddleReply();
         if (pending) {
           clearTimeout(pending.timeout);
@@ -80,11 +80,11 @@ function startWSClient(brainUrl) {
         }
       } else if (msg.type === 'proactive_message') {
         state.pushInboundMessage({
-          from: msg.from || 'manager',
+          from: msg.from || 'brain',
           content: msg.content || '',
         });
         console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars)`);
-        tryWake(msg.from || 'manager', msg.content || '');
+        tryWake(msg.from || 'brain', msg.content || '');
       }
     });
 

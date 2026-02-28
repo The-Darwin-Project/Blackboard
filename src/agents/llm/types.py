@@ -30,7 +30,7 @@ class FunctionCall:
 
 @dataclass
 class LLMResponse:
-    """Blocking LLM response (used by Aligner + DevTeam Manager)."""
+    """Blocking LLM response (used by Aligner)."""
     function_call: Optional[FunctionCall] = None
     text: Optional[str] = None
     raw_parts: Optional[list] = None
@@ -85,13 +85,13 @@ class LLMPort(Protocol):
 BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "select_agent",
-        "description": "Route work to an agent. Use this to assign a task to Architect, sysAdmin, or Developer.",
+        "description": "Route work to an agent. Use this to assign a task to Architect, sysAdmin, Developer, or QE.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer"],
+                    "enum": ["architect", "sysadmin", "developer", "qe"],
                     "description": "Which agent to route to",
                 },
                 "task_instruction": {
@@ -101,7 +101,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "mode": {
                     "type": "string",
                     "enum": ["investigate", "execute", "rollback", "plan", "review", "analyze", "implement", "test"],
-                    "description": "Behavioral mode for the agent. Determines scope of actions (e.g., investigate=read-only, execute=GitOps write, implement=full dev+QE team).",
+                    "description": "Behavioral mode for the agent. Determines scope of actions (e.g., investigate=read-only, execute=GitOps write, implement=code changes, test=QE verification).",
                 },
             },
             "required": ["agent_name", "task_instruction"],
@@ -155,13 +155,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "ask_agent_for_state",
-        "description": "Ask an agent for information (e.g., ask sysAdmin for kubectl logs, pod status).",
+        "description": "Ask an agent for information (e.g., ask sysAdmin for kubectl logs, ask QE for test status).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer"],
+                    "enum": ["architect", "sysadmin", "developer", "qe"],
                     "description": "Which agent to ask",
                 },
                 "question": {
@@ -297,6 +297,50 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["user_email", "message"],
         },
     },
+    {
+        "name": "reply_to_agent",
+        "description": (
+            "Reply to an agent's team_huddle message. Sends the reply directly to the "
+            "agent's CLI via its persistent WebSocket. The agent is blocked waiting for "
+            "this reply -- keep it concise and actionable."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent to reply to (e.g., 'developer-abc123', 'qe-def456')",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Reply content -- guidance, acknowledgment, or next-step instruction",
+                },
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
+    {
+        "name": "message_agent",
+        "description": (
+            "Send a proactive message to an agent. Unlike reply_to_agent (which responds "
+            "to a huddle), this pushes a NEW message the agent sees at its next tool "
+            "boundary. Use for urgent coordination: 'QE found issues, hold off on PR'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent to message (e.g., 'developer-abc123', 'qe-def456')",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message content",
+                },
+            },
+            "required": ["agent_id", "message"],
+        },
+    },
 ]
 
 
@@ -398,124 +442,6 @@ ALIGNER_TOOL_SCHEMAS: list[dict] = [
                 },
             },
             "required": ["service", "observation"],
-        },
-    },
-]
-
-
-# =============================================================================
-# Manager Tool Schemas (9 tools -- Dev Team Manager function calling)
-# =============================================================================
-
-MANAGER_TOOL_SCHEMAS: list[dict] = [
-    {
-        "name": "dispatch_developer",
-        "description": "Route task to the developer agent only. Use for code changes, MR operations, single write actions.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "What the developer should do (specific and actionable)"},
-            },
-            "required": ["task"],
-        },
-    },
-    {
-        "name": "dispatch_qe",
-        "description": "Route task to the QE agent only. Use for writing tests, verification, quality checks.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "task": {"type": "string", "description": "What QE should do (specific and actionable)"},
-            },
-            "required": ["task"],
-        },
-    },
-    {
-        "name": "dispatch_both",
-        "description": "Dispatch to developer AND QE concurrently. Use for feature implementations that need both code and tests.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "dev_task": {"type": "string", "description": "What the developer should implement"},
-                "qe_task": {"type": "string", "description": "What QE should test/verify"},
-            },
-            "required": ["dev_task", "qe_task"],
-        },
-    },
-    {
-        "name": "request_review",
-        "description": "Quality gate -- review the developer and QE outputs to decide next action.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "dev_output": {"type": "string", "description": "Developer's result"},
-                "qe_output": {"type": "string", "description": "QE's result"},
-            },
-            "required": ["dev_output", "qe_output"],
-        },
-    },
-    {
-        "name": "approve_and_merge",
-        "description": "Outputs are approved. Tell developer to open PR and merge.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "dev_agent_id": {"type": "string", "description": "The agent_id of the developer who implemented the change"},
-            },
-            "required": ["dev_agent_id"],
-        },
-    },
-    {
-        "name": "request_fix",
-        "description": "Send a fix or verify request to a specific agent (session affinity).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "The agent_id to send the fix request to"},
-                "feedback": {"type": "string", "description": "What needs to be fixed or verified"},
-            },
-            "required": ["agent_id", "feedback"],
-        },
-    },
-    {
-        "name": "report_to_brain",
-        "description": "Return result to the Brain. Call when: (1) work is complete, (2) work is pending/waiting on an external process (pipeline, deploy, CI), or (3) work failed. The Brain handles deferral for pending states -- do NOT re-dispatch agents to poll.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string", "description": "Result summary from the agent(s)"},
-                "status": {"type": "string", "enum": ["success", "partial", "failed", "pending"], "description": "Outcome: success (done), partial (needs more work), failed (unrecoverable), pending (waiting on external process)"},
-                "recommendation": {"type": "string", "description": "Specific next-step recommendation for the Brain (e.g., 're-check pipeline in 10 minutes, merge if pass, close with note if fail'). Extract this from the agent's output."},
-            },
-            "required": ["summary", "status"],
-        },
-    },
-    {
-        "name": "reply_to_agent",
-        "description": "Reply to a HuddleSendMessage from an agent. Sends the reply text back to the agent's CLI via the persistent WS.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Agent to reply to"},
-                "message": {"type": "string", "description": "Reply content"},
-            },
-            "required": ["agent_id", "message"],
-        },
-    },
-    {
-        "name": "message_agent",
-        "description": (
-            "Send a proactive message to an agent. Unlike reply_to_agent (which responds to a huddle), "
-            "this pushes a NEW message the agent sees at its next tool boundary. "
-            "Use for urgent coordination: 'QE found issues, hold off on PR'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Agent to message (e.g., developer-..., qe-...)"},
-                "message": {"type": "string", "description": "Message content"},
-            },
-            "required": ["agent_id", "message"],
         },
     },
 ]

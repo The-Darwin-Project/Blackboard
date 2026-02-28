@@ -22,7 +22,7 @@
 # 20. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 21. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
 # 22. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
-# 23. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns (agent progress, aligner confirms). Lightweight LLM call (tools=[], 256 tokens), appends brain.think, marks turns EVALUATED.
+# 23. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -67,6 +67,7 @@ class ContextFlags(TypedDict, total=False):
     has_aligner_turns: bool
     has_slack_participant: bool
     is_intermediate: bool
+    has_pending_huddle: bool
     _cached_active_ids: list[str]
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
@@ -94,20 +95,19 @@ You coordinate AI agents via a shared conversation queue. Each agent accepts an 
   - `mode: execute` -- Full GitOps: clone repo, modify values.yaml, commit, push. ArgoCD syncs the change.
   - `mode: rollback` -- Git revert on target repo, verify ArgoCD sync. Use for crisis recovery.
 
-- **Developer**: A development team with four dispatch modes:
-  - `mode: implement` -- Full team. Developer implements, QE verifies quality, Flash Manager moderates.
-    Use for: adding features, fixing bugs, modifying application source code.
-  - `mode: execute` -- Developer solo. No QE, no Flash Manager.
-    Use for: single write actions (post MR comment, merge MR, tag release, create branch, run a command).
-  - `mode: investigate` (default) -- Developer solo. No QE, no Flash Manager.
-    Use for: checking MR/PR status, code inspection, status reports, read-only information gathering.
-  - `mode: test` -- QE solo. No Developer, no Flash Manager.
-    Use for: running tests against existing code, verifying deployments via browser (Playwright).
+- **Developer**: Implements code changes, manages branches, opens PRs.
+  - `mode: implement` -- Code changes: adding features, fixing bugs, modifying application source code. After Developer completes, dispatch QE to verify.
+  - `mode: execute` -- Single write actions: post MR comment, merge MR, tag release, create branch, run a command.
+  - `mode: investigate` (default) -- Read-only: checking MR/PR status, code inspection, status reports.
+  - Tools: git, file system, glab, gh
 
-The Developer team tools:
-- Developer: git, file system, glab, gh (code implementation, MR/PR inspection)
-- QE: git, file system, Playwright headless browser (UI tests), pytest, httpx, curl
-- Both share the same workspace and see each other's code changes in real-time
+- **QE**: Quality verification agent. Runs tests, verifies deployments.
+  - `mode: test` -- Run tests against code, verify deployments via browser (Playwright), quality checks.
+  - `mode: investigate` -- Read-only test status checks, inspecting test results.
+  - Tools: git, file system, Playwright headless browser, pytest, httpx, curl
+
+Developer and QE are dispatched sequentially (Developer first, then QE for verification).
+Both agents share the same workspace volume and see each other's code changes.
 
 ## Your Job
 1. Read the event (anomaly or user request) and its conversation history.
@@ -128,9 +128,16 @@ Use notify_user_slack to send a direct message to a user by their email address.
 
 ## Re-Triage on New User Issues
 - When a user reports NEW bugs, crashes, errors, or issues within an active event:
-  1. Always use `mode: implement` to engage the full Developer team (Manager + Developer + QE).
+  1. Dispatch Developer with `mode: implement`, then QE with `mode: test` for verification.
   2. Do NOT reuse the previous dispatch mode just because the last dispatch was solo developer.
-  3. Multiple distinct issues (2+) or any crash/error report warrants fresh triage via `mode: implement`.
+  3. Multiple distinct issues (2+) or any crash/error report warrants fresh triage.
+
+## Huddle Protocol
+- When an agent sends a team_huddle, you will see it as a conversation turn with action="huddle".
+- You MUST reply using reply_to_agent(agent_id, message). The agent is blocked until you reply.
+- Keep replies concise and actionable. The agent cannot continue until it receives your response.
+- If the agent reports completion, acknowledge and let them finish their task.
+- If the agent reports a problem, provide specific guidance for the next step.
 
 ## Compound User Instructions
 - When a user request contains conditional outcomes (e.g., "if pipeline fails notify X, if it passes merge it"):
@@ -214,15 +221,16 @@ VOLUME_PATHS = {
 
 # Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
 PHASE_CONDITIONS: dict[str, Any] = {
-    "always":      lambda e, c: True,
-    "dispatch":    lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
-    "post-agent":  lambda e, c: c["has_agent_result"],
-    "waiting":     lambda e, c: c["is_waiting"],
-    "defer-wake":  lambda e, c: c.get("is_defer_wakeup", False),
+    "always":       lambda e, c: True,
+    "dispatch":     lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
+    "post-agent":   lambda e, c: c["has_agent_result"],
+    "waiting":      lambda e, c: c["is_waiting"],
+    "defer-wake":   lambda e, c: c.get("is_defer_wakeup", False),
     "context":      lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
     "source":       lambda e, c: True,
     "multi-user":   lambda e, c: c.get("has_slack_participant", False),
     "intermediate": lambda e, c: c.get("is_intermediate", False),
+    "coordination": lambda e, c: c.get("has_pending_huddle", False),
 }
 
 # Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
@@ -282,12 +290,6 @@ class Brain:
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
-        # DevTeam (Manager + dev + qe) -- initialized when ws_mode=reverse
-        self._dev_team = None
-        if self._ws_mode == "reverse":
-            from .dev_team import DevTeam
-            self._dev_team = DevTeam()
-            logger.info("DevTeam initialized (Manager + dev/qe via registry)")
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "false").lower() == "true"
         self._skill_loader = None
@@ -616,19 +618,29 @@ class Brain:
     ) -> None:
         """Process intermediate turns (agent progress, aligner confirms) with a lightweight LLM call.
 
-        Limited tools (defer_event only), minimal prompt (always + intermediate phases), 256 max tokens.
+        Observation-only (zero tools, 256 tokens) unless huddle turns present
+        (reply_to_agent/message_agent, 1024 tokens).
         Appends brain.think turn for temporal context; marks processed turns EVALUATED.
-        If LLM calls defer_event, cancels the active agent and defers -- preventing sleep-loop anti-pattern.
         """
         if not self._adapter:
             logger.warning("_process_intermediate skipped: no LLM adapter")
             return
 
         from .llm import BRAIN_TOOL_SCHEMAS
-        intermediate_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] == "defer_event"]
+        huddle_turns = [t for t in turns if t.action == "huddle"]
+        if huddle_turns:
+            intermediate_tools = [
+                t for t in BRAIN_TOOL_SCHEMAS
+                if t["name"] in ("reply_to_agent", "message_agent")
+            ]
+            max_tokens = 1024
+        else:
+            intermediate_tools = []
+            max_tokens = 256
 
         ctx: ContextFlags = {
             "is_intermediate": True,
+            "has_pending_huddle": bool(huddle_turns),
             "turn_count": len(event.conversation),
             "has_agent_result": False,
             "is_waiting": False,
@@ -656,7 +668,7 @@ class Brain:
                 contents=contents,
                 tools=intermediate_tools,
                 temperature=call_temp,
-                max_output_tokens=256,
+                max_output_tokens=max_tokens,
                 thinking_level=thinking_level,
             ):
                 if chunk.text:
@@ -678,18 +690,17 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
 
-        if function_call and function_call.name == "defer_event":
-            args = function_call.args or {}
-            reason = args.get("reason", "Agent reported pending state")
-            logger.info(f"Intermediate defer for {event_id}: {reason}")
-            await self.cancel_active_task(event_id, f"Intermediate defer: {reason}")
-            await self._execute_function_call(event_id, "defer_event", args)
+        if function_call and function_call.name in ("reply_to_agent", "message_agent"):
+            await self._execute_function_call(
+                event_id, function_call.name, function_call.args or {},
+            )
 
+        tool_names = [t["name"] for t in intermediate_tools] or ["none"]
         up_to = max(t.turn for t in turns) + 1
         await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
         logger.info(
             f"Intermediate: processed {len(turns)} turns for {event_id} "
-            f"(phases: {active_phases}, tools: [defer_event])"
+            f"(phases: {active_phases}, tools: {tool_names})"
         )
 
     @staticmethod
@@ -826,6 +837,10 @@ class Brain:
         flags["has_slack_participant"] = bool(
             event.slack_thread_ts
             and any(t.actor == "user" and t.source == "slack" for t in event.conversation)
+        )
+        flags["has_pending_huddle"] = any(
+            t.action == "huddle" and t.status.value != "evaluated"
+            for t in event.conversation
         )
 
         consecutive_defers = 0
@@ -1309,8 +1324,9 @@ class Brain:
                 })
 
             # Launch agent task (non-blocking)
+            # QE has no Python agent class -- allow reverse-WS dispatch without one
             agent = self.agents.get(agent_name)
-            if agent:
+            if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
                 event_md_path = f"./events/event-{event_id}.md"
                 task_coro = self._run_agent_task(
                     event_id, agent_name, agent, task, event_md_path,
@@ -1319,6 +1335,35 @@ class Brain:
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
+            return False
+
+        elif function_name in ("reply_to_agent", "message_agent"):
+            agent_id = args.get("agent_id", "")
+            message = args.get("message", "")
+            msg_type = "huddle_reply" if function_name == "reply_to_agent" else "proactive_message"
+            from ..dependencies import get_registry_and_bridge
+            registry, _ = get_registry_and_bridge()
+            agent_conn = await registry.get_by_id(agent_id) if registry else None
+            if agent_conn and agent_conn.ws:
+                try:
+                    await agent_conn.ws.send_json({
+                        "type": msg_type,
+                        "task_id": agent_conn.current_task_id or "",
+                        "content": message,
+                    })
+                    logger.info(f"Brain {function_name} -> {agent_id} ({len(message)} chars)")
+                except Exception as e:
+                    logger.warning(f"Failed to send {function_name} to {agent_id}: {e}")
+            else:
+                logger.warning(f"{function_name}: agent {agent_id} not found or disconnected")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="reply",
+                thoughts=f"{'Reply' if function_name == 'reply_to_agent' else 'Message'} to {agent_id}: {message}",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
             return False
 
         elif function_name == "close_event":
@@ -1714,30 +1759,34 @@ class Brain:
                 from ..dependencies import get_registry_and_bridge
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
-                    if agent_name == "developer" and self._dev_team:
-                        # DevTeam returns (summary, status) -- status is success/partial/failed/pending/None
-                        result, dev_status = await self._dev_team.process(
-                            event_id=event_id,
-                            task=task,
-                            on_progress=on_progress,
-                            event_md_path=event_md_path,
-                            mode=mode,
+                    async def on_huddle(data: dict) -> None:
+                        """Append huddle as conversation turn -- Brain replies via _process_intermediate."""
+                        role = data.get("agent_id", agent_name).split("-")[0]
+                        turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor=role,
+                            action="huddle",
+                            thoughts=data.get("content", ""),
                         )
-                        session_id = None
-                    else:
-                        # Direct dispatch for architect, sysadmin
-                        result, session_id = await dispatch_to_agent(
-                            registry=registry,
-                            bridge=bridge,
-                            role=agent_name,
-                            event_id=event_id,
-                            task=task,
-                            on_progress=on_progress,
-                            session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
-                            event_md_path=event_md_path,
-                        )
+                        await self.blackboard.append_turn(event_id, turn)
+                        await self._broadcast_turn(event_id, turn)
+
+                    result, session_id = await dispatch_to_agent(
+                        registry=registry,
+                        bridge=bridge,
+                        role=agent_name,
+                        event_id=event_id,
+                        task=task,
+                        on_progress=on_progress,
+                        on_huddle=on_huddle,
+                        session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                        event_md_path=event_md_path,
+                    )
                 else:
                     logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")
+                    if not agent:
+                        logger.error(f"No agent class for {agent_name} in legacy mode, cannot dispatch")
+                        return
                     async with self._agent_locks[agent_name]:
                         result, session_id = await agent.process(
                             event_id=event_id, task=task, event_md_path=event_md_path,
@@ -1745,6 +1794,9 @@ class Brain:
                             session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
                         )
             else:
+                if not agent:
+                    logger.error(f"No agent class for {agent_name} in legacy mode, cannot dispatch")
+                    return
                 async with self._agent_locks[agent_name]:
                     result, session_id = await agent.process(
                         event_id=event_id,

@@ -89,26 +89,6 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_BRAIN
-            - name: LLM_MODEL_MANAGER
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: LLM_MODEL_MANAGER
-            - name: LLM_TEMPERATURE_MANAGER
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: LLM_TEMPERATURE_MANAGER
-            - name: LLM_THINKING_MANAGER
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: LLM_THINKING_MANAGER
-            - name: LLM_MAX_TOKENS_MANAGER
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Release.Name }}-config
-                  key: LLM_MAX_TOKENS_MANAGER
             - name: LLM_MODEL_ALIGNER
               valueFrom:
                 configMapKeyRef:

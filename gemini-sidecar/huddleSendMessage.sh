@@ -1,9 +1,9 @@
 #!/bin/bash
 # gemini-sidecar/huddleSendMessage.sh
-# Agent-to-Manager communication. Sends a message and BLOCKS until the Manager replies.
+# Agent-to-Brain huddle. Sends a message and BLOCKS until the Brain replies.
 #
-# This is team-internal communication (dev/qe -> Manager).
-# For Brain/system communication, use sendMessage or sendResults.
+# This is agent-to-Brain communication (dev/qe -> Brain).
+# For non-blocking status updates, use sendMessage or sendResults.
 #
 # Usage (PREFER file or pipe for multiline content):
 #   huddleSendMessage ./report.md                  BEST: Send file contents
@@ -36,11 +36,11 @@ if [ -z "$CONTENT" ]; then
   exit 1
 fi
 
-# POST to sidecar callback. The sidecar HOLDS this request open until the Manager replies.
-# Timeout: 600s (10 min) -- Manager needs time for LLM thinking, reviewing both dev+QE, function calling.
+# POST to sidecar callback. The sidecar HOLDS this request open until the Brain replies.
+# Timeout: 600s (10 min) -- Brain needs time for LLM thinking + coordination.
 # Background heartbeat keeps the CLI from killing us for "no output" (Gemini CLI 5min inactivity timeout).
-echo "Waiting for Manager reply..."
-(while true; do sleep 30; echo "Still waiting for Manager..."; done) &
+echo "Waiting for Brain reply..."
+(while true; do sleep 30; echo "Still waiting for Brain..."; done) &
 HEARTBEAT_PID=$!
 trap "kill $HEARTBEAT_PID 2>/dev/null" EXIT
 
@@ -55,9 +55,9 @@ HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
 
 if [ "$HTTP_CODE" -ne 200 ]; then
-  echo "Error: Manager reply failed (HTTP $HTTP_CODE): $BODY" >&2
+  echo "Error: Brain reply failed (HTTP $HTTP_CODE): $BODY" >&2
   exit 1
 fi
 
-# Print the Manager's reply (the LLM's response)
+# Print the Brain's reply
 echo "$BODY" | jq -r '.reply // .content // .'

@@ -11,7 +11,7 @@ tags: [function-calling, rules, slack]
 ## Agent Progress vs Terminal Dispatch
 
 - Agent `team_send_message` and `sendMessage` progress notes appear as conversation turns with `source: agent_message`. These are STATUS UPDATES, not terminal findings. The dispatch may still be running.
-- When you see an `agent_message` turn during an active dispatch, do NOT re-route, close, or defer. Wait for the `execute` turn from the DevTeam which signals dispatch completion.
+- When you see an `agent_message` turn during an active dispatch, do NOT re-route, close, or defer. Wait for the `execute` turn from the agent which signals dispatch completion.
 
 ## Slack Notifications
 

@@ -24,8 +24,8 @@ steps:
 ```
 
 All steps target `developer` -> Send the FULL plan with `mode: implement` (one dispatch).
-The Developer team's Manager orchestrates internally: Developer executes
-implementation steps, QE handles test steps, Manager reviews and approves.
+Brain coordinates sequentially: dispatch Developer for implementation steps,
+then dispatch QE for test/verification steps.
 
 ## Step 2: Dispatch Rules
 
@@ -34,7 +34,7 @@ implementation steps, QE handles test steps, Manager reviews and approves.
 - If ALL steps target the same agent, send the entire Architect plan as the
   `task_instruction` in a single `select_agent` call.
 - Use `mode: implement` when the plan contains implementation + test steps.
-  The `implement` mode activates the full team (Developer + QE + Manager).
+  The `implement` mode signals code changes that need QE verification afterward.
 - The plan IS the work order. The team reads it and follows the steps internally.
 
 **Mixed-agent plans:**
@@ -57,7 +57,7 @@ Read `agent` and `mode` from each step in the frontmatter `steps:` array, then c
 **Mode selection for batched steps (same agent):**
 
 - If the batch contains ANY step with `mode: implement`, use `mode: implement`
-  (full team). The QE and Manager are needed to verify the implementation.
+  (Developer then QE). QE verification is needed for implementation changes.
 - If the batch is all `mode: test`, use `mode: test` (QE solo).
 - If the batch is all `mode: execute`, use `mode: execute` (developer solo).
 - If the batch is all `mode: investigate`, use `mode: investigate`.

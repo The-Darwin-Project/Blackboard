@@ -123,11 +123,6 @@ gcp:
       model: "gemini-3.1-pro-preview" # If provider=claude, set to "claude-opus-4-6"
       temperature: "0.8"
       maxOutputTokens: "65000"
-    manager:
-      model: "gemini-3.1-pro-preview"
-      temperature: "0.4"
-      thinkingLevel: "low"
-      maxOutputTokens: "4096"
     aligner:
       model: "gemini-3.1-pro-preview"
       temperature: "0.3"

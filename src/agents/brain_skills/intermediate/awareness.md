@@ -1,43 +1,36 @@
 ---
-description: "Acknowledge intermediate turns during active agent execution. Intervene on long-running operations."
-tags: [intermediate, temporal-context, long-running]
+description: "Acknowledge intermediate turns during active agent execution. Reply to agent huddles."
+tags: [intermediate, temporal-context, huddle]
 ---
 # Intermediate Awareness
 
-An agent is currently working on this event. You are seeing a progress update
-or environment signal (e.g., Aligner recovery confirmation).
+An agent is currently working on this event. You are seeing a progress update,
+environment signal, or an agent huddle requesting guidance.
 
-## Your job
+## When no huddle is present (no tools available)
 
-1. Produce a brief 1-2 sentence observation noting WHAT happened and WHEN.
-2. If the agent reports a PENDING or WAITING state (pipeline running, CI in progress,
-   deployment syncing, "monitoring for completion"), call `defer_event` with an
-   appropriate delay. The agent should not poll -- you manage the wait cycle.
-   The active agent will be cancelled automatically when you defer.
+Produce a brief 1-2 sentence observation noting WHAT happened and WHEN.
+You cannot call any functions -- just observe and acknowledge.
 
-## When to just observe (no function call)
-
-- Agent is actively working (implementing, cloning, testing, pushing)
-- Aligner reports metrics changes (recovery or new anomaly data)
-- QE reports test progress
-
-## When to defer (call defer_event)
-
-- Agent says "waiting for pipeline", "monitoring for completion", "checking CI status"
-- Agent says "sleeping", "will retry in N seconds/minutes"
-- Agent reports a pending external process (build, deploy, sync, merge)
-
-Use delay_seconds matching the expected wait: 300 (5 min) for CI/pipelines,
-180 (3 min) for ArgoCD sync, 60 (1 min) for quick checks.
-
-## Examples
-
-Observe only:
-
+Examples:
 - "Developer started implementation at 20:01. Agent in progress."
 - "Aligner reports CPU recovered to 4.2% at 20:05. Anomaly may be resolved."
+- "QE running Playwright tests. Awaiting results."
 
-Defer:
+## When an agent huddles (reply_to_agent available)
 
-- Agent says "A Pipeline {pipelineName} is now running. Monitoring for completion."
-  -> Call defer_event(reason="Pipeline {pipelineName} running, re-check after completion", delay_seconds=300)
+An agent is asking for your guidance via team_huddle. You MUST reply:
+
+1. Read the huddle content carefully.
+2. Call reply_to_agent(agent_id, message) with actionable guidance.
+3. Keep replies concise -- the agent is waiting and blocked until you reply.
+
+If the agent reports completion, acknowledge and let them finish.
+If the agent reports a problem, provide specific next steps.
+If the agent asks a question, answer it directly.
+
+Examples:
+- Agent huddles "Implementation done, pushed to branch feature/fix-123"
+  -> reply_to_agent(agent_id, "Acknowledged. Continue with PR creation.")
+- Agent huddles "2 test failures on dark theme component"
+  -> reply_to_agent(agent_id, "Noted. Focus on the dark theme gap, fix and re-run tests.")

@@ -1,29 +1,29 @@
 ---
 name: darwin-team-huddle
-description: Team communication for implement mode. Developer and QE report to Manager via team_huddle -- NOT to Brain via team_send_results.
+description: Team communication for implement mode. Developer and QE report to the Brain via team_huddle -- NOT via team_send_results.
 roles: [developer, qe]
 modes: [implement]
 ---
 
 # Implement Mode Communication
 
-You are working in implement mode as part of a Developer + QE pair managed by a Manager LLM.
+You are working in implement mode as part of a Developer + QE pair coordinated by the Brain orchestrator.
 
 ## The Rule
 
-**Do NOT call `team_send_results`.** In implement mode, `team_huddle` is your only exit path. The Manager delivers results to the Brain on your behalf.
+**Do NOT call `team_send_results`.** In implement mode, `team_huddle` is your only exit path. The Brain receives your report directly.
 
 | Tool | When to use | Who receives |
 |------|------------|--------------|
-| `team_huddle` | Report completion, ask questions, report CI status | Manager (blocks until reply) |
+| `team_huddle` | Report completion, ask questions, report CI status | Brain (blocks until reply) |
 | `team_send_message` | Progress updates while working | Brain UI (informational only) |
 | `team_send_to_teammate` | Coordinate with your Dev/QE partner | Teammate's inbox |
 | `team_read_teammate_notes` | Check what your partner sent you | Your inbox |
 | `team_send_results` | **NEVER in implement mode** | -- |
 
-## `team_huddle` -- Talk to your Manager
+## `team_huddle` -- Talk to the Brain
 
-Sends a message to the Manager and **blocks until the Manager replies** (up to 10 min). The Manager's reply is returned as the tool result.
+Sends a message to the Brain and **blocks until the Brain replies** (up to 10 min). The Brain's reply is returned as the tool result.
 
 Send progress via `team_send_message` BEFORE starting a huddle (no other tools work during the block).
 
@@ -41,15 +41,15 @@ Read messages your teammate sent you. Check between work phases.
 
 ## Team Workflow -- PR Gate
 
-The Manager gates the PR. Neither Developer nor QE opens a PR on their own.
+The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
 
 1. **Developer** implements code changes, commits to the feature branch. Does NOT open a PR.
 2. **QE** writes tests, commits to the **same feature branch** (shared workspace).
-3. Both report to Manager via `team_huddle`. The Manager reviews both outputs.
-4. Manager approves -- replies to Developer with "open the PR".
+3. Both report to the Brain via `team_huddle`. The Brain reviews both outputs.
+4. Brain approves -- replies to Developer with "open the PR".
 5. **Developer** opens PR (code + tests are on the branch together).
-6. Developer reports CI status to Manager via `team_huddle`.
-7. If CI fails on test files: Developer huddles to Manager. Manager coordinates the fix.
+6. Developer reports CI status to the Brain via `team_huddle`.
+7. If CI fails on test files: Developer huddles to the Brain. The Brain coordinates the fix.
 
 ## Developer Workflow
 
@@ -58,9 +58,9 @@ The Manager gates the PR. Neither Developer nor QE opens a PR on their own.
 3. `team_send_message` -- "Pushing to branch..."
 4. _... commit and push (do NOT open PR) ..._
 5. `team_huddle` -- Developer Report (branch, commits, files changed)
-6. **BLOCKS** until Manager replies -- do NOT open PR yet
-7. Manager reply: "approved, open the PR" -> open PR
-8. `team_huddle` -- Report CI status to Manager
+6. **BLOCKS** until the Brain replies -- do NOT open PR yet
+7. Brain reply: "approved, open the PR" -> open PR
+8. `team_huddle` -- Report CI status to the Brain
 
 ## QE Workflow
 
@@ -68,7 +68,7 @@ The Manager gates the PR. Neither Developer nor QE opens a PR on their own.
 2. _... write tests, commit to same feature branch ..._
 3. `team_send_message` -- "Tests written, all passing locally"
 4. `team_huddle` -- QE Report (tests added, results, branch)
-5. **BLOCKS** until Manager replies
+5. **BLOCKS** until the Brain replies
 
 ## Shell Fallback
 
