@@ -2,6 +2,7 @@
 name: darwin-rollback
 description: GitOps rollback workflow for crisis recovery. Activates for Mode:rollback tasks or when reverting a deployment via git revert.
 roles: [sysadmin]
+modes: [execute]
 ---
 
 # Darwin Rollback Workflow

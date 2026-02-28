@@ -1,29 +1,36 @@
 ---
 name: darwin-comms
-description: Report findings and status updates to the Darwin Brain. Use when you have results to deliver, progress to report, or need to communicate status back to the orchestrator.
+description: Report findings and status updates to the Darwin Brain. Covers solo mode communication (execute, investigate, plan). In implement mode, use darwin-team-huddle instead.
 roles: [architect, sysadmin, developer, qe]
+modes: [execute, investigate, plan]
 ---
 
 # Communicating with the Darwin Brain
 
-Your primary communication tools are the MCP-based `team_send_results` and `team_send_message`.
-Shell scripts (`sendResults`, `sendMessage`) are available as fallback if MCP tools return errors.
+## Mode Matters -- Choose the Right Exit Path
 
-## Primary Tools (MCP)
+| Mode | How to deliver results | Why |
+|------|----------------------|-----|
+| execute, investigate, plan | `team_send_results` | Solo task -- you report directly to Brain |
+| implement | `team_huddle` | Paired task -- report to Manager, NOT to Brain. See darwin-team-huddle skill. |
 
-### `team_send_results` -- Deliver your findings
+If you are in **implement mode**, STOP reading this skill. Use `team_huddle` to report to your Manager. Do NOT call `team_send_results` -- the Manager delivers results to the Brain on your behalf.
+
+## Solo Mode Tools (execute / investigate / plan)
+
+### `team_send_results` -- Deliver your findings to Brain
 
 The Brain uses your last `team_send_results` call as your final deliverable.
 
 - Each call **overwrites** the previous result (last-write-wins). The Brain receives only the **last** call.
-- Always call `team_send_results` before finishing your task with your final summary.
+- Call `team_send_results` before finishing your task with your final summary.
 - Structure your report with: root cause, evidence, files changed, outcome.
 
-### `team_send_message` -- Send a progress note
+### `team_send_message` -- Send a progress note (all modes)
 
-Progress notes appear in the Brain's UI. They do **not** replace your deliverable (only `team_send_results` does that).
+Progress notes appear in the Brain's UI. They do **not** replace your deliverable.
 
-Use for status updates, phase transitions, or interim observations during long-running tasks.
+Use for status updates, phase transitions, or interim observations during long-running tasks. Available in ALL modes including implement.
 
 ### `team_check_messages` -- Poll for incoming messages
 
@@ -31,9 +38,9 @@ Messages from the Manager and teammates are delivered automatically via CLI hook
 
 ## Shell Fallback
 
-If MCP tools are unavailable, use shell scripts: `sendResults`, `sendMessage`. See `-m` flag limitations in the shell docs.
+If MCP tools are unavailable, use shell scripts: `sendResults`, `sendMessage`.
 
-When using `-m` with shell scripts, only pass short single-line strings. For multiline content, write to a file and pass the file path as the argument:
+When using `-m` with shell scripts, only pass short single-line strings. For multiline content, write to a file and pass the file path:
 
 ```bash
 cat > ./results/report.md << 'EOF'
@@ -46,29 +53,21 @@ sendResults ./results/report.md
 
 ## Long-Running Operations -- NEVER Poll
 
-If your action triggers a process that takes more than 60 seconds to complete (CI/CD pipelines, ArgoCD syncs, image builds, deployments rolling out):
+If your action triggers a process that takes more than 60 seconds (CI/CD pipelines, ArgoCD syncs, image builds):
 
 1. **Execute the action** (post `/retest`, trigger pipeline, push commit)
-2. **Confirm the action was accepted** (pipeline status changed to `running`, comment posted)
-3. **Return immediately** via `team_send_results` with current state and a recommendation:
+2. **Confirm it was accepted** (pipeline status changed to `running`)
+3. **Return immediately** with current state and a recommendation:
 
-```text
-## Status Report
-Action: Posted /retest on MR !14
-Pipeline: now running (id: 14556584)
+In solo mode: use `team_send_results`.
+In implement mode: use `team_huddle` to report "pending" to the Manager.
 
-Recommendation: Re-check pipeline status in 5-10 minutes.
-If passed, merge. If failed, notify user@company.com.
-```
+**NEVER** poll, sleep, or loop waiting for completion. The Brain manages wait cycles.
 
-**NEVER** poll, sleep, or loop waiting for pipelines/builds/syncs to complete. The Brain manages wait cycles via `defer_event`. Your job is to act and report -- not to wait.
-
-## Recommended Workflow
+## Solo Mode Workflow
 
 1. `team_send_message` -- "Starting investigation..."
-2. _... do investigation work ..._
-3. `team_send_message` -- "Found root cause: memory pressure"
+2. _... do work ..._
+3. `team_send_message` -- "Found root cause"
 4. _... apply fix ..._
-5. `team_send_message` -- "Fix applied, verifying..."
-6. _... verify ..._
-7. `team_send_results` -- Final completion report with root cause, evidence, and outcome
+5. `team_send_results` -- Final report with root cause, evidence, and outcome

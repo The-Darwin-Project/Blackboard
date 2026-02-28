@@ -6,6 +6,8 @@
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
 // 5. [Pattern]: filterSkillsByRole reads YAML frontmatter `roles:` from each SKILL.md and removes skills not matching AGENT_ROLE.
 // 6. [Pattern]: TeamChat MCP: Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool, Claude PreToolUse (both in settings.json).
+// 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
+// 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
 
 const fs = require('fs');
 const path = require('path');
@@ -228,4 +230,68 @@ function filterSkillsByRole(geminiDir, claudeDir) {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer };
+const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
+const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
+const DISABLED_SUFFIX = '.disabled';
+
+/**
+ * Hide skills that don't match the current task mode by renaming dirs to *.disabled.
+ * Reads `modes: [...]` from each SKILL.md frontmatter.
+ * Skills WITHOUT a `modes:` field load in all modes (backward compatible).
+ * Empty mode ('') skips filtering entirely.
+ * Renames in both Gemini and Claude skill dirs (Claude entries are symlinks).
+ */
+function filterSkillsByMode(mode) {
+    if (!mode) return;
+    if (!fs.existsSync(GEMINI_SKILLS_DIR)) return;
+
+    let disabled = 0, active = 0;
+    for (const entry of fs.readdirSync(GEMINI_SKILLS_DIR)) {
+        if (entry.endsWith(DISABLED_SUFFIX)) continue;
+        const skillMd = path.join(GEMINI_SKILLS_DIR, entry, 'SKILL.md');
+        if (!fs.existsSync(skillMd)) continue;
+
+        const head = fs.readFileSync(skillMd, 'utf8').slice(0, 500);
+        const match = head.match(/^modes:\s*\[([^\]]*)\]/m);
+        if (!match) { active++; continue; }
+
+        const modes = match[1].split(',').map(m => m.trim().toLowerCase());
+        if (modes.includes(mode.toLowerCase())) { active++; continue; }
+
+        fs.renameSync(
+            path.join(GEMINI_SKILLS_DIR, entry),
+            path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
+        );
+        const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
+        if (fs.existsSync(claudeEntry)) {
+            fs.renameSync(claudeEntry, claudeEntry + DISABLED_SUFFIX);
+        }
+        disabled++;
+    }
+    if (disabled > 0) {
+        console.log(`Skills filtered for mode '${mode}': ${disabled} disabled, ${active} active`);
+    }
+}
+
+/**
+ * Restore all *.disabled skill dirs back to their original names.
+ * Processes Gemini first so symlink targets exist when Claude entries are restored.
+ * Idempotent — safe to call when no .disabled dirs exist.
+ */
+function restoreAllSkills() {
+    let restored = 0;
+    for (const dir of [GEMINI_SKILLS_DIR, CLAUDE_SKILLS_DIR]) {
+        if (!fs.existsSync(dir)) continue;
+        for (const entry of fs.readdirSync(dir)) {
+            if (!entry.endsWith(DISABLED_SUFFIX)) continue;
+            const baseName = entry.slice(0, -DISABLED_SUFFIX.length);
+            fs.renameSync(path.join(dir, entry), path.join(dir, baseName));
+            if (dir === GEMINI_SKILLS_DIR) restored++;
+        }
+    }
+    if (restored > 0) {
+        console.log(`Skills restored: ${restored} re-enabled`);
+    }
+}
+
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, filterSkillsByMode, restoreAllSkills };

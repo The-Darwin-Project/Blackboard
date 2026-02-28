@@ -2,6 +2,7 @@
 name: darwin-pr-template
 description: PR creation template for consistent, well-structured pull requests. Use when opening a PR.
 roles: [developer]
+modes: [implement]
 ---
 
 # PR Template

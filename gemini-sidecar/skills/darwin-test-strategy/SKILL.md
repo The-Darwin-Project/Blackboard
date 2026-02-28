@@ -2,6 +2,7 @@
 name: darwin-test-strategy
 description: QE test strategy and execution workflow. Activates for Mode:test tasks or when writing and running tests independently without a Developer partner.
 roles: [qe]
+modes: [implement, test]
 ---
 
 # Darwin QE Test Strategy

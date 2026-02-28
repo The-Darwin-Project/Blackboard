@@ -8,6 +8,7 @@
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 // 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate/proactive messages via handleTask with saved session context.
+// 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -23,6 +24,7 @@ const {
   CLI_429_MAX_RETRIES, CLI_429_INITIAL_DELAY_MS, CLI_429_BACKOFF_MULTIPLIER,
 } = require('./config');
 const { wsSend } = require('./ws-utils');
+const { filterSkillsByMode, restoreAllSkills } = require('./cli-setup');
 
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 30000;
@@ -207,6 +209,9 @@ async function handleTask(ws, msg) {
     state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null });
     resetTimer();
 
+    restoreAllSkills();
+    filterSkillsByMode(mode);
+
     let result;
     let retryDelay = CLI_429_INITIAL_DELAY_MS;
     let retriesTaken = 0;
@@ -275,6 +280,8 @@ async function handleTask(ws, msg) {
       state.saveLastTaskContext({ sessionId: cur?.sessionId || null, eventId, cwd: workDir });
       state.clearCurrentTask();
     }
+  } finally {
+    restoreAllSkills();
   }
 }
 

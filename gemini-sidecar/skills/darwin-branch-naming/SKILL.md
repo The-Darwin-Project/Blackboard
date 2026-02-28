@@ -2,6 +2,7 @@
 name: darwin-branch-naming
 description: Discovery-based branch naming for Darwin agents (repo-agnostic)
 roles: [developer, qe]
+modes: [implement]
 ---
 
 # Branch Naming Convention

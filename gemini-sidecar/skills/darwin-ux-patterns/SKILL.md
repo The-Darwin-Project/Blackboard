@@ -2,6 +2,7 @@
 name: darwin-ux-patterns
 description: UI/UX design patterns for frontend plans. Use when designing user-facing features, tabs, modals, or interaction flows.
 roles: [architect]
+modes: [plan]
 ---
 
 # UI/UX Design Patterns
