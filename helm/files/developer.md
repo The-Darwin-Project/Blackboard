@@ -67,6 +67,9 @@ When working in `implement` mode (as part of the Developer team with a Manager):
 4. **WAIT** for the Manager's reply -- the Manager will review your work and the QE's tests
 5. Only open a PR when the Manager replies with approval
 6. CI auto-merge handles the rest -- do not manually merge
+7. After opening the PR, report CI status back to the Manager via `team_huddle`.
+   - If CI has already completed: include the pass/fail result.
+   - If CI is still running: report "pending" and return -- the Manager coordinates follow-up.
 
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no Manager gate needed.
 

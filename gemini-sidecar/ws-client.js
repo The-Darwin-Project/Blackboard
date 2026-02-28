@@ -7,6 +7,7 @@
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId (fixes pre-existing bug from legacy mode).
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
+// 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate/proactive messages via handleTask with saved session context.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -25,6 +26,8 @@ const { wsSend } = require('./ws-utils');
 
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 30000;
+let _activeWs = null;
+let _isWaking = false;
 
 function killChild(child) {
   child.kill('SIGTERM');
@@ -45,6 +48,7 @@ function startWSClient(brainUrl) {
     const ws = new WebSocket(brainUrl);
 
     ws.on('open', () => {
+      _activeWs = ws;
       console.log(`[${new Date().toISOString()}] Connected to Brain: ${brainUrl}`);
       if (backoff > BACKOFF_MIN) {
         console.warn(`[${new Date().toISOString()}] WS reconnected -- inbound messages during disconnect were lost`);
@@ -78,16 +82,19 @@ function startWSClient(brainUrl) {
           content: msg.content || '',
         });
         console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars)`);
+        tryWake(msg.from || 'manager', msg.content || '');
       }
     });
 
     ws.on('close', () => {
+      _activeWs = null;
       console.log(`[${new Date().toISOString()}] Disconnected from Brain`);
       cleanupActiveTask();
       scheduleReconnect();
     });
 
     ws.on('error', (err) => {
+      _activeWs = null;
       console.error(`[${new Date().toISOString()}] WS error: ${err.message}`);
       cleanupActiveTask();
       scheduleReconnect();
@@ -257,6 +264,7 @@ async function handleTask(ws, msg) {
         status: result.status, output: result.output || result.stdout || '',
         source: result.source || 'stdout',
       });
+      state.saveLastTaskContext({ sessionId: result.sessionId || null, eventId, cwd: workDir });
       state.clearCurrentTask();
     }
   } catch (err) {
@@ -264,6 +272,7 @@ async function handleTask(ws, msg) {
     if (cur?.timer) clearTimeout(cur.timer);
     if (cur?.taskId === taskId) {
       sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: err.message });
+      state.saveLastTaskContext({ sessionId: cur?.sessionId || null, eventId, cwd: workDir });
       state.clearCurrentTask();
     }
   }
@@ -282,4 +291,28 @@ function handleCancel(msg) {
   state.clearCurrentTask();
 }
 
-module.exports = { startWSClient };
+function tryWake(from, content) {
+  if (state.getCurrentTask()) return;
+  const ctx = state.getLastTaskContext();
+  if (!ctx) return;
+  if (_isWaking) return;
+  if (!_activeWs) return;
+
+  _isWaking = true;
+  const syntheticMsg = {
+    type: 'task',
+    task_id: `wake-${Date.now()}`,
+    event_id: ctx.eventId,
+    session_id: ctx.sessionId,
+    prompt: 'You have a pending message from your teammate. Check your inbox and respond.',
+    cwd: ctx.cwd,
+    autoApprove: true,
+    mode: 'implement',
+  };
+  console.log(`[${new Date().toISOString()}] Wake triggered: resuming session ${ctx.sessionId} for event ${ctx.eventId} (from: ${from})`);
+  handleTask(_activeWs, syntheticMsg)
+    .catch(err => console.error(`[${new Date().toISOString()}] Wake failed:`, err.message))
+    .finally(() => { _isWaking = false; });
+}
+
+module.exports = { startWSClient, tryWake };

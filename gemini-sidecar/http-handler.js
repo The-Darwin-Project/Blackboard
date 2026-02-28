@@ -7,6 +7,7 @@
 // 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
 
 const { executeCLI } = require('./cli-executor');
+const { tryWake } = require('./ws-client');
 const {
   hasGitHubCredentials,
   generateInstallationToken,
@@ -143,9 +144,9 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: 'No active task connection' }));
         return;
       } else if (callbackType === 'teammate_forward') {
-        // Teammate direct message: store in teammate queue (peer reads via GET /teammate-notes)
         state.pushTeammateMessage({ from: body.from || 'unknown', content });
         console.log(`[${new Date().toISOString()}] Teammate message stored (${content.length} chars, from: ${body.from || 'unknown'})`);
+        tryWake(body.from || 'unknown', content);
       } else {
         // sendMessage: forward as progress note (do NOT overwrite deliverable)
         const task2 = state.getCurrentTask();

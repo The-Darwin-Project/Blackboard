@@ -4,7 +4,7 @@
 // 2. [Constraint]: No SDK. readline + process.stdout.write + http.request only. Zero npm deps.
 // 3. [Pattern]: Role-filtered tools via AGENT_ROLE env. dev/qe get all 6, architect/sysadmin get 3.
 // 4. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
-// 5. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for teammate HTTP. Empty PEER_PORT = no teammate tools.
+// 5. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for sending to teammate. team_read_teammate_notes reads from SIDECAR_PORT (own inbox).
 'use strict';
 
 const readline = require('readline');
@@ -88,8 +88,7 @@ async function handleToolCall(name, args) {
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };
     }
     if (name === 'team_read_teammate_notes') {
-      if (!PEER_PORT) return { error: 'No peer sidecar configured (PEER_PORT not set)' };
-      const notes = await httpGet(PEER_PORT, '/teammate-notes');
+      const notes = await httpGet(SIDECAR_PORT, '/teammate-notes');
       return { notes: Array.isArray(notes) ? notes : [] };
     }
     return { error: `Unknown tool: ${name}` };

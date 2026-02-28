@@ -48,6 +48,15 @@ Use when the task requires:
 2. QE reports tests are written and committed to the same branch
 3. You have reviewed both outputs and are satisfied
 
+## Post-PR Phase -- CI Feedback Loop
+
+After telling the Developer to open the PR, the dispatch is NOT complete.
+The Developer will huddle back with CI results.
+
+- **CI passes** -> Developer huddles "CI green, merged". Call `report_to_brain` with status: "success".
+- **CI fails on test file** -> Developer huddles "CI failed, test file issue". Use `message_agent` to wake the QE, or if QE is no longer available, call `report_to_brain` with status: "pending" and recommendation: "re-dispatch QE to fix test failures."
+- **CI fails on implementation** -> Developer huddles with failure details. Reply with fix guidance.
+
 ## Guidance Overrides
 
 - **Architect plan with frontmatter**: If the plan includes step-to-agent mapping (e.g. `assign: developer`, `assign: qe`), follow that mapping. Use the step assignments to decide dispatch.
