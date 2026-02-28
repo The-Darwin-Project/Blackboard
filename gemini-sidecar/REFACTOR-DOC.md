@@ -11,7 +11,7 @@
 ## 1. Function Inventory
 
 | # | Name | Lines | Parameters | Return Type | Pure / Side-Effect | Description |
-|---|------|-------|------------|-------------|-------------------|-------------|
+| --- | ------ | ------- | ------------ | ------------- | ------------------- | ------------- |
 | 1 | `stripAnsi` | 49 | `text: string` | `string` | Pure | Removes ANSI escape codes from PTY output. |
 | 2 | `parseStreamLine` | 128–169 | `line: string` | `{text, sessionId, toolCalls, done} \| null` | Pure | Unified stream-json line parser for both Gemini and Claude CLIs. Handles init, assistant message, content_block_delta, assistant summary, and result events. Falls back to raw text on JSON parse failure. |
 | 3 | `parseClaudeStreamLine` | 172–175 | `line: string` | `string \| null` | Pure | Backward-compat wrapper around `parseStreamLine`. Returns only the text field. |
@@ -42,7 +42,7 @@
 ## 2. Module-Level Mutable State
 
 | Name | Type | Declared | Set By | Read By | Lifecycle |
-|------|------|----------|--------|---------|-----------|
+| ------ | ------ | ---------- | -------- | --------- | ----------- |
 | `_callbackResult` | `string \| null` | L40 | `handleRequest` (POST `/callback`, type=result), reset to `null` at task start in both `/execute` handler and WS `task` handler | `executeCLI` close handler (captured as `capturedCallback`), `executeCLIStreaming` close handler (same), `resolveResult` (via param) | Reset to `null` before each task. Set when agent calls `sendResults`. Consumed (and nulled) when CLI process exits. |
 | `_lastCLILoginTime` | `number` | L336 | `setupCLILogins` (set to `Date.now()` after successful login batch) | `setupCLILogins` (dedup check) | Starts at `0`. Updated after each successful ArgoCD/Kargo login round. Persists for process lifetime. |
 | `currentTask` | `object \| null` | L1205 | `executeCLIStreaming` (L928: set to `{eventId, child}`), WS `task` handler (cleared L1292), WS `cancel` handler (cleared L1336), WS `close` handler (cleared L1355) | `executeCLIStreaming` stdout handler (sessionId write), `handleRequest` callback handler (read `eventId`, `ws`), WS `task`/`cancel`/`close` handlers, `parseStreamLine` consumers (sessionId write) | `null` when idle. Set to `{eventId, child}` when a CLI process is running. May also carry `.sessionId`, `.ws`, `.cwd` during WS execution. Cleared on task completion, cancellation, or WS disconnect. |
@@ -54,7 +54,7 @@
 The `currentTask` object is loosely typed with these observed fields:
 
 | Field | Type | Set Where | Used Where |
-|-------|------|-----------|------------|
+| ------- | ------ | ----------- | ------------ |
 | `eventId` | `string` | `executeCLIStreaming` L928 | WS handlers, logging |
 | `child` | `ChildProcess` | `executeCLIStreaming` L928 | WS `cancel` handler (`.kill()`), WS `close` handler (`.kill()`) |
 | `sessionId` | `string \| undefined` | `parseStreamLine` consumers in stdout handler | `executeCLIStreaming` close handler (captured before clear), WS `result` message |
@@ -68,7 +68,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ## 3. Constants & Env-Var-Derived Values
 
 | Name | Line | Value / Source | Description |
-|------|------|---------------|-------------|
+| ------ |------ | --------------- | ------------- |
 | `PORT` | 25 | `process.env.PORT \|\| 9090` | HTTP + WS listen port |
 | `ROLE_TIMEOUTS` | 26–32 | `{architect: 600000, sysadmin: 300000, developer: 900000, qe: 600000, default: 300000}` | Role-specific CLI timeout map (ms) |
 | `TIMEOUT_MS` | 33 | `parseInt(process.env.TIMEOUT_MS) \|\| ROLE_TIMEOUTS[AGENT_ROLE] \|\| 300000` | Effective CLI process timeout |
@@ -96,7 +96,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ### Env vars read at runtime (not captured as module constants)
 
 | Env Var | Read Where | Purpose |
-|---------|-----------|---------|
+| --------- | ----------- | --------- |
 | `AGENT_PERMISSION_MODE` | `buildCLICommand` L182 | If `"plan"` → `--permission-mode plan` for Claude |
 | `GOOGLE_GENAI_USE_VERTEXAI` | `executeCLI` L804, `executeCLIStreaming` L921, `requestFindings` L717 | Set to `'true'` in spawned Gemini env |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Inherited by child processes | ADC for Vertex AI auth |
@@ -114,7 +114,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ## 4. External Dependencies
 
 | Module | Import | Used For |
-|--------|--------|----------|
+| -------- | -------- | ---------- |
 | `http` | `require('http')` L17 | HTTP server (`createServer`, `handleRequest`) |
 | `fs` | `require('fs')` L18 | File I/O (settings, secrets, findings, results dir) |
 | `path` | `require('path')` L19 | Path construction (settings dirs) |
@@ -130,7 +130,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ### `GET /health`
 
 | Field | Value |
-|-------|-------|
+| ------- | ------- |
 | Handler | `handleRequest` L1056–1074 |
 | Response | `200 application/json` |
 | Body | `{ status, service, cliType, cliModel, agentRole, toolRestrictions, hasGitHubCredentials, hasGitLabCredentials, hasArgocdCredentials, hasKargoCredentials, hasGitHubMCP, hasGitLabMCP, gitlabHost }` |
@@ -138,7 +138,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ### `POST /callback`
 
 | Field | Value |
-|-------|-------|
+| ------- | ------- |
 | Handler | `handleRequest` L1077–1123 |
 | Request body | `{ type?: "result" \| "message", content: string }` |
 | Response | `200 { ok: true, type }` or `400 { error }` |
@@ -148,7 +148,7 @@ The `currentTask` object is loosely typed with these observed fields:
 ### `POST /execute`
 
 | Field | Value |
-|-------|-------|
+| ------- | ------- |
 | Handler | `handleRequest` L1126–1191 |
 | Request body | `{ prompt: string, autoApprove?: boolean, cwd?: string }` |
 | Concurrency | Returns `429 { error: 'Agent busy' }` if `currentTask` is set |
@@ -272,7 +272,7 @@ Sent when a `task` message arrives while `currentTask` is non-null.
 ## 7. Startup Sequence (Module Load Order)
 
 | Order | Lines | What Happens |
-|-------|-------|-------------|
+| ------- | ------- | ------------- |
 | 1 | 17–23 | `require()` — load `http`, `fs`, `path`, `os`, `child_process`, `jsonwebtoken`, `ws` |
 | 2 | 25–35 | Declare constants: `PORT`, `ROLE_TIMEOUTS`, `TIMEOUT_MS`, `FINDINGS_FRESHNESS_MS`, `DEFAULT_WORK_DIR` |
 | 3 | 40 | Initialize `_callbackResult = null` |
@@ -300,7 +300,7 @@ Sent when a `task` message arrives while `currentTask` is non-null.
 
 ### 8.1 HTTP `/execute` → `executeCLI()` → result
 
-```
+```Bash
 POST /execute { prompt, autoApprove?, cwd? }
 │
 ├─ Guard: if currentTask → 429 "Agent busy"
@@ -348,7 +348,7 @@ POST /execute { prompt, autoApprove?, cwd? }
 
 ### 8.2 WS `task` → `executeCLIStreaming()` → streaming progress + result
 
-```
+```Bash
 WS message { type: "task", event_id, prompt, cwd?, autoApprove?, session_id? }
 │
 ├─ Guard: if currentTask → send "busy" message, return
@@ -397,7 +397,7 @@ WS message { type: "task", event_id, prompt, cwd?, autoApprove?, session_id? }
 
 ### 8.3 WS `followup` → `executeCLIStreaming()` (with `--resume`)
 
-```
+```Bash
 WS message { type: "followup", session_id, message, event_id }
 │
 ├─ Guard: if !session_id → send error "No session_id for followup"
@@ -411,7 +411,7 @@ WS message { type: "followup", session_id, message, event_id }
 
 ### 8.4 WS `cancel` → SIGTERM/SIGKILL
 
-```
+```Bash
 WS message { type: "cancel" }
 │
 ├─ if currentTask && currentTask.child:
@@ -423,7 +423,7 @@ WS message { type: "cancel" }
 
 ### 8.5 WS Disconnect → Orphan Cleanup
 
-```
+```Bash
 ws.on('close'):
 │
 ├─ if currentTask && currentTask.child:
@@ -436,7 +436,7 @@ ws.on('close'):
 
 ### 8.6 `/callback` → `_callbackResult` / WS Forward
 
-```
+```Bash
 POST /callback { type?: "result"|"message", content: string }
 │
 ├─ type === "result":
