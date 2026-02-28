@@ -79,7 +79,7 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // Teammate notes (forwarded by peer, drained on read by the peer's GET)
+  // Teammate notes (forwarded by teammate; drained by this sidecar's GET — hook or team_read_teammate_notes)
   if (url.pathname === '/teammate-notes' && req.method === 'GET') {
     const msgs = state.drainTeammateMessages();
     res.writeHead(200, { 'Content-Type': 'application/json' });
