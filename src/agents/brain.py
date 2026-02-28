@@ -610,13 +610,30 @@ class Brain:
     ) -> None:
         """Process intermediate turns (agent progress, aligner confirms) with a lightweight LLM call.
 
-        No tools, minimal prompt (always + intermediate phases), 256 max tokens.
+        Limited tools (defer_event only), minimal prompt (always + intermediate phases), 256 max tokens.
         Appends brain.think turn for temporal context; marks processed turns EVALUATED.
+        If LLM calls defer_event, cancels the active agent and defers -- preventing sleep-loop anti-pattern.
         """
         if not self._adapter:
             logger.warning("_process_intermediate skipped: no LLM adapter")
             return
-        ctx: ContextFlags = {"is_intermediate": True}
+
+        from .llm import BRAIN_TOOL_SCHEMAS
+        intermediate_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] == "defer_event"]
+
+        ctx: ContextFlags = {
+            "is_intermediate": True,
+            "turn_count": len(event.conversation),
+            "has_agent_result": False,
+            "is_waiting": False,
+            "is_defer_wakeup": False,
+            "has_related": False,
+            "has_graph_edges": False,
+            "has_recent_closed": False,
+            "has_slack_participant": False,
+            "source": event.source,
+            "service": event.service or "",
+        }
         active_phases = self._match_phases(event, ctx)
         system_prompt = self._build_system_prompt(event, active_phases, ctx)
         thinking_level, call_temp = self._resolve_llm_params(active_phases)
@@ -626,20 +643,24 @@ class Brain:
             "text": "", "accumulated": "", "is_thought": True,
         })
         accumulated_text = ""
+        function_call = None
         try:
             async for chunk in self._adapter.generate_stream(
                 system_prompt=system_prompt,
                 contents=contents,
-                tools=[],
+                tools=intermediate_tools,
                 temperature=call_temp,
                 max_output_tokens=256,
                 thinking_level=thinking_level,
             ):
                 if chunk.text:
                     accumulated_text += chunk.text
+                if chunk.function_call:
+                    function_call = chunk.function_call
         except Exception as e:
             logger.warning(f"Intermediate LLM call failed for {event_id}: {e}")
         await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+
         if accumulated_text:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
@@ -650,11 +671,20 @@ class Brain:
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
+
+        if function_call and function_call.name == "defer_event":
+            args = function_call.args or {}
+            reason = args.get("reason", "Agent reported pending state")
+            delay = min(max(int(args.get("delay_seconds", 300)), 30), 3600)
+            logger.info(f"Intermediate defer for {event_id}: {reason} ({delay}s)")
+            await self.cancel_active_task(event_id, f"Intermediate defer: {reason}")
+            await self._execute_function_call(event_id, event, "defer_event", function_call, accumulated_text or reason)
+
         up_to = max(t.turn for t in turns) + 1
         await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
         logger.info(
             f"Intermediate: processed {len(turns)} turns for {event_id} "
-            f"(always, intermediate phases, 256 max tokens)"
+            f"(phases: {active_phases}, tools: [defer_event])"
         )
 
     @staticmethod
