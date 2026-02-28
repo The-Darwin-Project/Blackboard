@@ -1261,10 +1261,10 @@ class Brain:
                 logger.info(f"Task already active for {event_id}, skipping dispatch")
                 return False
 
-            # Recursion guard
+            # Recursion guard (resets on user interaction via clear_waiting)
             depth = self._routing_depth.get(event_id, 0) + 1
-            if depth > 15:
-                logger.warning(f"Event {event_id} hit routing depth limit (15)")
+            if depth > 30:
+                logger.warning(f"Event {event_id} hit routing depth limit (30)")
                 await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
                 return False
             self._routing_depth[event_id] = depth
@@ -1913,6 +1913,7 @@ class Brain:
     def clear_waiting(self, event_id: str) -> None:
         """Clear the wait_for_user state for an event (called when user responds)."""
         self._waiting_for_user.discard(event_id)
+        self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
 
     def register_channel(self, channel_broadcast: Callable) -> None:
         """Register an additional broadcast target (e.g., Slack)."""

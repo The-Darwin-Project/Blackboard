@@ -7,11 +7,11 @@
 
 const PORT = process.env.PORT || 9090;
 const ROLE_TIMEOUTS = {
-    architect: 600000,   // 10 min
-    sysadmin: 300000,    // 5 min
-    developer: 900000,   // 15 min
-    qe: 600000,          // 10 min
-    default: 300000,     // 5 min fallback
+    architect: 1800000,  // 30 min
+    sysadmin: 1800000,   // 30 min
+    developer: 1800000,  // 30 min
+    qe: 1800000,         // 30 min
+    default: 1800000,    // 30 min
 };
 const TIMEOUT_MS = parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[process.env.AGENT_ROLE || 'default'] || ROLE_TIMEOUTS.default;
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
