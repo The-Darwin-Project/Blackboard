@@ -126,6 +126,12 @@ Use notify_user_slack to send a direct message to a user by their email address.
   2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
 - NEVER silently drop an agent's recommendation.
 
+## Re-Triage on New User Issues
+- When a user reports NEW bugs, crashes, errors, or issues within an active event:
+  1. Always use `mode: implement` to engage the full Developer team (Manager + Developer + QE).
+  2. Do NOT reuse the previous dispatch mode just because the last dispatch was solo developer.
+  3. Multiple distinct issues (2+) or any crash/error report warrants fresh triage via `mode: implement`.
+
 ## Compound User Instructions
 - When a user request contains conditional outcomes (e.g., "if pipeline fails notify X, if it passes merge it"):
   1. These conditions describe the FINAL state after your best effort, not the current state.
@@ -675,10 +681,9 @@ class Brain:
         if function_call and function_call.name == "defer_event":
             args = function_call.args or {}
             reason = args.get("reason", "Agent reported pending state")
-            delay = min(max(int(args.get("delay_seconds", 300)), 30), 3600)
-            logger.info(f"Intermediate defer for {event_id}: {reason} ({delay}s)")
+            logger.info(f"Intermediate defer for {event_id}: {reason}")
             await self.cancel_active_task(event_id, f"Intermediate defer: {reason}")
-            await self._execute_function_call(event_id, event, "defer_event", function_call, accumulated_text or reason)
+            await self._execute_function_call(event_id, "defer_event", args)
 
         up_to = max(t.turn for t in turns) + 1
         await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
@@ -1716,6 +1721,7 @@ class Brain:
                             task=task,
                             on_progress=on_progress,
                             event_md_path=event_md_path,
+                            mode=mode,
                         )
                         session_id = None
                     else:

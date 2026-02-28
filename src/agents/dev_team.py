@@ -80,10 +80,24 @@ class DevTeam:
         task: str,
         on_progress: Optional[Callable] = None,
         event_md_path: str = "",
+        mode: str = "",
     ) -> tuple[str, str | None]:
         """Multi-turn function-calling loop: triage -> dispatch -> review -> report."""
         adapter = self._get_adapter()
-        system_prompt = f"You are the Dev Team Manager.\n\n{self._skills_text}"
+        mode_hint = ""
+        if mode == "implement":
+            mode_hint = (
+                "\n\n## Brain Dispatch Mode: implement\n"
+                "The Brain selected **implement** mode (full team). "
+                "This means the task likely needs both Developer AND QE. "
+                "Prefer `dispatch_both` unless the task is clearly a solo read-only or single-action task. "
+                "Bug fixes, crash fixes, and multi-issue reports MUST use `dispatch_both`."
+            )
+        elif mode == "test":
+            mode_hint = "\n\n## Brain Dispatch Mode: test\nThe Brain selected **test** mode (QE solo). Use `dispatch_qe`."
+        elif mode == "execute":
+            mode_hint = "\n\n## Brain Dispatch Mode: execute\nThe Brain selected **execute** mode (Developer solo). Use `dispatch_developer`."
+        system_prompt = f"You are the Dev Team Manager.{mode_hint}\n\n{self._skills_text}"
         contents: list[dict] = [{"role": "user", "parts": [{"text": task}]}]
 
         if on_progress:

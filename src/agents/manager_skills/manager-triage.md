@@ -34,6 +34,9 @@ Use when the task requires:
 - Feature implementations that need both code and tests
 - Bug fixes that need tests to verify the fix
 - Architect plans with dev and QE steps; both agents work on the same scope
+- Any task mentioning crashes, errors, TypeErrors, or stack traces
+- Multiple distinct issues (2+ problems) in a single task
+- User-reported UI bugs or behavioral regressions
 
 **PR Gate**: When using dispatch_both, both agents report back via huddle messages.
 
@@ -115,4 +118,6 @@ Always call `report_to_brain` to return results. Never let the conversation end 
 
 ## Default
 
-If unclear, use **dispatch_developer**. Simpler to escalate later than to over-coordinate with both agents.
+- If the task mentions errors, crashes, bugs, or multiple issues: use **dispatch_both**.
+- If the task is clearly read-only, single-action, or low-risk config: use **dispatch_developer**.
+- If genuinely unclear: use **dispatch_both**. It is safer to verify than to skip QE.

@@ -42,4 +42,4 @@ Both agents share the same filesystem(Volume). Each agent has its own working di
 - Write backend unit tests (pytest) and frontend UI tests (Playwright)
 - Commit test files to the same feature branch
 - Run tests locally to verify they pass against the Developer's code
-- Report test results to Manager via `team_huddle` or `team_send_results`
+- Report test results to Manager via `team_huddle`. Do NOT call `team_send_results` in implement mode.
