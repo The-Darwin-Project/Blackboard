@@ -1,7 +1,7 @@
 # BlackBoard/src/agents/aligner.py
 # @ai-rules:
 # 1. [Pattern]: Analysis interval is 120s. Hard failures (CrashLoop, OOM, ImagePull) bypass buffer entirely.
-# 2. [Pattern]: Dedup guard before appending confirm turns -- skip if previous confirm still SENT/DELIVERED.
+# 2. [Pattern]: Last-write-wins: updates pending confirm evidence via update_turn_evidence() instead of skipping when previous confirm still SENT/DELIVERED.
 # 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
 # 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (via LLM_MAX_TOKENS_ALIGNER or per-call override).
@@ -766,7 +766,9 @@ class Aligner:
                     and t.status.value in ("sent", "delivered")
                 ]
                 if pending:
-                    logger.debug(f"Skipping confirm for {eid}: previous confirm not yet evaluated")
+                    pending[0].evidence = message
+                    await self.blackboard.update_turn_evidence(eid, pending[0].turn, message)
+                    logger.info(f"Updated pending confirm for {eid} with fresh metrics")
                     continue
                 turn = ConversationTurn(
                     turn=len(event.conversation) + 1,

@@ -22,6 +22,7 @@
 # 20. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 21. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
 # 22. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
+# 23. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns (agent progress, aligner confirms). Lightweight LLM call (tools=[], 256 tokens), appends brain.think, marks turns EVALUATED.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -65,6 +66,7 @@ class ContextFlags(TypedDict, total=False):
     has_graph_edges: bool
     has_aligner_turns: bool
     has_slack_participant: bool
+    is_intermediate: bool
     _cached_active_ids: list[str]
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
@@ -211,16 +213,18 @@ PHASE_CONDITIONS: dict[str, Any] = {
     "post-agent":  lambda e, c: c["has_agent_result"],
     "waiting":     lambda e, c: c["is_waiting"],
     "defer-wake":  lambda e, c: c.get("is_defer_wakeup", False),
-    "context":     lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
-    "source":      lambda e, c: True,
-    "multi-user":  lambda e, c: c.get("has_slack_participant", False),
+    "context":      lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
+    "source":       lambda e, c: True,
+    "multi-user":   lambda e, c: c.get("has_slack_participant", False),
+    "intermediate": lambda e, c: c.get("is_intermediate", False),
 }
 
 # Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
 PHASE_EXCLUSIONS: dict[str, list[str]] = {
-    "post-agent":  ["dispatch"],
-    "defer-wake":  ["dispatch"],
-    "waiting":     ["dispatch", "post-agent", "defer-wake"],
+    "post-agent":   ["dispatch"],
+    "defer-wake":   ["dispatch"],
+    "waiting":      ["dispatch", "post-agent", "defer-wake"],
+    "intermediate": ["dispatch", "post-agent", "defer-wake", "waiting", "context"],
 }
 
 
@@ -600,6 +604,58 @@ class Brain:
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
+
+    async def _process_intermediate(
+        self, event_id: str, event: EventDocument, turns: list[ConversationTurn]
+    ) -> None:
+        """Process intermediate turns (agent progress, aligner confirms) with a lightweight LLM call.
+
+        No tools, minimal prompt (always + intermediate phases), 256 max tokens.
+        Appends brain.think turn for temporal context; marks processed turns EVALUATED.
+        """
+        if not self._adapter:
+            logger.warning("_process_intermediate skipped: no LLM adapter")
+            return
+        ctx: ContextFlags = {"is_intermediate": True}
+        active_phases = self._match_phases(event, ctx)
+        system_prompt = self._build_system_prompt(event, active_phases, ctx)
+        thinking_level, call_temp = self._resolve_llm_params(active_phases)
+        contents = await self._build_contents(event, context_cache=ctx)
+        await self._broadcast({
+            "type": "brain_thinking", "event_id": event_id,
+            "text": "", "accumulated": "", "is_thought": True,
+        })
+        accumulated_text = ""
+        try:
+            async for chunk in self._adapter.generate_stream(
+                system_prompt=system_prompt,
+                contents=contents,
+                tools=[],
+                temperature=call_temp,
+                max_output_tokens=256,
+                thinking_level=thinking_level,
+            ):
+                if chunk.text:
+                    accumulated_text += chunk.text
+        except Exception as e:
+            logger.warning(f"Intermediate LLM call failed for {event_id}: {e}")
+        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+        if accumulated_text:
+            turn = ConversationTurn(
+                turn=len(event.conversation) + 1,
+                actor="brain",
+                action="think",
+                thoughts=accumulated_text,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
+        up_to = max(t.turn for t in turns) + 1
+        await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
+        logger.info(
+            f"Intermediate: processed {len(turns)} turns for {event_id} "
+            f"(always, intermediate phases, 256 max tokens)"
+        )
 
     @staticmethod
     def _is_transient(e: Exception) -> bool:
@@ -2255,6 +2311,12 @@ class Brain:
                                     await self.cancel_active_task(eid, "User message received")
                                     # Fall through to process_event (don't continue)
                             else:
+                                intermediate = [
+                                    t for t in unseen
+                                    if t.actor not in ("brain", "user")
+                                ]
+                                if intermediate:
+                                    await self._process_intermediate(eid, event, intermediate)
                                 continue
                         else:
                             continue

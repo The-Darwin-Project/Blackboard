@@ -1,7 +1,7 @@
 # BlackBoard/src/state/blackboard.py
 # @ai-rules:
 # 1. [Constraint]: All Redis mutations use WATCH/MULTI/EXEC. Catch redis.WatchError specifically -- NEVER bare Exception.
-# 2. [Pattern]: mark_turns_delivered/evaluated/mark_turn_status follow the pipeline pattern from append_turn.
+# 2. [Pattern]: mark_turns_delivered/evaluated/mark_turn_status/update_turn_evidence follow the pipeline pattern from append_turn.
 # 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
@@ -1453,6 +1453,42 @@ class BlackboardState:
                     pipe.set(key, json.dumps(event.model_dump()))
                     await pipe.execute()
                     logger.debug(f"Marked turn {turn_number} as {status.value} for event {event_id}")
+                    return True
+                except WatchError:
+                    continue
+
+    async def update_turn_evidence(
+        self,
+        event_id: str,
+        turn_num: int,
+        evidence: str,
+    ) -> bool:
+        """Update a single turn's evidence by turn number (WATCH/MULTI/EXEC).
+
+        Used by Aligner last-write-wins: update pending confirm evidence in-place.
+        Returns True if updated, False if turn not found.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return False
+                    event = EventDocument(**json.loads(data))
+                    found = False
+                    for t in event.conversation:
+                        if t.turn == turn_num:
+                            t.evidence = evidence
+                            found = True
+                            break
+                    if not found:
+                        return False
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    logger.debug(f"Updated turn {turn_num} evidence for event {event_id}")
                     return True
                 except WatchError:
                     continue

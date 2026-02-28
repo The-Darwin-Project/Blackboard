@@ -1,0 +1,4 @@
+thinking_level: "low"
+temperature: 0.3
+priority: 90
+description: "Lightweight acknowledgment of agent progress and Aligner confirms; no tools, minimal tokens"
