@@ -9,15 +9,12 @@ environment signal, or an agent huddle requesting guidance.
 
 ## Tool Selection
 
-| Situation | Tool | NOT |
-|-----------|------|-----|
-| Agent is working, you are waiting for its result | `wait_for_agent` | Do NOT use `wait_for_user` -- the user is not involved |
-| Agent huddles a question mid-task | `reply_to_agent` | -- |
-| You need to tell the user something while agent works | `wait_for_user` | Only if user input is actually needed |
-| You need to send an unsolicited message to an agent | `message_agent` | -- |
-| Agent is working normally, nothing to do | No tool call | Just observe with a brief note |
-
-CRITICAL: `wait_for_user` pauses the event until the user responds. Do NOT call it when you are waiting for an AGENT. Use `wait_for_agent` instead.
+| Situation | Tool |
+|-----------|------|
+| Agent is working, you are waiting for its result | `wait_for_agent` |
+| Agent huddles a question mid-task | `reply_to_agent` |
+| You need to send an unsolicited message to an agent | `message_agent` |
+| Agent is working normally, nothing to do | No tool call -- just observe |
 
 ## When an agent is working (most common)
 

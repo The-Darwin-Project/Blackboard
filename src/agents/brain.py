@@ -636,7 +636,7 @@ class Brain:
         from .llm import BRAIN_TOOL_SCHEMAS
         intermediate_tools = [
             t for t in BRAIN_TOOL_SCHEMAS
-            if t["name"] in ("reply_to_agent", "message_agent", "wait_for_user", "wait_for_agent")
+            if t["name"] in ("reply_to_agent", "message_agent", "wait_for_agent")
         ]
         huddle_turns = [t for t in turns if t.action == "huddle"]
         max_tokens = 1024 if huddle_turns else 256
@@ -693,7 +693,7 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
 
-        if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_user", "wait_for_agent"):
+        if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_agent"):
             await self._execute_function_call(
                 event_id, function_call.name, function_call.args or {},
             )
