@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute. All state via state.js.
 // 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message/teammate_forward — task_id and event_id from state.getCurrentTask().
-// 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 10min timeout.
+// 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 90s timeout.
 // 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set.
 // 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
 
@@ -133,9 +133,9 @@ async function handleRequest(req, res) {
               res.writeHead(408, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ error: 'Manager reply timeout' }));
               state.clearPendingHuddleReply();
-              console.log(`[${new Date().toISOString()}] [${eid3}] Huddle reply timed out (10min)`);
+              console.log(`[${new Date().toISOString()}] [${eid3}] Huddle reply timed out (90s)`);
             }
-          }, 600000);
+          }, 90000);
           state.setPendingHuddleReply({ res, timeout });
           return; // do NOT respond yet -- response sent when huddle_reply arrives
         }
@@ -146,7 +146,7 @@ async function handleRequest(req, res) {
       } else if (callbackType === 'teammate_forward') {
         state.pushTeammateMessage({ from: body.from || 'unknown', content });
         console.log(`[${new Date().toISOString()}] Teammate message stored (${content.length} chars, from: ${body.from || 'unknown'})`);
-        tryWake(body.from || 'unknown', content);
+        tryWake(body.from || 'unknown', content, body.event_id || '');
       } else {
         // sendMessage: forward as progress note (do NOT overwrite deliverable)
         const task2 = state.getCurrentTask();

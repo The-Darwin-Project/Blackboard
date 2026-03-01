@@ -23,7 +23,7 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 
 ## `team_huddle` -- Talk to the Brain
 
-Sends a message to the Brain and **blocks until the Brain replies** (up to 10 min). The Brain's reply is returned as the tool result.
+Sends a message to the Brain and **blocks until the Brain replies** (up to 90 seconds). The Brain's reply is returned as the tool result. If no reply arrives, the tool returns a timeout error -- continue your work and report via `team_send_results` instead.
 
 Send progress via `team_send_message` BEFORE starting a huddle (no other tools work during the block).
 

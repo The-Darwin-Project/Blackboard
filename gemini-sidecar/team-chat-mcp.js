@@ -19,7 +19,7 @@ const ALL_TOOLS = [
   { name: 'team_send_message', description: 'Send a progress update to the Brain (shown in event chat, does NOT overwrite deliverable)', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Status update text' } }, required: ['message'] } },
   { name: 'team_send_results', description: 'Deliver your final report/findings to the Brain (overwrites previous deliverable)', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report or findings' } }, required: ['content'] } },
   { name: 'team_check_messages', description: 'Check your inbox for pending messages from Manager or Brain. Returns and clears the queue.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'team_huddle', description: 'Send a message to your Manager and BLOCK until the Manager replies (up to 10 min). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for Manager' } }, required: ['message'] }, teamOnly: true },
+  { name: 'team_huddle', description: 'Send a message to the Brain and BLOCK until the Brain replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for Brain' } }, required: ['message'] }, teamOnly: true },
   { name: 'team_send_to_teammate', description: 'Send a direct message to your dev/QE teammate via their sidecar. Message is stored in their teammate queue.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Message for teammate' } }, required: ['message'] }, teamOnly: true },
   { name: 'team_read_teammate_notes', description: "Read and clear messages your teammate sent you. Drains the teammate's outbound queue for you.", inputSchema: { type: 'object', properties: {} }, teamOnly: true },
 ];
@@ -78,13 +78,18 @@ async function handleToolCall(name, args) {
       return { messages: Array.isArray(msgs) ? msgs : [] };
     }
     if (name === 'team_huddle') {
-      const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'huddle_message', content: args.message || '' }, 610000);
+      const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'huddle_message', content: args.message || '' }, 95000);
       if (r.status === 200 && r.body?.reply !== undefined) return { reply: r.body.reply };
       return { error: r.body?.error || `HTTP ${r.status}` };
     }
     if (name === 'team_send_to_teammate') {
       if (!PEER_PORT) return { error: 'No peer sidecar configured (PEER_PORT not set)' };
-      const r = await httpPost(PEER_PORT, '/callback', { type: 'teammate_forward', from: ROLE, content: args.message || '' });
+      const task = state.getCurrentTask();
+      const eventId = task?.eventId || '';
+      const r = await httpPost(PEER_PORT, '/callback', {
+        type: 'teammate_forward', from: ROLE, content: args.message || '',
+        event_id: eventId,
+      });
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };
     }
     if (name === 'team_read_teammate_notes') {

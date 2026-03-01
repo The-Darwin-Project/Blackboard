@@ -298,25 +298,27 @@ function handleCancel(msg) {
   state.clearCurrentTask();
 }
 
-function tryWake(from, content) {
+function tryWake(from, content, eventId) {
   if (state.getCurrentTask()) return;
-  const ctx = state.getLastTaskContext();
-  if (!ctx) return;
   if (_isWaking) return;
   if (!_activeWs) return;
+
+  const ctx = state.getLastTaskContext();
+  const resolvedEventId = eventId || (ctx && ctx.eventId) || '';
+  if (!resolvedEventId) return;
 
   _isWaking = true;
   const syntheticMsg = {
     type: 'task',
     task_id: `wake-${Date.now()}`,
-    event_id: ctx.eventId,
-    session_id: ctx.sessionId,
-    prompt: 'You have a pending message from your teammate. Check your inbox and respond.',
-    cwd: ctx.cwd,
+    event_id: resolvedEventId,
+    session_id: ctx?.sessionId || null,
+    prompt: `You have a pending message from your teammate (${from}). Read the event document at events/event-${resolvedEventId}.md for context, then check your inbox with team_read_teammate_notes and respond.`,
+    cwd: ctx?.cwd || DEFAULT_WORK_DIR,
     autoApprove: true,
     mode: 'implement',
   };
-  console.log(`[${new Date().toISOString()}] Wake triggered: resuming session ${ctx.sessionId} for event ${ctx.eventId} (from: ${from})`);
+  console.log(`[${new Date().toISOString()}] Wake triggered: event ${resolvedEventId} (from: ${from}, session: ${ctx?.sessionId || 'new'})`);
   handleTask(_activeWs, syntheticMsg)
     .catch(err => console.error(`[${new Date().toISOString()}] Wake failed:`, err.message))
     .finally(() => { _isWaking = false; });
