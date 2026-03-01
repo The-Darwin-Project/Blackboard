@@ -1818,9 +1818,14 @@ class Brain:
                 await self.defer_event(event_id, "Agent returned retryable error")
                 return
 
-            # Track session for Phase 2 follow-ups (forward user messages instead of cancel)
-            if session_id:
+            # Track session for follow-ups -- but clear on failure to prevent corrupted resume loops
+            result_str_check = str(result).strip() if result else ""
+            is_error_result = result_str_check.startswith("Error:") or not result_str_check
+            if session_id and not is_error_result:
                 self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
+            elif is_error_result and event_id in self._agent_sessions:
+                self._agent_sessions.get(event_id, {}).pop(agent_name, None)
+                logger.info(f"Cleared corrupted session for {agent_name} on {event_id}")
             # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
