@@ -1842,7 +1842,10 @@ class Brain:
 
             if result == RETRYABLE_SENTINEL:
                 logger.info(f"Retryable error for {event_id}, deferring event")
-                await self.defer_event(event_id, "Agent returned retryable error")
+                await self._execute_function_call(
+                    event_id, "defer_event",
+                    {"reason": "Agent returned retryable error", "delay_seconds": 60},
+                )
                 return
 
             # Track session for follow-ups -- but clear on failure to prevent corrupted resume loops
