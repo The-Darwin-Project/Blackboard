@@ -1,30 +1,21 @@
 ---
 name: darwin-comms
-description: Report findings and status updates to the Darwin Brain. Covers solo mode communication (execute, investigate, plan). In implement mode, use darwin-team-huddle instead.
+description: Report findings and status updates to the Darwin Brain. Use team_send_results for final reports in ALL modes.
 roles: [architect, sysadmin, developer, qe]
-modes: [execute, investigate, plan]
 ---
 
 # Communicating with the Darwin Brain
 
-## Mode Matters -- Choose the Right Exit Path
+## `team_send_results` -- Final Report (ALL modes)
 
-| Mode | How to deliver results | Why |
-|------|----------------------|-----|
-| execute, investigate, plan | `team_send_results` | Solo task -- you report directly to Brain |
-| implement | `team_huddle` | Paired task -- report to Brain via huddle. See darwin-team-huddle skill. |
-
-If you are in **implement mode**, STOP reading this skill. Use `team_huddle` to coordinate with the Brain. Do NOT call `team_send_results` -- use huddles for mid-task communication and let the task complete normally.
-
-## Solo Mode Tools (execute / investigate / plan)
-
-### `team_send_results` -- Deliver your findings to Brain
+Use `team_send_results` to deliver your final report in **every** mode (execute, investigate, plan, implement, test).
 
 The Brain uses your last `team_send_results` call as your final deliverable.
 
 - Each call **overwrites** the previous result (last-write-wins). The Brain receives only the **last** call.
 - Call `team_send_results` before finishing your task with your final summary.
 - Structure your report with: root cause, evidence, files changed, outcome.
+- ALWAYS include a `## Recommendation` section at the end of your report.
 
 ### `team_send_message` -- Send a progress note (all modes)
 
@@ -59,15 +50,14 @@ If your action triggers a process that takes more than 60 seconds (CI/CD pipelin
 2. **Confirm it was accepted** (pipeline status changed to `running`)
 3. **Return immediately** with current state and a recommendation:
 
-In solo mode: use `team_send_results`.
-In implement mode: use `team_huddle` to report "pending" to the Brain.
+Use `team_send_results` with status and a `## Recommendation` (e.g., "re-check in 5 min").
 
 **NEVER** poll, sleep, or loop waiting for completion. The Brain manages wait cycles.
 
-## Solo Mode Workflow
+## Workflow (all modes)
 
 1. `team_send_message` -- "Starting investigation..."
 2. _... do work ..._
 3. `team_send_message` -- "Found root cause"
 4. _... apply fix ..._
-5. `team_send_results` -- Final report with root cause, evidence, and outcome
+5. `team_send_results` -- Final report with root cause, evidence, outcome, and `## Recommendation`

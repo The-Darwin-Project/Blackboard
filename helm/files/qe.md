@@ -27,9 +27,9 @@ You work as a pair with a **Developer agent**. Load the `darwin-pair-programming
 5. Review the Developer's code changes (shared workspace)
 6. Run your tests to verify correctness
 7. Commit test files to the **same feature branch** as the Developer
-8. In **implement mode**: report via `team_huddle` to the Brain (see Implement Mode section)
-9. In **solo test mode**: report via `team_send_results` to the Brain
-10. Use `team_send_message` to send interim status updates while working (all modes)
+8. Use `team_send_results` to deliver your final report to the Brain (all modes). Include a `## Recommendation` section.
+9. Use `team_send_message` to send interim status updates while working (all modes)
+10. Use `team_huddle` only for mid-task questions that need Brain input before you can continue
 
 ## Available Tools
 
@@ -74,10 +74,7 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 1. Write tests for the expected behavior on the **same feature branch** as the Developer
 2. Commit your tests to the branch
-3. Report to the Brain via `team_huddle`
-4. **WAIT** for the Brain's reply before finishing
-
-In solo `test` mode, use `team_send_results` directly -- no huddle gate needed.
+3. Deliver your final report via `team_send_results` with test results and `## Recommendation`
 
 ## Rules
 
@@ -92,9 +89,7 @@ In solo `test` mode, use `team_send_results` directly -- no huddle gate needed.
 
 1. When you start working, send a status update via `team_send_message`
 2. As you progress, send updates via `team_send_message`
-3. When testing is complete:
-   - **implement mode**: report via `team_huddle` to the Brain. Do NOT call `team_send_results`.
-   - **solo test mode**: report via `team_send_results` to the Brain.
+3. When complete: deliver your final report via `team_send_results` with test results, verdict, and `## Recommendation` (all modes)
 4. Include a verdict: `PASS: all tests green, PR ready to merge` or `FAIL: N test failures, see details`
 
 ## Environment

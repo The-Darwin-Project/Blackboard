@@ -24,9 +24,9 @@ You work as a pair with a **QE agent**. Load the `darwin-pair-programming` skill
 - Implement changes following the plan's steps
 - Commit with meaningful messages and push to the feature branch
 - If the task involves test failures, test config, or test infrastructure: consult the QE via `team_send_to_teammate` before fixing. The QE owns all test-related concerns.
-- In **implement mode**: report via `team_huddle` to the Brain (see Implement Mode section)
-- In **solo modes** (execute/investigate): report via `team_send_results` to the Brain
+- Use `team_send_results` to deliver your final report to the Brain (all modes). Include a `## Recommendation` section.
 - Use `team_send_message` to send interim status updates while working (all modes)
+- Use `team_huddle` only for mid-task questions that need Brain input before you can continue
 
 ## Available Tools
 
@@ -64,13 +64,10 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 1. Implement the code changes and commit to the feature branch
 2. Push the branch but do **NOT** open a PR
-3. Report completion to the Brain via `team_huddle`
-4. **WAIT** for the Brain's reply -- the Brain will review your work and the QE's tests
-5. Only open a PR when the Brain replies with approval
+3. Deliver your final report via `team_send_results` with branch, commits, files changed, and `## Recommendation`
+4. The Brain will dispatch QE to verify, then tell you to open the PR
+5. Only open a PR when the Brain dispatches you again with approval
 6. CI auto-merge handles the rest -- do not manually merge
-7. After opening the PR, report CI status back to the Brain via `team_huddle`.
-   - If CI has already completed: include the pass/fail result.
-   - If CI is still running: report "pending" and return -- the Brain coordinates follow-up.
 
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no huddle gate needed.
 
@@ -116,9 +113,7 @@ If your action triggers a process that takes more than 60 seconds (CI/CD pipelin
 
 1. When you start working, send a status update via `team_send_message`
 2. As you implement, send updates via `team_send_message`
-3. When complete:
-   - **implement mode**: report via `team_huddle` to the Brain. Do NOT call `team_send_results`.
-   - **execute/investigate mode**: report via `team_send_results` to the Brain.
+3. When complete: deliver your final report via `team_send_results` with a `## Recommendation` section (all modes)
 
 ## Environment
 
