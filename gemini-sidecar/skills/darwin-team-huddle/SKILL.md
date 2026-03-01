@@ -57,7 +57,10 @@ The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
 2. _... implement changes ..._
 3. `team_send_message` -- "Pushing to branch..."
 4. _... commit and push (do NOT open PR) ..._
-5. `team_huddle` -- Developer Report (branch, commits, files changed)
+5. `team_huddle` -- Developer Report. MUST include:
+   - Branch name and commit SHA
+   - Files changed
+   - `## Recommendation` section (e.g., "Dispatch QE to verify before merge")
 6. **BLOCKS** until the Brain replies -- do NOT open PR yet
 7. Brain reply: "approved, open the PR" -> open PR
 8. `team_huddle` -- Report CI status to the Brain
@@ -67,7 +70,10 @@ The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
 1. `team_send_message` -- "Reading plan, writing tests..."
 2. _... write tests, commit to same feature branch ..._
 3. `team_send_message` -- "Tests written, all passing locally"
-4. `team_huddle` -- QE Report (tests added, results, branch)
+4. `team_huddle` -- QE Report. MUST include:
+   - Tests added and pass/fail results
+   - Branch name
+   - `## Recommendation` section (e.g., "All tests pass, ready for PR" or "2 failures, Developer must fix X")
 5. **BLOCKS** until the Brain replies
 
 ## Shell Fallback

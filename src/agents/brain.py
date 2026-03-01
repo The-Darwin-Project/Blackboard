@@ -948,6 +948,33 @@ class Brain:
         result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
         rec = Brain._extract_recommendation(result_text)
 
+        # QE gate: if last dispatch was mode=implement and developer reported,
+        # inject QE verification regardless of recommendation content
+        last_route = next(
+            (t for t in reversed(event.conversation)
+             if t.actor == "brain" and t.action == "route" and t.taskForAgent),
+            None,
+        )
+        was_implement = (
+            last_route and last_route.taskForAgent
+            and last_route.taskForAgent.get("mode") == "implement"
+            and last_agent_turn.actor == "developer"
+        )
+        if was_implement:
+            qe_gate = (
+                "\n\n## QE VERIFICATION GATE (mandatory)\n"
+                "The Developer completed work in implement mode. "
+                "You MUST dispatch QE (mode: test) to verify before any PR, merge, or close action."
+            )
+            base_rec = rec or ""
+            from datetime import datetime, timezone
+            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
+            return (
+                f"## LATEST AGENT RESULT (from {last_agent_turn.actor}, "
+                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
+                f"{base_rec}{qe_gate}"
+            )
+
         if rec:
             from datetime import datetime, timezone
             ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
