@@ -222,6 +222,24 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "wait_for_agent",
+        "description": (
+            "Signal that the Brain is waiting for an agent to complete its task. "
+            "Pauses the event until the agent reports back. Use when you have dispatched "
+            "an agent and need to wait for its result before proceeding."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "What the Brain is waiting for (e.g., 'Waiting for QE to complete pagination tests')",
+                },
+            },
+            "required": ["summary"],
+        },
+    },
+    {
         "name": "lookup_service",
         "description": (
             "Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, "

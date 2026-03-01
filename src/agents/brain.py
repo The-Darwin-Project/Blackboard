@@ -636,7 +636,7 @@ class Brain:
         from .llm import BRAIN_TOOL_SCHEMAS
         intermediate_tools = [
             t for t in BRAIN_TOOL_SCHEMAS
-            if t["name"] in ("reply_to_agent", "message_agent", "wait_for_user")
+            if t["name"] in ("reply_to_agent", "message_agent", "wait_for_user", "wait_for_agent")
         ]
         huddle_turns = [t for t in turns if t.action == "huddle"]
         max_tokens = 1024 if huddle_turns else 256
@@ -693,7 +693,7 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
 
-        if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_user"):
+        if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_user", "wait_for_agent"):
             await self._execute_function_call(
                 event_id, function_call.name, function_call.args or {},
             )
@@ -1461,7 +1461,6 @@ class Brain:
 
         elif function_name == "wait_for_verification":
             condition = args.get("condition", "")
-            # Brain-push: call check_state directly instead of polling
             event = await self.blackboard.get_event(event_id)
             target_service = event.service if event else ""
             aligner = self.agents.get("_aligner")
@@ -1476,7 +1475,6 @@ class Brain:
                 )
                 await self.blackboard.append_turn(event_id, verify_turn)
                 await self._broadcast_turn(event_id, verify_turn)
-                # Immediately append the Aligner's response
                 confirm_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="aligner",
@@ -1490,7 +1488,7 @@ class Brain:
                 )
                 await self.blackboard.append_turn(event_id, confirm_turn)
                 await self._broadcast_turn(event_id, confirm_turn)
-            return False
+            return True  # Re-invoke LLM to evaluate the aligner evidence and decide next action
 
         elif function_name == "defer_event":
             # Guard: never defer when waiting for user response
@@ -1539,6 +1537,19 @@ class Brain:
                 action="wait",
                 thoughts=summary,
                 waitingFor="user",
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return False
+
+        elif function_name == "wait_for_agent":
+            summary = args.get("summary", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="wait",
+                thoughts=summary,
+                waitingFor="agent",
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
