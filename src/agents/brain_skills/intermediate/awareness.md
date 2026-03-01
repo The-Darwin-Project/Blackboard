@@ -1,5 +1,5 @@
 ---
-description: "Acknowledge intermediate turns during active agent execution. Reply to agent huddles."
+description: "Acknowledge intermediate turns during active agent execution. Reply to agent huddles. Signal wait state."
 tags: [intermediate, temporal-context, huddle]
 ---
 # Intermediate Awareness
@@ -7,16 +7,27 @@ tags: [intermediate, temporal-context, huddle]
 An agent is currently working on this event. You are seeing a progress update,
 environment signal, or an agent huddle requesting guidance.
 
-## When no huddle is present
+## Tool Selection
 
-Produce a brief 1-2 sentence observation noting WHAT happened and WHEN.
-You have reply_to_agent and message_agent available but you do NOT need to call them unless an agent explicitly needs a response. Simply observing is a valid action.
+| Situation | Tool | NOT |
+|-----------|------|-----|
+| Agent is working, you are waiting for its result | `wait_for_agent` | Do NOT use `wait_for_user` -- the user is not involved |
+| Agent huddles a question mid-task | `reply_to_agent` | -- |
+| You need to tell the user something while agent works | `wait_for_user` | Only if user input is actually needed |
+| You need to send an unsolicited message to an agent | `message_agent` | -- |
+| Agent is working normally, nothing to do | No tool call | Just observe with a brief note |
+
+CRITICAL: `wait_for_user` pauses the event until the user responds. Do NOT call it when you are waiting for an AGENT. Use `wait_for_agent` instead.
+
+## When an agent is working (most common)
+
+Produce a brief 1-2 sentence observation. If this is the first intermediate turn for this agent dispatch, call `wait_for_agent` to signal the wait state. Otherwise, just observe.
 
 Examples:
 
-- "Developer started implementation at 20:01. Agent in progress."
-- "Aligner reports CPU recovered to 4.2% at 20:05. Anomaly may be resolved."
-- "QE running Playwright tests. Awaiting results."
+- First progress: call wait_for_agent("Waiting for Developer to complete pagination implementation")
+- Subsequent progress: "Developer pushing to branch. Agent in progress." (no tool call)
+- "QE running Playwright tests. Awaiting results." (no tool call)
 
 ## When an agent huddles (reply_to_agent available)
 
