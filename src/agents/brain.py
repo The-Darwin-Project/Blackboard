@@ -627,16 +627,12 @@ class Brain:
             return
 
         from .llm import BRAIN_TOOL_SCHEMAS
+        intermediate_tools = [
+            t for t in BRAIN_TOOL_SCHEMAS
+            if t["name"] in ("reply_to_agent", "message_agent")
+        ]
         huddle_turns = [t for t in turns if t.action == "huddle"]
-        if huddle_turns:
-            intermediate_tools = [
-                t for t in BRAIN_TOOL_SCHEMAS
-                if t["name"] in ("reply_to_agent", "message_agent")
-            ]
-            max_tokens = 1024
-        else:
-            intermediate_tools = []
-            max_tokens = 256
+        max_tokens = 1024 if huddle_turns else 256
 
         ctx: ContextFlags = {
             "is_intermediate": True,
@@ -698,6 +694,9 @@ class Brain:
         tool_names = [t["name"] for t in intermediate_tools] or ["none"]
         up_to = max(t.turn for t in turns) + 1
         await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
+        evaluated_turns = [t.turn for t in turns if t.turn < up_to]
+        if evaluated_turns:
+            await self._broadcast_status_update(event_id, "evaluated", turns=evaluated_turns)
         logger.info(
             f"Intermediate: processed {len(turns)} turns for {event_id} "
             f"(phases: {active_phases}, tools: {tool_names})"

@@ -7,12 +7,13 @@ tags: [intermediate, temporal-context, huddle]
 An agent is currently working on this event. You are seeing a progress update,
 environment signal, or an agent huddle requesting guidance.
 
-## When no huddle is present (no tools available)
+## When no huddle is present
 
 Produce a brief 1-2 sentence observation noting WHAT happened and WHEN.
-You cannot call any functions -- just observe and acknowledge.
+You have reply_to_agent and message_agent available but you do NOT need to call them unless an agent explicitly needs a response. Simply observing is a valid action.
 
 Examples:
+
 - "Developer started implementation at 20:01. Agent in progress."
 - "Aligner reports CPU recovered to 4.2% at 20:05. Anomaly may be resolved."
 - "QE running Playwright tests. Awaiting results."
@@ -30,6 +31,7 @@ If the agent reports a problem, provide specific next steps.
 If the agent asks a question, answer it directly.
 
 Examples:
+
 - Agent huddles "Implementation done, pushed to branch feature/fix-123"
   -> reply_to_agent(agent_id, "Acknowledged. Continue with PR creation.")
 - Agent huddles "2 test failures on dark theme component"
