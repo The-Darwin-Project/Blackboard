@@ -22,9 +22,9 @@ Both agents share the same filesystem(Volume). Each agent has its own working di
 2. **No PR without Brain approval**: Neither agent opens a PR. The Brain tells the Developer when to open it.
 3. **Communicate via MCP**: Use `team_send_to_teammate` to send messages and `team_read_teammate_notes` to check for partner messages.
 4. **Git pull before push**: Always `git pull --rebase` before pushing to avoid conflicts with your partner's commits.
-5. **Test ownership**: The QE owns test files.
-   - During concurrent implementation: use `team_send_to_teammate` for test coordination.
-   - During PR gate (after PR is open): if CI fails on a test file, the Developer
+5. **Test ownership**: The QE owns all test-related concerns -- test files, test configuration, test infrastructure (Dockerfiles for test images, test runner scripts, Playwright config), and test discovery.
+   - If your task involves test failures, test infrastructure, or test configuration: use `team_send_to_teammate` to consult the QE before implementing. The QE may be idle -- your message will wake it.
+   - During PR gate (after PR is open): if CI fails on test-related files, the Developer
      huddles to the Brain with the failure details. Do NOT fix test files directly
      and do NOT go peer-to-peer to the QE -- let the Brain coordinate.
 
@@ -34,7 +34,7 @@ Both agents share the same filesystem(Volume). Each agent has its own working di
 - Commit implementation code to the feature branch
 - Report to the Brain via `team_huddle` when done
 - Wait for Brain approval before opening the PR
-- Fix CI failures in implementation code only -- delegate test failures to QE
+- Fix CI failures in implementation code only -- delegate all test-related issues (test files, test config, test runner scripts, Dockerfiles for test images) to QE via `team_send_to_teammate`
 
 ## QE Responsibilities
 
