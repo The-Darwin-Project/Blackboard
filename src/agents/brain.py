@@ -2287,6 +2287,26 @@ class Brain:
             lines.append(f"- **Evidence:** {evidence.display_text}")
             lines.append(f"- **Domain:** {evidence.domain}")
             lines.append(f"- **Severity:** {evidence.severity}")
+            if evidence.gitlab_context:
+                gl = evidence.gitlab_context
+                lines.append(f"")
+                lines.append(f"## GitLab Context")
+                lines.append(f"- **Project ID:** {gl.get('project_id', '')}")
+                lines.append(f"- **Project Path:** {gl.get('project_path', '')}")
+                lines.append(f"- **MR IID:** !{gl.get('mr_iid', '')}")
+                lines.append(f"- **MR Title:** {gl.get('mr_title', '')}")
+                lines.append(f"- **MR URL:** {gl.get('target_url', '')}")
+                lines.append(f"- **Action:** {gl.get('action_name', '')}")
+                lines.append(f"- **Pipeline:** {gl.get('pipeline_status', 'unknown')}")
+                lines.append(f"- **Merge Status:** {gl.get('merge_status', '')}")
+                lines.append(f"- **Source Branch:** {gl.get('source_branch', '')}")
+                lines.append(f"- **Target Branch:** {gl.get('target_branch', '')}")
+                lines.append(f"- **Author:** {gl.get('author', '')}")
+                maintainer = gl.get("maintainer", {})
+                if maintainer:
+                    emails = maintainer.get("emails", [])
+                    lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
+                    lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
         else:
             lines.append(f"- **Evidence:** {evidence}")
         lines.append(f"- **Time:** {event.event.timeDate}")

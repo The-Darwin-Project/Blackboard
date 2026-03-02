@@ -190,7 +190,7 @@ class Headhunter:
             "labels": target.get("labels", []),
             "milestone": (target.get("milestone") or {}).get("title"),
             "project_path": todo["project"].get("path_with_namespace", ""),
-            "target_url": todo.get("target_url", ""),
+            "target_url": todo.get("target_url", "").split("#")[0],
         }
 
         async with httpx.AsyncClient(verify=False, timeout=30) as client:
@@ -455,7 +455,7 @@ class Headhunter:
                 "source_branch": target.get("source_branch", ""),
                 "target_branch": target.get("target_branch", ""),
                 "author": target.get("author", {}).get("username", ""),
-                "target_url": todo.get("target_url", ""),
+                "target_url": todo.get("target_url", "").split("#")[0],
                 "pipeline_status": "unknown",
                 "maintainer": maintainer,
             },

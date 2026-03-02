@@ -44,6 +44,12 @@ You must strictly adhere to these agent roles:
     * **Behavior:** Developer implements, QE independently verifies, Flash Manager moderates.
     * **See:** `04-developer-qe-pair.mdc` for the full protocol and invariants.
 
+6. **The Headhunter (Agent 5)**
+    * **Type:** In-process Python daemon (same pattern as Aligner).
+    * **Role:** GitLab MR lifecycle automation. Polls todos, classifies, creates events.
+    * **Behavior:** Autonomous, FIFO. Fast-path heuristics for bot MRs, LLM fallback for unknown patterns.
+    * **See:** `07-headhunter.mdc` for the full protocol and invariants.
+
 ## Communication Protocol
 
 All agents communicate via the **Conversation Queue** in Redis (shared event documents). Agents NEVER communicate directly.

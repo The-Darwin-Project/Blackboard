@@ -18,10 +18,11 @@ alwaysApply: true
   * **SysAdmin** (`sysadmin.py`) is a thin HTTP client. Sidecar has full git + kubectl. Safety via FORBIDDEN_PATTERNS in security.py.
   * **Developer** (`developer.py`) is the pair programming manager. Fires Dev + QE sidecars concurrently via `asyncio.gather()`. Flash Manager (Gemini Flash) reviews outputs. See `04-developer-qe-pair.mdc` for invariants.
   * **Aligner** (`aligner.py`) keeps Vertex AI Flash for filter config. Creates events, does NOT route to agents.
+  * **Headhunter** (`headhunter.py`) is an in-process daemon (same pattern as Aligner). Polls GitLab `/todos`, classifies MRs, creates events. Does NOT route to agents -- Brain handles all routing. See `07-headhunter.mdc`.
 
 ## 3. The Conversation Queue Protocol
 
-* **Event Creation:** Events are created by Aligner (anomaly) or Chat (user request)
+* **Event Creation:** Events are created by Aligner (anomaly), Chat (user request), Headhunter (GitLab todo), or Slack (DM/slash command)
 * **Triage:** Brain triages events via LLM function calling
 * **Conversation:** Conversation is an append-only log of turns in the event document
 * **Plans:** Plans are Markdown turns, not JSON

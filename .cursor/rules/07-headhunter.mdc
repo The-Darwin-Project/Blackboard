@@ -1,0 +1,79 @@
+---
+description: Headhunter agent -- GitLab todo poller, MR lifecycle automation, maintainer resolution
+alwaysApply: true
+---
+
+# Headhunter Agent (Agent 5)
+
+## Identity
+
+* **Type:** In-process Python daemon (same pattern as Aligner).
+* **Role:** GitLab MR lifecycle automation. Polls `/todos` API, classifies MRs, creates events for Brain.
+* **Behavior:** Autonomous, FIFO. Processes oldest todos first. Does NOT route to agents directly -- creates events for Brain.
+
+## Architecture
+
+* **File:** `src/agents/headhunter.py`
+* **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
+* **LLM:** Gemini Flash via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`). Fast-path heuristics skip LLM for known bot patterns.
+* **Flow Gate:** `max_active=1` (configurable). Blocks new events while one is being processed.
+* **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
+* **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
+
+## Fast-Path Heuristics (no LLM needed)
+
+| Pattern | Classification | Action |
+|---|---|---|
+| Bot MR + `review_requested` + failed pipeline | CLEAR | Retest, merge if green, escalate if red |
+| Bot MR + `review_requested` + green pipeline | CLEAR | Review and merge |
+| `directly_addressed` with @mention instruction | CLEAR | Follow the instruction from the comment |
+
+## Maintainer Resolution
+
+Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR metadata fallback.
+
+* Static list is read at runtime (not import time) via `_get_static_maintainer_emails()`.
+* `HEADHUNTER_MAINTAINER_SOURCE`: `static` (default) or `smartsheet` (future).
+* Resolved maintainer stored in `evidence.gitlab_context.maintainer` at event creation.
+
+## Security: @Mention Instruction Injection
+
+* MR comments tagging the bot (`@cnv-downstream-bot <instruction>`) are passed as plan context.
+* Only authors in the allowed list can inject instructions (default-closed).
+* Allowed authors = email local parts from `HEADHUNTER_MAINTAINERS` + explicit `HEADHUNTER_ALLOWED_AUTHORS` CSV.
+* If both are empty, all @mentions are blocked (`_nobody_` sentinel).
+
+## Feedback Loop (Signal + Poll Hybrid)
+
+* Brain signals `_headhunter_close_signal.set()` in `_close_and_broadcast()`.
+* Headhunter feedback loop wakes on signal or every `poll_interval` (safety net).
+* Posts MR comment + marks todo as done on event close.
+* `directly_addressed` and `mentioned` bypass recently-processed dedup (explicit re-request).
+
+## Dedup Layers
+
+| Layer | What it catches | Crash-safe? |
+|---|---|---|
+| `_processed_todos` (in-memory) | Same MR within pod lifetime | No |
+| `_is_recently_processed()` (Redis) | Same MR closed in last 30 min | Yes |
+| Flow gate (`max_active`) | Concurrent events | Yes |
+| GitLab auto-resolve | `review_requested` cleared on bot interaction | Yes |
+
+## Key Invariants
+
+* Sidecar skills NEVER include GitLab usernames in Slack recommendations.
+* Brain ALWAYS uses `evidence.gitlab_context.maintainer.emails` for notifications.
+* Submodule MRs with `cannot_be_merged` are closed as obsolete (newer update merged).
+* `GITLAB_BOT_USERNAME` env var controls which account name to match in @mention scanning.
+
+## Helm Configuration
+
+```yaml
+headhunter:
+  enabled: false
+  pollInterval: "300"
+  maxActive: "1"
+  startupDelay: "180"
+  maintainerSource: "static"
+  maintainers: ""  # CSV of emails
+```
