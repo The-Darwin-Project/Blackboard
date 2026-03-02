@@ -51,17 +51,29 @@ glab api -X PUT /projects/:id/merge_requests/:iid/merge
 - NEVER auto-rebase -- if merge_status is `cannot_be_merged`, report conflicts to maintainer
 - NEVER delete branches after merge (let GitLab's auto-delete handle it)
 
-## Conflict Reporting
+## Conflict / Unmergeable Handling
 
 If merge_status is `cannot_be_merged`:
 
-1. Post an MR comment describing the conflict:
+**For automated submodule MRs** (branch starts with `submodule-`, author is a bot):
+
+- This means a newer submodule update already merged to main. The MR is obsolete.
+- Close the MR with a comment explaining why:
+
+```bash
+glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Closing this MR -- a newer submodule update has already been merged to main, making this one obsolete."
+glab api -X PUT /projects/:id/merge_requests/:iid --field state_event=close
+```
+
+**For all other MRs:**
+
+- Post an MR comment describing the conflict:
 
 ```bash
 glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflicts detected. Manual rebase required. Notifying maintainer."
 ```
 
-1. In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
+- In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
 ## Reporting Results
 
@@ -71,4 +83,5 @@ Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer
 - **Success**: "MR merged successfully. Recommend notifying maintainer via Slack."
 - **Pipeline running**: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."
 - **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer via Slack with failure details."
-- **Conflict**: "Merge conflicts detected. Recommend notifying maintainer via Slack to rebase."
+- **Conflict (submodule)**: "Closed obsolete submodule MR -- newer update already merged to main."
+- **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer via Slack to rebase."

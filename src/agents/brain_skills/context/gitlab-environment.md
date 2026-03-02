@@ -33,8 +33,9 @@ Darwin's GitLab SA CANNOT:
 1. Check pipeline status
 2. If failed: retest via `/retest` MR comment
 3. If green + can_be_merged: merge
-4. If green + cannot_be_merged: report conflict to maintainer
-5. If retest fails: comment with failure details, notify maintainer
+4. If green + cannot_be_merged on a submodule MR: close the MR (obsolete, newer update merged)
+5. If green + cannot_be_merged on a regular MR: report conflict to maintainer
+6. If retest fails: comment with failure details, notify maintainer
 
 ## Maintainer Resolution
 
