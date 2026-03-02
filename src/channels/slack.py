@@ -246,12 +246,12 @@ class SlackChannel:
             from ..models import ConversationTurn
             turn = ConversationTurn(**message["turn"])
 
-            # Phase 2: Auto-open #darwin-infra thread for aligner events on first
-            # brain.route (agent dispatched). Skips trivial events that Brain
+            # Auto-open #darwin-infra thread for autonomous events (aligner, headhunter)
+            # on first brain.route (agent dispatched). Skips trivial events that Brain
             # auto-closes without routing -- keeps the channel clean.
             if (
                 not event_doc.slack_thread_ts
-                and event_doc.source == "aligner"
+                and event_doc.source in ("aligner", "headhunter")
                 and self._infra_channel
                 and turn.actor == "brain"
                 and turn.action == "route"

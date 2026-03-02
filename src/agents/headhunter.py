@@ -124,6 +124,7 @@ class Headhunter:
         actionable = [t for t in todos if t.get("action_name") in V1_ACTIONABLE]
         if not actionable:
             return []
+        actionable.sort(key=lambda t: t.get("created_at", ""))
 
         grouped = self._group_by_mr(actionable)
         result = []
@@ -132,6 +133,7 @@ class Headhunter:
                 continue
             best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
             result.append(best)
+        result.sort(key=lambda t: t.get("created_at", ""))
         return result
 
     @staticmethod

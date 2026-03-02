@@ -377,4 +377,5 @@ async def headhunter_pending_todos():
             "created_at": todo.get("created_at", ""),
             "target_url": todo.get("target_url", ""),
         })
+    result.sort(key=lambda t: t.get("created_at", ""))
     return result

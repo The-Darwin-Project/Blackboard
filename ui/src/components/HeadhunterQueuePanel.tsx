@@ -140,7 +140,10 @@ export default function HeadhunterQueuePanel() {
               !{todo.mr_iid} {todo.mr_title}
             </div>
             {/* Row 3: project + author */}
-            <div style={{ fontSize: 10, color: '#64748b' }}>
+            <div style={{
+              fontSize: 10, color: '#64748b',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
               {projectName} · {todo.author}
             </div>
           </a>
