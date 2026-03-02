@@ -260,7 +260,7 @@ class Headhunter:
         url = context.get("target_url", "")
 
         is_bot_mr = "bot_" in author or "submodule-updater" in author
-        is_review = action in ("review_requested", "approval_required")
+        is_review = action in ("review_requested", "approval_required", "directly_addressed")
         is_failed = pipeline == "failed"
 
         if is_bot_mr and is_review and is_failed:

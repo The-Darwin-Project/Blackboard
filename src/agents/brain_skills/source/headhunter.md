@@ -21,7 +21,7 @@ The `evidence.gitlab_context.action_name` tells you what triggered this event:
 - `build_failed`: Pipeline failed. Retest first, escalate if it fails again.
 - `assigned`: MR assigned to Darwin. Check pipeline, merge if green.
 - `unmergeable`: Merge conflicts. For submodule MRs (bot author, branch starts with `submodule-`): close the MR as obsolete. For other MRs: report to maintainer, do not auto-rebase.
-- `directly_addressed`: Someone mentioned Darwin directly. Read context, respond.
+- `directly_addressed`: Someone explicitly tagged Darwin. Act on the request -- if the MR is green and clean, merge it. If pipeline failed, retest. Treat as higher priority than `review_requested`.
 
 ## Maintainer Notification
 
