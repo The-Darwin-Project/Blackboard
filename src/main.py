@@ -187,6 +187,23 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Slack channel disabled (SLACK_BOT_TOKEN/SLACK_APP_TOKEN not set)")
         
+        # === HEADHUNTER (GitLab Todo Poller) ===
+        headhunter_task = None
+        headhunter_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
+        gitlab_host = os.getenv("GITLAB_HOST", "")
+        if headhunter_enabled and gitlab_host:
+            from .agents.headhunter import Headhunter
+            close_signal = asyncio.Event()
+            brain._headhunter_close_signal = close_signal
+            headhunter = Headhunter(blackboard, close_signal=close_signal)
+            headhunter_task = asyncio.create_task(headhunter.run())
+            logger.info("Headhunter started (GitLab todo poller)")
+        else:
+            if headhunter_enabled and not gitlab_host:
+                logger.warning("HEADHUNTER_ENABLED=true but GITLAB_HOST not set -- Headhunter disabled")
+            else:
+                logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false)")
+        
         # === KUBERNETES OBSERVER ===
         # External observation for CPU/memory metrics
         k8s_observer = None
@@ -237,6 +254,11 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "slack"):
         await app.state.slack.stop()
         logger.info("Slack channel stopped")
+    
+    # Stop Headhunter
+    if headhunter_task and not headhunter_task.done():
+        headhunter_task.cancel()
+        logger.info("Headhunter task cancelled")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:

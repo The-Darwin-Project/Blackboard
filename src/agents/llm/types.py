@@ -359,6 +359,33 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["agent_id", "message"],
         },
     },
+    {
+        "name": "notify_gitlab_result",
+        "description": (
+            "Post a result comment on a GitLab MR and optionally re-assign the reviewer. "
+            "Use for headhunter-sourced events when the task is complete or needs escalation. "
+            "The MR details are in evidence.gitlab_context. "
+            "If evidence.gitlab_context is missing, this tool returns an error."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "integer", "description": "GitLab project ID from evidence.gitlab_context.project_id"},
+                "mr_iid": {"type": "integer", "description": "MR internal ID from evidence.gitlab_context.mr_iid"},
+                "result": {
+                    "type": "string",
+                    "enum": ["success", "failure", "escalation"],
+                    "description": "Outcome: success (merged/resolved), failure (still broken), escalation (needs human)",
+                },
+                "summary": {"type": "string", "description": "Text to post as MR comment summarizing what Darwin did"},
+                "reassign_reviewer": {
+                    "type": "boolean",
+                    "description": "If true, re-tag the maintainer as MR reviewer (use on failure/escalation)",
+                },
+            },
+            "required": ["project_id", "mr_iid", "result", "summary"],
+        },
+    },
 ]
 
 

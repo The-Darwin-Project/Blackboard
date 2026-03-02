@@ -211,6 +211,19 @@ spec:
             - name: ALIGNER_ERROR_RATE_THRESHOLD
               value: "{{ .Values.aligner.thresholds.errorRate }}"
             {{- end }}
+            {{- if .Values.headhunter }}
+            # Headhunter (GitLab todo poller)
+            - name: HEADHUNTER_ENABLED
+              value: "{{ .Values.headhunter.enabled }}"
+            - name: HEADHUNTER_POLL_INTERVAL
+              value: "{{ .Values.headhunter.pollInterval }}"
+            - name: HEADHUNTER_MAX_ACTIVE
+              value: "{{ .Values.headhunter.maxActive }}"
+            - name: HEADHUNTER_MAINTAINER_SOURCE
+              value: "{{ .Values.headhunter.maintainerSource }}"
+            - name: HEADHUNTER_MAINTAINERS
+              value: "{{ .Values.headhunter.maintainers }}"
+            {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)
             - name: SLACK_BOT_TOKEN

@@ -268,6 +268,9 @@ class EventEvidence(BaseModel):
     domain: str = Field("complicated", description="Cynefin: clear|complicated|complex|chaotic")
     severity: str = Field("warning", description="info|warning|critical")
     metrics: Optional[EventMetrics] = None
+    gitlab_context: Optional[dict] = Field(
+        None, description="GitLab todo context: todo_id, action_name, project_id, mr_iid, pipeline_status, maintainer"
+    )
 
 
 class EventInput(BaseModel):

@@ -283,6 +283,15 @@ slack:
   userMapping:
     method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================
+# Headhunter (GitLab Todo Poller)
+# =============================================================================
+headhunter:
+  enabled: false # Set to true + configure GITLAB_HOST to activate
+  pollInterval: "300" # seconds between poll cycles
+  maxActive: "1" # max concurrent headhunter events (flow gate)
+  maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
+  maintainers: "" # CSV of emails for static source (e.g., "alice@redhat.com,bob@redhat.com")
+# =============================================================================
 # Node Selection (optional)
 # =============================================================================
 nodeSelector: {}

@@ -1650,6 +1650,38 @@ class BlackboardState:
             results.append((eid, close_time, summary))
         return results
 
+    async def get_recent_closed_by_source(
+        self, source: str, minutes: int = 30
+    ) -> list[EventDocument]:
+        """Get recently closed events filtered by source (e.g., 'headhunter').
+
+        Uses pipeline for batch-GET. Scoped to source to keep the result set small.
+        """
+        cutoff = time.time() - (minutes * 60)
+        event_ids = await self.redis.zrangebyscore(self.EVENT_CLOSED, cutoff, "+inf")
+        if not event_ids:
+            return []
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for eid in event_ids:
+                pipe.get(f"{self.EVENT_PREFIX}{eid}")
+            docs = await pipe.execute()
+        results = []
+        for raw in docs:
+            if not raw:
+                continue
+            event = EventDocument(**json.loads(raw))
+            if event.source == source:
+                results.append(event)
+        return results
+
+    async def is_feedback_sent(self, event_id: str) -> bool:
+        """Check if headhunter feedback was already sent for an event."""
+        return bool(await self.redis.get(f"darwin:headhunter:feedback:{event_id}"))
+
+    async def mark_feedback_sent(self, event_id: str, ttl: int = 3600) -> None:
+        """Mark headhunter feedback as sent (TTL prevents unbounded growth)."""
+        await self.redis.set(f"darwin:headhunter:feedback:{event_id}", "1", ex=ttl)
+
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""
         from datetime import datetime, timezone

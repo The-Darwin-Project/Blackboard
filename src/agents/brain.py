@@ -1719,6 +1719,37 @@ class Brain:
             await self._broadcast_turn(event_id, turn)
             return True
 
+        elif function_name == "notify_gitlab_result":
+            event_doc = await self.blackboard.get_event(event_id)
+            gl_ctx = None
+            if event_doc and event_doc.event.evidence:
+                ev = event_doc.event.evidence
+                gl_ctx = getattr(ev, "gitlab_context", None) if hasattr(ev, "gitlab_context") else None
+            if not gl_ctx:
+                result_text = "Cannot notify GitLab: no gitlab_context in event evidence. This tool is for headhunter-sourced events only."
+            else:
+                project_id = args.get("project_id", gl_ctx.get("project_id"))
+                mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
+                result_type = args.get("result", "success")
+                summary = args.get("summary", "")
+                reassign = args.get("reassign_reviewer", False)
+                result_text = (
+                    f"GitLab notification queued: {result_type} on !{mr_iid} (project {project_id}). "
+                    f"Summary: {summary[:200]}. Reassign reviewer: {reassign}. "
+                    f"Feedback will be posted by Headhunter feedback loop on event close."
+                )
+                logger.info(f"notify_gitlab_result: event={event_id} project={project_id} mr=!{mr_iid} result={result_type}")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="notify",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            return True
+
         else:
             logger.warning(f"Unknown function call: {function_name}")
             return False
@@ -2085,6 +2116,9 @@ class Brain:
             "event_id": event_id,
             "summary": summary,
             })
+        signal = getattr(self, '_headhunter_close_signal', None)
+        if signal and event and event.source == "headhunter":
+            signal.set()
 
     # =========================================================================
     # Active Task Cancellation
