@@ -111,12 +111,12 @@ class Headhunter:
         return f"https://{self._gitlab_host}/api/v4{path}"
 
     async def poll_cycle(self) -> list[dict]:
-        """Fetch pending todos, filter actionable, group by MR, return highest-priority per MR."""
+        """Fetch pending todos (oldest first), filter actionable, group by MR, return highest-priority per MR."""
         async with httpx.AsyncClient(verify=False, timeout=30) as client:
             resp = await client.get(
                 self._api_url("/todos"),
                 headers=self._headers(),
-                params={"state": "pending", "type": "MergeRequest"},
+                params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
             )
             resp.raise_for_status()
             todos = resp.json()
