@@ -31,6 +31,17 @@ function GitLabIcon({ size }: { size: number }) {
   );
 }
 
+function HeadhunterIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 13L2.5 9L3.8 3L5.5 7.5H10.5L12.2 3L13.5 9L8 13Z" fill="#E24329" opacity="0.85" />
+      <path d="M8 13L5.5 7.5H10.5L8 13Z" fill="#FC6D26" opacity="0.85" />
+      <circle cx="12" cy="4" r="3.5" stroke="#38bdf8" strokeWidth="1.2" fill="none" />
+      <line x1="14.5" y1="6.5" x2="15.5" y2="7.5" stroke="#38bdf8" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function GitHubIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill={ICON_COLOR} aria-hidden="true">
@@ -67,6 +78,7 @@ function FallbackIcon({ size }: { size: number }) {
 const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   slack: SlackIcon,
   gitlab: GitLabIcon,
+  headhunter: HeadhunterIcon,
   github: GitHubIcon,
   chat: ChatIcon,
   aligner: AlignerIcon,

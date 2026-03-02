@@ -44,11 +44,9 @@ ACTION_PRIORITY = {
 MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
 
-# Static maintainer list (safety default -- CSV of emails, one env var).
-# Override with HEADHUNTER_MAINTAINER_SOURCE=smartsheet for per-component resolution.
-STATIC_MAINTAINER_EMAILS: list[str] = [
-    e.strip() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()
-]
+def _get_static_maintainer_emails() -> list[str]:
+    """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
+    return [e.strip() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()]
 
 
 class Headhunter:
@@ -402,7 +400,11 @@ class Headhunter:
         return event_id
 
     async def _resolve_service(self, project_path: str) -> str:
-        """Map GitLab project path to a Darwin service name via service registry."""
+        """Map GitLab project path to a Darwin service name via service registry.
+
+        Fallback: extract the last path segment as a meaningful component name
+        (e.g., 'openshift-virtualization/konflux-builds/v4-99/kubevirt' -> 'kubevirt').
+        """
         try:
             services = await self.blackboard.get_services()
             for svc in services.values():
@@ -412,7 +414,7 @@ class Headhunter:
                     return svc.name
         except Exception:
             pass
-        return "general"
+        return project_path.rsplit("/", 1)[-1] if "/" in project_path else project_path or "general"
 
     async def resolve_maintainer(self, project_path: str, todo: dict) -> dict:
         """Resolve maintainer for escalation. Source controlled by HEADHUNTER_MAINTAINER_SOURCE.
@@ -425,15 +427,36 @@ class Headhunter:
             if maintainer:
                 return {**maintainer, "source": "smartsheet"}
 
-        if STATIC_MAINTAINER_EMAILS:
-            return {"source": "static", "emails": STATIC_MAINTAINER_EMAILS}
+        static_emails = _get_static_maintainer_emails()
+        if static_emails:
+            return {"source": "static", "emails": static_emails}
 
         target = todo.get("target", {})
         assignee = target.get("assignee") or target.get("author", {})
         if assignee and assignee.get("username"):
-            return {"source": "mr_metadata", "emails": [], "name": assignee["username"]}
+            email = await self._resolve_email_from_gitlab(assignee["username"])
+            emails = [email] if email else []
+            return {"source": "mr_metadata", "emails": emails, "name": assignee["username"]}
 
         return {"source": "static", "emails": []}
+
+    async def _resolve_email_from_gitlab(self, username: str) -> str | None:
+        """Lookup a GitLab user's email by username. Returns email or None."""
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=10) as client:
+                resp = await client.get(
+                    self._api_url(f"/users?username={username}"),
+                    headers=self._headers(),
+                )
+                if resp.is_success:
+                    users = resp.json()
+                    if users and users[0].get("public_email"):
+                        return users[0]["public_email"]
+                    if users and users[0].get("email"):
+                        return users[0]["email"]
+        except Exception as e:
+            logger.debug(f"GitLab email lookup failed for {username}: {e}")
+        return None
 
     async def _resolve_from_smartsheet(self, project_path: str) -> dict | None:
         """Resolve from Smartsheet API (lazy-loaded). Only active when source=smartsheet."""

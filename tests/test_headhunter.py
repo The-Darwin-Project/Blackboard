@@ -239,13 +239,13 @@ class TestServiceResolution:
         assert result == "my-service"
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_general(self):
+    async def test_falls_back_to_project_name(self):
         bb = StubBlackboard()
         bb.get_services = AsyncMock(return_value={})
         hh = _make_headhunter(blackboard=bb)
 
-        result = await hh._resolve_service("unknown/repo")
-        assert result == "general"
+        result = await hh._resolve_service("openshift-virtualization/konflux-builds/v5-99/kubevirt")
+        assert result == "kubevirt"
 
 
 # =========================================================================

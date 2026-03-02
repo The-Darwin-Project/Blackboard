@@ -18,11 +18,23 @@ Post a `/retest` comment on the MR to trigger a pipeline rerun:
 glab api /projects/:id/merge_requests/:iid/notes -f body="/retest"
 ```
 
-After posting, wait 30 seconds, then check pipeline status:
+After posting, check pipeline status:
 
 ```bash
 glab api "/projects/:id/pipelines?ref=:source_branch&order_by=updated_at&per_page=1"
 ```
+
+## Pipeline Timing
+
+Konflux/Tekton pipelines take 20-30 minutes. After retesting:
+
+1. Check pipeline status immediately. If `running` or `pending`:
+   - Report back: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."
+   - The Brain will defer the event and re-dispatch you later to check the result.
+2. If `success`: proceed to merge.
+3. If `failed`: read the failed job log and report the error.
+
+Do NOT poll in a loop -- report the current state and let the Brain handle the timing.
 
 ## Merge MR
 
@@ -49,11 +61,13 @@ If merge_status is `cannot_be_merged`:
 glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflicts detected. Manual rebase required. Notifying maintainer."
 ```
 
-2. In your response to the Brain, recommend sending a Slack notification to the maintainer about the conflict. The Brain owns Slack -- you do not have Slack access.
+1. In your response to the Brain, recommend sending a Slack notification to the maintainer about the conflict. The Brain owns Slack -- you do not have Slack access.
 
 ## Reporting Results
 
 Always end your response with a clear recommendation for the Brain:
+
 - **Success**: "MR merged successfully. Recommend notifying maintainer via Slack."
+- **Pipeline running**: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."
 - **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer via Slack with failure details."
 - **Conflict**: "Merge conflicts detected. Recommend notifying maintainer via Slack to rebase."

@@ -18,11 +18,19 @@ interface EventTicketCardProps {
   onClose: (id: string) => void;
 }
 
+/** Extract plan title from YAML frontmatter reason, or return raw text for non-frontmatter. */
+export function extractReasonDisplay(reason: string): string {
+  if (!reason.startsWith('---')) return reason;
+  const match = reason.match(/plan:\s*"?([^"\n]+)"?/);
+  return match?.[1]?.trim() || reason.replace(/---[\s\S]*?---/, '').trim() || reason;
+}
+
 export default function EventTicketCard({ event, isSelected, onSelect, onClose }: EventTicketCardProps) {
   const domain = (event.evidence?.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
   const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
   const statusStyle = STATUS_COLORS[event.status] || STATUS_COLORS.active;
   const metrics = event.evidence?.metrics;
+  const reasonText = extractReasonDisplay(event.reason);
 
   const handleClose = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -104,7 +112,7 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
         marginBottom: metrics ? 8 : 0,
       }} title={event.reason}>
-        {event.reason}
+        {reasonText}
       </div>
 
       {/* Metrics + turns (compact footer) */}

@@ -18,6 +18,7 @@ import ReportGrid from './ReportGrid';
 import ReportContent from './ReportContent';
 import ReportToolbar from './ReportToolbar';
 import { DOMAIN_COLORS } from '../constants/colors';
+import { extractReasonDisplay } from './EventTicketCard';
 
 export default function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -226,7 +227,7 @@ function SidebarCard({ report, isSelected, onClick }: {
         {report.service}
       </div>
       <div style={{ fontSize: 11, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {report.reason}
+        {extractReasonDisplay(report.reason)}
       </div>
       <div style={{ fontSize: 10, color: '#475569', marginTop: 2 }}>
         {new Date(report.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} &middot; {report.turns} turns

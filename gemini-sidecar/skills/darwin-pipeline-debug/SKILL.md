@@ -24,19 +24,34 @@ glab api "/projects/:id/jobs/:job_id/trace" | tail -50
 ## Error Classification (v1)
 
 After reading the log, classify:
+
 - **Transient**: network timeout, registry pull failure, flaky test -> retest via `/retest`
 - **Real failure**: compilation error, missing dependency, test assertion -> report to maintainer
+
+## Pipeline Timing
+
+Konflux/Tekton pipelines take 20-30 minutes. After retesting:
+
+1. Check pipeline status immediately. If `running` or `pending`:
+   - Report back: "Pipeline retested, currently running. Recommend re-checking in 5 minutes."
+   - The Brain will defer the event and re-dispatch you later to check the result.
+2. If `success`: report that retry resolved the issue.
+3. If `failed`: read the new failed job log and report the error.
+
+Do NOT poll in a loop -- report the current state and let the Brain handle the timing.
 
 ## v1 Scope
 
 - Read failed job log and report error type
 - Retry pipeline once via `/retest` comment
-- Check result after retry
+- Check result after retry -- if still running, report and let Brain defer
 - Do NOT attempt root cause analysis
 - Do NOT modify code or config to fix the pipeline
 
 ## Reporting Results
 
 Always end your response with a clear recommendation for the Brain:
+
 - **Transient (retry succeeded)**: "Pipeline green after retry. Recommend merging and notifying maintainer via Slack."
+- **Pipeline running**: "Pipeline retested, currently running. Recommend re-checking in 5 minutes."
 - **Persistent failure**: "Pipeline still failing after retry. Error: {description}. Recommend notifying maintainer via Slack with failure details."

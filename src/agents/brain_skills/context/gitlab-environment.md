@@ -26,6 +26,7 @@ Darwin's GitLab SA CANNOT:
 - Retry failed pipelines once. If the retry also fails, escalate to maintainer.
 - Do NOT attempt root cause analysis of pipeline failures in v1 -- just report the error.
 - Konflux/Tekton pipelines are external. GitLab shows them as "external" pipeline status.
+- **Timing: Konflux pipelines take 20-30 minutes.** When the developer reports "pipeline running, recommend re-checking in 5 minutes," use `defer_event` to wait. Re-dispatch the developer after the deferral to check the result. Max 3 re-checks before escalating to maintainer.
 
 ## MR Lifecycle
 
