@@ -18,7 +18,7 @@ requires:
 The `evidence.gitlab_context.action_name` tells you what triggered this event:
 
 - `review_requested` / `approval_required`: MR needs review. Check pipeline status. Darwin does NOT auto-approve in v1.
-- `build_failed`: Pipeline failed. Retest first, escalate if it fails again.
+- `build_failed`: Pipeline failed. Retest first, escalate if it failsdirectly_addressed again.
 - `assigned`: MR assigned to Darwin. Check pipeline, merge if green.
 - `unmergeable`: Merge conflicts. For submodule MRs (bot author, branch starts with `submodule-`): close the MR as obsolete. For other MRs: report to maintainer, do not auto-rebase.
 - `directly_addressed`: Someone explicitly tagged Darwin. Act on the request -- if the MR is green and clean, merge it. If pipeline failed, retest. Treat as higher priority than `review_requested`.
