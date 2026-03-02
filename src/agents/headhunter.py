@@ -615,7 +615,8 @@ class Headhunter:
                 break
             project_id = todo.get("project", {}).get("id", 0)
             mr_iid = todo.get("target", {}).get("iid", 0)
-            if await self._is_recently_processed(project_id, mr_iid):
+            action = todo.get("action_name", "")
+            if action not in ("directly_addressed", "mentioned") and await self._is_recently_processed(project_id, mr_iid):
                 logger.info(f"Headhunter: skipping !{mr_iid} (recently processed)")
                 continue
             context = await self.fetch_context(todo)
