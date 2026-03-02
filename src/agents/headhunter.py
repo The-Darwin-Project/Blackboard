@@ -499,10 +499,14 @@ class Headhunter:
             logger.warning("Headhunter disabled: GITLAB_HOST not set")
             return
 
+        startup_delay = int(os.getenv("HEADHUNTER_STARTUP_DELAY", "180"))
         logger.info(
-            f"Headhunter started (poll={self._poll_interval}s, max_active={self._max_active}, "
-            f"model={self._model_name})"
+            f"Headhunter waiting {startup_delay}s for sidecars to connect before first poll "
+            f"(poll={self._poll_interval}s, max_active={self._max_active}, model={self._model_name})"
         )
+        await asyncio.sleep(startup_delay)
+        logger.info("Headhunter started")
+
         if self._close_signal:
             asyncio.create_task(self._feedback_loop())
             logger.info("Headhunter feedback loop started (Signal + Poll hybrid)")

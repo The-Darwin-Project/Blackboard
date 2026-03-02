@@ -289,6 +289,7 @@ headhunter:
   enabled: false # Set to true + configure GITLAB_HOST to activate
   pollInterval: "300" # seconds between poll cycles
   maxActive: "1" # max concurrent headhunter events (flow gate)
+  startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of emails for static source (e.g., "alice@redhat.com,bob@redhat.com")
 # =============================================================================

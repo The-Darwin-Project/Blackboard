@@ -219,6 +219,8 @@ spec:
               value: "{{ .Values.headhunter.pollInterval }}"
             - name: HEADHUNTER_MAX_ACTIVE
               value: "{{ .Values.headhunter.maxActive }}"
+            - name: HEADHUNTER_STARTUP_DELAY
+              value: "{{ .Values.headhunter.startupDelay }}"
             - name: HEADHUNTER_MAINTAINER_SOURCE
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
