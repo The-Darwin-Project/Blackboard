@@ -236,6 +236,27 @@ export async function getAgents(): Promise<AgentRegistryEntry[]> {
 }
 
 // =============================================================================
+// Headhunter Queue API
+// =============================================================================
+
+export interface HeadhunterTodo {
+  todo_id: number;
+  action: string;
+  priority: number;
+  mr_iid: number;
+  mr_title: string;
+  project_path: string;
+  author: string;
+  pipeline_status: string;
+  created_at: string;
+  target_url: string;
+}
+
+export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {
+  return fetchApi<HeadhunterTodo[]>('/queue/headhunter/pending');
+}
+
+// =============================================================================
 // Configuration API (AI Transparency & Compliance)
 // =============================================================================
 

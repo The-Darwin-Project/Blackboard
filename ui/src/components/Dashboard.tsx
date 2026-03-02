@@ -16,6 +16,7 @@ import GraphContextMenu from './GraphContextMenu';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
 import AgentRegistryPanel from './AgentRegistryPanel';
+import HeadhunterQueuePanel from './HeadhunterQueuePanel';
 import ConversationFeed from './ConversationFeed';
 import AgentStreamCard from './AgentStreamCard';
 import TabPanel from './TabPanel';
@@ -82,6 +83,7 @@ const MIDDLE_TABS: Tab[] = [
 const RIGHT_TABS: Tab[] = [
   { id: 'resources', label: 'Resources' },
   { id: 'agents', label: 'Agents' },
+  { id: 'queue', label: 'Queue' },
 ];
 
 function DashboardInner() {
@@ -415,6 +417,7 @@ function DashboardInner() {
             <div className="flex-1 p-4 overflow-auto min-h-0">
               {rightTab === 'resources' && <MetricChart />}
               {rightTab === 'agents' && <AgentRegistryPanel />}
+              {rightTab === 'queue' && <HeadhunterQueuePanel />}
             </div>
           </div>
         )}

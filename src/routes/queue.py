@@ -319,3 +319,62 @@ async def rebuild_deep_memory(
         "failed": failed,
         "total": len(closed_ids),
     }
+
+
+@router.get("/headhunter/pending")
+async def headhunter_pending_todos():
+    """Return pending GitLab todos that the Headhunter would process next.
+
+    Lightweight read-only endpoint for UI observability. No events created.
+    Returns empty list if Headhunter is disabled or GitLab is unavailable.
+    """
+    import os
+    import httpx
+
+    gitlab_host = os.getenv("GITLAB_HOST", "")
+    if not gitlab_host or os.getenv("HEADHUNTER_ENABLED", "false").lower() != "true":
+        return []
+
+    from ..agents.headhunter import V1_ACTIONABLE, ACTION_PRIORITY
+    try:
+        from ..utils.gitlab_token import get_gitlab_auth
+        auth = get_gitlab_auth()
+        if not auth:
+            return []
+        token = auth.get_token()
+    except Exception:
+        return []
+
+    try:
+        async with httpx.AsyncClient(verify=False, timeout=15) as client:
+            resp = await client.get(
+                f"https://{gitlab_host}/api/v4/todos",
+                headers={"PRIVATE-TOKEN": token},
+                params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
+            )
+            if not resp.is_success:
+                return []
+            todos = resp.json()
+    except Exception:
+        return []
+
+    result = []
+    for todo in todos:
+        action = todo.get("action_name", "")
+        if action not in V1_ACTIONABLE:
+            continue
+        target = todo.get("target", {})
+        project = todo.get("project", {})
+        result.append({
+            "todo_id": todo.get("id"),
+            "action": action,
+            "priority": ACTION_PRIORITY.get(action, 99),
+            "mr_iid": target.get("iid"),
+            "mr_title": target.get("title", ""),
+            "project_path": project.get("path_with_namespace", ""),
+            "author": target.get("author", {}).get("username", ""),
+            "pipeline_status": target.get("pipeline", {}).get("status", "unknown") if target.get("pipeline") else "unknown",
+            "created_at": todo.get("created_at", ""),
+            "target_url": todo.get("target_url", ""),
+        })
+    return result
