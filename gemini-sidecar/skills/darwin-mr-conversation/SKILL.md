@@ -32,7 +32,8 @@ glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: your response 
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain:
+Always end your response with a clear recommendation for the Brain.
+Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
 - **Answered**: "Responded to MR comment thread. No further action needed."
 - **Needs human**: "Question requires human judgment. Recommend notifying maintainer via Slack to respond on the MR."

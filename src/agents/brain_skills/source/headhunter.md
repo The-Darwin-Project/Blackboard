@@ -25,9 +25,10 @@ The `evidence.gitlab_context.action_name` tells you what triggered this event:
 
 ## Maintainer Notification
 
-- The maintainer info is in `evidence.gitlab_context.maintainer`.
-- If `maintainer.emails` is a non-empty list, use `notify_user_slack` for EACH email.
-- If `maintainer.emails` is empty but `maintainer.name` is present (mr_metadata fallback), use `notify_user_slack` with the name as a display-name lookup.
+- ALWAYS use `evidence.gitlab_context.maintainer.emails` for Slack notifications.
+- Do NOT use usernames or @mentions from agent responses -- agents read MR metadata which may contain usernames without valid email addresses. Only the evidence field has verified emails.
+- Call `notify_user_slack` for EACH email in `maintainer.emails`.
+- If `maintainer.emails` is empty, skip Slack notification and note it in the close summary.
 - Notify on both success (MR merged) and failure (pipeline still failing after retry).
 
 ## Close Protocol

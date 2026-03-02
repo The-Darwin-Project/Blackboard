@@ -61,11 +61,12 @@ If merge_status is `cannot_be_merged`:
 glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflicts detected. Manual rebase required. Notifying maintainer."
 ```
 
-1. In your response to the Brain, recommend sending a Slack notification to the maintainer about the conflict. The Brain owns Slack -- you do not have Slack access.
+1. In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain:
+Always end your response with a clear recommendation for the Brain.
+Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
 - **Success**: "MR merged successfully. Recommend notifying maintainer via Slack."
 - **Pipeline running**: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."

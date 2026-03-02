@@ -33,7 +33,8 @@ Post a structured summary as an MR comment:
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain:
+Always end your response with a clear recommendation for the Brain.
+Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
 - **Needs approval**: "MR summarized and comment posted. Recommend notifying approver via Slack to review."
 - **Low risk, routine**: "Routine change with green pipeline. Recommend notifying approver via Slack for quick approval."
