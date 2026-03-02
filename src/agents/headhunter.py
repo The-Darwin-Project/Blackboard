@@ -49,6 +49,31 @@ def _get_static_maintainer_emails() -> list[str]:
     return [e.strip() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()]
 
 
+def _get_allowed_mention_authors() -> set[str]:
+    """Build a set of GitLab usernames allowed to instruct Darwin via @mentions.
+
+    Sources (merged):
+    1. HEADHUNTER_MAINTAINERS emails -> local part before @
+    2. HEADHUNTER_ALLOWED_AUTHORS -> explicit GitLab usernames (CSV)
+
+    Never returns empty -- if nothing is configured, returns {"_nobody_"} to block all
+    mentions. Use HEADHUNTER_ALLOWED_AUTHORS=* to allow everyone (not recommended).
+    """
+    authors: set[str] = set()
+    emails = _get_static_maintainer_emails()
+    for e in emails:
+        if "@" in e:
+            authors.add(e.split("@")[0])
+    explicit = os.getenv("HEADHUNTER_ALLOWED_AUTHORS", "")
+    if explicit.strip() == "*":
+        return set()
+    for name in explicit.split(","):
+        name = name.strip()
+        if name:
+            authors.add(name)
+    return authors or {"_nobody_"}
+
+
 class Headhunter:
     """GitLab todo poller -- observes MR/pipeline assignments and creates Darwin events."""
 
@@ -211,6 +236,26 @@ class Headhunter:
             context["pipeline_status"] = pipeline_status
             context["failed_job_log"] = failed_job_log
 
+            if action in ("directly_addressed", "mentioned"):
+                bot_username = os.getenv("GITLAB_BOT_USERNAME", "cnv-downstream-bot")
+                notes_resp = await client.get(
+                    self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
+                    headers=headers,
+                    params={"sort": "desc", "per_page": "10"},
+                )
+                if notes_resp.is_success:
+                    allowed_authors = _get_allowed_mention_authors()
+                    for note in notes_resp.json():
+                        body = note.get("body", "")
+                        note_author = note.get("author", {}).get("username", "")
+                        if f"@{bot_username}" in body:
+                            if allowed_authors and note_author not in allowed_authors:
+                                logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
+                                continue
+                            context["mention_comment"] = body
+                            context["mention_author"] = note_author
+                            break
+
         return context
 
     # =========================================================================
@@ -305,6 +350,29 @@ class Headhunter:
             logger.info(f"Fast-path: bot MR + review_requested + green pipeline -> CLEAR merge plan")
             return plan, "clear"
 
+        mention = context.get("mention_comment", "")
+        if action == "directly_addressed" and mention:
+            plan = (
+                f"---\n"
+                f"plan: \"Handle direct request on {title}\"\n"
+                f"service: general\n"
+                f"repository: {project}\n"
+                f"domain: CLEAR\n"
+                f"risk: low\n"
+                f"steps:\n"
+                f"  - id: follow-instruction\n"
+                f"    agent: developer\n"
+                f"    mode: execute\n"
+                f"    summary: \"Someone requested action on MR {url}."
+                f" Their instruction: {mention.replace(chr(34), chr(39))}"
+                f" -- Follow this instruction. Check pipeline and merge status before acting."
+                f" Notify the maintainer via Slack about the result.\"\n"
+                f"    status: pending\n"
+                f"---"
+            )
+            logger.info(f"Fast-path: directly_addressed with instruction -> CLEAR follow-instruction plan")
+            return plan, "clear"
+
         return None
 
     def _build_analysis_prompt(self, context: dict) -> str:
@@ -324,6 +392,8 @@ class Headhunter:
             parts.append(f"Labels: {', '.join(context['labels'])}")
         if context.get("failed_job_log"):
             parts.append(f"Failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
+        if context.get("mention_comment"):
+            parts.append(f"Direct request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
         parts.append(
             "\nProduce a YAML frontmatter work plan with fields: plan, service, repository, "
