@@ -33,11 +33,39 @@ AGENT_EMOJI: dict[str, str] = {
 import re
 
 
+def _md_table_to_text(match: re.Match) -> str:
+    """Convert a markdown pipe table to padded plain-text columns."""
+    lines = match.group(0).strip().splitlines()
+    rows: list[list[str]] = []
+    for line in lines:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and all(re.match(r"^[-:]+$", c) for c in cells):
+            continue
+        rows.append(cells)
+    if not rows:
+        return match.group(0)
+    col_count = max(len(r) for r in rows)
+    widths = [0] * col_count
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < col_count:
+                widths[i] = max(widths[i], len(cell))
+    out: list[str] = []
+    for idx, row in enumerate(rows):
+        padded = [row[i].ljust(widths[i]) if i < len(row) else " " * widths[i] for i in range(col_count)]
+        out.append("  ".join(padded))
+        if idx == 0:
+            out.append("  ".join("-" * w for w in widths))
+    return "```\n" + "\n".join(out) + "\n```"
+
+
 def _md_to_mrkdwn(text: str) -> str:
     """Convert standard Markdown to Slack mrkdwn format.
 
     Slack uses *bold*, _italic_, ~strike~, and ```code``` but NOT **bold** or ### headings.
+    Markdown tables are converted to monospaced code blocks with aligned columns.
     """
+    text = re.sub(r"(?:^\|.+\|$\n?)+", _md_table_to_text, text, flags=re.MULTILINE)
     # Headers: ### Heading -> *Heading*
     text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
     # Bold: **text** -> *text*
