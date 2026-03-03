@@ -21,6 +21,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from .formatter import (
     format_turn, format_event_summary, get_turn_attachment_color,
     get_agent_notification_text, create_feedback_block, format_task_card,
+    extract_tables,
 )
 from ..models import EventEvidence
 
@@ -412,7 +413,7 @@ class SlackChannel:
             self._stream_sessions.pop(event_id, None)
 
     async def _handle_assistant_turn(self, event_id: str, message: dict) -> None:
-        """Finalize the stream with feedback blocks when Brain emits a turn."""
+        """Finalize the stream with feedback blocks (and table blocks if present)."""
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
 
@@ -425,7 +426,11 @@ class SlackChannel:
                 if turn.actor == "brain" and turn.action == "route":
                     card = format_task_card(turn, status="in_progress")
                     await stream.append(markdown_text=f"\n\n{card}")
-                await stream.stop(blocks=create_feedback_block())
+
+                raw_text = turn.result or turn.thoughts or ""
+                _, table_blocks = extract_tables(raw_text)
+                stop_blocks = table_blocks[:1] + create_feedback_block()
+                await stream.stop(blocks=stop_blocks)
                 logger.debug(f"Stream stopped for {event_id}")
                 return
             except Exception as e:
@@ -489,13 +494,25 @@ class SlackChannel:
 
     async def _send_turn_to_thread(self, event_doc: Any, turn: Any) -> None:
         """Format a ConversationTurn and post it to the event's Slack thread."""
+        raw_text = turn.result or turn.thoughts or ""
+        cleaned, table_blocks = extract_tables(raw_text)
+
+        original_result, original_thoughts = turn.result, turn.thoughts
+        if turn.result:
+            turn.result = cleaned
+        else:
+            turn.thoughts = cleaned
+
         blocks = format_turn(turn, event_id=event_doc.id)
-        fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
+        turn.result, turn.thoughts = original_result, original_thoughts
+
+        fallback = f"{turn.actor}.{turn.action}: {raw_text}"[:200]
         color = get_turn_attachment_color(turn)
         await self._post_to_thread(
             event_doc.slack_channel_id, event_doc.slack_thread_ts,
             get_agent_notification_text(turn) if color else fallback,
             blocks, attachment_color=color,
+            table_blocks=table_blocks[:1],
         )
 
     async def _update_turn_in_thread(
@@ -520,20 +537,27 @@ class SlackChannel:
     async def _post_to_thread(
         self, channel: str, thread_ts: str, text: str,
         blocks: list | None = None, attachment_color: str | None = None,
+        table_blocks: list | None = None,
     ) -> None:
         """Post a message to a Slack thread.
 
         If attachment_color is set, blocks are wrapped in a legacy attachment
         to render a colored side bar (per-agent visual identity).
+        table_blocks are appended as a separate attachment (one table per message).
         """
         try:
             kwargs: dict[str, Any] = {
                 "channel": channel, "thread_ts": thread_ts, "text": text,
             }
+            attachments: list[dict] = []
             if attachment_color and blocks:
-                kwargs["attachments"] = [{"color": attachment_color, "blocks": blocks}]
+                attachments.append({"color": attachment_color, "blocks": blocks})
             elif blocks:
                 kwargs["blocks"] = blocks
+            if table_blocks:
+                attachments.append({"blocks": table_blocks})
+            if attachments:
+                kwargs["attachments"] = attachments
             await self._app.client.chat_postMessage(**kwargs)
         except Exception as e:
             logger.warning(f"Slack post failed: {e}")

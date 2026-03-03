@@ -33,15 +33,24 @@ AGENT_EMOJI: dict[str, str] = {
 import re
 
 
-def _md_table_to_text(match: re.Match) -> str:
-    """Convert a markdown pipe table to padded plain-text columns."""
-    lines = match.group(0).strip().splitlines()
+def _parse_md_table(text: str) -> list[list[str]]:
+    """Parse markdown pipe table into list of rows (list of cell strings).
+    Skips separator rows (---|---). Returns empty list if not a valid table.
+    """
     rows: list[list[str]] = []
-    for line in lines:
+    for line in text.strip().splitlines():
+        if not line.strip():
+            continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         if cells and all(re.match(r"^[-:]+$", c) for c in cells):
             continue
         rows.append(cells)
+    return rows
+
+
+def _md_table_to_text(match: re.Match) -> str:
+    """Convert a markdown pipe table to padded plain-text columns (code block)."""
+    rows = _parse_md_table(match.group(0))
     if not rows:
         return match.group(0)
     col_count = max(len(r) for r in rows)
@@ -57,6 +66,37 @@ def _md_table_to_text(match: re.Match) -> str:
         if idx == 0:
             out.append("  ".join("-" * w for w in widths))
     return "```\n" + "\n".join(out) + "\n```"
+
+
+def _md_table_to_block_kit(table_text: str) -> dict | None:
+    """Convert markdown pipe table to a Block Kit table block dict."""
+    rows = _parse_md_table(table_text)
+    if len(rows) < 2:
+        return None
+    return {
+        "type": "table",
+        "rows": [[{"type": "raw_text", "text": cell} for cell in row] for row in rows],
+    }
+
+
+_TABLE_RE = re.compile(r"(?:^\|.+\|$\n?)+", re.MULTILINE)
+
+
+def extract_tables(text: str) -> tuple[str, list[dict]]:
+    """Extract markdown tables from text, returning cleaned text + Block Kit table blocks.
+    Tables are stripped from the text so they don't double-render as code blocks in _md_to_mrkdwn.
+    """
+    tables: list[dict] = []
+
+    def _replace(match: re.Match) -> str:
+        block = _md_table_to_block_kit(match.group(0))
+        if block:
+            tables.append(block)
+            return ""
+        return match.group(0)
+
+    cleaned = _TABLE_RE.sub(_replace, text).strip()
+    return cleaned, tables
 
 
 def _md_to_mrkdwn(text: str) -> str:

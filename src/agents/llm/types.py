@@ -83,9 +83,71 @@ class LLMPort(Protocol):
 # Each adapter converts these to its SDK's native format.
 
 BRAIN_TOOL_SCHEMAS: list[dict] = [
+    # --- Lookup tools (check BEFORE routing) ---
+    {
+        "name": "lookup_service",
+        "description": (
+            "Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, "
+            "version, replicas, and current metrics. Use this BEFORE routing to an agent when you "
+            "need a service's repository URL or deployment details."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {
+                    "type": "string",
+                    "description": "Service name to look up (e.g., 'darwin-store')",
+                },
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "lookup_journal",
+        "description": (
+            "Look up the ops journal for any service. Returns recent event history "
+            "(closures, scaling actions, fixes). Use FIRST for any question about what happened, "
+            "recent events, service history, or status. Can directly answer user questions "
+            "without needing an agent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service_name": {
+                    "type": "string",
+                    "description": "Service name to look up (e.g., 'darwin-store', 'postgres')",
+                },
+            },
+            "required": ["service_name"],
+        },
+    },
+    {
+        "name": "consult_deep_memory",
+        "description": (
+            "Search operational history for similar past events. Returns symptoms, root causes, "
+            "and fixes from past incidents. MUST be called before select_agent for recurring "
+            "issues, past event queries, or unfamiliar symptoms. Can directly answer user "
+            "questions about history without needing an agent."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for (e.g., 'high CPU on darwin-store')",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    # --- Routing tools (use AFTER lookup tools when agent action is needed) ---
     {
         "name": "select_agent",
-        "description": "Route work to an agent. Use this to assign a task to Architect, sysAdmin, Developer, or QE.",
+        "description": (
+            "Route work to an agent. Use ONLY when the task requires agent capabilities "
+            "(kubectl, git, code changes, ArgoCD). Do NOT use for questions answerable from "
+            "lookup_journal, consult_deep_memory, or lookup_service."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -237,59 +299,6 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
             },
             "required": ["summary"],
-        },
-    },
-    {
-        "name": "lookup_service",
-        "description": (
-            "Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, "
-            "version, replicas, and current metrics. Use this BEFORE routing to an agent when you "
-            "need a service's repository URL or deployment details."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "service_name": {
-                    "type": "string",
-                    "description": "Service name to look up (e.g., 'darwin-store')",
-                },
-            },
-            "required": ["service_name"],
-        },
-    },
-    {
-        "name": "lookup_journal",
-        "description": (
-            "Look up the ops journal for any service. Returns recent event history "
-            "(closures, scaling actions, fixes). Use to check what happened recently "
-            "to a service or its dependencies before making decisions."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "service_name": {
-                    "type": "string",
-                    "description": "Service name to look up (e.g., 'darwin-store', 'postgres')",
-                },
-            },
-            "required": ["service_name"],
-        },
-    },
-    {
-        "name": "consult_deep_memory",
-        "description": (
-            "Search operational history for similar past events. Returns symptoms, root causes, "
-            "and fixes from past incidents. Use before acting on unfamiliar issues."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to search for (e.g., 'high CPU on darwin-store')",
-                },
-            },
-            "required": ["query"],
         },
     },
     {
