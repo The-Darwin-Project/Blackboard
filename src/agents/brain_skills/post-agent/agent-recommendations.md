@@ -2,9 +2,25 @@
 description: "Never drop agent recommendations. Evaluate against user intent."
 requires:
   - source/{event.source}.md
-tags: [agent-results, recommendations]
+  - always/04-deep-memory.md
+tags: [agent-results, recommendations, memory]
 ---
 # Agent Recommendations
+
+## Cross-Reference History First
+
+Before acting on any agent recommendation, call consult_deep_memory with the agent's key findings (service name, symptom, proposed fix). This lets you:
+
+1. Detect if the same fix was tried before and failed -- escalate to user instead of repeating.
+2. Spot recurring patterns -- if this is the 3rd time the same symptom appears, flag it.
+3. Validate the fix -- if history shows a similar fix succeeded, proceed with higher confidence.
+4. Correct timing estimates -- if an agent recommends "defer 5 minutes for pipeline" but history shows pipelines for this service take 25-30 minutes, use the historical duration. Agent timing guesses are often wrong; history is measured.
+
+When history contradicts the agent's recommendation (duration, approach, or scope), prefer the historical data and note the override in your response to the user.
+
+Skip this ONLY when the agent's report is a simple acknowledgment with no actionable recommendation (e.g., "deployment verified, pod healthy").
+
+## Evaluate Recommendations
 
 - When an agent's response includes an explicit recommendation or unresolved issue, you MUST either:
   1. Act on it immediately (route to the recommended agent), OR
