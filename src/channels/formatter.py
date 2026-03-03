@@ -68,14 +68,27 @@ def _md_table_to_text(match: re.Match) -> str:
     return "```\n" + "\n".join(out) + "\n```"
 
 
+_MAX_TABLE_ROWS = 100
+_MAX_TABLE_COLS = 20
+
+
 def _md_table_to_block_kit(table_text: str) -> dict | None:
-    """Convert markdown pipe table to a Block Kit table block dict."""
+    """Convert markdown pipe table to a Block Kit table block dict.
+
+    Enforces Slack limits: 100 rows, 20 columns. Truncates with a footer on overflow.
+    """
     rows = _parse_md_table(table_text)
     if len(rows) < 2:
         return None
+    overflow = len(rows) > _MAX_TABLE_ROWS
+    col_count = min(max((len(r) for r in rows), default=1), _MAX_TABLE_COLS)
+    truncated = [row[:col_count] for row in rows[:_MAX_TABLE_ROWS]]
+    if overflow:
+        footer = [f"... ({len(rows) - _MAX_TABLE_ROWS} more rows)"] + [""] * (col_count - 1)
+        truncated.append(footer)
     return {
         "type": "table",
-        "rows": [[{"type": "raw_text", "text": cell} for cell in row] for row in rows],
+        "rows": [[{"type": "raw_text", "text": cell} for cell in row] for row in truncated],
     }
 
 
@@ -317,6 +330,110 @@ def format_plan_block(event_id: str, tasks: list[dict[str, str]]) -> list[dict]:
         icon = _TASK_STATUS_ICON.get(t.get("status", "in_progress"), ":gear:")
         lines.append(f"{icon} *{t['agent']}*: {t.get('text', '')}")
     return [_section("\n".join(lines))]
+
+
+SOURCE_EMOJI: dict[str, str] = {
+    "chat": ":speech_balloon:",
+    "slack": ":slack:",
+    "aligner": ":chart_with_upwards_trend:",
+    "headhunter": ":gitlab:",
+}
+
+STATUS_EMOJI: dict[str, str] = {
+    "new": ":new:",
+    "active": ":zap:",
+    "deferred": ":double_vertical_bar:",
+    "closed": ":white_check_mark:",
+}
+
+
+def build_home_tab_view(
+    active_events: list[dict],
+    recent_closed: list[dict],
+    agents: list[dict],
+    dashboard_url: str = "",
+) -> dict:
+    """Build a Slack Home tab view with active events, closures, agent status, and actions.
+
+    All arguments are plain dicts -- no model imports at call time.
+    Returns a complete views.publish view payload.
+    """
+    blocks: list[dict] = []
+
+    blocks.append({
+        "type": "header",
+        "text": {"type": "plain_text", "text": "Darwin Operations Center"},
+    })
+    blocks.append({"type": "divider"})
+
+    # --- Active Events ---
+    blocks.append(_section(":zap: *Active Events*"))
+    if active_events:
+        for evt in active_events[:10]:
+            src_icon = SOURCE_EMOJI.get(evt.get("source", ""), ":gear:")
+            status_icon = STATUS_EMOJI.get(evt.get("status", ""), ":gear:")
+            reason = _truncate(evt.get("reason", ""), 120)
+            evt_id = evt.get("id", "?")
+            svc = evt.get("service", "general")
+            turns = evt.get("turns", 0)
+            line = f"{status_icon} `{evt_id}` {src_icon} *{svc}* -- {reason} _({turns} turns)_"
+            blocks.append(_section(line))
+    else:
+        blocks.append(_section("_No active events. All systems nominal._"))
+
+    blocks.append({"type": "divider"})
+
+    # --- Recent Closures ---
+    blocks.append(_section(":white_check_mark: *Recently Closed* (last 24h)"))
+    if recent_closed:
+        lines = []
+        for evt in recent_closed[:8]:
+            evt_id = evt.get("id", "?")
+            svc = evt.get("service", "general")
+            summary = _truncate(evt.get("summary", ""), 100)
+            lines.append(f"- `{evt_id}` *{svc}* -- {summary}")
+        blocks.append(_section("\n".join(lines)))
+    else:
+        blocks.append(_section("_No events closed in the last 24 hours._"))
+
+    blocks.append({"type": "divider"})
+
+    # --- Agent Status ---
+    blocks.append(_section(":robot_face: *Connected Agents*"))
+    if agents:
+        lines = []
+        for a in agents:
+            role = a.get("role", "unknown")
+            emoji = AGENT_EMOJI.get(role, ":gear:")
+            busy = ":red_circle:" if a.get("busy") else ":large_green_circle:"
+            evt_id = a.get("current_event_id", "")
+            status = f"working on `{evt_id}`" if evt_id else "idle"
+            lines.append(f"{busy} {emoji} *{role}* -- {status}")
+        blocks.append(_section("\n".join(lines)))
+    else:
+        blocks.append(_section("_No agents connected._"))
+
+    blocks.append({"type": "divider"})
+
+    # --- Quick Actions ---
+    action_elements: list[dict] = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Create Event"},
+            "style": "primary",
+            "action_id": "darwin_home_create_event",
+        },
+    ]
+    if dashboard_url:
+        action_elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Open Dashboard"},
+            "url": dashboard_url,
+            "action_id": "darwin_home_open_dashboard",
+        })
+    blocks.append({"type": "actions", "elements": action_elements})
+
+    return {"type": "home", "blocks": blocks}
 
 
 def create_feedback_block() -> list:

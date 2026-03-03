@@ -316,6 +316,134 @@ class SlackChannel:
                 thread_ts=msg_ts, text=text,
             )
 
+        @self._app.event("app_home_opened")
+        async def handle_app_home_opened(event: dict, client: Any) -> None:
+            if event.get("tab") != "home":
+                return
+            user_id = event["user"]
+            try:
+                await self._publish_home_tab(client, user_id)
+            except Exception as e:
+                logger.warning(f"Home tab publish failed for {user_id}: {e}")
+
+        @self._app.action("darwin_home_create_event")
+        async def handle_home_create_event(ack: Any, body: dict, client: Any) -> None:
+            await ack()
+            await client.views_open(
+                trigger_id=body["trigger_id"],
+                view={
+                    "type": "modal",
+                    "callback_id": "darwin_create_event_modal",
+                    "title": {"type": "plain_text", "text": "Create Event"},
+                    "submit": {"type": "plain_text", "text": "Submit"},
+                    "close": {"type": "plain_text", "text": "Cancel"},
+                    "blocks": [
+                        {
+                            "type": "input",
+                            "block_id": "event_description",
+                            "label": {"type": "plain_text", "text": "Describe the issue or task"},
+                            "element": {
+                                "type": "plain_text_input",
+                                "action_id": "description_input",
+                                "multiline": True,
+                                "placeholder": {"type": "plain_text", "text": "e.g., darwin-store backend is returning 500 errors on /products"},
+                            },
+                        },
+                    ],
+                },
+            )
+
+        @self._app.view("darwin_create_event_modal")
+        async def handle_create_event_modal(ack: Any, body: dict, client: Any, view: dict) -> None:
+            await ack()
+            text = view["state"]["values"]["event_description"]["description_input"]["value"]
+            user_id = body["user"]["id"]
+            if not text or not text.strip():
+                return
+
+            event_id = await self._blackboard.create_event(
+                source="slack",
+                service="general",
+                reason=text.strip(),
+                evidence=EventEvidence(
+                    display_text=text.strip(),
+                    source_type="slack",
+                    domain="complicated",
+                    severity="info",
+                ),
+            )
+            event_doc = await self._blackboard.get_event(event_id)
+            blocks = format_event_summary(event_doc) if event_doc else []
+            result = await client.chat_postMessage(
+                channel=user_id,
+                text=f"Event `{event_id}` created: {text.strip()[:100]}",
+                blocks=blocks,
+            )
+            thread_ts = result["ts"]
+
+            await self._blackboard.update_event_slack_context(
+                event_id, user_id, thread_ts, user_id,
+            )
+            await self._blackboard.set_slack_mapping(user_id, thread_ts, event_id)
+            logger.info(f"Home tab create event: {event_id} by {user_id} (thread={thread_ts})")
+
+        @self._app.action("darwin_home_open_dashboard")
+        async def handle_home_open_dashboard(ack: Any, body: dict) -> None:
+            await ack()
+
+    async def _publish_home_tab(self, client: Any, user_id: str) -> None:
+        """Gather data and publish the Home tab view for a user."""
+        from .formatter import build_home_tab_view
+
+        event_ids = await self._blackboard.get_active_events()
+        active_events = []
+        for eid in event_ids:
+            event = await self._blackboard.get_event(eid)
+            if event:
+                active_events.append({
+                    "id": event.id,
+                    "source": event.source,
+                    "service": event.service,
+                    "status": event.status.value,
+                    "reason": event.event.reason,
+                    "turns": len(event.conversation),
+                })
+
+        import time as _time
+        cutoff = _time.time() - 86400
+        closed_ids = await self._blackboard.redis.zrangebyscore(
+            self._blackboard.EVENT_CLOSED, cutoff, "+inf",
+        )
+        recent_closed = []
+        if closed_ids:
+            async with self._blackboard.redis.pipeline(transaction=False) as pipe:
+                for eid in closed_ids:
+                    pipe.get(f"{self._blackboard.EVENT_PREFIX}{eid}")
+                raw = await pipe.execute()
+            import json as _json
+            for raw_doc in raw:
+                if not raw_doc:
+                    continue
+                try:
+                    doc = _json.loads(raw_doc)
+                    last_turn = doc.get("conversation", [{}])[-1] if doc.get("conversation") else {}
+                    recent_closed.append({
+                        "id": doc.get("id", "?"),
+                        "service": doc.get("service", "general"),
+                        "summary": last_turn.get("thoughts") or last_turn.get("result") or "Closed",
+                    })
+                except Exception:
+                    continue
+        recent_closed = recent_closed[-8:]
+
+        agents = await self._brain.list_connected_agents()
+
+        import os as _os
+        dashboard_url = _os.getenv("DARWIN_DASHBOARD_URL", "")
+
+        view = build_home_tab_view(active_events, recent_closed, agents, dashboard_url)
+        await client.views_publish(user_id=user_id, view=view)
+
     # =========================================================================
     # Broadcast handler (registered on Brain via register_channel)
     # Two-path router: Assistant threads use streaming, legacy uses emoji hack.
@@ -518,8 +646,23 @@ class SlackChannel:
     async def _update_turn_in_thread(
         self, thinking: tuple[str, str], event_doc: Any, turn: Any,
     ) -> None:
-        """Replace the thinking indicator message with the formatted turn."""
+        """Replace the thinking indicator message with the formatted turn.
+
+        If the turn contains tables, delete the thinking indicator and post a
+        new message via _send_turn_to_thread (chat_update cannot render table blocks).
+        """
         channel, msg_ts = thinking
+        raw_text = turn.result or turn.thoughts or ""
+        _, table_blocks = extract_tables(raw_text)
+
+        if table_blocks:
+            try:
+                await self._app.client.chat_delete(channel=channel, ts=msg_ts)
+            except Exception:
+                pass
+            await self._send_turn_to_thread(event_doc, turn)
+            return
+
         blocks = format_turn(turn, event_id=event_doc.id)
         fallback = f"{turn.actor}.{turn.action}: {turn.thoughts or turn.result or ''}"[:200]
         color = get_turn_attachment_color(turn)

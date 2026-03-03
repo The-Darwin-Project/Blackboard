@@ -2060,6 +2060,14 @@ class Brain:
         """Register an additional broadcast target (e.g., Slack)."""
         self._broadcast_targets.append(channel_broadcast)
 
+    async def list_connected_agents(self) -> list[dict]:
+        """Public accessor for connected agent status. Used by SlackChannel Home tab."""
+        from ..dependencies import get_registry_and_bridge
+        registry, _ = get_registry_and_bridge()
+        if registry:
+            return await registry.list_agents()
+        return []
+
     async def _broadcast(self, message: dict) -> None:
         """Fan out a message to all registered broadcast targets (WS, Slack, etc.)."""
         for target in self._broadcast_targets:
