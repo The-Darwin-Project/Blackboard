@@ -336,6 +336,7 @@ class EventDocument(BaseModel):
     slack_thread_ts: Optional[str] = Field(None, description="Slack thread timestamp (correlation key)")
     slack_channel_id: Optional[str] = Field(None, description="DM channel or public channel ID")
     slack_user_id: Optional[str] = Field(None, description="Slack user who initiated (for DM events)")
+    slack_thread_title: Optional[str] = Field(None, description="Assistant thread title (informational)")
 
 
 # =============================================================================

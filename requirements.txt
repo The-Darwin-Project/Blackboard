@@ -39,6 +39,7 @@ websockets
 # Kubernetes client (for K8s metrics observer)
 kubernetes
 
-# Slack integration (Socket Mode, async handlers)
-slack-bolt[async]
+# Slack integration (Socket Mode, async handlers, Assistant + streaming)
+slack-bolt[async]>=1.22.0
+slack-sdk>=3.35.0
 aiohttp

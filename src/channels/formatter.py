@@ -1,8 +1,9 @@
 # BlackBoard/src/channels/formatter.py
 # @ai-rules:
-# 1. [Constraint]: Pure functions only -- no I/O, no Slack API calls. Returns Block Kit dicts.
+# 1. [Constraint]: Pure functions only -- no I/O, no Slack API calls. Returns Block Kit dicts or slack-sdk model objects.
 # 2. [Pattern]: format_turn dispatches on actor.action pattern (e.g., "brain.think", "brain.route").
 # 3. [Gotcha]: Slack Block Kit text limit is 3000 chars per section. Truncate long results.
+# 4. [Pattern]: create_feedback_block uses slack-sdk model objects (ContextActionsBlock, FeedbackButtonsElement).
 """Convert ConversationTurn objects to Slack Block Kit payloads."""
 from __future__ import annotations
 
@@ -213,3 +214,58 @@ def format_event_summary(event_doc: "EventDocument") -> list[dict]:
         ),
     ]
     return blocks
+
+
+# =========================================================================
+# Streaming / Assistant formatting helpers
+# =========================================================================
+
+_TASK_STATUS_ICON = {
+    "in_progress": ":arrows_counterclockwise:",
+    "complete": ":white_check_mark:",
+    "error": ":warning:",
+}
+
+
+def format_task_card(turn: "ConversationTurn", status: str = "in_progress") -> str:
+    """Return mrkdwn string for a task card (used in streaming append).
+
+    Maps agent dispatch/completion to a compact status line.
+    """
+    icon = _TASK_STATUS_ICON.get(status, ":gear:")
+    agents = ", ".join(turn.selectedAgents or [turn.actor])
+    emoji = AGENT_EMOJI.get(agents.split(",")[0].strip(), "\U0001f916")
+    reason = _truncate(turn.thoughts or "", 200)
+    return f"{icon} {emoji} *{agents}* {reason}"
+
+
+def format_plan_block(event_id: str, tasks: list[dict[str, str]]) -> list[dict]:
+    """Return Block Kit blocks for a task plan (non-streaming fallback).
+
+    Each task dict has 'agent', 'status', and optional 'text'.
+    """
+    lines = [f"*Plan for `{event_id}`*"]
+    for t in tasks:
+        icon = _TASK_STATUS_ICON.get(t.get("status", "in_progress"), ":gear:")
+        lines.append(f"{icon} *{t['agent']}*: {t.get('text', '')}")
+    return [_section("\n".join(lines))]
+
+
+def create_feedback_block() -> list:
+    """Return ContextActionsBlock with feedback thumbs up/down buttons."""
+    from slack_sdk.models.blocks import (
+        ContextActionsBlock, FeedbackButtonsElement, FeedbackButtonObject,
+    )
+    return [ContextActionsBlock(elements=[
+        FeedbackButtonsElement(
+            action_id="darwin_feedback",
+            positive_button=FeedbackButtonObject(
+                text="Helpful", value="positive",
+                accessibility_label="Submit positive feedback",
+            ),
+            negative_button=FeedbackButtonObject(
+                text="Not helpful", value="negative",
+                accessibility_label="Submit negative feedback",
+            ),
+        ),
+    ])]
