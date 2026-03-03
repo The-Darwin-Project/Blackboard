@@ -15,9 +15,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from slack_bolt.async_app import AsyncApp
+from slack_bolt.async_app import AsyncApp, AsyncAssistant
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-from slack_bolt import Assistant
 
 from .formatter import (
     format_turn, format_event_summary, get_turn_attachment_color,
@@ -57,7 +56,7 @@ class SlackChannel:
         self._stream_sessions: dict[str, Any] = {}  # event_id -> AsyncChatStream
 
         self._app = AsyncApp(token=bot_token)
-        self._assistant = Assistant()
+        self._assistant = AsyncAssistant()
         self._register_assistant_handlers()
         self._app.use(self._assistant)
         self._register_handlers()
