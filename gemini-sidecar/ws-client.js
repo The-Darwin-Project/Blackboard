@@ -292,8 +292,8 @@ function handleCancel(msg) {
   if (task.timer) clearTimeout(task.timer);
   killChild(task.child);
   sendMsg(task.ws, msg.task_id, {
-    type: 'error', event_id: task.eventId,
-    error: 'Cancelled by Brain', retryable: false,
+    type: 'result', event_id: task.eventId,
+    output: 'Cancelled by Brain', source: 'cancel',
   });
   state.clearCurrentTask();
 }

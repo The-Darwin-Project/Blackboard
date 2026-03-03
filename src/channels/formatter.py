@@ -205,6 +205,9 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         text = turn.thoughts or ""
         blocks.append(_section(text))
 
+    elif turn.action == "cancel" and turn.actor in ("architect", "sysadmin", "developer", "qe"):
+        blocks.append(_section(f":stop_button: *{turn.actor}* task cancelled"))
+
     elif turn.actor in ("architect", "sysadmin", "developer", "qe") and turn.result:
         result = _md_to_mrkdwn(_truncate(turn.result))
         blocks.append(_section(f"*:gear: {turn.actor}* ({turn.action}):\n{result}"))

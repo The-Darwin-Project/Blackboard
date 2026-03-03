@@ -1953,16 +1953,21 @@ class Brain:
                     await self.process_event(event_id)
                 return
 
-            # Append agent result turn
+            # Append agent result turn (cancel = clean termination, not an error)
+            is_cancel = result_str.strip() == "Cancelled by Brain"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
-                action="execute",
+                action="cancel" if is_cancel else "execute",
                 result=result_str[:15000],  # Cap result length (raised for Dev+QE merged output)
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
-            logger.info(f"Agent task completed: {agent_name} for {event_id}")
+            logger.info(f"Agent task {'cancelled' if is_cancel else 'completed'}: {agent_name} for {event_id}")
+
+            if is_cancel:
+                self._release_task_state(event_id)
+                return
 
             # Write architect plan as standalone file to agent volumes
             if agent_name == "architect" and result_str.lstrip().startswith("---"):
