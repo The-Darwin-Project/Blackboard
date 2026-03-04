@@ -602,8 +602,16 @@ class SlackChannel:
             and turn.actor == "brain"
             and turn.action == "route"
         ):
+            logger.info(f"Opening infra thread for {event_id} (source={event_doc.source}, channel={self._infra_channel})")
             await self.open_infra_thread(event_doc, event_doc.event.reason)
             event_doc = await self._blackboard.get_event(event_id)
+        elif not event_doc.slack_thread_ts and event_doc.source in ("aligner", "headhunter"):
+            logger.warning(
+                f"Infra thread skipped for {event_id}: "
+                f"thread_ts={event_doc.slack_thread_ts}, source={event_doc.source}, "
+                f"infra_channel={'set' if self._infra_channel else 'EMPTY'}, "
+                f"turn={turn.actor}.{turn.action}"
+            )
 
         if not event_doc or not event_doc.slack_thread_ts:
             return
@@ -708,12 +716,13 @@ class SlackChannel:
     async def open_infra_thread(self, event_doc: Any, summary: str) -> None:
         """Post an event to #darwin-infra and store thread_ts (Phase 2)."""
         if not self._infra_channel:
+            logger.warning("open_infra_thread: SLACK_INFRA_CHANNEL is empty, skipping")
             return
         blocks = format_event_summary(event_doc)
         try:
             result = await self._app.client.chat_postMessage(
                 channel=self._infra_channel,
-                text=f"Event `{event_doc.id}`: {summary}",
+                text=f"Event `{event_doc.id}`: {summary[:200]}",
                 blocks=blocks,
             )
             thread_ts = result["ts"]
@@ -723,8 +732,9 @@ class SlackChannel:
             await self._blackboard.set_slack_mapping(
                 self._infra_channel, thread_ts, event_doc.id,
             )
+            logger.info(f"Infra thread created: {event_doc.id} -> {self._infra_channel}/{thread_ts}")
         except Exception as e:
-            logger.warning(f"Infra thread post failed: {e}")
+            logger.error(f"Infra thread post FAILED for {event_doc.id} to {self._infra_channel}: {e}")
 
     async def open_dm_thread(self, slack_user_id: str, event_doc: Any, summary: str) -> None:
         """Open a DM with a user for an event (Phase 3)."""
