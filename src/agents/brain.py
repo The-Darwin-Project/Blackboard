@@ -248,6 +248,19 @@ PHASE_EXCLUSIONS: dict[str, list[str]] = {
     "intermediate": ["dispatch", "post-agent", "defer-wake", "waiting", "context"],
 }
 
+# Context priming: synthetic prefill so the LLM treats protocols as already-committed.
+# Update BRAIN_PREFILL_MODEL if always/ skill protocols change materially.
+BRAIN_PREFILL_USER = "Session active. Review your core protocols before processing."
+
+BRAIN_PREFILL_MODEL = (
+    "Darwin Brain active. Core protocols confirmed: "
+    "(1) Consult deep memory before routing or deferring -- "
+    "historical timing overrides agent estimates. "
+    "(2) Cynefin triage on every new event. "
+    "(3) Never silently drop agent recommendations. "
+    "(4) Source-aware close rules. "
+    "Ready for event processing."
+)
 
 
 class Brain:
@@ -519,6 +532,11 @@ class Brain:
             context_flags = None
 
         prompt = await self._build_contents(event, context_cache=context_flags)
+
+        prompt = [
+            {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
+            {"role": "model", "parts": [{"text": BRAIN_PREFILL_MODEL}]},
+        ] + prompt
 
         # Signal UI that Brain is processing (visible even when LLM produces no text)
         await self._broadcast({
