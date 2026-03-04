@@ -25,6 +25,8 @@ data:
   LLM_MAX_TOKENS_ALIGNER: "{{ .Values.gcp.llm.aligner.maxOutputTokens }}"
   # Archivist (event summarization for deep memory)
   LLM_MODEL_ARCHIVIST: "{{ .Values.gcp.llm.archivist.model }}"
+  LLM_TEMPERATURE_ARCHIVIST: "{{ .Values.gcp.llm.archivist.temperature }}"
+  LLM_THINKING_ARCHIVIST: "{{ .Values.gcp.llm.archivist.thinkingLevel }}"
   LLM_MAX_TOKENS_ARCHIVIST: "{{ .Values.gcp.llm.archivist.maxOutputTokens }}"
   
   # Brain Progressive Skills

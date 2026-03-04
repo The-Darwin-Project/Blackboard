@@ -105,36 +105,37 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "lookup_journal",
         "description": (
-            "Look up the ops journal for any service. Returns recent event history "
-            "(closures, scaling actions, fixes). Use FIRST for any question about what happened, "
-            "recent events, service history, or status. Can directly answer user questions "
-            "without needing an agent."
+            "Look up the ops journal. When service_name is provided, returns history for that "
+            "specific service. When omitted, returns recent entries across all services -- useful "
+            "for cross-service timing, pipeline patterns, and operational trends. Use FIRST for "
+            "any question about what happened, recent events, service history, or status. Can "
+            "directly answer user questions without needing an agent."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "service_name": {
                     "type": "string",
-                    "description": "Service name to look up (e.g., 'darwin-store', 'postgres')",
+                    "description": "Service name to look up. service_name is optional, name can be omitted for cross-service/source results.",
                 },
             },
-            "required": ["service_name"],
         },
     },
     {
         "name": "consult_deep_memory",
         "description": (
-            "Search operational history for similar past events. Returns symptoms, root causes, "
-            "and fixes from past incidents. MUST be called before select_agent for recurring "
-            "issues, past event queries, or unfamiliar symptoms. Can directly answer user "
-            "questions about history without needing an agent."
+            "Search operational history for past events. Returns incident details, operational "
+            "timings, defer patterns, and procedural workflows. Use for: recurring issues, "
+            "timing questions, past event queries, or pattern analysis. MUST be called before "
+            "select_agent for recurring issues, past event queries, or unfamiliar symptoms. "
+            "Can directly answer user questions about history without needing an agent."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to search for (e.g., 'high CPU on darwin-store')",
+                    "description": "What to search for (e.g., 'average pipeline time', 'high CPU on darwin-store')",
                 },
             },
             "required": ["query"],

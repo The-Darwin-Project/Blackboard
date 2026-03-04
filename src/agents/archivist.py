@@ -1,7 +1,7 @@
 # BlackBoard/src/agents/archivist.py
 # @ai-rules:
 # 1. [Constraint]: archive_event() is fire-and-forget. MUST NOT block event closure.
-# 2. [Pattern]: Uses google-genai SDK for both LLM summarization (LLM_MODEL_ARCHIVIST) and embedding (text-embedding-005).
+# 2. [Pattern]: Uses google-genai SDK for LLM summarization (LLM_MODEL_ARCHIVIST, LLM_THINKING_ARCHIVIST, LLM_TEMPERATURE_ARCHIVIST) and embedding (text-embedding-005).
 # 3. [Gotcha]: embed_content returns 768-dim vector. Qdrant collection must match.
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
@@ -19,6 +19,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,7 +32,9 @@ FEEDBACK_COLLECTION = "darwin_feedback"
 EMBEDDING_MODEL = "text-embedding-005"
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
 
-SUMMARIZE_PROMPT = """Summarize this incident conversation into a structured JSON object.
+SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object, this will be used to create a vector for similarity search.
+Each turn is timestamped as [HH:MM:SS actor.action]. Use timestamps to derive durations.
+
 Include these fields:
 - symptom: What was observed (one sentence)
 - root_cause: What caused it (one sentence, or "unknown")
@@ -39,12 +42,17 @@ Include these fields:
 - keywords: Array of 3-5 relevant keywords
 - service: The affected service name
 - turns: Number of conversation turns
-- duration_seconds: How long the event lasted
+- duration_seconds: Total event duration from first to last turn
+- operational_timings: Array of observed process durations (e.g., [{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}])
+- defer_patterns: Array of Brain defer actions, each with reason and duration_seconds
+- agent_execution_times: Array of agent tasks, each with agent name and duration_seconds (route to execute)
+- procedures: Short workflow description (e.g., "retest pipeline, wait for completion, merge MR")
+- outcome: Final state -- one of: resolved, escalated, user_closed, force_closed, stale
 
-Respond with JSON only, no markdown fences.
+Example output:
+{{"symptom": "pipeline failed for MR !289", "root_cause": "Transient Platform Services infrastructure issue", "fix_action": "Retested pipeline, merged MR after pass", "keywords": ["Platform Services", "pipeline", "kubevirt-plugin", "retest"], "service": "kubevirt-plugin", "turns": 12, "duration_seconds": 1800, "operational_timings": [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}], "defer_patterns": [{{"reason": "Waiting for pipeline", "duration_seconds": 1200}}], "agent_execution_times": [{{"agent": "developer", "duration_seconds": 90}}], "procedures": "retest pipeline, defer for completion, verify result, merge MR", "outcome": "resolved"}}
 
-Conversation:
-{conversation}"""
+Respond with JSON only, no markdown fences."""
 
 
 class Archivist:
@@ -91,10 +99,10 @@ class Archivist:
             if not await self._ensure_initialized():
                 return
 
-            # Build conversation text for summarization
             conv_lines = []
             for turn in event.conversation:
-                line = f"[{turn.actor}.{turn.action}]"
+                ts = datetime.fromtimestamp(turn.timestamp).strftime("%H:%M:%S")
+                line = f"[{ts} {turn.actor}.{turn.action}]"
                 if turn.thoughts:
                     line += f" {turn.thoughts}"
                 if turn.result:
@@ -112,13 +120,17 @@ class Archivist:
             # Step 1: Summarize with LLM
             from google.genai import types
 
-            prompt = SUMMARIZE_PROMPT.format(conversation=conversation_text[:5000])
             response = await self._client.aio.models.generate_content(
                 model=ARCHIVIST_MODEL,
-                contents=prompt,
+                contents=conversation_text,
                 config=types.GenerateContentConfig(
-                    temperature=0.1,
+                    system_instruction=SUMMARIZE_PROMPT,
+                    temperature=float(os.getenv("LLM_TEMPERATURE_ARCHIVIST", "0.3")),
                     max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
+                    thinking_config=types.ThinkingConfig(
+                        include_thoughts=True,
+                        thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
+                    ),
                 ),
             )
 
@@ -137,6 +149,11 @@ class Archivist:
                     "service": event.service,
                     "turns": len(event.conversation),
                     "duration_seconds": duration,
+                    "operational_timings": [],
+                    "defer_patterns": [],
+                    "agent_execution_times": [],
+                    "procedures": "unknown",
+                    "outcome": "unknown",
                 }
 
             # Ensure service + turns + duration are in the payload
@@ -145,11 +162,15 @@ class Archivist:
             summary.setdefault("duration_seconds", duration)
 
             # Step 2: Generate embedding
+            timings = summary.get("operational_timings", [])
             embed_text = (
                 f"{summary.get('symptom', '')} "
                 f"{summary.get('root_cause', '')} "
                 f"{summary.get('fix_action', '')} "
-                f"{' '.join(summary.get('keywords', []))}"
+                f"{' '.join(summary.get('keywords', []))} "
+                f"{' '.join(str(t) for t in timings) if isinstance(timings, list) else ''} "
+                f"{summary.get('procedures', '')} "
+                f"{summary.get('outcome', '')}"
             )
             embed_response = await self._client.aio.models.embed_content(
                 model=EMBEDDING_MODEL,

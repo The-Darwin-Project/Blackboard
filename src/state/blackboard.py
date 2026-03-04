@@ -1695,6 +1695,24 @@ class BlackboardState:
         key = f"{self.JOURNAL_PREFIX}{service}"
         return await self.redis.lrange(key, 0, -1)
 
+    async def get_recent_journal_entries(self, limit: int = 30, per_service: int = 3) -> list[str]:
+        """Get recent journal entries across ALL services, sorted by timestamp descending."""
+        from datetime import datetime as _dt
+        entries: list[tuple[_dt, str, str]] = []
+        async for key in self.redis.scan_iter(match=f"{self.JOURNAL_PREFIX}*"):
+            service = key.removeprefix(self.JOURNAL_PREFIX) if isinstance(key, str) else key.decode().removeprefix(self.JOURNAL_PREFIX)
+            raw = await self.redis.lrange(key, -per_service, -1)
+            for entry in raw:
+                entry_str = entry if isinstance(entry, str) else entry.decode()
+                try:
+                    ts_str = entry_str.split("]")[0].lstrip("[")
+                    ts = _dt.strptime(ts_str, "%Y-%m-%d %H:%M")
+                except (ValueError, IndexError):
+                    ts = _dt.min
+                entries.append((ts, service, entry_str))
+        entries.sort(key=lambda x: x[0], reverse=True)
+        return [f"[{svc}] {text}" for _, svc, text in entries[:limit]]
+
     async def close_event(self, event_id: str, summary: str) -> None:
         """Close an event with summary. Move from active to closed.
 

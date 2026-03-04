@@ -1648,12 +1648,20 @@ class Brain:
 
         elif function_name == "lookup_journal":
             service_name = args.get("service_name", "")
-            entries = await self._get_journal_cached(service_name)
-            if entries:
-                journal_text = f"Ops journal for {service_name} (last {len(entries)} entries):\n"
-                journal_text += "\n".join(f"  {e}" for e in entries)
+            if service_name:
+                entries = await self._get_journal_cached(service_name)
+                if entries:
+                    journal_text = f"Ops journal for {service_name} (last {len(entries)} entries):\n"
+                    journal_text += "\n".join(f"  {e}" for e in entries)
+                else:
+                    journal_text = f"No ops journal entries for {service_name}."
             else:
-                journal_text = f"No ops journal entries for {service_name}."
+                entries = await self.blackboard.get_recent_journal_entries()
+                if entries:
+                    journal_text = f"Cross-service ops journal (last {len(entries)} entries):\n"
+                    journal_text += "\n".join(f"  {e}" for e in entries)
+                else:
+                    journal_text = "No ops journal entries found across any service."
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",

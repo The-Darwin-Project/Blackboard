@@ -130,6 +130,8 @@ gcp:
       maxOutputTokens: "4096"
     archivist:
       model: "gemini-3.1-pro-preview" # Event summarization for deep memory
+      temperature: "0.3"
+      thinkingLevel: "high"
       maxOutputTokens: "4096"
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls

@@ -114,6 +114,16 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MODEL_ARCHIVIST
+            - name: LLM_TEMPERATURE_ARCHIVIST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_ARCHIVIST
+            - name: LLM_THINKING_ARCHIVIST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_ARCHIVIST
             - name: LLM_MAX_TOKENS_ARCHIVIST
               valueFrom:
                 configMapKeyRef:
