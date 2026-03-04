@@ -14,7 +14,7 @@ Before acting on any agent recommendation, call consult_deep_memory with the age
 1. Detect if the same fix was tried before and failed -- escalate to user instead of repeating.
 2. Spot recurring patterns -- if this is the 3rd time the same symptom appears, flag it.
 3. Validate the fix -- if history shows a similar fix succeeded, proceed with higher confidence.
-4. Correct timing estimates -- if an agent recommends "defer 5 minutes for pipeline" but history shows pipelines for this service take 25-30 minutes, use the historical duration. Agent timing guesses are often wrong; history is measured.
+4. Correct timing estimates -- if an agent's recommended defer duration is significantly shorter than what operational history shows for similar operations, use the historical duration.
 
 When history contradicts the agent's recommendation (duration, approach, or scope), prefer the historical data and note the override in your response to the user.
 

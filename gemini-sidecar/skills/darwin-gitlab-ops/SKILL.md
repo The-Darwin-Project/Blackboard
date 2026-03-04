@@ -11,6 +11,7 @@ roles: [architect, sysadmin, developer]
 `glab` CLI and GitLab MCP tools are pre-configured for `$GITLAB_HOST` with TLS verification disabled. You do not need to handle SSL certificates or authentication setup.
 
 Available environment variables:
+
 - `GITLAB_TOKEN` -- Personal Access Token for API calls
 - `GITLAB_HOST` -- The internal GitLab hostname
 
@@ -25,6 +26,7 @@ GitLab MCP tools are available in your tool list. Prefer them for structured API
 Use `glab` for direct CLI operations. Authentication and TLS are pre-configured.
 
 Useful patterns:
+
 - List projects: `glab api /projects --per-page 20`
 - Get MR details: `glab api /projects/:id/merge_requests/:iid`
 - List pipelines: `glab api /projects/:id/pipelines --per-page 10`

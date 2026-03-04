@@ -26,11 +26,10 @@ glab api "/projects/:id/pipelines?ref=:source_branch&order_by=updated_at&per_pag
 
 ## Pipeline Timing
 
-Konflux/Tekton pipelines take 20-30 minutes. After retesting:
+After retesting:
 
 1. Check pipeline status immediately. If `running` or `pending`:
-   - Report back: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."
-   - The Brain will defer the event and re-dispatch you later to check the result.
+   - Report back with current state. The Brain will defer and re-dispatch you later to check the result.
 2. If `success`: proceed to merge.
 3. If `failed`: read the failed job log and report the error.
 
@@ -81,7 +80,7 @@ Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
 - **Success**: "MR merged successfully. Recommend notifying maintainer via Slack."
-- **Pipeline running**: "Pipeline triggered, currently running. Recommend re-checking in 5 minutes."
+- **Pipeline running**: "Pipeline triggered, currently running."
 - **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer via Slack with failure details."
 - **Conflict (submodule)**: "Closed obsolete submodule MR -- newer update already merged to main."
 - **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer via Slack to rebase."

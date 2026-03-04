@@ -72,9 +72,9 @@ If your action triggers a process that takes more than 60 seconds (ArgoCD sync, 
 
 - Execute the action (push commit, trigger sync)
 - Confirm it was accepted (ArgoCD shows `Syncing`, rollout started)
-- **Return immediately** via `team_send_results` with state + recommendation ("re-check in 5 min")
+- **Return immediately** via `team_send_results` with state + `## Recommendation`
 - **NEVER** poll, sleep, or loop waiting for sync/rollout completion
-- The Brain handles wait cycles -- it will re-route you to verify later
+- The Brain manages all wait cycles and timing -- it will re-route you to verify later
 
 ## Communication Protocol
 

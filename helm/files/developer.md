@@ -99,9 +99,9 @@ If your action triggers a process that takes more than 60 seconds (CI/CD pipelin
 
 - Execute the action (post `/retest`, push commit, trigger pipeline)
 - Confirm it was accepted (status changed to `running`)
-- **Return immediately** via `team_send_results` with state + recommendation ("re-check in 5 min")
+- **Return immediately** via `team_send_results` with state + `## Recommendation`
 - **NEVER** poll, sleep, or loop waiting for completion
-- The Brain handles wait cycles -- it will re-route you to check status later
+- The Brain manages all wait cycles and timing -- it will re-route you to check status later
 
 ## Engineering Principles
 

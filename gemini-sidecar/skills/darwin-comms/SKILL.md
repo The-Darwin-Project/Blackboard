@@ -48,11 +48,9 @@ If your action triggers a process that takes more than 60 seconds (CI/CD pipelin
 
 1. **Execute the action** (post `/retest`, trigger pipeline, push commit)
 2. **Confirm it was accepted** (pipeline status changed to `running`)
-3. **Return immediately** with current state and a recommendation:
+3. **Return immediately** with current state and a `## Recommendation`
 
-Use `team_send_results` with status and a `## Recommendation` (e.g., "re-check in 5 min").
-
-**NEVER** poll, sleep, or loop waiting for completion. The Brain manages wait cycles.
+**NEVER** poll, sleep, or loop waiting for completion. The Brain manages all wait cycles and timing.
 
 ## Workflow (all modes)
 
