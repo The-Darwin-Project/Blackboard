@@ -738,9 +738,8 @@ class KubernetesObserver:
                 error_rate = 100.0  # Signal to Flash: something is wrong
                 logger.debug(f"Injecting error_rate=100% for {service_name}: {self._active_warnings[service_name]}")
             
-            if self.anomaly_callback:
-                if cpu_percent >= 70 or memory_percent >= 70 or error_rate > 0:
-                    logger.info(f"Anomaly callback: {service_name} CPU={cpu_percent:.1f}% MEM={memory_percent:.1f}% ERR={error_rate:.1f}%")
+            if self.anomaly_callback and (cpu_percent >= 70 or memory_percent >= 70 or error_rate > 0):
+                logger.info(f"Anomaly callback: {service_name} CPU={cpu_percent:.1f}% MEM={memory_percent:.1f}% ERR={error_rate:.1f}%")
                 await self.anomaly_callback(
                     service_name, cpu_percent, memory_percent, "kubernetes",
                     error_rate=error_rate,
