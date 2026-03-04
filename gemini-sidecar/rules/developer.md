@@ -95,7 +95,7 @@ When adding new fields to data models, APIs, or schemas:
 
 ## Long-Running Operations -- Return, Don't Wait
 
-If your action triggers a process that takes more than 60 seconds (CI/CD pipelines, image builds, ArgoCD syncs):
+If your action triggers a long-running process (CI/CD pipelines, image builds, ArgoCD syncs):
 
 - Execute the action (post `/retest`, push commit, trigger pipeline)
 - Confirm it was accepted (status changed to `running`)

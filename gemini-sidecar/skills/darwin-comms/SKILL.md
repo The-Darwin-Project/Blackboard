@@ -44,7 +44,7 @@ sendResults ./results/report.md
 
 ## Long-Running Operations -- NEVER Poll
 
-If your action triggers a process that takes more than 60 seconds (CI/CD pipelines, ArgoCD syncs, image builds):
+If your action triggers a long-running process (CI/CD pipelines, ArgoCD syncs, image builds):
 
 1. **Execute the action** (post `/retest`, trigger pipeline, push commit)
 2. **Confirm it was accepted** (pipeline status changed to `running`)

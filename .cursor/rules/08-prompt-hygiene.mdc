@@ -1,0 +1,27 @@
+---
+description: Authoring principles for agent skills, rules, and prompt files. Prevents regression of hardcoded values and non-neutral patterns.
+globs: "BlackBoard/gemini-sidecar/**/*.md,BlackBoard/helm/files/*.md,BlackBoard/src/agents/brain_skills/**/*.md"
+alwaysApply: false
+---
+
+# Prompt Hygiene
+
+## 1. No Hardcoded Timing or Durations
+
+Skills and rules describe WHAT the environment is. Timing comes from operational history (deep memory). Do not embed specific durations (seconds, minutes) in skill or rule files. Use descriptive language: "a long-running process", "blocks until reply".
+
+## 2. Describe Data and Environment, Not Tool Sequences
+
+Let the LLM discover appropriate tools from its tool declarations. Describe the data or task needed, not the function to call. Do not list explicit tool/function names in prompts.
+
+## 3. No Negative Examples with Specific Patterns
+
+Models learn patterns from ALL examples, including "wrong" ones. Frame constraints positively. Instead of "Do NOT do X (e.g., bad-example)", write "Follow the convention established in Step N".
+
+## 4. Agent Recommendations Describe Observed State
+
+Agent reports describe what was observed. The Brain decides action and timing. Do not embed decision thresholds (score cutoffs, retry counts) in skill files -- the Brain's reasoning and deep memory handle that.
+
+## 5. Safety Guardrails Stay Prescriptive
+
+Absolute boundaries (NEVER delete namespace, NEVER force push) are constraints, not examples. These are the exception to rule 3 -- they remain prescriptive because they define hard limits, not learnable patterns.

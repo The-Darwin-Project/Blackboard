@@ -68,7 +68,7 @@ These specialized skills are loaded automatically when relevant:
 
 ## Long-Running Operations -- Return, Don't Wait
 
-If your action triggers a process that takes more than 60 seconds (ArgoCD sync, rollout, pipeline):
+If your action triggers a long-running process (ArgoCD sync, rollout, pipeline):
 
 - Execute the action (push commit, trigger sync)
 - Confirm it was accepted (ArgoCD shows `Syncing`, rollout started)

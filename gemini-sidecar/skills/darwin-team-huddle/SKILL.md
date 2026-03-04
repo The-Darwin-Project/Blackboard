@@ -14,7 +14,7 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 | Tool | When to use | Who receives |
 |------|------------|--------------|
 | `team_send_results` | **Final report** -- deliver your completed work with `## Recommendation` | Brain (final deliverable) |
-| `team_huddle` | Mid-task questions that need Brain input before you can continue | Brain (blocks up to 90s until reply) |
+| `team_huddle` | Mid-task questions that need Brain input before you can continue | Brain (blocks until reply) |
 | `team_send_message` | Progress updates while working | Brain UI (informational only) |
 | `team_send_to_teammate` | Coordinate with your Dev/QE partner | Teammate's inbox |
 | `team_read_teammate_notes` | Check what your partner sent you | Your inbox |
@@ -45,7 +45,7 @@ Use `team_huddle` ONLY when you need the Brain's input to continue your work:
 - "The tests require a running database -- should I mock or use the live instance?"
 - "CI failed on an unrelated test -- should I rebase or ignore?"
 
-Sends a message to the Brain and **blocks until the Brain replies** (up to 90 seconds). If no reply arrives, continue your work and deliver your report via `team_send_results`.
+Sends a message to the Brain and **blocks until the Brain replies**. If no reply arrives, continue your work and deliver your report via `team_send_results`.
 
 Do NOT use `team_huddle` for your final report -- use `team_send_results`.
 
