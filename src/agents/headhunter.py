@@ -645,14 +645,21 @@ class Headhunter:
             if not project_id or not mr_iid:
                 continue
 
-            last_turn = event.conversation[-1] if event.conversation else None
-            summary = (last_turn.thoughts or last_turn.result or "Event closed.") if last_turn else "Event closed."
-            is_success = event.status.value == "closed" and "fail" not in summary.lower()
+            close_turn = event.conversation[-1] if event.conversation else None
+            close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
+            summary = (close_turn.thoughts or close_turn.result or "Event closed.") if close_turn else "Event closed."
+
+            if close_reason in ("stale", "duplicate"):
+                await self.blackboard.mark_feedback_sent(event.id)
+                logger.info(f"Headhunter feedback skipped for {event.id}: {close_reason} on !{mr_iid} (todo left alive)")
+                continue
+
+            is_escalation = close_reason in ("timeout", "force_closed") or "fail" in summary.lower()
+            comment = f"**Darwin {'escalation' if is_escalation else 'resolved'}:** {summary[:500]}"
 
             async with httpx.AsyncClient(verify=False, timeout=30) as client:
                 headers = self._headers()
 
-                comment = f"**Darwin {'resolved' if is_success else 'escalation'}:** {summary[:500]}"
                 resp = await client.post(
                     self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
                     headers=headers,
@@ -673,7 +680,7 @@ class Headhunter:
                     )
 
             await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"Headhunter feedback sent for {event.id}: {'success' if is_success else 'escalation'} on !{mr_iid}")
+            logger.info(f"Headhunter feedback for {event.id}: {close_reason} on !{mr_iid}")
 
     async def _is_recently_processed(self, project_id: int, mr_iid: int) -> bool:
         """Check if this MR was processed in the last 30 minutes (Redis-backed dedup)."""

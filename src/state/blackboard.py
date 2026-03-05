@@ -1713,9 +1713,11 @@ class BlackboardState:
         entries.sort(key=lambda x: x[0], reverse=True)
         return [f"[{svc}] {text}" for _, svc, text in entries[:limit]]
 
-    async def close_event(self, event_id: str, summary: str) -> None:
+    async def close_event(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event with summary. Move from active to closed.
 
+        close_reason: structured reason for closure. Stored in close turn's evidence field.
+        Values: resolved, stale, timeout, force_closed, duplicate, user_closed.
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
@@ -1729,12 +1731,12 @@ class BlackboardState:
                         break
                     event = EventDocument(**json.loads(data))
                     event.status = EventStatus.CLOSED
-                    # Append closing turn
                     close_turn = ConversationTurn(
                         turn=len(event.conversation) + 1,
                         actor="brain",
                         action="close",
                         thoughts=summary,
+                        evidence=close_reason,
                     )
                     event.conversation.append(close_turn)
                     pipe.multi()

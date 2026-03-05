@@ -418,6 +418,7 @@ class Brain:
                     await self._close_and_broadcast(
                         event_id,
                         f"Duplicate: merged with existing event {eid} for {event.service}.",
+                        close_reason="duplicate",
                     )
                     return
 
@@ -438,6 +439,7 @@ class Brain:
             await self._close_and_broadcast(
                 event_id,
                 f"TIMEOUT: Event exceeded {MAX_TURNS_PER_EVENT} agent execution turns. Force closed.",
+                close_reason="timeout",
             )
             return
 
@@ -453,6 +455,7 @@ class Brain:
                 await self._close_and_broadcast(
                     event_id,
                     f"STALE: No activity for {int(inactivity // 60)} minutes. Force closed.",
+                    close_reason="stale",
                 )
                 return
 
@@ -1355,7 +1358,7 @@ class Brain:
             depth = self._routing_depth.get(event_id, 0) + 1
             if depth > 30:
                 logger.warning(f"Event {event_id} hit routing depth limit (30)")
-                await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.")
+                await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.", close_reason="force_closed")
                 return False
             self._routing_depth[event_id] = depth
 
@@ -2147,13 +2150,11 @@ class Brain:
             except Exception as e:
                 logger.warning(f"Broadcast target failed: {e}")
 
-    async def _close_and_broadcast(self, event_id: str, summary: str) -> None:
+    async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event and broadcast the closure to UI."""
-        # Cancel any running agent task for this event (prevents orphaned CLI processes)
         await self.cancel_active_task(event_id, f"Event closing: {summary}")
-        # Fetch event BEFORE close to get service name for journal
         event = await self.blackboard.get_event(event_id)
-        await self.blackboard.close_event(event_id, summary)
+        await self.blackboard.close_event(event_id, summary, close_reason=close_reason)
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)
@@ -2239,7 +2240,7 @@ class Brain:
         cancelled = 0
         for eid in list(self._active_tasks.keys()):
             if await self.cancel_active_task(eid, "Emergency stop by user"):
-                await self._close_and_broadcast(eid, "Emergency stop: all agents terminated.")
+                await self._close_and_broadcast(eid, "Emergency stop: all agents terminated.", close_reason="force_closed")
                 cancelled += 1
         logger.critical(f"EMERGENCY STOP: {cancelled} tasks cancelled")
         return cancelled
@@ -2492,7 +2493,7 @@ class Brain:
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
                     f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
                 )
-                await self.blackboard.close_event(eid, stale_summary)
+                await self.blackboard.close_event(eid, stale_summary, close_reason="stale")
                 # Persist report snapshot (non-fatal)
                 try:
                     await self.blackboard.persist_report(eid)

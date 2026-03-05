@@ -187,7 +187,7 @@ async def close_event_by_user(
         await brain.cancel_active_task(event_id, f"User force-close: {body.reason}")
     except RuntimeError:
         pass  # Brain not initialized
-    await blackboard.close_event(event_id, close_summary)
+    await blackboard.close_event(event_id, close_summary, close_reason="user_closed")
     # Clean up Slack thread mapping if event had Slack context
     if event.slack_channel_id and event.slack_thread_ts:
         await blackboard.delete_slack_mapping(event.slack_channel_id, event.slack_thread_ts)
