@@ -322,8 +322,8 @@ class Headhunter:
                 f"    mode: execute\n"
                 f"    summary: \"Check MR {url} -- pipeline failed. Retest the pipeline."
                 f" If the pipeline passes, merge the MR."
-                f" If it fails again, add a comment describing the retry and observed failures."
-                f" Notify the maintainer via Slack about the result.\"\n"
+                f" If it fails again, add a comment describing the failure, close the MR,"
+                f" and notify the maintainer via Slack.\"\n"
                 f"    status: pending\n"
                 f"---"
             )
@@ -400,6 +400,9 @@ class Headhunter:
             "domain (CLEAR/COMPLICATED/COMPLEX), risk (low/medium/high), "
             "steps (each with id, agent, mode, summary, status: pending). "
             "Always include: notify the maintainer via Slack about the outcome. "
+            "If the MR author is a bot and the pipeline fails after retry, "
+            "close the MR and notify the maintainer. "
+            "If the MR author is human, notify the maintainer but do not close the MR. "
             "Wrap in --- delimiters."
         )
         return "\n".join(parts)

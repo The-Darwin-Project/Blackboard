@@ -1066,6 +1066,23 @@ class Brain:
         if isinstance(evidence, EventEvidence):
             lines.append(f"Domain: {evidence.domain}")
             lines.append(f"Severity: {evidence.severity}")
+            if evidence.gitlab_context:
+                gl = evidence.gitlab_context
+                lines.append("")
+                lines.append("GitLab Context:")
+                lines.append(f"  Project: {gl.get('project_path', '')}")
+                lines.append(f"  MR: !{gl.get('mr_iid', '')} - {gl.get('mr_title', '')}")
+                lines.append(f"  MR URL: {gl.get('target_url', '')}")
+                lines.append(f"  Pipeline: {gl.get('pipeline_status', 'unknown')}")
+                lines.append(f"  Merge Status: {gl.get('merge_status', '')}")
+                lines.append(f"  Source Branch: {gl.get('source_branch', '')}")
+                lines.append(f"  Author: {gl.get('author', '')}")
+                maintainer = gl.get("maintainer", {})
+                if maintainer:
+                    emails = maintainer.get("emails", [])
+                    if emails:
+                        lines.append(f"  Maintainer Emails: {', '.join(emails)}")
+                logger.debug("Brain prompt includes gitlab_context for event %s", event.id)
 
         event_created = event.conversation[0].timestamp if event.conversation else time.time()
         age_seconds = int(time.time() - event_created)
@@ -1088,18 +1105,19 @@ class Brain:
             lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
             lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
 
-        if context_cache and "_cached_mermaid" in context_cache:
-            mermaid = context_cache["_cached_mermaid"]
-        else:
-            mermaid = ""
-            try:
-                mermaid = await self.blackboard.generate_mermaid()
-            except Exception as e:
-                logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
-        if mermaid:
-            lines.append("")
-            lines.append("Architecture Diagram (Mermaid):")
-            lines.append(mermaid)
+        if event.source != "headhunter":
+            if context_cache and "_cached_mermaid" in context_cache:
+                mermaid = context_cache["_cached_mermaid"]
+            else:
+                mermaid = ""
+                try:
+                    mermaid = await self.blackboard.generate_mermaid()
+                except Exception as e:
+                    logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
+            if mermaid:
+                lines.append("")
+                lines.append("Architecture Diagram (Mermaid):")
+                lines.append(mermaid)
 
         if context_cache and "_cached_active_ids" in context_cache:
             active_event_ids = context_cache["_cached_active_ids"]

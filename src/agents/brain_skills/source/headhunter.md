@@ -1,39 +1,44 @@
 ---
-description: "Headhunter-sourced event behavior, GitLab MR routing, and close protocol"
+description: "Headhunter-sourced event environment, data structure, and lifecycle"
 tags: [headhunter, gitlab, autonomous]
 requires:
   - context/gitlab-environment.md
 ---
-# Headhunter Source Rules
+# Headhunter Source Environment
 
-## GitLab Tasks
+## Data Available
 
-- Headhunter-sourced events come with an embedded work plan in the reason field.
-- If the plan has frontmatter steps (starts with `---`), activate the plan steps directly.
-- For CLEAR domain tasks (bot MR retests, green pipeline merges), route directly to the assigned agent without Architect review.
-- For COMPLICATED/COMPLEX tasks, route to the Architect first for review.
+Headhunter events carry an embedded YAML work plan in the `reason` field and structured GitLab context in the evidence:
 
-## Routing by action_name
+- `event.event.reason`: YAML frontmatter with `plan`, `domain`, `risk`, `steps` (each with `id`, `agent`, `mode`, `summary`, `status`)
+- `evidence.gitlab_context.action_name`: The GitLab action that triggered this event
+- `evidence.gitlab_context.project_path`, `mr_iid`, `mr_title`, `target_url`: MR identification
+- `evidence.gitlab_context.pipeline_status`, `merge_status`, `source_branch`, `author`: MR state
+- `evidence.gitlab_context.maintainer.emails`: Verified maintainer email addresses for notifications
 
-The `evidence.gitlab_context.action_name` tells you what triggered this event:
+If the plan has frontmatter steps (starts with `---`), activate the plan steps directly.
 
-- `review_requested` / `approval_required`: MR needs review. Check pipeline status. Darwin does NOT auto-approve in v1.
-- `build_failed`: Pipeline failed. Retest first, escalate if it failsdirectly_addressed again.
-- `assigned`: MR assigned to Darwin. Check pipeline, merge if green.
-- `unmergeable`: Merge conflicts. For submodule MRs (bot author, branch starts with `submodule-`): close the MR as obsolete. For other MRs: report to maintainer, do not auto-rebase.
-- `directly_addressed`: Someone explicitly tagged Darwin. Act on the request -- if the MR is green and clean, merge it. If pipeline failed, retest. Treat as higher priority than `review_requested`.
+## Routing Principle
+
+Route based on the plan's `domain` field:
+
+- **CLEAR**: Route directly to the assigned agent without Architect review.
+- **COMPLICATED / COMPLEX**: Route to the Architect first for review.
+
+The `action_name` field provides context for triage but the plan's steps contain the specific instructions.
 
 ## Maintainer Notification
 
-- ALWAYS use `evidence.gitlab_context.maintainer.emails` for Slack notifications.
-- Do NOT use usernames or @mentions from agent responses -- agents read MR metadata which may contain usernames without valid email addresses. Only the evidence field has verified emails.
-- Call `notify_user_slack` for EACH email in `maintainer.emails`.
-- If `maintainer.emails` is empty, skip Slack notification and note it in the close summary.
-- Notify on both success (MR merged) and failure (pipeline still failing after retry).
+Maintainer email addresses are in `evidence.gitlab_context.maintainer.emails`. Notifications should include the MR URL from `evidence.gitlab_context.target_url`.
+
+Notify each email address on both success and failure outcomes. If `maintainer.emails` is empty, note it in the close summary.
 
 ## Close Protocol
 
-- Close after the final plan step is completed and verified.
-- If the task involves an MR, confirm the MR state (merged/closed) before closing.
-- No wait_for_user needed -- headhunter events are autonomous like aligner events.
-- Notify maintainers via Slack before closing.
+Headhunter events are autonomous -- no `wait_for_user` needed. Close after the final plan step is completed and verified. If the task involves an MR, confirm the MR state (merged/closed) before closing. Notify maintainers via Slack before closing.
+
+For bot-authored MRs where a pipeline fails after retry: close the MR (the bot will create a fresh one) and notify the maintainer. For human-authored MRs: notify the maintainer but leave the MR open.
+
+## Operational History
+
+Headhunter events are repetitive. Consult deep memory for past outcomes from the same source before acting.
