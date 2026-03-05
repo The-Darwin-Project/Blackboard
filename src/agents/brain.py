@@ -14,7 +14,7 @@
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 13. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 14. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
-# 15. [Pattern]: _agent_sessions: dict[event_id, dict[agent_name, session_id]]. Nested dict prevents clobbering and allows O(1) cleanup on event close.
+# 15. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
 # 16. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 17. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 18. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
@@ -289,6 +289,7 @@ class Brain:
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
         self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
+        self._agent_session_modes: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> mode}
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
         # Per-agent locks -- prevents concurrent dispatch to the same agent
         from collections import defaultdict
@@ -1633,8 +1634,21 @@ class Brain:
                 for t in (ev.conversation if ev else [])
             )
             if already_consulted:
-                logger.info(f"Deep memory already consulted for {event_id} -- breaking loop")
-                return False  # Break the LLM loop; event re-enters via next event loop scan
+                logger.info(f"Deep memory already consulted for {event_id} -- returning cached results")
+                cached_evidence = next(
+                    (t.evidence for t in (ev.conversation if ev else [])
+                     if t.action == "think" and t.evidence and "Deep memory" in t.evidence),
+                    "Deep memory was already consulted (no cached results).",
+                )
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="think",
+                    evidence=f"[Already consulted] {cached_evidence}",
+                )
+                await self.blackboard.append_turn(event_id, turn)
+                await self._broadcast_turn(event_id, turn)
+                return True
 
             query = args.get("query", "")
             archivist = self.agents.get("_archivist_memory")
@@ -1867,6 +1881,12 @@ class Brain:
             logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
             self._active_agent_for_event[event_id] = agent_name
             self._routing_turn_for_event[event_id] = routing_turn_num or 0
+
+            prior_mode = self._agent_session_modes.get(event_id, {}).get(agent_name, "")
+            reuse_session = (prior_mode == mode) if mode and prior_mode else bool(prior_mode)
+            resume_session_id = self._agent_sessions.get(event_id, {}).get(agent_name) if reuse_session else None
+            if not reuse_session and prior_mode and prior_mode != mode:
+                logger.info(f"Skipping session resume for {agent_name} on {event_id}: mode changed {prior_mode}->{mode}")
             # Immediate progress so UI shows activity during CLI cold start
             await self._broadcast({
                 "type": "progress",
@@ -1898,7 +1918,7 @@ class Brain:
                         task=task,
                         on_progress=on_progress,
                         on_huddle=on_huddle,
-                        session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                        session_id=resume_session_id,
                         event_md_path=event_md_path,
                     )
                 else:
@@ -1910,7 +1930,7 @@ class Brain:
                         result, session_id = await agent.process(
                             event_id=event_id, task=task, event_md_path=event_md_path,
                             on_progress=on_progress, mode=mode,
-                            session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                            session_id=resume_session_id,
                         )
             else:
                 if not agent:
@@ -1923,7 +1943,7 @@ class Brain:
                         event_md_path=event_md_path,
                         on_progress=on_progress,
                         mode=mode,
-                        session_id=self._agent_sessions.get(event_id, {}).get(agent_name),
+                        session_id=resume_session_id,
                     )
 
             if result == RETRYABLE_SENTINEL:
@@ -1934,13 +1954,15 @@ class Brain:
                 )
                 return
 
-            # Track session for follow-ups -- but clear on failure to prevent corrupted resume loops
+            # Track session + mode for follow-ups -- clear on failure to prevent corrupted resume loops
             result_str_check = str(result).strip() if result else ""
             is_error_result = result_str_check.startswith("Error:") or not result_str_check
             if session_id and not is_error_result:
                 self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
+                self._agent_session_modes.setdefault(event_id, {})[agent_name] = mode or ""
             elif is_error_result and event_id in self._agent_sessions:
                 self._agent_sessions.get(event_id, {}).pop(agent_name, None)
+                self._agent_session_modes.get(event_id, {}).pop(agent_name, None)
                 logger.info(f"Cleared corrupted session for {agent_name} on {event_id}")
             # Lock released -- Brain continues freely
 
@@ -2160,6 +2182,7 @@ class Brain:
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
+        self._agent_session_modes.pop(event_id, None)
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
@@ -2201,6 +2224,7 @@ class Brain:
             pass
         self._release_task_state(event_id)
         self._agent_sessions.pop(event_id, None)
+        self._agent_session_modes.pop(event_id, None)
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)

@@ -7,6 +7,7 @@
 // 4. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 5. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 6. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
+// 7. [Pattern]: is400SessionError detects Claude thinking-block corruption on --resume. executeCLIStreaming retries once without session (_retryWithoutSession flag prevents loops).
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -395,6 +396,15 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     resolve({ status: 'success', sessionId: capturedSessionId, output: stdoutFallback(effectiveOutput), source: 'stdout' });
                 });
             } else {
+                if (options.sessionId && !options._retryWithoutSession && is400SessionError(effectiveOutput, stderr)) {
+                    console.log(`[${new Date().toISOString()}] [${eventId}] 400 session error detected, retrying without --resume`);
+                    executeCLIStreaming(ws, eventId, prompt, {
+                        ...options,
+                        sessionId: null,
+                        _retryWithoutSession: true,
+                    }).then(resolve).catch(reject);
+                    return;
+                }
                 resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
             }
         });
@@ -412,6 +422,16 @@ function is429Error(stderr) {
     return lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('rate limit');
 }
 
+function is400SessionError(output, stderr) {
+    const combined = ((output || '') + (stderr || '')).toLowerCase();
+    return combined.includes('400') && (
+        combined.includes('thinking') ||
+        combined.includes('redacted_thinking') ||
+        combined.includes('text content blocks must be non-empty') ||
+        combined.includes('invalid_request_error')
+    );
+}
+
 module.exports = {
     buildCLICommand,
     executeCLI,
@@ -422,4 +442,5 @@ module.exports = {
     requestFindings,
     prepareResultsDir,
     is429Error,
+    is400SessionError,
 };

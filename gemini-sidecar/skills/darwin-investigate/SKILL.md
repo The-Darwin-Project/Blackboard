@@ -7,13 +7,20 @@ modes: [investigate]
 
 # Darwin Investigation Workflow
 
-## Time-Boxed Investigation (3-5 commands MAX)
+## Time-Boxed Investigation (5-7 steps MAX)
 
-1. Check pod status: `oc get pods -n <namespace>`
-2. Describe the problem pod: `oc describe pod <name> -n <namespace>`
-3. Check logs: `oc logs <pod> -n <namespace>`
-4. Check resource usage: `oc adm top pods -n <namespace>` (if relevant)
-5. **STOP. Report your findings.**
+Use **ArgoCD MCP tools first** -- the sidecar may not have direct RBAC to workload namespaces.
+
+1. Get application state: ArgoCD MCP `get_application` (shows sync status, health, conditions, current revision)
+2. Get resource tree: ArgoCD MCP `get_application_resource_tree` (shows all pods, ReplicaSets, ConfigMaps with their hashes and health status)
+3. Get crash logs: ArgoCD MCP `get_application_workload_logs` (pod logs without needing namespace RBAC)
+4. **Change Attribution** (for crash/unhealthy events): From the resource tree, determine WHAT changed:
+   - If old and new ReplicaSets both exist, check if image tags differ or only ConfigMap/Secret hashes differ
+   - Same image + different ConfigMap hash = **config-triggered rollout** (fix the config)
+   - Different image = **image-triggered rollout** (rollback the image)
+   - Check `get_application` sync history for what resources changed in the latest revision
+5. **Fallback** (only if ArgoCD MCP is unavailable): `oc get pods`, `oc describe pod`, `oc logs`
+6. **STOP. Report your findings.**
 
 Do NOT keep investigating after you have enough evidence. The Brain decides the next step.
 
@@ -23,8 +30,9 @@ Structure your findings as:
 
 ```text
 **Root Cause**: one sentence
+**Trigger**: image change | config change (ConfigMap/Secret) | infrastructure
 **Evidence**: 2-3 bullet points of what you found
-**Recommendation**: what the Brain should do next
+**Recommendation**: what the Brain should do next, based on evidance.
 ```
 
 ## Rules
