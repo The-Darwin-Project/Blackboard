@@ -15,8 +15,9 @@ Headhunter events carry an embedded YAML work plan in the `reason` field and str
 - `evidence.gitlab_context.project_path`, `mr_iid`, `mr_title`, `target_url`: MR identification
 - `evidence.gitlab_context.pipeline_status`, `merge_status`, `source_branch`, `author`: MR state
 - `evidence.gitlab_context.maintainer.emails`: Verified maintainer email addresses for notifications
+- `evidence.gitlab_context.mr_description`: Original MR description, may contain structured Bot Instructions with success/failure actions
 
-If the plan has frontmatter steps (starts with `---`), activate the plan steps directly.
+If the plan has frontmatter steps (starts with `---`), activate the plan steps directly. The plan is generated from either structured Bot Instructions in the MR description (Tier 1) or LLM analysis of the full MR context (Tier 2).
 
 ## Routing Principle
 
@@ -25,7 +26,7 @@ Route based on the plan's `domain` field:
 - **CLEAR**: Route directly to the assigned agent without Architect review.
 - **COMPLICATED / COMPLEX**: Route to the Architect first for review.
 
-The `action_name` field provides context for triage but the plan's steps contain the specific instructions.
+The plan steps contain the specific instructions. If the step summary references Bot Instructions (success/failure actions), follow them as written.
 
 ## Maintainer Notification
 

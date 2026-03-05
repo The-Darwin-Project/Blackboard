@@ -28,6 +28,10 @@ data:
   LLM_TEMPERATURE_ARCHIVIST: "{{ .Values.gcp.llm.archivist.temperature }}"
   LLM_THINKING_ARCHIVIST: "{{ .Values.gcp.llm.archivist.thinkingLevel }}"
   LLM_MAX_TOKENS_ARCHIVIST: "{{ .Values.gcp.llm.archivist.maxOutputTokens }}"
+  # Headhunter (MR triage classification)
+  LLM_MODEL_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.model }}"
+  LLM_TEMPERATURE_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.temperature }}"
+  LLM_THINKING_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.thinkingLevel }}"
   
   # Brain Progressive Skills
   BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"

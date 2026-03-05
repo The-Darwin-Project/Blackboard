@@ -235,6 +235,21 @@ spec:
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
+            - name: LLM_MODEL_HEADHUNTER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_HEADHUNTER
+            - name: LLM_TEMPERATURE_HEADHUNTER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_HEADHUNTER
+            - name: LLM_THINKING_HEADHUNTER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_HEADHUNTER
             {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)

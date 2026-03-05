@@ -3,15 +3,17 @@
 # 1. [Pattern]: Follows Aligner pattern -- in-process daemon, lazy-loaded LLM adapter via _get_adapter().
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
 # 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
-# 4. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
-# 5. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
-# 6. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
-# 7. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
+# 4. [Pattern]: Two-tier triage: (1) _parse_bot_instructions reads ### Bot Instructions from mr_description -- deterministic, no LLM. (2) Flash Lite LLM analysis for all other MRs.
+# 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
+# 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
+# 7. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
+# 8. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
+# 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
 
-Polls GitLab /todos API, enriches context, classifies via Gemini Flash,
-and pushes structured events to the Brain conversation queue.
+Two-tier triage: parse structured Bot Instructions from MR descriptions,
+or classify via Flash Lite LLM. Pushes structured events to the Brain queue.
 """
 from __future__ import annotations
 
@@ -88,7 +90,9 @@ class Headhunter:
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._max_active = int(os.getenv("HEADHUNTER_MAX_ACTIVE", "1"))
         self._processed_todos: set[tuple[int, int]] = set()
-        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-2.0-flash")
+        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.1-flash-lite-preview")
+        self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "1.0"))
+        self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_host = os.getenv("GITLAB_HOST", "")
         self._gitlab_token: str | None = None
@@ -263,17 +267,19 @@ class Headhunter:
     # =========================================================================
 
     async def analyze_and_plan(self, context: dict) -> tuple[str, str]:
-        """LLM call: raw context -> (frontmatter_plan_text, domain).
+        """Two-tier MR triage: Bot Instructions parse -> LLM analysis -> emergency fallback.
 
-        Returns a tuple of (plan_text, domain) where domain is clear/complicated/complex.
-        Fast-path: known bot patterns skip LLM entirely with a templated plan.
+        Tier 1: Parse structured '### Bot Instructions' from mr_description (no LLM).
+        Tier 2: Flash Lite LLM analysis with full MR context.
+        Emergency: Static fallback plan when LLM is unavailable.
         """
-        fast = self._fast_path_plan(context)
-        if fast:
-            return fast
+        parsed = self._parse_bot_instructions(context)
+        if parsed:
+            return parsed
 
         adapter = await self._get_adapter()
         if not adapter:
+            logger.warning(f"Emergency fallback plan for !{context.get('mr_title', '?')}")
             return self._fallback_plan(context), "complicated"
 
         prompt = self._build_analysis_prompt(context)
@@ -281,102 +287,72 @@ class Headhunter:
             response = await adapter.generate(
                 system="You are a GitLab MR triage agent. Classify and plan.",
                 contents=prompt,
-                temperature=0.3,
+                temperature=self._temperature,
                 max_output_tokens=1024,
+                thinking_level=self._thinking_level,
             )
             plan_text = response.text.strip()
             domain = self._extract_domain(plan_text)
+            logger.info(f"Tier 2: LLM analysis for !{context.get('mr_title', '?')} -> {domain}")
             return plan_text, domain
         except Exception as e:
-            logger.warning(f"LLM analysis failed, using fallback: {e}")
+            logger.warning(f"Tier 2 LLM analysis failed, using emergency fallback: {e}")
             return self._fallback_plan(context), "complicated"
 
     @staticmethod
-    def _fast_path_plan(context: dict) -> tuple[str, str] | None:
-        """Detect known bot patterns and return a templated plan without LLM.
+    def _parse_bot_instructions(context: dict) -> tuple[str, str] | None:
+        """Tier 1: Parse structured Bot Instructions from MR description.
 
-        Returns (plan_text, domain) or None if no fast-path matches.
+        Detects '### Bot Instructions' marker in mr_description.
+        Returns (plan_text, domain) or None if no instructions found.
+        Parse failures return None to fall through to Tier 2 LLM analysis.
         """
-        author = context.get("author", "")
-        action = context.get("action_name", "")
-        pipeline = context.get("pipeline_status", "")
-        title = context.get("mr_title", "")
-        project = context.get("project_path", "")
-        url = context.get("target_url", "")
+        description = context.get("mr_description", "")
+        if "### Bot Instructions" not in description:
+            return None
 
-        is_bot_mr = "bot_" in author or "submodule-updater" in author
-        is_review = action in ("review_requested", "approval_required", "directly_addressed")
-        is_failed = pipeline == "failed"
+        try:
+            title = context.get("mr_title", "")
+            project = context.get("project_path", "")
+            url = context.get("target_url", "")
 
-        if is_bot_mr and is_review and is_failed:
+            mr_type = ""
+            for line in description.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("## ") and not stripped.startswith("### "):
+                    mr_type = stripped[3:].strip()
+                    break
+
+            instructions_idx = description.index("### Bot Instructions")
+            instructions = description[instructions_idx + len("### Bot Instructions"):].strip()
+
+            domain = "clear" if mr_type in ("Submodule Update", "Konflux Release") else "complicated"
+
+            safe_instructions = instructions.replace('"', "'")
             plan = (
                 f"---\n"
-                f"plan: \"Retest failed pipeline on {title}, merge if green, escalate if red\"\n"
+                f"plan: \"{mr_type or 'Handle MR'}: {title}\"\n"
                 f"service: general\n"
                 f"repository: {project}\n"
-                f"domain: CLEAR\n"
+                f"domain: {domain.upper()}\n"
                 f"risk: low\n"
                 f"steps:\n"
-                f"  - id: retest-and-verify\n"
+                f"  - id: execute-instructions\n"
                 f"    agent: developer\n"
                 f"    mode: execute\n"
-                f"    summary: \"Check MR {url} -- pipeline failed. Retest the pipeline."
-                f" If the pipeline passes, merge the MR."
-                f" If it fails again, add a comment describing the failure, close the MR,"
-                f" and notify the maintainer via Slack.\"\n"
+                f"    summary: \"MR {url} -- {safe_instructions}\"\n"
                 f"    status: pending\n"
                 f"---"
             )
-            logger.info(f"Fast-path: bot MR + review_requested + failed pipeline -> CLEAR retest plan")
-            return plan, "clear"
+            logger.info(f"Tier 1: Bot Instructions parsed for !{context.get('mr_title', '?')} ({mr_type or 'unknown type'})")
+            return plan, domain
 
-        if is_bot_mr and is_review and pipeline in ("success", "passed"):
-            plan = (
-                f"---\n"
-                f"plan: \"Pipeline green on bot MR {title}, review and merge\"\n"
-                f"service: general\n"
-                f"repository: {project}\n"
-                f"domain: CLEAR\n"
-                f"risk: low\n"
-                f"steps:\n"
-                f"  - id: merge\n"
-                f"    agent: developer\n"
-                f"    mode: execute\n"
-                f"    summary: \"Review and merge MR {url} -- pipeline is green."
-                f" Notify the maintainer via Slack that the MR was merged.\"\n"
-                f"    status: pending\n"
-                f"---"
-            )
-            logger.info(f"Fast-path: bot MR + review_requested + green pipeline -> CLEAR merge plan")
-            return plan, "clear"
-
-        mention = context.get("mention_comment", "")
-        if action == "directly_addressed" and mention:
-            plan = (
-                f"---\n"
-                f"plan: \"Handle direct request on {title}\"\n"
-                f"service: general\n"
-                f"repository: {project}\n"
-                f"domain: CLEAR\n"
-                f"risk: low\n"
-                f"steps:\n"
-                f"  - id: follow-instruction\n"
-                f"    agent: developer\n"
-                f"    mode: execute\n"
-                f"    summary: \"Someone requested action on MR {url}."
-                f" Their instruction: {mention.replace(chr(34), chr(39))}"
-                f" -- Follow this instruction. Check pipeline and merge status before acting."
-                f" Notify the maintainer via Slack about the result.\"\n"
-                f"    status: pending\n"
-                f"---"
-            )
-            logger.info(f"Fast-path: directly_addressed with instruction -> CLEAR follow-instruction plan")
-            return plan, "clear"
-
-        return None
+        except Exception as e:
+            logger.warning(f"Tier 1: Bot Instructions detected but parsing failed: {e}")
+            return None
 
     def _build_analysis_prompt(self, context: dict) -> str:
-        """Build structured prompt for Flash analysis. Used when no fast-path matches."""
+        """Build structured prompt for Tier 2 LLM analysis with full MR context."""
         parts = [
             f"Action: {context['action_name']}",
             f"MR: {context['mr_title']}",
@@ -386,6 +362,8 @@ class Headhunter:
             f"Pipeline: {context['pipeline_status']}",
             f"Project: {context['project_path']}",
         ]
+        if context.get("mr_description"):
+            parts.append(f"MR Description:\n{context['mr_description']}")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
         if context.get("labels"):
@@ -393,16 +371,14 @@ class Headhunter:
         if context.get("failed_job_log"):
             parts.append(f"Failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
         if context.get("mention_comment"):
-            parts.append(f"Direct request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
+            parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
         parts.append(
             "\nProduce a YAML frontmatter work plan with fields: plan, service, repository, "
             "domain (CLEAR/COMPLICATED/COMPLEX), risk (low/medium/high), "
             "steps (each with id, agent, mode, summary, status: pending). "
             "Always include: notify the maintainer via Slack about the outcome. "
-            "If the MR author is a bot and the pipeline fails after retry, "
-            "close the MR and notify the maintainer. "
-            "If the MR author is human, notify the maintainer but do not close the MR. "
+            "Include the MR URL in step summaries so agents can reference it. "
             "Wrap in --- delimiters."
         )
         return "\n".join(parts)
@@ -460,6 +436,7 @@ class Headhunter:
                 "author": target.get("author", {}).get("username", ""),
                 "target_url": todo.get("target_url", "").split("#")[0],
                 "pipeline_status": "unknown",
+                "mr_description": (target.get("description") or "")[:2000],
                 "maintainer": maintainer,
             },
         )

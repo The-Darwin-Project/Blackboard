@@ -15,18 +15,18 @@ alwaysApply: true
 
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** Gemini Flash via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`). Fast-path heuristics skip LLM for known bot patterns.
+* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). Two-tier triage (see below).
 * **Flow Gate:** `max_active=1` (configurable). Blocks new events while one is being processed.
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
-## Fast-Path Heuristics (no LLM needed)
+## Two-Tier Triage
 
-| Pattern | Classification | Action |
+| Tier | Trigger | How |
 |---|---|---|
-| Bot MR + `review_requested` + failed pipeline | CLEAR | Retest, merge if green, escalate if red |
-| Bot MR + `review_requested` + green pipeline | CLEAR | Review and merge |
-| `directly_addressed` with @mention instruction | CLEAR | Follow the instruction from the comment |
+| **Tier 1: Bot Instructions** | `### Bot Instructions` found in `mr_description` | Deterministic parse -- no LLM call. See `09-bot-mr-description-protocol.mdc`. |
+| **Tier 2: LLM Analysis** | No Bot Instructions in description | Flash Lite reads full MR context (description, pipeline, changed files, comments) and generates a plan. |
+| **Emergency Fallback** | LLM unavailable | Static COMPLICATED/investigate plan. Safety net only. |
 
 ## Maintainer Resolution
 
@@ -63,7 +63,7 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 
 * Sidecar skills NEVER include GitLab usernames in Slack recommendations.
 * Brain ALWAYS uses `evidence.gitlab_context.maintainer.emails` for notifications.
-* Submodule MRs with `cannot_be_merged` are closed as obsolete (newer update merged).
+* `evidence.gitlab_context.mr_description` contains the original MR description (Bot Instructions visible to Brain).
 * `GITLAB_BOT_USERNAME` env var controls which account name to match in @mention scanning.
 
 ## Helm Configuration
@@ -76,4 +76,11 @@ headhunter:
   startupDelay: "180"
   maintainerSource: "static"
   maintainers: ""  # CSV of emails
+
+# LLM (under gcp.llm)
+gcp:
+  llm:
+    headhunter:
+      model: "gemini-3.1-flash-lite-preview"
+      temperature: "0.2"
 ```
