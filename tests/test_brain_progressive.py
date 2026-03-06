@@ -63,20 +63,18 @@ class TestMatchPhases:
         defaults.update(overrides)
         return defaults
 
-    def test_new_event_triage(self):
+    def test_new_event_dispatch(self):
         ctx = self._make_ctx(turn_count=0)
         active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
         assert "always" in active
-        assert "triage" in active
         assert "dispatch" in active
         assert "source" in active
         assert "post-agent" not in active
 
-    def test_post_agent_excludes_triage_dispatch(self):
+    def test_post_agent_excludes_dispatch(self):
         ctx = self._make_ctx(turn_count=1, has_agent_result=True)
         active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
         assert "post-agent" in active
-        assert "triage" in active
         assert "dispatch" in active
 
         excluded: set[str] = set()
@@ -84,11 +82,10 @@ class TestMatchPhases:
             excluded.update(PHASE_EXCLUSIONS.get(phase, []))
         final = [p for p in active if p not in excluded]
         assert "post-agent" in final
-        assert "triage" not in final
         assert "dispatch" not in final
         assert "source" in final
 
-    def test_waiting_excludes_triage_dispatch_postagent(self):
+    def test_waiting_excludes_dispatch_postagent(self):
         ctx = self._make_ctx(turn_count=5, is_waiting=True, has_agent_result=True)
         active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
 
@@ -99,7 +96,6 @@ class TestMatchPhases:
         assert "waiting" in final
         assert "always" in final
         assert "source" in final
-        assert "triage" not in final
         assert "dispatch" not in final
         assert "post-agent" not in final
 
