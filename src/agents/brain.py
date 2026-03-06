@@ -8,7 +8,7 @@
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
-# 9. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak.
+# 9. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
 # 10. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
 # 11. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 12. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
@@ -216,7 +216,8 @@ Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL ser
 
 # Circuit breaker limits
 MAX_TURNS_PER_EVENT = 100
-MAX_INACTIVITY_SECONDS = 1800  # 30 minutes with no new turns = stale
+NUDGE_INTERVAL_SECONDS = 1800  # 30 min idle before automated nudge
+MAX_NUDGES_BEFORE_ESCALATION = 3  # consecutive nudges before human escalation
 
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
@@ -443,21 +444,42 @@ class Brain:
             )
             return
 
-        # Circuit breaker: inactivity timeout (no new turns for 30 min = stale)
-        # Active events with recent turns never time out, regardless of total duration.
-        # Events waiting for user (approval/response) are exempt -- they're intentionally idle.
+        # Health check: nudge idle events, escalate to human after max nudges.
+        # Guards: skip if deferred (intentional wait), waiting for user, or last real turn is brain.defer (just woke).
         if event.conversation and event_id not in self._waiting_for_user:
-            last_turn_time = event.conversation[-1].timestamp
-            inactivity = time.time() - last_turn_time
+            last_real_turn = next(
+                (t for t in reversed(event.conversation)
+                 if not (t.actor == "user" and t.source == "automated")),
+                None,
+            )
+            if last_real_turn and last_real_turn.actor == "brain" and last_real_turn.action == "defer":
+                pass  # Just woke from defer -- defer-wake handles re-activation
+            elif last_real_turn:
+                inactivity = time.time() - last_real_turn.timestamp
+                if inactivity > NUDGE_INTERVAL_SECONDS:
+                    consecutive_nudges = 0
+                    for t in reversed(event.conversation):
+                        if t.actor == "user" and t.source == "automated":
+                            consecutive_nudges += 1
+                        else:
+                            break
 
-            if inactivity > MAX_INACTIVITY_SECONDS:
-                logger.warning(f"Event {event_id} inactive for {inactivity:.0f}s (max {MAX_INACTIVITY_SECONDS}s)")
-                await self._close_and_broadcast(
-                    event_id,
-                    f"STALE: No activity for {int(inactivity // 60)} minutes. Force closed.",
-                    close_reason="stale",
-                )
-                return
+                    if consecutive_nudges >= MAX_NUDGES_BEFORE_ESCALATION:
+                        await self._escalate_to_human(event_id, event, consecutive_nudges, inactivity)
+                        return
+
+                    idle_min = int(inactivity // 60)
+                    nudge_turn = ConversationTurn(
+                        turn=len(event.conversation) + 1,
+                        actor="user",
+                        action="message",
+                        source="automated",
+                        thoughts=f"Automated health check: this event has been idle for {idle_min} minutes with no progress. Evaluate the current state and take action: route an agent to check status, defer with a reason, or close if resolved.",
+                    )
+                    await self.blackboard.append_turn(event_id, nudge_turn)
+                    await self._broadcast_turn(event_id, nudge_turn)
+                    logger.info(f"Nudge injected for {event_id} ({consecutive_nudges + 1}/{MAX_NUDGES_BEFORE_ESCALATION})")
+                    return
 
         # Snapshot turn count BEFORE LLM call -- any turns appended during processing
         # (e.g., Aligner confirm arriving mid-evaluation) will have index > turn_snapshot
@@ -2149,6 +2171,73 @@ class Brain:
                 await target(message)
             except Exception as e:
                 logger.warning(f"Broadcast target failed: {e}")
+
+    async def _escalate_to_human(
+        self, event_id: str, event: EventDocument, nudge_count: int, idle_seconds: float,
+    ) -> None:
+        """Escalate an idle event to a human after max automated nudges.
+
+        Sets wait_for_user and DMs the resolved maintainer via Slack.
+        No force-close -- the human decides what to do.
+        """
+        idle_min = int(idle_seconds // 60)
+        self._waiting_for_user.add(event_id)
+
+        email = None
+        evidence = event.event.evidence
+        if hasattr(evidence, "gitlab_context") and evidence.gitlab_context:
+            gl = evidence.gitlab_context
+            maintainer = gl.get("maintainer", {})
+            emails = maintainer.get("emails", [])
+            if emails:
+                email = emails[0]
+        if not email and event.slack_user_id:
+            email = event.slack_user_id
+        if not email:
+            import os as _os
+            static = _os.getenv("HEADHUNTER_MAINTAINERS", "")
+            if static:
+                email = static.split(",")[0].strip()
+
+        escalation_msg = (
+            f"Event `{event_id}` has been idle for {idle_min} minutes after "
+            f"{nudge_count} automated check-ins. Brain could not resolve. "
+            f"Service: {event.service}. Please review."
+        )
+
+        if email:
+            slack_channel = self._get_slack_channel()
+            if slack_channel:
+                try:
+                    if "@" in email:
+                        user_info = await slack_channel._app.client.users_lookupByEmail(email=email)
+                        slack_user_id = user_info["user"]["id"]
+                    else:
+                        slack_user_id = email
+                    dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
+                    dm_channel = dm["channel"]["id"]
+                    await slack_channel._app.client.chat_postMessage(
+                        channel=dm_channel,
+                        text=f":rotating_light: *Darwin Escalation*\n\n{escalation_msg}",
+                    )
+                    logger.info(f"Escalation DM sent to {email} for {event_id}")
+                except Exception as e:
+                    logger.warning(f"Escalation DM failed for {event_id}: {e}")
+            else:
+                logger.warning(f"Escalation: no Slack channel for {event_id}, wait_for_user set without DM")
+        else:
+            logger.warning(f"Escalation: no email resolved for {event_id}, wait_for_user set without DM")
+
+        wait_turn = ConversationTurn(
+            turn=len(event.conversation) + 1,
+            actor="brain",
+            action="wait",
+            thoughts=escalation_msg,
+            waitingFor="user",
+        )
+        await self.blackboard.append_turn(event_id, wait_turn)
+        await self._broadcast_turn(event_id, wait_turn)
+        logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
 
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event and broadcast the closure to UI."""
