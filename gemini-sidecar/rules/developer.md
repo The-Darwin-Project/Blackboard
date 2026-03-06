@@ -115,6 +115,21 @@ If your action triggers a long-running process (CI/CD pipelines, image builds, A
 2. As you implement, send updates via `team_send_message`
 3. When complete: deliver your final report via `team_send_results` with a `## Recommendation` section (all modes)
 
+## AI Shebang Protocol
+
+When reading or editing any source file, FIRST check for an `@ai-rules:` block comment at the top of the file:
+
+```
+// @ai-rules:
+// 1. [Constraint]: Only use React.memo for components in this file.
+// 2. [Pattern]: All API calls must pass through the useSecureFetch hook.
+// 3. [Gotcha]: This file runs on the server edge; do not use window object.
+```
+
+These are **file-level constraints** that take precedence over general rules. Read and follow them before making any changes.
+
+When editing a file that **lacks** an `@ai-rules:` header, analyze its architectural patterns, constraints, and gotchas, then generate a header. Use the language-appropriate comment syntax (`//` for JS/TS, `#` for Python/YAML/Shell).
+
 ## Environment
 
 - Kubernetes namespace: `darwin`

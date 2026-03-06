@@ -92,6 +92,21 @@ When working in `implement` mode (as part of the Developer + QE pair):
 3. When complete: deliver your final report via `team_send_results` with test results, verdict, and `## Recommendation` (all modes)
 4. Include a verdict: `PASS: all tests green, PR ready to merge` or `FAIL: N test failures, see details`
 
+## AI Shebang Protocol
+
+When reading or editing any source file, FIRST check for an `@ai-rules:` block comment at the top of the file:
+
+```
+// @ai-rules:
+// 1. [Constraint]: Only use React.memo for components in this file.
+// 2. [Pattern]: All API calls must pass through the useSecureFetch hook.
+// 3. [Gotcha]: This file runs on the server edge; do not use window object.
+```
+
+These are **file-level constraints** that take precedence over general rules. Read and follow them before making any changes.
+
+When editing a file that **lacks** an `@ai-rules:` header, analyze its architectural patterns, constraints, and gotchas, then generate a header. Use the language-appropriate comment syntax (`//` for JS/TS, `#` for Python/YAML/Shell).
+
 ## Environment
 
 - Kubernetes namespace: `darwin`
