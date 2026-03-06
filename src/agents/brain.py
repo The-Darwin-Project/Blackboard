@@ -502,6 +502,17 @@ class Brain:
             logger.info(f"Brain processed event {event_id} (probe mode)")
             return
 
+        # Determine defer-wake state ONCE before the iterative loop.
+        # Persists across iterations so tool stripping survives lookup re-invocations.
+        last_action = next(
+            (t for t in reversed(event.conversation)
+             if not (t.actor == "brain" and t.action == "think")),
+            None,
+        )
+        is_defer_wake = bool(
+            last_action and last_action.actor == "brain" and last_action.action == "defer"
+        )
+
         # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
         # returns True, meaning the LLM needs to make a follow-up decision.
         # Bounded to prevent runaway loops.
@@ -512,7 +523,9 @@ class Brain:
                 event = await self.blackboard.get_event(event_id)
                 if not event:
                     return
-            should_continue = await self._process_with_llm(event_id, event)
+            should_continue = await self._process_with_llm(
+                event_id, event, is_defer_wake=is_defer_wake,
+            )
             if not should_continue:
                 break
             logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
@@ -532,6 +545,8 @@ class Brain:
         self,
         event_id: str,
         event: EventDocument,
+        *,
+        is_defer_wake: bool = False,
     ) -> bool:
         """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
@@ -549,6 +564,9 @@ class Brain:
         # Progressive skill loading: build phase-specific system prompt + LLM params
         if self._progressive_skills and self._skill_loader:
             context_flags = await self._extract_context_flags(event)
+            if is_defer_wake:
+                context_flags["is_defer_wakeup"] = True
+                context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
             active_phases = self._match_phases(event, context_flags)
             system_prompt = self._build_system_prompt(event, active_phases, context_flags)
             thinking_level, call_temp = self._resolve_llm_params(active_phases)
@@ -556,6 +574,12 @@ class Brain:
             system_prompt = BRAIN_SYSTEM_PROMPT
             thinking_level, call_temp = self._determine_thinking_params_legacy(event)
             context_flags = None
+
+        # Strip defer_event on defer-wake -- forces Brain to act (route/close/escalate)
+        active_tools = BRAIN_TOOL_SCHEMAS
+        if is_defer_wake:
+            active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
+            logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
 
         prompt = await self._build_contents(event, context_cache=context_flags)
 
@@ -588,7 +612,7 @@ class Brain:
                 async for chunk in self._adapter.generate_stream(
                     system_prompt=system_prompt,
                     contents=prompt,
-                    tools=BRAIN_TOOL_SCHEMAS,
+                    tools=active_tools,
                     temperature=call_temp,
                     max_output_tokens=self.max_output_tokens,
                     thinking_level=thinking_level,
@@ -897,6 +921,8 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "defer":
                 consecutive_defers += 1
+            elif t.actor == "brain" and t.action == "think":
+                continue
             else:
                 break
         flags["is_defer_wakeup"] = consecutive_defers > 0
@@ -954,10 +980,22 @@ class Brain:
                 "unknown",
             )
             last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
+            last_agent = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor not in ("brain", "user", "aligner")),
+                None,
+            )
+            elapsed_str = ""
+            if last_agent:
+                elapsed_min = int((time.time() - last_agent.timestamp) / 60)
+                elapsed_str = (
+                    f"Time elapsed since last {last_agent.actor} response "
+                    f"({last_agent.action}): {elapsed_min} minutes."
+                )
             resolved_contents.append(
-                f"**DEFER STATUS:** This event has been deferred {consecutive} consecutive time(s).\n"
-                f"Last deferral reason: {last_reason}\n"
-                f"{'⚠️ You have deferred 2+ times for the same reason. You MUST route an agent to verify the current state. Do NOT defer again with the same reason.' if consecutive >= 2 else ''}"
+                f"**DEFER WAKE-UP ({consecutive}x):** {last_reason}\n"
+                f"{elapsed_str}\n"
+                f"The defer_event tool is not available. You must take action: route an agent to verify current state, close, or escalate."
             )
 
         prompt = "\n\n---\n\n".join(resolved_contents)
