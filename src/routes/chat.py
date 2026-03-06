@@ -52,6 +52,7 @@ async def create_chat_event(
             evidence=EventEvidence(
                 display_text=request.message,
                 source_type="chat",
+                triggered_by="dashboard",
                 domain="complicated",
                 severity="info",
             ),

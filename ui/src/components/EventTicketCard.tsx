@@ -30,6 +30,7 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
   const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
   const statusStyle = STATUS_COLORS[event.status] || STATUS_COLORS.active;
   const metrics = event.evidence?.metrics;
+  const triggeredBy = event.evidence?.triggered_by;
   const reasonText = extractReasonDisplay(event.reason);
 
   const handleClose = (e: React.MouseEvent) => {
@@ -93,10 +94,13 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         )}
       </div>
 
-      {/* Row 2: service name + timestamp */}
+      {/* Row 2: service name + triggered_by + timestamp */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
         <strong style={{ color: '#e2e8f0', fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {event.service}
+          {triggeredBy && (
+            <span style={{ color: '#64748b', fontWeight: 400 }}>{` \u2022 ${triggeredBy}`}</span>
+          )}
         </strong>
         {event.created && (
           <span style={{ fontSize: 11, color: '#94a3b8', flexShrink: 0 }}>

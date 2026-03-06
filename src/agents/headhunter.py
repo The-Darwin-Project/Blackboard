@@ -420,6 +420,7 @@ class Headhunter:
         evidence = EventEvidence(
             display_text=f"GitLab: {todo['action_name']} on !{target['iid']} in {project_path}",
             source_type="headhunter",
+            triggered_by="gitlab-bot",
             domain=domain,
             severity="info",
             gitlab_context={

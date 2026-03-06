@@ -148,6 +148,7 @@ export interface EventMetrics {
 export interface EventEvidence {
   display_text: string;
   source_type: string;
+  triggered_by?: string | null;
   domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
   severity: 'info' | 'warning' | 'critical';
   metrics?: EventMetrics;

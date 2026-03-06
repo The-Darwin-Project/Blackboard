@@ -112,6 +112,7 @@ class SlackChannel:
                 event_id = await self._blackboard.get_event_by_slack_thread(channel_id, thread_ts)
 
                 if not event_id:
+                    display_name = await self._resolve_display_name(client, user_id)
                     event_id = await self._blackboard.create_event(
                         source="slack",
                         service="general",
@@ -119,6 +120,7 @@ class SlackChannel:
                         evidence=EventEvidence(
                             display_text=text,
                             source_type="slack",
+                            triggered_by=display_name,
                             domain="complicated",
                             severity="info",
                         ),
@@ -174,7 +176,7 @@ class SlackChannel:
                 await respond(text="Usage: `/darwin <describe the issue or task>`")
                 return
 
-            # Create event in Blackboard
+            display_name = await self._resolve_display_name(client, user_id)
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -182,6 +184,7 @@ class SlackChannel:
                 evidence=EventEvidence(
                     display_text=text,
                     source_type="slack",
+                    triggered_by=display_name,
                     domain="complicated",
                     severity="info",
                 ),
@@ -361,6 +364,7 @@ class SlackChannel:
             if not text or not text.strip():
                 return
 
+            display_name = await self._resolve_display_name(client, user_id)
             event_id = await self._blackboard.create_event(
                 source="slack",
                 service="general",
@@ -368,6 +372,7 @@ class SlackChannel:
                 evidence=EventEvidence(
                     display_text=text.strip(),
                     source_type="slack",
+                    triggered_by=display_name,
                     domain="complicated",
                     severity="info",
                 ),

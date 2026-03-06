@@ -267,6 +267,9 @@ class EventEvidence(BaseModel):
     source_type: str = Field("unknown", description="aligner | chat | headhunter | ...")
     domain: str = Field("complicated", description="Cynefin: clear|complicated|complex|chaotic")
     severity: str = Field("warning", description="info|warning|critical")
+    triggered_by: Optional[str] = Field(
+        None, description="Who initiated: Slack display name, 'dashboard', 'system', 'gitlab-bot'"
+    )
     metrics: Optional[EventMetrics] = None
     gitlab_context: Optional[dict] = Field(
         None, description="GitLab todo context: todo_id, action_name, project_id, mr_iid, pipeline_status, maintainer"

@@ -355,6 +355,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         evidence=EventEvidence(
                             display_text=message,
                             source_type="chat",
+                            triggered_by="dashboard",
                             domain="complicated",
                             severity="info",
                         ),

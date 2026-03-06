@@ -634,6 +634,7 @@ class Aligner:
         evidence_obj = EventEvidence(
             display_text=", ".join(evidence_parts),
             source_type="aligner",
+            triggered_by="system",
             domain=domain,
             severity=severity_level,
             metrics=EventMetrics(
