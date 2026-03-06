@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentConnection:
-    """A single live sidecar WebSocket connection."""
+    """A single live sidecar or ephemeral agent WebSocket connection."""
 
     agent_id: str
     role: str
@@ -32,6 +32,9 @@ class AgentConnection:
     busy: bool = False
     current_event_id: str | None = None
     current_task_id: str | None = None
+    ephemeral: bool = False
+    bound_event_id: str | None = None
+    current_role: str | None = None
 
 
 class AgentRegistry:
@@ -41,9 +44,13 @@ class AgentRegistry:
         self._agents: dict[str, AgentConnection] = {}
         self._lock = asyncio.Lock()
         self._on_task_orphaned: Callable[[str], None] | None = None
+        self._on_ephemeral_registered: Callable[[str], None] | None = None
 
     def set_task_orphaned_callback(self, cb: Callable[[str], None]) -> None:
         self._on_task_orphaned = cb
+
+    def set_ephemeral_registered_callback(self, cb: Callable[[str], None]) -> None:
+        self._on_ephemeral_registered = cb
 
     async def register(
         self,
@@ -53,22 +60,26 @@ class AgentRegistry:
         capabilities: list[str],
         cli: str,
         model: str,
+        ephemeral: bool = False,
+        event_id: str | None = None,
     ) -> None:
         async with self._lock:
-            prefix = agent_id.rsplit("-", 1)[0]
-            stale = [
-                aid for aid, conn in self._agents.items()
-                if conn.role == role
-                and aid.rsplit("-", 1)[0] == prefix
-                and aid != agent_id
-            ]
-            for aid in stale:
-                old = self._agents.pop(aid)
-                try:
-                    await old.ws.close()
-                except Exception:
-                    pass
-                logger.info("Evicted stale agent %s (replaced by %s)", aid, agent_id)
+            if not ephemeral:
+                prefix = agent_id.rsplit("-", 1)[0]
+                stale = [
+                    aid for aid, conn in self._agents.items()
+                    if conn.role == role
+                    and not conn.ephemeral
+                    and aid.rsplit("-", 1)[0] == prefix
+                    and aid != agent_id
+                ]
+                for aid in stale:
+                    old = self._agents.pop(aid)
+                    try:
+                        await old.ws.close()
+                    except Exception:
+                        pass
+                    logger.info("Evicted stale agent %s (replaced by %s)", aid, agent_id)
 
             self._agents[agent_id] = AgentConnection(
                 agent_id=agent_id,
@@ -78,11 +89,16 @@ class AgentRegistry:
                 model=model,
                 ws=ws,
                 connected_at=time.time(),
+                ephemeral=ephemeral,
+                bound_event_id=event_id,
             )
             logger.info(
-                "Registered agent %s (role=%s, cli=%s, model=%s)",
-                agent_id, role, cli, model,
+                "Registered agent %s (role=%s, cli=%s, model=%s, ephemeral=%s, event=%s)",
+                agent_id, role, cli, model, ephemeral, event_id,
             )
+
+        if ephemeral and event_id and self._on_ephemeral_registered:
+            self._on_ephemeral_registered(event_id)
 
     async def unregister(self, agent_id: str) -> None:
         async with self._lock:
@@ -91,7 +107,10 @@ class AgentRegistry:
                 return
             if conn.current_task_id and self._on_task_orphaned:
                 self._on_task_orphaned(conn.current_task_id)
-            logger.info("Unregistered agent %s (role=%s)", agent_id, conn.role)
+            if conn.ephemeral:
+                logger.info("Unregistered ephemeral agent %s (event=%s)", agent_id, conn.bound_event_id)
+            else:
+                logger.info("Unregistered agent %s (role=%s)", agent_id, conn.role)
 
     async def get_available(self, role: str) -> AgentConnection | None:
         async with self._lock:
@@ -114,7 +133,15 @@ class AgentRegistry:
                     return conn
             return None
 
-    async def mark_busy(self, agent_id: str, event_id: str, task_id: str) -> None:
+    async def get_ephemeral(self, event_id: str) -> AgentConnection | None:
+        """Find the ephemeral agent bound to a specific event."""
+        async with self._lock:
+            for conn in self._agents.values():
+                if conn.ephemeral and conn.bound_event_id == event_id:
+                    return conn
+            return None
+
+    async def mark_busy(self, agent_id: str, event_id: str, task_id: str, role: str | None = None) -> None:
         async with self._lock:
             conn = self._agents.get(agent_id)
             if not conn:
@@ -122,7 +149,9 @@ class AgentRegistry:
             conn.busy = True
             conn.current_event_id = event_id
             conn.current_task_id = task_id
-            logger.debug("Marked agent %s busy (event=%s, task=%s)", agent_id, event_id, task_id)
+            if role:
+                conn.current_role = role
+            logger.debug("Marked agent %s busy (event=%s, task=%s, role=%s)", agent_id, event_id, task_id, role)
 
     async def mark_idle(self, agent_id: str) -> None:
         async with self._lock:
@@ -132,6 +161,7 @@ class AgentRegistry:
             conn.busy = False
             conn.current_event_id = None
             conn.current_task_id = None
+            conn.current_role = None
             logger.debug("Marked agent %s idle", agent_id)
 
     async def list_agents(self) -> list[dict]:
@@ -146,6 +176,9 @@ class AgentRegistry:
                     "connected_at": c.connected_at,
                     "cli": c.cli,
                     "model": c.model,
+                    "ephemeral": c.ephemeral,
+                    "bound_event_id": c.bound_event_id,
+                    "current_role": c.current_role,
                 }
                 for c in self._agents.values()
             ]

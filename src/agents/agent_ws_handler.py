@@ -52,6 +52,8 @@ async def agent_websocket_handler(
         await registry.register(
             agent_id, raw.get("role", "unknown"), websocket,
             raw.get("capabilities", []), raw.get("cli", ""), raw.get("model", ""),
+            ephemeral=raw.get("ephemeral", False),
+            event_id=raw.get("event_id"),
         )
 
         heartbeat_task = asyncio.create_task(_heartbeat(websocket))

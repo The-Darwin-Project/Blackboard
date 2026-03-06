@@ -4,7 +4,7 @@
 // 2. [Constraint]: Idempotent — checks fs.existsSync before creating; skips overwrite of existing settings/rules.
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
-// 5. [Pattern]: filterSkillsByRole reads YAML frontmatter `roles:` from each SKILL.md and removes skills not matching AGENT_ROLE.
+// 5. [Pattern]: filterSkillsByRole uses .disabled rename (re-entrant). swapActiveRules copies role-specific rules for dynamic switching.
 // 6. [Pattern]: TeamChat MCP: Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool, Claude PreToolUse (both in settings.json).
 // 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
 // 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
@@ -185,6 +185,7 @@ function initializeCLISettings() {
             '/data/gitops-sysadmin': 'TRUST_FOLDER',
             '/data/gitops-developer': 'TRUST_FOLDER',
             '/data/gitops-qe': 'TRUST_FOLDER',
+            '/data/workspace': 'TRUST_FOLDER',
         };
         fs.writeFileSync(trustedFoldersPath, JSON.stringify(trustedFolders, null, 2));
         console.log('Gemini trustedFolders.json created (object format)');
@@ -192,25 +193,23 @@ function initializeCLISettings() {
         console.error(`Gemini trustedFolders.json error: ${err.message}`);
     }
 
-    filterSkillsByRole(geminiDir, claudeDir);
+    filterSkillsByRole((process.env.AGENT_ROLE || '').toLowerCase());
 }
 
 /**
- * Remove skills that don't match AGENT_ROLE.
- * Reads `roles: [...]` from each SKILL.md frontmatter.
- * If roles is present and AGENT_ROLE is not in the list, delete the skill directory.
+ * Hide skills that don't match a role by renaming dirs to *.disabled.
+ * Re-entrant: calls restoreAllSkills() first so role switches work cleanly.
+ * @param {string} role - lowercase role name. Empty string skips filtering.
  */
-function filterSkillsByRole(geminiDir, claudeDir) {
-    const role = (process.env.AGENT_ROLE || '').toLowerCase();
+function filterSkillsByRole(role) {
     if (!role) return;
+    restoreAllSkills();
+    if (!fs.existsSync(GEMINI_SKILLS_DIR)) return;
 
-    const geminiSkillsDir = path.join(geminiDir, 'skills');
-    const claudeSkillsDir = path.join(claudeDir, 'skills');
-    if (!fs.existsSync(geminiSkillsDir)) return;
-
-    let kept = 0, removed = 0;
-    for (const entry of fs.readdirSync(geminiSkillsDir)) {
-        const skillMd = path.join(geminiSkillsDir, entry, 'SKILL.md');
+    let kept = 0, disabled = 0;
+    for (const entry of fs.readdirSync(GEMINI_SKILLS_DIR)) {
+        if (entry.endsWith(DISABLED_SUFFIX)) continue;
+        const skillMd = path.join(GEMINI_SKILLS_DIR, entry, 'SKILL.md');
         if (!fs.existsSync(skillMd)) continue;
 
         const head = fs.readFileSync(skillMd, 'utf8').slice(0, 500);
@@ -220,14 +219,35 @@ function filterSkillsByRole(geminiDir, claudeDir) {
         const roles = match[1].split(',').map(r => r.trim().toLowerCase());
         if (roles.includes(role)) { kept++; continue; }
 
-        fs.rmSync(path.join(geminiSkillsDir, entry), { recursive: true, force: true });
-        const claudeLink = path.join(claudeSkillsDir, entry);
-        if (fs.existsSync(claudeLink)) fs.rmSync(claudeLink, { recursive: true, force: true });
-        removed++;
+        fs.renameSync(
+            path.join(GEMINI_SKILLS_DIR, entry),
+            path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
+        );
+        const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
+        if (fs.existsSync(claudeEntry)) {
+            fs.renameSync(claudeEntry, claudeEntry + DISABLED_SUFFIX);
+        }
+        disabled++;
     }
-    if (removed > 0) {
-        console.log(`Skills filtered for ${role}: ${kept} kept, ${removed} removed`);
+    if (disabled > 0) {
+        console.log(`Skills filtered for role '${role}': ${kept} kept, ${disabled} disabled`);
     }
+}
+
+/**
+ * Copy role-specific rules file to the active CLI config locations.
+ * Source: /tmp/agent-rules/{role}.md (full ConfigMap mount for ephemeral agents).
+ * No-op for local sidecars where /tmp/agent-rules/GEMINI.md is already mounted as subPath.
+ * @param {string} role - lowercase role name
+ */
+function swapActiveRules(role) {
+    const sourceFile = `/tmp/agent-rules/${role}.md`;
+    if (!fs.existsSync(sourceFile)) return;
+    const geminiTarget = path.join(os.homedir(), '.gemini', 'GEMINI.md');
+    const claudeTarget = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+    fs.copyFileSync(sourceFile, geminiTarget);
+    fs.copyFileSync(sourceFile, claudeTarget);
+    console.log(`Rules swapped to ${role}: ${sourceFile}`);
 }
 
 const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
@@ -294,4 +314,4 @@ function restoreAllSkills() {
     }
 }
 
-module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, filterSkillsByMode, restoreAllSkills };
+module.exports = { initializeCLISettings, resolveCommand, writeClaudeMcpServer, filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills };

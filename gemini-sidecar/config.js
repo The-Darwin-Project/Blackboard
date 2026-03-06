@@ -28,6 +28,12 @@ const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';
 
+// Ephemeral agent config -- set by Tekton TriggerTemplate for on-call agents
+const EVENT_ID = process.env.EVENT_ID || '';
+const EPHEMERAL = !!EVENT_ID;
+const IDLE_TIMEOUT_MS = parseInt(process.env.IDLE_TIMEOUT_MS) || 3600000; // 1h default
+const BRAIN_HTTP_URL = process.env.BRAIN_HTTP_URL || '';
+
 // Strip ANSI escape codes from PTY output (colors, cursor movements, etc.)
 // PTY output is raw terminal data -- Brain/LLM needs clean text.
 const ANSI_RE = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hlm]/g;
@@ -42,6 +48,10 @@ module.exports = {
   AGENT_CLI,
   AGENT_MODEL,
   AGENT_ROLE,
+  EVENT_ID,
+  EPHEMERAL,
+  IDLE_TIMEOUT_MS,
+  BRAIN_HTTP_URL,
   CLI_429_MAX_RETRIES,
   CLI_429_INITIAL_DELAY_MS,
   CLI_429_BACKOFF_MULTIPLIER,

@@ -84,12 +84,13 @@ async def dispatch_to_agent(
             "type": "task",
             "task_id": task_id,
             "event_id": event_id,
+            "role": role,
             "prompt": prompt,
             "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/gitops"),
             "autoApprove": True,
             "session_id": session_id,
         })
-        await registry.mark_busy(agent_conn.agent_id, event_id, task_id)
+        await registry.mark_busy(agent_conn.agent_id, event_id, task_id, role=role)
 
         latest_callback_result: str | None = None
         returned_session_id = session_id

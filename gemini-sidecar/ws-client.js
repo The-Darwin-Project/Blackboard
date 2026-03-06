@@ -21,10 +21,11 @@ const {
 const state = require('./state');
 const {
   DEFAULT_WORK_DIR, AGENT_CLI, AGENT_MODEL, AGENT_ROLE,
+  EVENT_ID, EPHEMERAL, IDLE_TIMEOUT_MS,
   CLI_429_MAX_RETRIES, CLI_429_INITIAL_DELAY_MS, CLI_429_BACKOFF_MULTIPLIER,
 } = require('./config');
 const { wsSend } = require('./ws-utils');
-const { filterSkillsByMode, restoreAllSkills } = require('./cli-setup');
+const { filterSkillsByRole, filterSkillsByMode, swapActiveRules, restoreAllSkills } = require('./cli-setup');
 
 const BACKOFF_MIN = 1000;
 const BACKOFF_MAX = 30000;
@@ -42,9 +43,20 @@ function sendMsg(ws, taskId, data) {
 }
 
 function startWSClient(brainUrl) {
-  const agentId = `${AGENT_ROLE}-${os.hostname()}`;
+  const agentId = EPHEMERAL ? `oncall-${os.hostname()}` : `${AGENT_ROLE}-${os.hostname()}`;
   let backoff = BACKOFF_MIN;
   let reconnectTimer = null;
+  let _idleTimer = null;
+
+  function resetIdleTimer() {
+    if (!EPHEMERAL) return;
+    if (_idleTimer) clearTimeout(_idleTimer);
+    _idleTimer = setTimeout(() => {
+      console.log(`[${new Date().toISOString()}] Idle timeout (${IDLE_TIMEOUT_MS}ms) -- ephemeral agent exiting`);
+      if (_activeWs) try { _activeWs.close(); } catch {}
+      process.exit(0);
+    }, IDLE_TIMEOUT_MS);
+  }
 
   function connect() {
     const ws = new WebSocket(brainUrl);
@@ -58,15 +70,23 @@ function startWSClient(brainUrl) {
       backoff = BACKOFF_MIN;
       wsSend(ws, {
         type: 'register', agent_id: agentId, role: AGENT_ROLE,
+        event_id: EVENT_ID || null, ephemeral: EPHEMERAL,
         capabilities: [], cli: AGENT_CLI, model: AGENT_MODEL,
       });
+      resetIdleTimer();
     });
 
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
-      if (msg.type === 'task') await handleTask(ws, msg);
+      if (msg.type === 'task') { resetIdleTimer(); await handleTask(ws, msg); }
       else if (msg.type === 'cancel') handleCancel(msg);
+      else if (msg.type === 'terminate') {
+        console.log(`[${new Date().toISOString()}] Terminate received for ${msg.event_id || 'unknown'}`);
+        cleanupActiveTask();
+        if (_activeWs) try { _activeWs.close(); } catch {}
+        process.exit(0);
+      }
       else if (msg.type === 'ping') wsSend(ws, { type: 'pong' });
       else if (msg.type === 'huddle_reply') {
         // Brain replied to a HuddleSendMessage -- resolve the held HTTP response
@@ -132,7 +152,12 @@ async function handleTask(ws, msg) {
   const workDir = msg.cwd || DEFAULT_WORK_DIR;
   const autoApprove = msg.autoApprove || false;
   const sessionId = msg.session_id || null;
+  const role = msg.role || AGENT_ROLE;
 
+  if (!role) {
+    sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'No role specified' });
+    return;
+  }
   if (state.getCurrentTask()) {
     sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'Agent busy, task rejected.' });
     return;
@@ -210,6 +235,8 @@ async function handleTask(ws, msg) {
     resetTimer();
 
     restoreAllSkills();
+    swapActiveRules(role);
+    filterSkillsByRole(role);
     filterSkillsByMode(mode);
 
     let result;
