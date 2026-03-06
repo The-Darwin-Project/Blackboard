@@ -504,13 +504,21 @@ class Brain:
 
         # Determine defer-wake state ONCE before the iterative loop.
         # Persists across iterations so tool stripping survives lookup re-invocations.
-        last_action = next(
+        # Uses defer-vs-route timestamp comparison so intermediate turns (brain.think,
+        # brain.wait from intermediate phase during deferral) don't break detection.
+        last_defer = next(
             (t for t in reversed(event.conversation)
-             if not (t.actor == "brain" and t.action == "think")),
+             if t.actor == "brain" and t.action == "defer"),
+            None,
+        )
+        last_route = next(
+            (t for t in reversed(event.conversation)
+             if t.actor == "brain" and t.action == "route"),
             None,
         )
         is_defer_wake = bool(
-            last_action and last_action.actor == "brain" and last_action.action == "defer"
+            last_defer
+            and (not last_route or last_defer.timestamp > last_route.timestamp)
         )
 
         # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
@@ -750,6 +758,15 @@ class Brain:
             logger.warning(f"Intermediate LLM call failed for {event_id}: {e}")
         await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
 
+        # State guard: event may have been deferred/closed during the LLM call
+        fresh = await self.blackboard.get_event(event_id)
+        if not fresh or fresh.status.value != "active":
+            logger.info(
+                f"Intermediate result discarded for {event_id}: "
+                f"status changed to {fresh.status.value if fresh else 'deleted'}"
+            )
+            return
+
         if accumulated_text:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
@@ -921,7 +938,7 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "defer":
                 consecutive_defers += 1
-            elif t.actor == "brain" and t.action == "think":
+            elif t.actor == "brain" and t.action in ("think", "wait"):
                 continue
             else:
                 break
