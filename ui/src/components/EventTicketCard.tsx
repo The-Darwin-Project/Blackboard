@@ -94,13 +94,10 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
         )}
       </div>
 
-      {/* Row 2: service name + triggered_by + timestamp */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
+      {/* Row 2: service name + timestamp */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: triggeredBy ? 2 : 8, gap: 8 }}>
         <strong style={{ color: '#e2e8f0', fontSize: 14, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {event.service}
-          {triggeredBy && (
-            <span style={{ color: '#64748b', fontWeight: 400 }}>{` \u2022 ${triggeredBy}`}</span>
-          )}
         </strong>
         {event.created && (
           <span style={{ fontSize: 11, color: '#94a3b8', flexShrink: 0 }}>
@@ -108,6 +105,11 @@ export default function EventTicketCard({ event, isSelected, onSelect, onClose }
           </span>
         )}
       </div>
+      {triggeredBy && (
+        <div style={{ fontSize: 12, color: '#64748b', marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {triggeredBy}
+        </div>
+      )}
 
       {/* Row 3: reason */}
       <div style={{
