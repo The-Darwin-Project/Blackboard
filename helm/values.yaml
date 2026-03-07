@@ -127,7 +127,7 @@ gcp:
       model: "gemini-3.1-flash-lite-preview"
       temperature: "0.3"
       thinkingLevel: "high"
-      maxOutputTokens: "4096"
+      maxOutputTokens: "10000"
     archivist:
       model: "gemini-3.1-pro-preview" # Event summarization for deep memory
       temperature: "0.3"
