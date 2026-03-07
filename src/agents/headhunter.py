@@ -288,7 +288,7 @@ class Headhunter:
                 system="You are a GitLab MR triage agent. Classify and plan.",
                 contents=prompt,
                 temperature=self._temperature,
-                max_output_tokens=1024,
+                max_output_tokens=10000,
                 thinking_level=self._thinking_level,
             )
             plan_text = response.text.strip()

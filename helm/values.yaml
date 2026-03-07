@@ -132,7 +132,7 @@ gcp:
       model: "gemini-3.1-pro-preview" # Event summarization for deep memory
       temperature: "0.3"
       thinkingLevel: "high"
-      maxOutputTokens: "4096"
+      maxOutputTokens: "20000"
     headhunter:
       model: "gemini-3.1-flash-lite-preview" # MR triage classification (Tier 2)
       temperature: "1.0"
