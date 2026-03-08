@@ -3,41 +3,40 @@
 # 1. [Constraint]: Gated on DEX_ENABLED env var. When false, all functions return anonymous stubs.
 # 2. [Pattern]: UserContext is the single identity abstraction -- all consumers use .label for display.
 # 3. [Gotcha]: Slack users always have named identity regardless of DEX_ENABLED setting.
-# 4. [Pattern]: _validate_jwt() is sync (CPU-bound). JWKS fetched async at startup via fetch_oidc_jwks().
-# 5. [Pattern]: JWKS fetched from DEX_INTERNAL_URL/keys (internal), iss validated against DEX_ISSUER_URL (public).
-"""User identity via Dex OIDC -- validates JWTs from Dashboard WebSocket and REST.
+# 4. [Pattern]: _validate_jwt() is pure crypto -- zero network calls. Keys provided by OIDCKeyAdapter.
+# 5. [Pattern]: get_user_from_request/get_user_from_slack are forward-looking scaffolding (RBAC v2).
+"""User identity domain -- pure JWT validation and UserContext abstraction.
 
 When dex.enabled=false (default): returns anonymous UserContext for Dashboard users.
-When dex.enabled=true:  validates JWT against Dex JWKS, returns named UserContext.
+When dex.enabled=true:  validates JWT against pre-cached keys, returns named UserContext.
 
-Env vars consumed (wired from Helm when dex.enabled=true):
-    DEX_ENABLED=true
-    DEX_ISSUER_URL=https://<brain-route>/dex    (public issuer, used for iss claim validation)
-    DEX_CLIENT_ID=darwin-dashboard              (audience validation)
-    DEX_INTERNAL_URL=https://<release>-dex:5556 (internal Service, used for JWKS fetch)
+Network concerns (JWKS fetch, SSL) live in adapters/oidc_adapter.py, not here.
 """
 from __future__ import annotations
 
 import logging
 import os
-import ssl
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import jwt
 
-_no_verify_ssl = ssl.create_default_context()
-_no_verify_ssl.check_hostname = False
-_no_verify_ssl.verify_mode = ssl.CERT_NONE
+if TYPE_CHECKING:
+    from .adapters.oidc_adapter import OIDCKeyAdapter
 
 logger = logging.getLogger(__name__)
 
 DEX_ENABLED = os.getenv("DEX_ENABLED", "false").lower() == "true"
 DEX_ISSUER_URL = os.getenv("DEX_ISSUER_URL", "")
 DEX_CLIENT_ID = os.getenv("DEX_CLIENT_ID", "darwin-dashboard")
-DEX_INTERNAL_URL = os.getenv("DEX_INTERNAL_URL", "")
 
-_jwks_client: jwt.PyJWKClient | None = None
+_oidc_adapter: OIDCKeyAdapter | None = None
+
+
+def set_oidc_adapter(adapter: OIDCKeyAdapter) -> None:
+    """Inject the OIDC key adapter at startup. Called from main.py lifespan."""
+    global _oidc_adapter
+    _oidc_adapter = adapter
 
 
 @dataclass
@@ -59,39 +58,22 @@ class UserContext:
         return self.display_name or self.user_id
 
 
-async def fetch_oidc_jwks() -> None:
-    """Fetch and cache JWKS from Dex internal endpoint. Called at Brain startup."""
-    global _jwks_client
-    if not DEX_ENABLED or not DEX_INTERNAL_URL:
-        return
-
-    jwks_url = f"{DEX_INTERNAL_URL}/dex/keys"
-    try:
-        import httpx
-        async with httpx.AsyncClient(verify=False) as client:
-            resp = await client.get(jwks_url)
-            resp.raise_for_status()
-
-        _jwks_client = jwt.PyJWKClient(jwks_url, ssl_context=_no_verify_ssl)
-        logger.info("OIDC JWKS loaded from %s (%s keys)", jwks_url, "ok")
-    except Exception as e:
-        logger.warning("Failed to fetch OIDC JWKS from %s: %s -- auth will fall back to anonymous", jwks_url, e)
-        _jwks_client = None
-
-
 def _validate_jwt(token: str) -> dict:
-    """Decode and validate a JWT against cached JWKS. Sync (CPU-bound).
+    """Decode and validate a JWT against cached signing keys. Pure crypto, zero network.
 
-    Validates: signature (JWKS), iss (DEX_ISSUER_URL), aud (DEX_CLIENT_ID), exp.
+    Validates: signature (pre-cached JWKS key), iss (DEX_ISSUER_URL), aud (DEX_CLIENT_ID), exp.
     Returns claims dict on success, raises on failure.
     """
-    if not _jwks_client:
-        raise ValueError("JWKS not loaded")
+    if not _oidc_adapter or not _oidc_adapter.loaded:
+        raise ValueError("OIDC keys not loaded")
 
-    signing_key = _jwks_client.get_signing_key_from_jwt(token)
+    header = jwt.get_unverified_header(token)
+    kid = header.get("kid", "")
+    key = _oidc_adapter.get_signing_key(kid)
+
     return jwt.decode(
         token,
-        signing_key.key,
+        key,
         algorithms=["RS256", "ES256"],
         issuer=DEX_ISSUER_URL,
         audience=DEX_CLIENT_ID,

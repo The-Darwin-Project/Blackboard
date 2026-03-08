@@ -1,19 +1,40 @@
 ---
-description: "Dex OIDC authentication and user identity architecture"
-globs: ["src/auth.py", "src/routes/dex_proxy.py", "src/main.py", "ui/src/contexts/Auth*", "ui/src/components/LoginPage*", "helm/templates/dex-*", "helm/templates/cert-manager*"]
+description: "Dex OIDC authentication, user identity, and adapter architecture"
+globs: ["src/auth.py", "src/ports.py", "src/adapters/**", "src/routes/dex_proxy.py", "src/main.py", "ui/src/contexts/Auth*", "ui/src/components/LoginPage*", "helm/templates/dex-*", "helm/templates/cert-manager*"]
 alwaysApply: false
 ---
 
 # Auth & Identity
 
-## Architecture
+## Hexagonal Architecture
+
+Auth is split into domain (identity/validation) and adapters (transport/infrastructure):
+
+```
+Domain Layer
+  auth.py          -- UserContext, pure JWT validation (zero network)
+  ports.py         -- BroadcastPort Protocol (__call__)
+
+Adapters (src/adapters/)
+  oidc_adapter.py  -- JWKS fetch from Dex, SSL handling, key cache + background refresh
+  dashboard_ws.py  -- Dashboard WebSocket lifecycle, JWT auth gate, implements BroadcastPort
+
+Already-separated adapters (no move needed)
+  channels/slack.py       -- Slack broadcast adapter (implements BroadcastPort via __call__)
+  routes/dex_proxy.py     -- HTTP reverse proxy for Dex OIDC endpoints
+  agents/agent_ws_handler.py -- Agent WebSocket (registration protocol, no JWT)
+```
+
+**Isolation principle**: SSL/cert failures in `oidc_adapter` do NOT cascade into Dashboard WS auth. Keys are cached in memory; validation is pure crypto.
+
+## Dex OIDC
 
 Darwin uses **Dex OIDC** for Dashboard user authentication, bundled in the Helm chart and reverse-proxied through Brain at `/dex/*`.
 
 - **Feature flag**: `DEX_ENABLED` env var (from `dex.enabled` Helm value). `false` = anonymous mode, `true` = JWT required.
 - **Reverse proxy**: Brain proxies `/dex/*` to internal Dex Service (`DEX_INTERNAL_URL`). Browser never accesses Dex directly.
 - **Storage**: Dex uses `memory` storage (single-replica, zero CRD prerequisites).
-- **TLS**: cert-manager self-signed Issuer + Certificate for Dex internal HTTPS. Proxy uses `verify=False`.
+- **TLS**: cert-manager self-signed Issuer + Certificate for Dex internal HTTPS. All SSL handling in `oidc_adapter.py`.
 - **Static client**: `public: true` (PKCE, no client secret). Dashboard uses `oidc-client-ts`.
 - **Token storage**: `sessionStorage` (survives page refresh, cleared on tab close).
 
@@ -28,19 +49,31 @@ Darwin uses **Dex OIDC** for Dashboard user authentication, bundled in the Helm 
 | Slack | Named (Slack profile) | `get_user_from_slack()` |
 | Agent WS `/agent/ws` | N/A (unauthenticated) | No auth, internal pod-to-pod |
 
+## Adapter Boundaries
+
+- **OIDCKeyAdapter**: Owns SSL context, JWKS fetch, key rotation. Injected into `auth.py` via `set_oidc_adapter()`.
+- **DashboardWSAdapter**: Owns client connections, JWT auth gate, message routing. Implements `BroadcastPort`.
+- **Agent WS handler**: Owns registration, heartbeat, task bridge. Terminates orphan ephemeral agents on closed events.
+- **auth.py**: Domain-only. Pure validation with pre-cached keys. Zero network calls.
+- **Brain**: Broadcasts via `BroadcastPort`. Zero transport knowledge.
+
 ## Conventions
 
 - All user-facing actions (chat, approve, reject, feedback) must pass `UserContext` to `ConversationTurn(user_name=...)`.
 - When `DEX_ENABLED=true`, anonymous WS connections are rejected (4001) before `websocket.accept()`.
 - `UserContext.roles` is populated from JWT `groups` claim but NOT enforced in v1. RBAC is scaffolded for v2.
+- `get_user_from_request` and `get_user_from_slack` are forward-looking scaffolding (RBAC v2, Slack identity wiring).
 - The `/config` endpoint exposes `auth.enabled`, `auth.issuerUrl`, `auth.clientId` for Dashboard discovery. No secrets.
 - Connector configuration is user-provided via `values.yaml` `dex.connectors`. OpenShift OAuth is the default example.
 
 ## Key Files
 
-- `src/auth.py` -- JWT validation, JWKS cache, UserContext
+- `src/auth.py` -- Pure JWT validation, UserContext, set_oidc_adapter()
+- `src/ports.py` -- BroadcastPort Protocol definition
+- `src/adapters/oidc_adapter.py` -- JWKS fetch, SSL, key cache, background refresh
+- `src/adapters/dashboard_ws.py` -- Dashboard WS adapter (BroadcastPort)
 - `src/routes/dex_proxy.py` -- Reverse proxy adapter (`/dex/*` -> Dex Service)
-- `src/main.py` -- WS auth gate, `/config` auth fields, proxy router mount
+- `src/main.py` -- Pure wiring: create adapters, register ports, start services
 - `ui/src/contexts/AuthContext.tsx` -- PKCE flow, token management
 - `ui/src/components/LoginPage.tsx` -- Login page with projectDarwin.png background
 - `helm/templates/dex-deployment.yaml` -- Dex Deployment, Service, Config, SA

@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus
+from ..ports import BroadcastPort
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
 
@@ -276,12 +277,11 @@ class Brain:
         self,
         blackboard: BlackboardState,
         agents: Optional[dict[str, Any]] = None,
-        broadcast: Optional[Callable] = None,
+        broadcast: Optional[BroadcastPort] = None,
     ):
         self.blackboard = blackboard
         self.agents = agents or {}
-        # Multi-target broadcast: WS (initial) + Slack (registered later)
-        self._broadcast_targets: list[Callable] = []
+        self._broadcast_targets: list[BroadcastPort] = []
         if broadcast:
             self._broadcast_targets.append(broadcast)
         self._running = False
@@ -2236,8 +2236,8 @@ class Brain:
         self._waiting_for_user.discard(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
 
-    def register_channel(self, channel_broadcast: Callable) -> None:
-        """Register an additional broadcast target (e.g., Slack)."""
+    def register_channel(self, channel_broadcast: BroadcastPort) -> None:
+        """Register an additional broadcast target (e.g., Slack, Dashboard WS)."""
         self._broadcast_targets.append(channel_broadcast)
 
     async def list_connected_agents(self) -> list[dict]:

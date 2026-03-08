@@ -38,7 +38,7 @@ from .routes import (
     telemetry_router,
     topology_router,
 )
-from .auth import DEX_ENABLED, get_user_from_websocket, fetch_oidc_jwks
+from .auth import DEX_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
@@ -119,41 +119,26 @@ async def lifespan(app: FastAPI):
         set_agents(aligner, architect, sysadmin, developer)
         logger.info(f"Agents initialized (ws_mode={ws_mode})")
         
-        # UI WebSocket broadcast function (wired in Step 4)
-        # For now, a no-op until the /ws endpoint is added
-        connected_ui_clients: set = set()
-        
-        async def broadcast_to_ui(message: dict) -> None:
-            """Push message to all connected UI WebSocket clients."""
-            import json as _json
-            data = _json.dumps(message)
-            disconnected = set()
-            for client in connected_ui_clients:
-                try:
-                    await client.send_text(data)
-                except Exception:
-                    disconnected.add(client)
-            # Use difference_update (in-place mutation) to avoid reassignment
-            # which would break the closure over connected_ui_clients
-            connected_ui_clients.difference_update(disconnected)
-        
-        # Initialize Brain orchestrator with agents + broadcast
+        # Initialize Brain orchestrator (no broadcast in constructor -- registered via adapters)
         brain = Brain(
             blackboard=blackboard,
             agents={
                 "architect": architect,
                 "sysadmin": sysadmin,
                 "developer": developer,
-                "_aligner": aligner,  # In-process agent for verification checks
-                "_archivist_memory": archivist,  # Deep memory archiver (Qdrant)
+                "_aligner": aligner,
+                "_archivist_memory": archivist,
             },
-            broadcast=broadcast_to_ui,
         )
         set_brain(brain)
-        # Store connected_clients on app state for the WS endpoint
-        app.state.connected_ui_clients = connected_ui_clients
         app.state.brain = brain
-        logger.info("Brain orchestrator initialized with WebSocket agents + broadcast")
+
+        # Dashboard WebSocket adapter (implements BroadcastPort)
+        from .adapters.dashboard_ws import DashboardWSAdapter
+        dashboard_adapter = DashboardWSAdapter(brain=brain, blackboard=blackboard, auth_enabled=DEX_ENABLED)
+        brain.register_channel(dashboard_adapter)
+        app.state.dashboard_adapter = dashboard_adapter
+        logger.info("Brain orchestrator initialized with Dashboard WS adapter")
         
         # Initialize Agent Registry + TaskBridge (Phase A -- additive, no dispatch changes yet)
         agent_registry = AgentRegistry()
@@ -175,9 +160,14 @@ async def lifespan(app: FastAPI):
             brain._ephemeral_provisioner = provisioner
             logger.info("EphemeralProvisioner initialized (url=%s)", el_url)
         
-        # === DEX OIDC ===
+        # === DEX OIDC Key Adapter ===
         if DEX_ENABLED:
-            await fetch_oidc_jwks()
+            from .adapters.oidc_adapter import OIDCKeyAdapter
+            dex_internal_url = os.getenv("DEX_INTERNAL_URL", "")
+            oidc_adapter = OIDCKeyAdapter(f"{dex_internal_url}/dex/keys")
+            await oidc_adapter.start()
+            set_oidc_adapter(oidc_adapter)
+            app.state.oidc_adapter = oidc_adapter
 
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
@@ -267,6 +257,10 @@ async def lifespan(app: FastAPI):
         await developer.close()
         logger.info("Brain event loop stopped, agent WebSocket connections closed")
     
+    # Stop OIDC key adapter
+    if hasattr(app.state, "oidc_adapter"):
+        await app.state.oidc_adapter.stop()
+
     # Stop Slack channel
     if hasattr(app.state, "slack"):
         await app.state.slack.stop()
@@ -349,148 +343,12 @@ async def get_config() -> dict:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time UI communication.
-    
-    Receives: chat messages, approval actions
-    Sends: conversation turns, progress updates, event lifecycle
-    """
-    user = get_user_from_websocket(websocket)
-    if DEX_ENABLED and user.user_id == "anonymous":
-        await websocket.close(code=4001)
+    """WebSocket endpoint for real-time UI communication. Delegates to DashboardWSAdapter."""
+    adapter = getattr(app.state, 'dashboard_adapter', None)
+    if not adapter:
+        await websocket.close(code=1013, reason="Dashboard adapter not initialized")
         return
-    await websocket.accept()
-    
-    # Add to connected clients (set stored on app.state during lifespan)
-    clients = getattr(app.state, 'connected_ui_clients', set())
-    clients.add(websocket)
-    logger.info(f"UI WebSocket connected ({len(clients)} clients) user={user.label}")
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            msg_type = data.get("type")
-            
-            if msg_type == "chat":
-                # Create event from chat message
-                from .dependencies import _blackboard
-                from .models import ConversationTurn, EventEvidence
-                if _blackboard:
-                    message = data.get("message", "")
-                    service = data.get("service", "general")
-                    event_id = await _blackboard.create_event(
-                        source="chat",
-                        service=service,
-                        reason=message,
-                        evidence=EventEvidence(
-                            display_text=message,
-                            source_type="chat",
-                            triggered_by="dashboard",
-                            domain="complicated",
-                            severity="info",
-                        ),
-                    )
-                    # Extract optional image (with size guard)
-                    image = data.get("image")
-                    if image and len(image) > 1_400_000:
-                        await websocket.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
-                        image = None
-                    # Add user message as the first conversation turn
-                    user_turn = ConversationTurn(
-                        turn=1,
-                        actor="user",
-                        action="message",
-                        thoughts=message,
-                        image=image,
-                        user_name=user.label if user.label != "anonymous" else None,
-                    )
-                    await _blackboard.append_turn(event_id, user_turn)
-                    await websocket.send_json({
-                        "type": "event_created",
-                        "event_id": event_id,
-                        "service": service,
-                        "reason": message,
-                    })
-                    logger.info(f"WS chat event created: {event_id}")
-                    
-            elif msg_type == "user_message":
-                # Add user message to an existing event conversation
-                from .dependencies import _blackboard
-                from .models import ConversationTurn
-                event_id = data.get("event_id", "")
-                message = data.get("message", "")
-                image = data.get("image")
-                if image and len(image) > 1_400_000:
-                    await websocket.send_json({"type": "error", "message": "Image too large (max 1MB). Image was not attached."})
-                    image = None
-                if _blackboard and event_id and message:
-                    event = await _blackboard.get_event(event_id)
-                    if event:
-                        turn = ConversationTurn(
-                            turn=len(event.conversation) + 1,
-                            actor="user",
-                            action="message",
-                            thoughts=message,
-                            image=image,
-                            user_name=user.label if user.label != "anonymous" else None,
-                        )
-                        await _blackboard.append_turn(event_id, turn)
-                        if hasattr(app.state, 'brain'):
-                            app.state.brain.clear_waiting(event_id)
-                        await websocket.send_json({
-                            "type": "turn",
-                            "event_id": event_id,
-                            "turn": turn.model_dump(),
-                        })
-                        logger.info(f"WS user message added to event: {event_id}")
-
-            elif msg_type == "approve":
-                from .dependencies import _blackboard
-                from .models import ConversationTurn
-                event_id = data.get("event_id", "")
-                if _blackboard and event_id:
-                    event = await _blackboard.get_event(event_id)
-                    if event:
-                        turn = ConversationTurn(
-                            turn=len(event.conversation) + 1,
-                            actor="user",
-                            action="approve",
-                            thoughts="User approved the plan.",
-                            user_name=user.label if user.label != "anonymous" else None,
-                        )
-                        await _blackboard.append_turn(event_id, turn)
-                        # Clear wait_for_user state so Brain re-processes
-                        if hasattr(app.state, 'brain'):
-                            app.state.brain.clear_waiting(event_id)
-                        await websocket.send_json({
-                            "type": "turn",
-                            "event_id": event_id,
-                            "turn": turn.model_dump(),
-                        })
-                        logger.info(f"WS approval for event: {event_id}")
-
-            elif msg_type == "emergency_stop":
-                # Master kill switch: cancel ALL active agent tasks
-                if hasattr(app.state, 'brain'):
-                    cancelled = await app.state.brain.emergency_stop()
-                    await websocket.send_json({
-                        "type": "emergency_stop_ack",
-                        "cancelled": cancelled,
-                    })
-                    logger.critical(f"WS emergency stop: {cancelled} tasks cancelled")
-                else:
-                    await websocket.send_json({
-                        "type": "emergency_stop_ack",
-                        "cancelled": 0,
-                    })
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-    finally:
-        clients.discard(websocket)
-        logger.info(f"UI WebSocket disconnected ({len(clients)} clients)")
+    await adapter.websocket_handler(websocket)
 
 
 # =============================================================================
