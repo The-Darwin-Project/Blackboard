@@ -129,16 +129,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: https
-              scheme: HTTPS
+              port: telemetry
             initialDelaySeconds: 10
             periodSeconds: 30
             failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /healthz
-              port: https
-              scheme: HTTPS
+              port: telemetry
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
