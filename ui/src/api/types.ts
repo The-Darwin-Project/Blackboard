@@ -306,6 +306,9 @@ export interface AgentRegistryEntry {
   connected_at: number;
   cli: string;
   model: string;
+  ephemeral?: boolean;
+  bound_event_id?: string | null;
+  current_role?: string | null;
 }
 
 // =============================================================================

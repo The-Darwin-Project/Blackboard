@@ -18,6 +18,7 @@ interface AgentStreamCardProps {
   messages: string[];
   huddleMessages?: HuddleMessage[];
   isActive: boolean;
+  ephemeral?: boolean;
 }
 
 /** Render a single chat bubble (used by both inline card and FloatingWindow). */
@@ -169,8 +170,8 @@ function FloatingWindow({
   );
 }
 
-export default function AgentStreamCard({ agentName, eventId, messages, huddleMessages = [], isActive }: AgentStreamCardProps) {
-  const color = ACTOR_COLORS[agentName] || '#6b7280';
+export default function AgentStreamCard({ agentName, eventId, messages, huddleMessages = [], isActive, ephemeral }: AgentStreamCardProps) {
+  const color = ephemeral ? '#8b5cf6' : (ACTOR_COLORS[agentName] || '#6b7280');
   const scrollRef = useRef<HTMLDivElement>(null);
   const [poppedOut, setPoppedOut] = useState(false);
   const isChatMode = agentName === 'developer' && huddleMessages.length > 0;
@@ -196,6 +197,11 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
             <span style={{ background: color, color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
               {agentName}
             </span>
+            {ephemeral && (
+              <span style={{ background: '#8b5cf620', color: '#a78bfa', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, letterSpacing: '0.5px' }}>
+                EPHEMERAL
+              </span>
+            )}
             <span style={{ flex: 1, textAlign: 'center' }}>
               {eventId && <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>[{eventId.slice(0, 12)}]</span>}
               {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}

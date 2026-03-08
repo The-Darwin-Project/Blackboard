@@ -24,8 +24,10 @@ import ActivityStream from './ActivityStream';
 import EventTicketList from './EventTicketList';
 import ChatInput from './ChatInput';
 import { useWSMessage, useWSConnection, useWSReconnect } from '../contexts/WebSocketContext';
-import { useQueueInvalidation } from '../hooks/useQueue';
+import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useEventDocument } from '../hooks/useQueue';
+import { getAgents } from '../api/client';
+import type { AgentRegistryEntry } from '../api/types';
 import type { Tab } from './TabPanel';
 
 interface ContextMenuState {
@@ -119,6 +121,39 @@ function DashboardInner() {
     return init;
   });
 
+  // -- Ephemeral agent stream (per event_id, sessionStorage survives nav but not tab close) --
+  const [ephemeralStream, setEphemeralStream] = useState<Record<string, string[]>>(() => {
+    try {
+      const stored = sessionStorage.getItem('darwin:ephemeralStream');
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem('darwin:ephemeralStream', JSON.stringify(ephemeralStream)); } catch {}
+  }, [ephemeralStream]);
+  const [ephemeralAgents, setEphemeralAgents] = useState<AgentRegistryEntry[]>([]);
+
+  useEffect(() => {
+    const fetch = async () => {
+      try {
+        const agents = await getAgents();
+        setEphemeralAgents(agents.filter((a: AgentRegistryEntry) => a.ephemeral));
+      } catch {}
+    };
+    fetch();
+    const id = setInterval(fetch, 10_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const { data: activeEvents } = useActiveEvents();
+  const selectedEvent = activeEvents?.find((e) => e.id === selectedEventId);
+  const ephemeralAgentForEvent = ephemeralAgents.find(
+    (a) => a.bound_event_id === selectedEventId,
+  );
+  const showEphemeralSplit = !!(
+    selectedEvent?.source === 'headhunter' && ephemeralAgentForEvent
+  );
+
   // -- WS + query hooks --
   const { connected, send } = useWSConnection();
   const { invalidateActive, invalidateEvent, invalidateAll } = useQueueInvalidation();
@@ -198,6 +233,13 @@ function DashboardInner() {
             : current.huddleMessages;
           return { ...prev, [actor]: { ...current, messages, huddleMessages, eventId: (msg.event_id as string) || current.eventId, isActive: true } };
         });
+      }
+      const evtId = msg.event_id as string;
+      if (evtId) {
+        setEphemeralStream((prev) => ({
+          ...prev,
+          [evtId]: [...(prev[evtId] || []), msg.message as string].slice(-MAX_BUFFER),
+        }));
       }
     } else if (msg.type === 'turn') {
       const turn = msg.turn as Record<string, unknown>;
@@ -321,9 +363,24 @@ function DashboardInner() {
             <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <ActivityStream />
             </div>
-            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden', gap: showEphemeralSplit ? 4 : 0 }}>
               {selectedEventId ? (
-                <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
+                <>
+                  <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                    <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
+                  </div>
+                  {showEphemeralSplit && (
+                    <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                      <AgentStreamCard
+                        agentName={ephemeralAgentForEvent?.current_role || 'oncall'}
+                        eventId={selectedEventId}
+                        messages={ephemeralStream[selectedEventId] || []}
+                        isActive={!!ephemeralAgentForEvent?.busy}
+                        ephemeral
+                      />
+                    </div>
+                  )}
+                </>
               ) : (
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 13 }}>
                   Select an event from the Tickets tab to view conversation.

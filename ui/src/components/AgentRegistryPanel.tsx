@@ -72,33 +72,57 @@ function AgentRegistryPanel() {
     );
   }
 
+  const sorted = [...agents].sort((a, b) => {
+    if (a.ephemeral !== b.ephemeral) return a.ephemeral ? 1 : -1;
+    return a.connected_at - b.connected_at;
+  });
+
   return (
     <div className="space-y-2 overflow-auto">
-      {agents.map((a) => {
-        const roleColor = ACTOR_COLORS[a.role] || '#64748b';
+      {sorted.map((a) => {
+        const displayRole = a.current_role || a.role || 'oncall';
+        const roleColor = ACTOR_COLORS[displayRole] || (a.ephemeral ? '#8b5cf6' : '#64748b');
+        const borderColor = a.ephemeral ? '#8b5cf640' : '#334155';
         return (
           <div
             key={a.agent_id}
             style={{
               background: '#0f172a',
-              border: '1px solid #334155',
+              border: `1px solid ${borderColor}`,
               borderRadius: 8,
               padding: '10px 12px',
             }}
           >
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span
-                style={{
-                  background: roleColor,
-                  color: '#fff',
-                  padding: '2px 8px',
-                  borderRadius: 12,
-                  fontSize: 11,
-                  fontWeight: 600,
-                }}
-              >
-                {a.role}
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span
+                  style={{
+                    background: roleColor,
+                    color: '#fff',
+                    padding: '2px 8px',
+                    borderRadius: 12,
+                    fontSize: 11,
+                    fontWeight: 600,
+                  }}
+                >
+                  {displayRole}
+                </span>
+                {a.ephemeral && (
+                  <span
+                    style={{
+                      background: '#8b5cf620',
+                      color: '#a78bfa',
+                      padding: '1px 6px',
+                      borderRadius: 8,
+                      fontSize: 9,
+                      fontWeight: 600,
+                      letterSpacing: '0.5px',
+                    }}
+                  >
+                    EPHEMERAL
+                  </span>
+                )}
+              </div>
               <span
                 style={{
                   background: a.busy ? '#f59e0b15' : '#22c55e15',
@@ -115,7 +139,12 @@ function AgentRegistryPanel() {
             <div className="text-xs text-text-muted font-mono truncate" title={a.agent_id}>
               {a.agent_id}
             </div>
-            {a.current_event_id && (
+            {a.bound_event_id && (
+              <div className="text-xs mt-1 truncate" style={{ color: '#a78bfa' }} title={a.bound_event_id}>
+                {a.bound_event_id}
+              </div>
+            )}
+            {a.current_event_id && !a.bound_event_id && (
               <div className="text-xs text-text-muted mt-1 truncate" title={a.current_event_id}>
                 Event: {a.current_event_id.slice(0, 12)}…
               </div>
