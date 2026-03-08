@@ -87,7 +87,7 @@ rules:
 {{- end }}
 {{- if .Values.ephemeralAgents.enabled }}
 ---
-# Role for ephemeral agent lifecycle -- EventListener creates TaskRuns
+# Role for ephemeral agent lifecycle -- EventListener needs full Tekton Triggers access
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -102,11 +102,25 @@ rules:
     resources: ["taskruns"]
     verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["triggers.tekton.dev"]
-    resources: ["eventlisteners", "triggerbindings", "triggertemplates"]
-    verbs: ["get", "list"]
+    resources: ["eventlisteners", "triggerbindings", "triggertemplates", "triggers", "interceptors"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     verbs: ["get"]
+---
+# ClusterRole for EventListener to watch ClusterInterceptors (cluster-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent-cluster
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+rules:
+  - apiGroups: ["triggers.tekton.dev"]
+    resources: ["clusterinterceptors"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -124,5 +138,22 @@ subjects:
 roleRef:
   kind: Role
   name: {{ .Release.Name }}-ephemeral-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent-cluster
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-ephemeral-agent-cluster
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
