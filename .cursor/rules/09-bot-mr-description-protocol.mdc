@@ -13,7 +13,7 @@ The description must contain three parts in order:
 
 ### 1. Type Header
 
-A single `## ` line identifying the MR type. Known types that trigger deterministic Tier 1 parsing:
+A single `##` line identifying the MR type. Known types that trigger deterministic Tier 1 parsing:
 
 - `## Submodule Update`
 - `## Konflux Release`
