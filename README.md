@@ -45,7 +45,7 @@ graph TD
 In **reverse mode** (`AGENT_WS_MODE=reverse`), the connection direction is flipped: sidecars connect **to** the Brain's `/agent/ws` endpoint instead of the Brain connecting out to sidecars.
 
 | Component | Purpose |
-|-----------|---------|
+| --- | --- |
 | **AgentRegistry** | Dynamic pool of connected agents with busy/idle tracking |
 | **TaskBridge** | Per-task `asyncio.Queue` bridging WS handler to dispatch coroutines |
 | **Feature flag** | `AGENT_WS_MODE` (`legacy` / `reverse`) |
@@ -56,7 +56,7 @@ Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the B
 ### WebSocket Message Protocol (Reverse Mode)
 
 | Direction | Type | Fields | When |
-|-----------|------|--------|------|
+| --- | --- | --- | --- |
 | Sidecar → Brain | `register` | agent_id, role, capabilities, cli, model | On connect |
 | Sidecar → Brain | `progress` | task_id, event_id, message | During execution |
 | Sidecar → Brain | `result` | task_id, event_id, output, source, session_id | Task complete |
@@ -69,14 +69,14 @@ Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the B
 
 ## Agents
 
-| Agent          | Role              | Technology                         | Capabilities                                                      |
-| -------------- | ----------------- | ---------------------------------- | ----------------------------------------------------------------- |
-| **Brain**      | Orchestrator      | Vertex AI Pro (Gemini 3 Pro)       | Cynefin classification, progressive skill loading, agent routing, feedback loop verification |
-| **Aligner**    | Truth Maintenance | In-process Python + Vertex AI Flash| Telemetry processing, LLM signal analysis, anomaly-triggered event creation |
-| **Archivist**  | Deep Memory       | In-process Python + Flash          | Event summarization, vector embedding (text-embedding-005), similarity search via Qdrant |
-| **Architect**  | Strategy          | Gemini CLI sidecar                 | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
-| **SysAdmin**   | Execution         | Gemini CLI sidecar                 | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
-| **Developer**  | Implementation    | Gemini CLI sidecar (team: Dev + QE + Manager) | Source code changes, feature implementation, QE verification, manager review |
+| Agent | Role | Technology | Capabilities |
+| --- | --- | --- | --- |
+| **Brain** | Orchestrator | Vertex AI Pro (Gemini 3 Pro) | Cynefin classification, progressive skill loading, agent routing, feedback loop verification |
+| **Aligner** | Truth Maintenance | In-process Python + Vertex AI Flash | Telemetry processing, LLM signal analysis, anomaly-triggered event creation |
+| **Archivist** | Deep Memory | In-process Python + Flash | Event summarization, vector embedding (text-embedding-005), similarity search via Qdrant |
+| **Architect** | Strategy | Gemini CLI sidecar | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
+| **SysAdmin** | Execution | Gemini CLI sidecar | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
+| **Developer** | Implementation | Gemini CLI sidecar (team: Dev + QE + Manager) | Source code changes, feature implementation, QE verification, manager review |
 
 ### Dev Team Manager Pattern
 
@@ -161,18 +161,18 @@ The `VectorStore` class (`src/memory/vector_store.py`) is a lightweight async Qd
 
 All three sidecar agents share the same base image with these CLIs pre-installed:
 
-| CLI      | Purpose                                | Auth                                     |
-| -------- | -------------------------------------- | ---------------------------------------- |
-| `git`    | GitOps clone, modify, commit, push     | GitHub App token + GitLab PAT            |
-| `kubectl`| K8s investigation (get, describe, logs)| Pod ServiceAccount                       |
-| `oc`     | OpenShift CLI (superset of kubectl)    | Pod ServiceAccount                       |
-| `argocd` | ArgoCD app status, sync, diff          | Admin password (Architect + SysAdmin)    |
-| `kargo`  | Kargo projects, stages, promotions     | Admin password (Architect + SysAdmin)    |
-| `tkn`    | Tekton pipelines, runs, logs           | Pod ServiceAccount                       |
-| `helm`   | Chart validation (template, lint)      | N/A                                      |
-| `gh`     | GitHub CLI (PRs, issues, releases)     | GitHub App token                         |
-| `glab`   | GitLab CLI (MRs, pipelines, API)       | GitLab PAT                               |
-| `jq`/`yq`| JSON/YAML processing                  | N/A                                      |
+| CLI | Purpose | Auth |
+| --- | --- | --- |
+| `git` | GitOps clone, modify, commit, push | GitHub App token + GitLab PAT |
+| `kubectl` | K8s investigation (get, describe, logs) | Pod ServiceAccount |
+| `oc` | OpenShift CLI (superset of kubectl) | Pod ServiceAccount |
+| `argocd` | ArgoCD app status, sync, diff | Admin password (Architect + SysAdmin) |
+| `kargo` | Kargo projects, stages, promotions | Admin password (Architect + SysAdmin) |
+| `tkn` | Tekton pipelines, runs, logs | Pod ServiceAccount |
+| `helm` | Chart validation (template, lint) | N/A |
+| `gh` | GitHub CLI (PRs, issues, releases) | GitHub App token |
+| `glab` | GitLab CLI (MRs, pipelines, API) | GitLab PAT |
+| `jq`/`yq` | JSON/YAML processing | N/A |
 
 Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automatically based on task context (plan template, code review, GitOps workflow, investigation, rollback, etc.).
 
@@ -207,14 +207,14 @@ Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automati
 
 The Brain and Aligner use the `google-genai` SDK. The sidecar agents use the Gemini CLI with Vertex AI backend.
 
-| Component         | SDK                       | Model                    |
-| ----------------- | ------------------------- | ------------------------ |
-| Brain             | `google-genai` Python SDK | `gemini-3-pro-preview`   |
-| Aligner           | `google-genai` Python SDK | `gemini-3-flash-preview` |
-| Archivist         | `google-genai` Python SDK | `gemini-3-flash-preview` |
-| Architect sidecar | Gemini CLI                | `gemini-3-pro-preview`   |
-| SysAdmin sidecar  | Gemini CLI                | `gemini-3-flash-preview` |
-| Developer sidecar | Gemini CLI                | `gemini-2.5-pro`         |
+| Component | SDK | Model |
+| --- | --- | --- |
+| Brain | `google-genai` Python SDK | `gemini-3-pro-preview` |
+| Aligner | `google-genai` Python SDK | `gemini-3-flash-preview` |
+| Archivist | `google-genai` Python SDK | `gemini-3-flash-preview` |
+| Architect sidecar | Gemini CLI | `gemini-3-pro-preview` |
+| SysAdmin sidecar | Gemini CLI | `gemini-3-flash-preview` |
+| Developer sidecar | Gemini CLI | `gemini-2.5-pro` |
 
 ## Quick Start
 
@@ -324,36 +324,36 @@ GET /events/                   # Architecture event timeline
 
 ### Environment Variables
 
-| Variable                | Description               | Default                  |
-| ----------------------- | ------------------------- | ------------------------ |
-| `REDIS_HOST`            | Redis hostname            | `localhost`              |
-| `REDIS_PASSWORD`        | Redis password            | (empty)                  |
-| `GCP_PROJECT`           | GCP project ID            | (required)               |
-| `GCP_LOCATION`          | Vertex AI location        | `global`                 |
-| `LLM_MODEL_BRAIN`       | Brain model               | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_MANAGER`     | Manager (DevTeam) model   | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_ALIGNER`     | Aligner model             | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_ARCHIVIST`   | Archivist model           | `gemini-3.1-pro-preview` |
-| `ARCHITECT_SIDECAR_URL` | Architect WebSocket       | `http://localhost:9091`  |
-| `SYSADMIN_SIDECAR_URL`  | sysAdmin WebSocket        | `http://localhost:9092`  |
-| `DEVELOPER_SIDECAR_URL` | Developer WebSocket       | `http://localhost:9093`  |
-| `QDRANT_URL`            | Qdrant vector store       | `http://localhost:6333`  |
-| `SLACK_BOT_TOKEN`       | Slack bot OAuth token     | (optional)               |
-| `SLACK_APP_TOKEN`       | Slack app-level token     | (optional)               |
-| `DEX_ENABLED`           | Enable Dex OIDC auth      | `false`                  |
-| `AGENT_WS_MODE`         | WebSocket mode: `legacy` (Brain→sidecar) or `reverse` (sidecar→Brain) | `legacy` |
-| `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true`                |
-| `DEBUG`                 | Enable debug logging      | `false`                  |
+| Variable | Description | Default |
+| --- | --- | --- |
+| `REDIS_HOST` | Redis hostname | `localhost` |
+| `REDIS_PASSWORD` | Redis password | (empty) |
+| `GCP_PROJECT` | GCP project ID | (required) |
+| `GCP_LOCATION` | Vertex AI location | `global` |
+| `LLM_MODEL_BRAIN` | Brain model | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_MANAGER` | Manager (DevTeam) model | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-3.1-pro-preview` |
+| `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-3.1-pro-preview` |
+| `ARCHITECT_SIDECAR_URL` | Architect WebSocket | `http://localhost:9091` |
+| `SYSADMIN_SIDECAR_URL` | sysAdmin WebSocket | `http://localhost:9092` |
+| `DEVELOPER_SIDECAR_URL` | Developer WebSocket | `http://localhost:9093` |
+| `QDRANT_URL` | Qdrant vector store | `http://localhost:6333` |
+| `SLACK_BOT_TOKEN` | Slack bot OAuth token | (optional) |
+| `SLACK_APP_TOKEN` | Slack app-level token | (optional) |
+| `DEX_ENABLED` | Enable Dex OIDC auth | `false` |
+| `AGENT_WS_MODE` | WebSocket mode: `legacy` (Brain→sidecar) or `reverse` (sidecar→Brain) | `legacy` |
+| `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
+| `DEBUG` | Enable debug logging | `false` |
 
 ## Safety
 
 ### Air Gap (Soft Enforcement via GEMINI.md + Skills)
 
-| Agent     | Can Do                                                            | Cannot Do                                       |
-| --------- | ----------------------------------------------------------------- | ----------------------------------------------- |
-| Architect | Clone + read repos, argocd/kargo read, oc read                    | Commit, push, kubectl mutations, argocd sync    |
-| sysAdmin  | Git clone/push, kubectl/oc read, argocd sync, kargo read, helm    | kubectl write, invent Helm sections             |
-| Developer | Git clone/push, read Helm, read code                              | Modify infrastructure, kubectl scale, argocd    |
+| Agent | Can Do | Cannot Do |
+| --- | --- | --- |
+| Architect | Clone + read repos, argocd/kargo read, oc read | Commit, push, kubectl mutations, argocd sync |
+| sysAdmin | Git clone/push, kubectl/oc read, argocd sync, kargo read, helm | kubectl write, invent Helm sections |
+| Developer | Git clone/push, read Helm, read code | Modify infrastructure, kubectl scale, argocd |
 
 ### Security Patterns
 
