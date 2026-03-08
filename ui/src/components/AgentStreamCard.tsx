@@ -225,6 +225,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
           borderRadius: 4, border: `1px solid #1e293b`,
           display: 'flex', flexDirection: 'column',
           boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)',
+          overflow: 'hidden', minHeight: 0,
         }}>
           {/* Terminal title bar */}
           <div style={{

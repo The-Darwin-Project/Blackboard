@@ -367,7 +367,7 @@ function DashboardInner() {
             <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <ActivityStream />
             </div>
-            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden', gap: showEphemeralSplit ? 4 : 0 }}>
+            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden', gap: showEphemeralSplit ? 12 : 0 }}>
               {selectedEventId ? (
                 <>
                   <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
