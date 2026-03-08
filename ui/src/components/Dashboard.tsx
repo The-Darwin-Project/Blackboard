@@ -367,22 +367,25 @@ function DashboardInner() {
             <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <ActivityStream />
             </div>
-            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden', gap: showEphemeralSplit ? 12 : 0 }}>
+            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden' }}>
               {selectedEventId ? (
                 <>
                   <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
                   </div>
                   {showEphemeralSplit && (
-                    <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                      <AgentStreamCard
-                        agentName={ephemeralAgentForEvent?.current_role || 'oncall'}
-                        eventId={selectedEventId}
-                        messages={ephemeralStream[selectedEventId] || []}
-                        isActive={!!ephemeralAgentForEvent?.busy}
-                        ephemeral
-                      />
-                    </div>
+                    <>
+                      <div style={{ width: 1, flexShrink: 0, background: '#334155', margin: '0 6px' }} />
+                      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                        <AgentStreamCard
+                          agentName={ephemeralAgentForEvent?.current_role || 'oncall'}
+                          eventId={selectedEventId}
+                          messages={ephemeralStream[selectedEventId] || []}
+                          isActive={!!ephemeralAgentForEvent?.busy}
+                          ephemeral
+                        />
+                      </div>
+                    </>
                   )}
                 </>
               ) : (
