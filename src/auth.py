@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 from dataclasses import dataclass, field
 from typing import Optional
 
 import jwt
+
+_no_verify_ssl = ssl.create_default_context()
+_no_verify_ssl.check_hostname = False
+_no_verify_ssl.verify_mode = ssl.CERT_NONE
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +72,7 @@ async def fetch_oidc_jwks() -> None:
             resp = await client.get(jwks_url)
             resp.raise_for_status()
 
-        _jwks_client = jwt.PyJWKClient(jwks_url, ssl_context=False)
+        _jwks_client = jwt.PyJWKClient(jwks_url, ssl_context=_no_verify_ssl)
         logger.info("OIDC JWKS loaded from %s (%s keys)", jwks_url, "ok")
     except Exception as e:
         logger.warning("Failed to fetch OIDC JWKS from %s: %s -- auth will fall back to anonymous", jwks_url, e)

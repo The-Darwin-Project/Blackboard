@@ -2795,6 +2795,7 @@ class Brain:
                             logger.info(f"User message interrupted defer for {eid} -- waking early")
                         # Delay expired -- atomically re-activate (WATCH/MULTI/EXEC)
                         # to avoid losing turns appended during the defer window.
+                        logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
                         transitioned = await self.blackboard.transition_event_status(
                             eid, "deferred", EventStatus.ACTIVE,
                         )
@@ -2804,10 +2805,13 @@ class Brain:
                                 logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
                             else:
                                 logger.info(f"Deferred event {eid} re-activated")
-                                # Re-fetch post-transition so prefetch carries clean state
                                 event = await self.blackboard.get_event(eid)
                                 if event:
                                     await self.process_event(eid, prefetched_event=event)
+                        else:
+                            refetched = await self.blackboard.get_event(eid)
+                            actual_status = refetched.status.value if refetched else "MISSING"
+                            logger.warning(f"Defer re-activation FAILED for {eid}: expected 'deferred', actual '{actual_status}'")
                         continue
 
                     # Mark all SENT turns as DELIVERED (Brain has seen them)
