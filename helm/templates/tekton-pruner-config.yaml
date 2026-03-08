@@ -1,0 +1,27 @@
+# BlackBoard/helm/templates/tekton-pruner-config.yaml
+# Standalone Tekton Pruner ConfigMap -- fallback when chart does NOT own the Namespace.
+# Uses Resource Groups to target only darwin ephemeral-agent TaskRuns by label selector.
+# Ref: https://tekton.dev/docs/pruner/#resource-groups-fine-grained-control
+{{- if and .Values.ephemeralAgents.enabled (not .Values.global.namespace) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tekton-pruner-namespace-spec
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: tekton-pruner
+    pruner.tekton.dev/config-type: namespace
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  ns-config: |
+    taskRuns:
+      - selector:
+        - matchLabels:
+            app.kubernetes.io/component: ephemeral-agent
+    {{- if eq (.Values.ephemeralAgents.cleanup.strategy | default "keep-since") "keep-since" }}
+        ttlSecondsAfterFinished: {{ mul (.Values.ephemeralAgents.cleanup.keepSince | default 1440 | int) 60 }}
+    {{- else }}
+        historyLimit: {{ .Values.ephemeralAgents.cleanup.keep | default 5 }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,25 @@
+# BlackBoard/helm/templates/namespace.yaml
+# Creates the target namespace when global.namespace is set.
+# Tekton Operator pruner: namespace ANNOTATIONS control per-ns cleanup.
+# Ref: https://tekton.dev/vault/operator-v0.74.x-lts/tektonconfig/#pruner
+{{- if .Values.global.namespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- if .Values.ephemeralAgents.enabled }}
+    operator.tekton.dev/prune.resources: "taskrun"
+    operator.tekton.dev/prune.strategy: {{ .Values.ephemeralAgents.cleanup.strategy | default "keep-since" | quote }}
+    {{- if eq (.Values.ephemeralAgents.cleanup.strategy | default "keep-since") "keep-since" }}
+    operator.tekton.dev/prune.keep-since: {{ .Values.ephemeralAgents.cleanup.keepSince | default 1440 | quote }}
+    {{- else }}
+    operator.tekton.dev/prune.keep: {{ .Values.ephemeralAgents.cleanup.keep | default 5 | quote }}
+    {{- end }}
+    operator.tekton.dev/prune.schedule: {{ .Values.ephemeralAgents.cleanup.schedule | default "0 */6 * * *" | quote }}
+    {{- end }}
+{{- end }}
