@@ -235,6 +235,10 @@ spec:
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
+            {{- if .Values.ephemeralAgents.enabled }}
+            - name: TEKTON_EVENTLISTENER_URL
+              value: "http://el-{{ .Release.Name }}-ephemeral-agent:8080"
+            {{- end }}
             - name: LLM_MODEL_HEADHUNTER
               valueFrom:
                 configMapKeyRef:
