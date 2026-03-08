@@ -24,7 +24,7 @@ function Layout() {
   const { data: config } = useConfig();
   const { connected, send } = useWSConnection();
   const { data: activeEvents } = useActiveEvents();
-  const { user, isAuthenticated, authConfig, logout } = useAuth();
+  const { user, isAuthenticated, logout } = useAuth();
   const activeCount = activeEvents?.length ?? 0;
   const canEmergencyStop = connected && activeCount > 0;
   const userName = user?.profile?.preferred_username || user?.profile?.name || user?.profile?.email || '';
