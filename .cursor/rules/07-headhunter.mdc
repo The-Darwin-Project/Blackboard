@@ -16,7 +16,7 @@ alwaysApply: true
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
 * **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). Two-tier triage (see below).
-* **Flow Gate:** `max_active=1` (configurable). Blocks new events while one is being processed.
+* **Flow Gate:** `maxActive` controls both headhunter event creation AND ephemeral agent concurrency. It is the single knob for headhunter throughput. Read by both Headhunter (event creation) and EphemeralProvisioner (agent spawning via `HEADHUNTER_MAX_ACTIVE` env var).
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
@@ -72,7 +72,7 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 headhunter:
   enabled: false
   pollInterval: "300"
-  maxActive: "1"
+  maxActive: "3"    # Controls ephemeral agent concurrency. Excess events defer in queue.
   startupDelay: "180"
   maintainerSource: "static"
   maintainers: ""  # CSV of emails

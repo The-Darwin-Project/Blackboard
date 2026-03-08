@@ -23,3 +23,4 @@ alwaysApply: true
 * **Auth:** Vertex AI Workload Identity (ADC) via GCP service account key.
 * **GitOps:** ArgoCD (namespace-scoped) + Helm charts.
 * **CI/CD:** GitHub Actions (GitHub App token for git, GITHUB_TOKEN for GHCR push).
+* **Agent Orchestration:** Tekton Triggers (EventListener + TriggerTemplate). Ephemeral agents spawned as TaskRuns.

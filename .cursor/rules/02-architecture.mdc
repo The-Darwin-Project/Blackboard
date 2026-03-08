@@ -19,6 +19,7 @@ alwaysApply: true
   * **Developer** (`developer.py`) is the pair programming manager. Fires Dev + QE sidecars concurrently via `asyncio.gather()`. Flash Manager (Gemini Flash) reviews outputs. See `04-developer-qe-pair.mdc` for invariants.
   * **Aligner** (`aligner.py`) keeps Vertex AI Flash for filter config. Creates events, does NOT route to agents.
   * **Headhunter** (`headhunter.py`) is an in-process daemon (same pattern as Aligner). Polls GitLab `/todos`, classifies MRs, creates events. Does NOT route to agents -- Brain handles all routing. See `07-headhunter.mdc`.
+  * **Dispatcher** (`ephemeral_provisioner.py`) provisions ephemeral agents via Tekton webhook. Pure plumbing -- no routing logic, no LLM. Brain decides WHAT to dispatch; Dispatcher decides WHERE (local sidecar vs ephemeral agent based on event source). See `10-ephemeral-agents.mdc`.
 
 ## 3. The Conversation Queue Protocol
 
@@ -43,3 +44,9 @@ alwaysApply: true
 
 * **Metrics:** K8s Observer polls metrics-server for CPU/memory. Dependencies inferred from Service endpoints and env vars.
 * **Legacy:** The `/telemetry` push endpoint (DarwinClient) is deprecated. Use annotations instead.
+
+## 5. Execution Planes
+
+* **Local plane**: 4 sidecars in the Brain pod. Handle user/aligner events. Always available.
+* **Ephemeral plane**: Tekton TaskRun agents. Handle headhunter + trigger-source events. Per-event lifecycle. Capacity controlled by source maxActive.
+* **Queue discipline**: Ephemeral events NEVER spill to local plane. They defer and wait for a slot.

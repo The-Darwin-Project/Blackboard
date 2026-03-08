@@ -1,0 +1,41 @@
+---
+description: Ephemeral agent architecture -- Dispatcher, Tekton lifecycle, dynamic role switching, queue discipline
+alwaysApply: true
+---
+
+# Ephemeral Agents (On-Call)
+
+## Architecture
+
+* **Hybrid model**: Local sidecars handle user/aligner events. Ephemeral agents handle headhunter + future trigger sources.
+* **One agent per event**: Single container, stays alive across defer-wake cycles and role switches. Terminates on event close or idle timeout.
+* **Orchestration**: Tekton TaskRun via EventListener webhook. Brain fires HTTP POST with event_id, Tekton creates the container.
+* **ServiceAccount**: Ephemeral TaskRuns use the Brain's SA. No separate SA.
+
+## Queue Discipline
+
+* **NEVER** fall back to local sidecars for trigger-source events (headhunter, etc.)
+* If source's `maxActive` reached, Brain DEFERS the event. It stays in queue until a slot opens.
+* Each trigger agent owns its concurrency budget via its own `maxActive` in values.yaml.
+* Convention: `{SOURCE}_MAX_ACTIVE` env var (e.g., `HEADHUNTER_MAX_ACTIVE`).
+
+## Dynamic Role Switching
+
+* Role comes from `msg.role` in WS task message, NOT from `AGENT_ROLE` env var.
+* Ephemeral agents have `AGENT_ROLE=""`. Role is assigned per dispatch.
+* Single container can switch roles mid-event (developer -> sysadmin). `--resume` preserved.
+* Unified code path: `const role = msg.role || AGENT_ROLE` works for both local and ephemeral.
+
+## WS Protocol
+
+* Registration: `{ type: "register", role: "", event_id: "evt-xxx", ephemeral: true, ... }`
+* Task dispatch: `{ type: "task", role: "developer", prompt: "...", ... }` -- `role` field required for ephemeral.
+* Termination: `{ type: "terminate", event_id: "evt-xxx" }` -- Brain sends on event close.
+
+## Key Files
+
+* `src/agents/ephemeral_provisioner.py` -- Provisioning via Tekton webhook
+* `src/agents/agent_registry.py` -- `get_ephemeral(event_id)`, ephemeral metadata
+* `helm/templates/tekton-eventlistener.yaml` -- TriggerTemplate, EventListener
+* `gemini-sidecar/ws-client.js` -- Dynamic role handling in `handleTask`
+* `gemini-sidecar/cli-setup.js` -- `swapActiveRules(role)`, `filterSkillsByRole(role)`, `safeRename`
