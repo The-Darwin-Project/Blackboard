@@ -1,0 +1,47 @@
+---
+description: "Dex OIDC authentication and user identity architecture"
+globs: ["src/auth.py", "src/routes/dex_proxy.py", "src/main.py", "ui/src/contexts/Auth*", "ui/src/components/LoginPage*", "helm/templates/dex-*", "helm/templates/cert-manager*"]
+alwaysApply: false
+---
+
+# Auth & Identity
+
+## Architecture
+
+Darwin uses **Dex OIDC** for Dashboard user authentication, bundled in the Helm chart and reverse-proxied through Brain at `/dex/*`.
+
+- **Feature flag**: `DEX_ENABLED` env var (from `dex.enabled` Helm value). `false` = anonymous mode, `true` = JWT required.
+- **Reverse proxy**: Brain proxies `/dex/*` to internal Dex Service (`DEX_INTERNAL_URL`). Browser never accesses Dex directly.
+- **Storage**: Dex uses `memory` storage (single-replica, zero CRD prerequisites).
+- **TLS**: cert-manager self-signed Issuer + Certificate for Dex internal HTTPS. Proxy uses `verify=False`.
+- **Static client**: `public: true` (PKCE, no client secret). Dashboard uses `oidc-client-ts`.
+- **Token storage**: `sessionStorage` (survives page refresh, cleared on tab close).
+
+## Identity Abstraction
+
+`UserContext` is the **single** identity type across all channels:
+
+| Source | Identity | Mechanism |
+|--------|----------|-----------|
+| Dashboard (dex.enabled=true) | Named (JWT claims) | `get_user_from_websocket()` / `get_user_from_request()` |
+| Dashboard (dex.enabled=false) | Anonymous | Returns `UserContext()` default |
+| Slack | Named (Slack profile) | `get_user_from_slack()` |
+| Agent WS `/agent/ws` | N/A (unauthenticated) | No auth, internal pod-to-pod |
+
+## Conventions
+
+- All user-facing actions (chat, approve, reject, feedback) must pass `UserContext` to `ConversationTurn(user_name=...)`.
+- When `DEX_ENABLED=true`, anonymous WS connections are rejected (4001) before `websocket.accept()`.
+- `UserContext.roles` is populated from JWT `groups` claim but NOT enforced in v1. RBAC is scaffolded for v2.
+- The `/config` endpoint exposes `auth.enabled`, `auth.issuerUrl`, `auth.clientId` for Dashboard discovery. No secrets.
+- Connector configuration is user-provided via `values.yaml` `dex.connectors`. OpenShift OAuth is the default example.
+
+## Key Files
+
+- `src/auth.py` -- JWT validation, JWKS cache, UserContext
+- `src/routes/dex_proxy.py` -- Reverse proxy adapter (`/dex/*` -> Dex Service)
+- `src/main.py` -- WS auth gate, `/config` auth fields, proxy router mount
+- `ui/src/contexts/AuthContext.tsx` -- PKCE flow, token management
+- `ui/src/components/LoginPage.tsx` -- Login page with projectDarwin.png background
+- `helm/templates/dex-deployment.yaml` -- Dex Deployment, Service, Config, SA
+- `helm/templates/cert-manager.yaml` -- Issuer + Certificate

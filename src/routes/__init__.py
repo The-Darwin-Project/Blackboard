@@ -8,9 +8,11 @@ from .queue import router as queue_router
 from .reports import router as reports_router
 from .telemetry import router as telemetry_router
 from .topology import router as topology_router
+from .dex_proxy import router as dex_proxy_router
 
 __all__ = [
     "chat_router",
+    "dex_proxy_router",
     "events_router",
     "feedback_router",
     "metrics_router",

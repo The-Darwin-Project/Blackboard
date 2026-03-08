@@ -268,10 +268,25 @@ export interface HealthResponse {
 // Public Configuration (AI Transparency & Compliance)
 // =============================================================================
 
+export interface AuthConfig {
+  enabled: boolean;
+  issuerUrl?: string;
+  clientId?: string;
+  loginDisclaimer?: string;
+}
+
+export interface AuthUser {
+  sub: string;
+  name: string;
+  email: string;
+  groups?: string[];
+}
+
 export interface AppConfig {
   contactEmail: string;
   feedbackFormUrl: string;
   appVersion: string;
+  auth?: AuthConfig;
 }
 
 // =============================================================================

@@ -29,6 +29,7 @@ from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, 
 from .models import HealthResponse
 from .routes import (
     chat_router,
+    dex_proxy_router,
     events_router,
     feedback_router,
     metrics_router,
@@ -37,6 +38,7 @@ from .routes import (
     telemetry_router,
     topology_router,
 )
+from .auth import DEX_ENABLED, get_user_from_websocket, fetch_oidc_jwks
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
@@ -173,6 +175,10 @@ async def lifespan(app: FastAPI):
             brain._ephemeral_provisioner = provisioner
             logger.info("EphemeralProvisioner initialized (url=%s)", el_url)
         
+        # === DEX OIDC ===
+        if DEX_ENABLED:
+            await fetch_oidc_jwks()
+
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
         logger.info("Brain event loop started - WebSocket conversation queue active")
@@ -320,11 +326,21 @@ async def health_check() -> HealthResponse:
 @app.get("/config", tags=["config"])
 async def get_config() -> dict:
     """Public configuration for the UI (no secrets)."""
-    return {
+    config = {
         "contactEmail": os.getenv("DARWIN_CONTACT_EMAIL", ""),
         "feedbackFormUrl": os.getenv("DARWIN_FEEDBACK_FORM_URL", ""),
         "appVersion": os.getenv("APP_VERSION", "1.0.0"),
     }
+    if DEX_ENABLED:
+        config["auth"] = {
+            "enabled": True,
+            "issuerUrl": os.getenv("DEX_ISSUER_URL", ""),
+            "clientId": os.getenv("DEX_CLIENT_ID", "darwin-dashboard"),
+            "loginDisclaimer": os.getenv("DEX_LOGIN_DISCLAIMER", ""),
+        }
+    else:
+        config["auth"] = {"enabled": False}
+    return config
 
 
 # =============================================================================
@@ -339,13 +355,16 @@ async def websocket_endpoint(websocket: WebSocket):
     Receives: chat messages, approval actions
     Sends: conversation turns, progress updates, event lifecycle
     """
+    user = get_user_from_websocket(websocket)
+    if DEX_ENABLED and user.user_id == "anonymous":
+        await websocket.close(code=4001)
+        return
     await websocket.accept()
-    # TODO(dex): user = get_user_from_websocket(websocket); pass user.label to ConversationTurn(user_name=...)
     
     # Add to connected clients (set stored on app.state during lifespan)
     clients = getattr(app.state, 'connected_ui_clients', set())
     clients.add(websocket)
-    logger.info(f"UI WebSocket connected ({len(clients)} clients)")
+    logger.info(f"UI WebSocket connected ({len(clients)} clients) user={user.label}")
     
     try:
         while True:
@@ -383,6 +402,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         action="message",
                         thoughts=message,
                         image=image,
+                        user_name=user.label if user.label != "anonymous" else None,
                     )
                     await _blackboard.append_turn(event_id, user_turn)
                     await websocket.send_json({
@@ -412,9 +432,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             action="message",
                             thoughts=message,
                             image=image,
+                            user_name=user.label if user.label != "anonymous" else None,
                         )
                         await _blackboard.append_turn(event_id, turn)
-                        # Clear wait_for_user state so Brain re-processes
                         if hasattr(app.state, 'brain'):
                             app.state.brain.clear_waiting(event_id)
                         await websocket.send_json({
@@ -436,6 +456,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             actor="user",
                             action="approve",
                             thoughts="User approved the plan.",
+                            user_name=user.label if user.label != "anonymous" else None,
                         )
                         await _blackboard.append_turn(event_id, turn)
                         # Clear wait_for_user state so Brain re-processes
@@ -512,6 +533,8 @@ app.include_router(chat_router)
 app.include_router(events_router)
 app.include_router(feedback_router)
 app.include_router(reports_router)
+if DEX_ENABLED:
+    app.include_router(dex_proxy_router)
 
 
 # =============================================================================

@@ -25,6 +25,13 @@ import type {
 // Base URL is proxied by Vite in development
 const BASE_URL = '';
 
+let _getToken: (() => string | null) | null = null;
+
+/** Set the token getter for authenticated API calls. Called once by AuthProvider. */
+export function setTokenGetter(getter: () => string | null) {
+  _getToken = getter;
+}
+
 /**
  * Custom API error with detailed context.
  */
@@ -65,10 +72,16 @@ async function fetchApi<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const { headers: optHeaders, ...restOptions } = options;
+  const authHeaders: Record<string, string> = {};
+  const token = _getToken?.();
+  if (token) {
+    authHeaders['Authorization'] = `Bearer ${token}`;
+  }
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...restOptions,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders,
       ...optHeaders,
     },
   });

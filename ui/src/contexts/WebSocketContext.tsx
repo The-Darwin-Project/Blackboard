@@ -20,6 +20,7 @@
  */
 import { createContext, useContext, useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
 import type { WSMessage } from '../hooks/useWebSocket';
+import { useAuth } from './AuthContext';
 
 type MessageHandler = (msg: WSMessage) => void;
 type ReconnectHandler = () => void;
@@ -52,10 +53,15 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
+  const { getAccessToken } = useAuth();
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.host}/ws`;
+    let url = `${protocol}//${location.host}/ws`;
+    const token = getAccessToken();
+    if (token) {
+      url += `?token=${encodeURIComponent(token)}`;
+    }
 
     try {
       const ws = new WebSocket(url);
