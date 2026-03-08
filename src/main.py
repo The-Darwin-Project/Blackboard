@@ -161,6 +161,17 @@ async def lifespan(app: FastAPI):
         app.state.task_bridge = task_bridge
         set_registry_and_bridge(agent_registry, task_bridge)
         logger.info("AgentRegistry + TaskBridge initialized")
+
+        el_url = os.getenv("TEKTON_EVENTLISTENER_URL", "")
+        if el_url:
+            from .agents.ephemeral_provisioner import EphemeralProvisioner
+            provisioner = EphemeralProvisioner(
+                registry=agent_registry,
+                event_listener_url=el_url,
+            )
+            agent_registry.set_ephemeral_registered_callback(provisioner.on_ephemeral_registered)
+            brain._ephemeral_provisioner = provisioner
+            logger.info("EphemeralProvisioner initialized (url=%s)", el_url)
         
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())

@@ -312,6 +312,7 @@ class Brain:
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
+        self._ephemeral_provisioner = None
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "false").lower() == "true"
         self._skill_loader = None
@@ -1976,6 +1977,7 @@ class Brain:
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
                 from ..dependencies import get_registry_and_bridge
+                from .ephemeral_provisioner import CAPACITY_SENTINEL, INFRA_SENTINEL
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
                     async def on_huddle(data: dict) -> None:
@@ -1990,6 +1992,32 @@ class Brain:
                         await self.blackboard.append_turn(event_id, turn)
                         await self._broadcast_turn(event_id, turn)
 
+                    agent_id_override = None
+                    event_doc = await self.blackboard.get_event(event_id)
+                    use_ephemeral = (
+                        self._ephemeral_provisioner
+                        and event_doc
+                        and event_doc.source in ("headhunter",)
+                    )
+                    if use_ephemeral:
+                        provision_result = await self._ephemeral_provisioner.ensure_agent(
+                            event_id, source=event_doc.source,
+                        )
+                        if isinstance(provision_result, str):
+                            defer_seconds = 120 if provision_result == CAPACITY_SENTINEL else 60
+                            reason = (
+                                "Waiting for ephemeral agent slot"
+                                if provision_result == CAPACITY_SENTINEL
+                                else "Tekton infrastructure unavailable"
+                            )
+                            logger.info("Deferring %s for %ds: %s", event_id, defer_seconds, reason)
+                            await self._execute_function_call(
+                                event_id, "defer_event",
+                                {"delay_seconds": defer_seconds, "reason": reason},
+                            )
+                            return
+                        agent_id_override = provision_result.agent_id
+
                     result, session_id = await dispatch_to_agent(
                         registry=registry,
                         bridge=bridge,
@@ -1998,6 +2026,7 @@ class Brain:
                         task=task,
                         on_progress=on_progress,
                         on_huddle=on_huddle,
+                        agent_id=agent_id_override,
                         session_id=resume_session_id,
                         event_md_path=event_md_path,
                     )
@@ -2296,6 +2325,8 @@ class Brain:
 
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event and broadcast the closure to UI."""
+        if self._ephemeral_provisioner:
+            await self._ephemeral_provisioner.terminate_agent(event_id)
         await self.cancel_active_task(event_id, f"Event closing: {summary}")
         event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary, close_reason=close_reason)
