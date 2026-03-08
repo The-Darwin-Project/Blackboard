@@ -581,7 +581,19 @@ async def api_info() -> dict:
 # =============================================================================
 # Static Files (React SPA) - MUST be mounted LAST
 # =============================================================================
-# Mount at root so UI is served at / while API routes take precedence
+# Mount static assets (JS, CSS, images) at root, then add SPA fallback
+# for client-side routes (/callback, /reports, /guide, etc.)
 static_dir = Path(__file__).parent.parent / "ui" / "dist"
 if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
+
+    _index_html = (static_dir / "index.html").read_bytes()
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa_fallback(path: str):
+        file_path = static_dir / path
+        if file_path.is_file():
+            from starlette.responses import FileResponse
+            return FileResponse(file_path)
+        from starlette.responses import HTMLResponse
+        return HTMLResponse(content=_index_html)
