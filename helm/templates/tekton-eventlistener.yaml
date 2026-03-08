@@ -90,7 +90,7 @@ spec:
                 - name: KARGO_INSECURE
                   value: "true"
                 {{- end }}
-              resources:
+              computeResources:
                 requests:
                   memory: {{ .Values.sidecars.resources.requests.memory | default "256Mi" | quote }}
                   cpu: {{ .Values.sidecars.resources.requests.cpu | default "100m" | quote }}

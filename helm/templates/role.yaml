@@ -107,6 +107,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 ---
 # ClusterRole for EventListener to watch ClusterInterceptors (cluster-scoped)
 apiVersion: rbac.authorization.k8s.io/v1
