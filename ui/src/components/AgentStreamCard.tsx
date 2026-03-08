@@ -84,6 +84,43 @@ function MessageCards({ messages, color }: { messages: string[]; color: string }
   );
 }
 
+/** Terminal-style renderer for ephemeral on-call agent streams. */
+function TerminalView({ messages, isActive }: { messages: string[]; isActive: boolean }) {
+  if (messages.length === 0) {
+    return (
+      <div style={{ color: '#4ade8040', fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12 }}>
+        <span style={{ color: '#4ade80' }}>$</span> Waiting for dispatch...
+        {isActive && <span style={{ display: 'inline-block', width: 8, height: 14, background: '#4ade80', marginLeft: 4, animation: 'blink 1s step-end infinite' }} />}
+      </div>
+    );
+  }
+  return (
+    <>
+      {messages.slice(-80).map((line, i) => (
+        <div key={i} style={{
+          padding: '1px 0',
+          fontSize: 12,
+          fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+          lineHeight: '1.5',
+          wordBreak: 'break-word' as const,
+          whiteSpace: 'pre-wrap' as const,
+          color: '#c4ecc4',
+        }}>
+          <span style={{ color: '#4ade8080', userSelect: 'none' }}>{'> '}</span>
+          {line}
+        </div>
+      ))}
+      {isActive && (
+        <div style={{ padding: '1px 0' }}>
+          <span style={{ color: '#4ade80' }}>$</span>
+          <span style={{ display: 'inline-block', width: 8, height: 14, background: '#4ade80', marginLeft: 4, animation: 'blink 1s step-end infinite' }} />
+        </div>
+      )}
+      <style>{`@keyframes blink { 50% { opacity: 0; } }`}</style>
+    </>
+  );
+}
+
 function FloatingWindow({
   agentName, eventId, messages, huddleMessages, onClose,
 }: {
@@ -171,14 +208,67 @@ function FloatingWindow({
 }
 
 export default function AgentStreamCard({ agentName, eventId, messages, huddleMessages = [], isActive, ephemeral }: AgentStreamCardProps) {
-  const color = ephemeral ? '#8b5cf6' : (ACTOR_COLORS[agentName] || '#6b7280');
+  const color = ephemeral ? '#4ade80' : (ACTOR_COLORS[agentName] || '#6b7280');
   const scrollRef = useRef<HTMLDivElement>(null);
   const [poppedOut, setPoppedOut] = useState(false);
-  const isChatMode = agentName === 'developer' && huddleMessages.length > 0;
+  const isChatMode = !ephemeral && agentName === 'developer' && huddleMessages.length > 0;
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages.length, huddleMessages.length]);
+
+  if (ephemeral) {
+    return (
+      <>
+        <div style={{
+          flex: 1, minWidth: 0, background: '#030712',
+          borderRadius: 4, border: `1px solid #1e293b`,
+          display: 'flex', flexDirection: 'column',
+          boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)',
+        }}>
+          {/* Terminal title bar */}
+          <div style={{
+            padding: '5px 10px', background: '#111827', borderBottom: '1px solid #1e293b',
+            borderRadius: '3px 3px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 5 }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} />
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#f59e0b' }} />
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
+              </div>
+              <span style={{ fontSize: 11, color: '#64748b', fontFamily: "'JetBrains Mono', monospace" }}>
+                oncall@{eventId?.slice(0, 12) || 'idle'} ~ {agentName}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 6px #4ade80' }} />}
+              <button
+                onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
+                title="Copy stream" aria-label="Copy stream"
+                style={{ background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+              >&#x2398;</button>
+              <button onClick={() => setPoppedOut(true)} title="Pop out" aria-label="Pop out"
+                style={{ background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+              >&#x29c9;</button>
+            </div>
+          </div>
+
+          {/* Terminal body */}
+          <div ref={scrollRef} style={{
+            flex: 1, overflow: 'auto', padding: '8px 12px',
+            background: '#030712',
+          }}>
+            <TerminalView messages={messages} isActive={isActive} />
+          </div>
+        </div>
+
+        {poppedOut && (
+          <FloatingWindow agentName={agentName} eventId={eventId} messages={messages} huddleMessages={[]} onClose={() => setPoppedOut(false)} />
+        )}
+      </>
+    );
+  }
 
   return (
     <>
@@ -197,11 +287,6 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
             <span style={{ background: color, color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
               {agentName}
             </span>
-            {ephemeral && (
-              <span style={{ background: '#8b5cf620', color: '#a78bfa', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 600, letterSpacing: '0.5px' }}>
-                EPHEMERAL
-              </span>
-            )}
             <span style={{ flex: 1, textAlign: 'center' }}>
               {eventId && <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>[{eventId.slice(0, 12)}]</span>}
               {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}
