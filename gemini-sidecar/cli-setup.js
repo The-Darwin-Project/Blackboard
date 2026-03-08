@@ -219,13 +219,13 @@ function filterSkillsByRole(role) {
         const roles = match[1].split(',').map(r => r.trim().toLowerCase());
         if (roles.includes(role)) { kept++; continue; }
 
-        fs.renameSync(
+        safeRename(
             path.join(GEMINI_SKILLS_DIR, entry),
             path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
         );
         const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
         if (fs.existsSync(claudeEntry)) {
-            fs.renameSync(claudeEntry, claudeEntry + DISABLED_SUFFIX);
+            safeRename(claudeEntry, claudeEntry + DISABLED_SUFFIX);
         }
         disabled++;
     }
@@ -254,6 +254,19 @@ const GEMINI_SKILLS_DIR = path.join(os.homedir(), '.gemini', 'skills');
 const CLAUDE_SKILLS_DIR = path.join(os.homedir(), '.claude', 'skills');
 const DISABLED_SUFFIX = '.disabled';
 
+function safeRename(src, dest) {
+    try {
+        fs.renameSync(src, dest);
+    } catch (err) {
+        if (err.code === 'EXDEV') {
+            fs.cpSync(src, dest, { recursive: true });
+            fs.rmSync(src, { recursive: true, force: true });
+        } else {
+            throw err;
+        }
+    }
+}
+
 /**
  * Hide skills that don't match the current task mode by renaming dirs to *.disabled.
  * Reads `modes: [...]` from each SKILL.md frontmatter.
@@ -278,13 +291,13 @@ function filterSkillsByMode(mode) {
         const modes = match[1].split(',').map(m => m.trim().toLowerCase());
         if (modes.includes(mode.toLowerCase())) { active++; continue; }
 
-        fs.renameSync(
+        safeRename(
             path.join(GEMINI_SKILLS_DIR, entry),
             path.join(GEMINI_SKILLS_DIR, entry + DISABLED_SUFFIX),
         );
         const claudeEntry = path.join(CLAUDE_SKILLS_DIR, entry);
         if (fs.existsSync(claudeEntry)) {
-            fs.renameSync(claudeEntry, claudeEntry + DISABLED_SUFFIX);
+            safeRename(claudeEntry, claudeEntry + DISABLED_SUFFIX);
         }
         disabled++;
     }
@@ -305,7 +318,7 @@ function restoreAllSkills() {
         for (const entry of fs.readdirSync(dir)) {
             if (!entry.endsWith(DISABLED_SUFFIX)) continue;
             const baseName = entry.slice(0, -DISABLED_SUFFIX.length);
-            fs.renameSync(path.join(dir, entry), path.join(dir, baseName));
+            safeRename(path.join(dir, entry), path.join(dir, baseName));
             if (dir === GEMINI_SKILLS_DIR) restored++;
         }
     }
