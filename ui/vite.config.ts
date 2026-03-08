@@ -4,8 +4,25 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
+function devAuthMock() {
+  return {
+    name: 'dev-auth-mock',
+    configureServer(server: any) {
+      server.middlewares.use('/config', (_req: any, res: any) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+          contactEmail: '',
+          feedbackFormUrl: '',
+          appVersion: 'dev',
+          auth: { enabled: true, issuerUrl: 'http://localhost:5556/dex', clientId: 'darwin-dashboard', loginDisclaimer: '' },
+        }));
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), devAuthMock()],
   // Base path - UI served at root
   base: '/',
   build: {
