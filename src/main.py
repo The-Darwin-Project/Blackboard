@@ -505,7 +505,8 @@ async def agent_ws_endpoint(websocket: WebSocket):
     if not registry or not bridge:
         await websocket.close(code=1013, reason="Registry not initialized")
         return
-    await agent_websocket_handler(websocket, registry, bridge)
+    from .dependencies import _blackboard
+    await agent_websocket_handler(websocket, registry, bridge, blackboard=_blackboard)
 
 
 # =============================================================================

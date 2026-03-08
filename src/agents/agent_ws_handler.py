@@ -4,16 +4,21 @@
 # 2. [Pattern]: All sidecar messages routed to TaskBridge.put(task_id, msg). Bridge delivers to dispatch coroutine.
 # 3. [Constraint]: Must be registered before entering message loop. 10s timeout on register message.
 # 4. [Constraint]: This file handles transport only. No LLM logic, no dispatch decisions.
+# 5. [Pattern]: Ephemeral agents registering for a closed/missing event are terminated immediately (orphan cleanup).
 """WebSocket handler for agent sidecar connections (reversed WS direction)."""
 from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .agent_registry import AgentRegistry
 from .task_bridge import TaskBridge
+
+if TYPE_CHECKING:
+    from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,7 @@ async def agent_websocket_handler(
     websocket: WebSocket,
     registry: AgentRegistry,
     bridge: TaskBridge,
+    blackboard: "BlackboardState | None" = None,
 ) -> None:
     """Handle a single agent sidecar WebSocket lifecycle."""
     await websocket.accept()
@@ -49,12 +55,24 @@ async def agent_websocket_handler(
             return
 
         agent_id = raw["agent_id"]
+        is_ephemeral = raw.get("ephemeral", False)
+        event_id = raw.get("event_id")
+
         await registry.register(
             agent_id, raw.get("role", "unknown"), websocket,
             raw.get("capabilities", []), raw.get("cli", ""), raw.get("model", ""),
-            ephemeral=raw.get("ephemeral", False),
-            event_id=raw.get("event_id"),
+            ephemeral=is_ephemeral,
+            event_id=event_id,
         )
+
+        if is_ephemeral and event_id and blackboard:
+            event = await blackboard.get_event(event_id)
+            if not event or event.status.value == "closed":
+                logger.info("Terminating orphan ephemeral agent %s: event %s is %s",
+                            agent_id, event_id, event.status.value if event else "missing")
+                await websocket.send_json({"type": "cancel", "task_id": "", "reason": "Event closed"})
+                await websocket.close(code=1000, reason=f"Event {event_id} no longer active")
+                return
 
         heartbeat_task = asyncio.create_task(_heartbeat(websocket))
 
