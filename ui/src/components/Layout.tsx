@@ -8,10 +8,11 @@
  * Header with status badge, main content area with responsive grid.
  */
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Activity, AlertCircle, BookOpen, CheckCircle2, FileText, Home, Square, Wifi, WifiOff } from 'lucide-react';
+import { Activity, AlertCircle, BookOpen, CheckCircle2, FileText, Home, LogOut, Square, User, Wifi, WifiOff } from 'lucide-react';
 import { useTopology, useConfig } from '../hooks';
 import { useActiveEvents } from '../hooks/useQueue';
 import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
+import { useAuth } from '../contexts/AuthContext';
 import WaitingBell from './WaitingBell';
 
 function Layout() {
@@ -23,8 +24,10 @@ function Layout() {
   const { data: config } = useConfig();
   const { connected, send } = useWSConnection();
   const { data: activeEvents } = useActiveEvents();
+  const { user, isAuthenticated, authConfig, logout } = useAuth();
   const activeCount = activeEvents?.length ?? 0;
   const canEmergencyStop = connected && activeCount > 0;
+  const userName = user?.profile?.preferred_username || user?.profile?.name || user?.profile?.email || '';
 
   useWSMessage((msg) => {
     if (msg.type === 'emergency_stop_ack') {
@@ -94,6 +97,22 @@ function Layout() {
           <WaitingBell onEventClick={(eventId) => {
             window.dispatchEvent(new CustomEvent('darwin:selectEvent', { detail: eventId }));
           }} />
+
+          {/* User Identity + Logout */}
+          {isAuthenticated && userName && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10">
+              <User className="w-3.5 h-3.5 text-indigo-400" />
+              <span className="text-xs font-medium text-indigo-300">{userName}</span>
+              <button
+                type="button"
+                onClick={() => { if (window.confirm('Logout?')) logout(); }}
+                title="Logout"
+                className="ml-1 p-0.5 rounded hover:bg-indigo-500/20 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5 text-indigo-400 hover:text-indigo-300" />
+              </button>
+            </div>
+          )}
 
           {/* Status Badge */}
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
