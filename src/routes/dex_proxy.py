@@ -33,7 +33,7 @@ _HOP_BY_HOP = frozenset({
 @router.api_route("/dex/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def dex_proxy(request: Request, path: str) -> Response:
     """Forward request to internal Dex Service."""
-    target = f"{DEX_INTERNAL_URL}/{path}"
+    target = f"{DEX_INTERNAL_URL}/dex/{path}"
 
     headers = {
         k: v for k, v in request.headers.items()

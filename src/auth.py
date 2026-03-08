@@ -60,7 +60,7 @@ async def fetch_oidc_jwks() -> None:
     if not DEX_ENABLED or not DEX_INTERNAL_URL:
         return
 
-    jwks_url = f"{DEX_INTERNAL_URL}/keys"
+    jwks_url = f"{DEX_INTERNAL_URL}/dex/keys"
     try:
         import httpx
         async with httpx.AsyncClient(verify=False) as client:
