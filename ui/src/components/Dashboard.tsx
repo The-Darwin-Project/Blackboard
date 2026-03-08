@@ -224,7 +224,9 @@ function DashboardInner() {
         });
         return;
       }
-      if (AGENTS.includes(actor as typeof AGENTS[number])) {
+      const evtId = msg.event_id as string;
+      const isEphemeralEvent = evtId && ephemeralAgents.some((a) => a.bound_event_id === evtId);
+      if (!isEphemeralEvent && AGENTS.includes(actor as typeof AGENTS[number])) {
         setAgentStreams((prev) => {
           const current = prev[actor] || { messages: [], huddleMessages: [], eventId: null, isActive: false };
           const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
@@ -234,7 +236,6 @@ function DashboardInner() {
           return { ...prev, [actor]: { ...current, messages, huddleMessages, eventId: (msg.event_id as string) || current.eventId, isActive: true } };
         });
       }
-      const evtId = msg.event_id as string;
       if (evtId) {
         setEphemeralStream((prev) => ({
           ...prev,
@@ -357,7 +358,7 @@ function DashboardInner() {
         {/* LEFT PANEL: Activity | Event Chat */}
         <div
           className="flex-shrink-0 h-full bg-bg-secondary rounded-lg border border-border overflow-hidden flex flex-col"
-          style={{ width: sidebarWidth }}
+          style={{ width: showEphemeralSplit ? '60%' : sidebarWidth }}
         >
           <TabPanel tabs={LEFT_TABS} activeTab={leftTab} onTabChange={setLeftTab}>
             <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
