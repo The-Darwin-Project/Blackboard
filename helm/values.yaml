@@ -289,6 +289,16 @@ slack:
   userMapping:
     method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================
+# Ephemeral Agents (On-Call via Tekton TaskRun)
+# =============================================================================
+ephemeralAgents:
+  enabled: true # Set to true when Tekton Triggers CRDs are installed
+  idleTimeoutMs: "3600000" # 1h -- agent self-terminates after no tasks
+  taskRunTimeout: "24h0m0s" # Hard ceiling. Must exceed idleTimeoutMs.
+  cli: "claude" # CLI binary for ephemeral agents
+  model: "claude-opus-4-6" # Single model for all role switches
+  permissionMode: "bypassPermissions"
+# =============================================================================
 # Headhunter (GitLab Todo Poller)
 # =============================================================================
 headhunter:

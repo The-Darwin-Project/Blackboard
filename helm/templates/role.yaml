@@ -85,3 +85,44 @@ rules:
 #   name: {{ .Release.Name }}-argocd-reader
 #   apiGroup: rbac.authorization.k8s.io
 {{- end }}
+{{- if .Values.ephemeralAgents.enabled }}
+---
+# Role for ephemeral agent lifecycle -- EventListener creates TaskRuns
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["taskruns"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["triggers.tekton.dev"]
+    resources: ["eventlisteners", "triggerbindings", "triggertemplates"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-ephemeral-agent
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -1,0 +1,184 @@
+# BlackBoard/helm/templates/tekton-eventlistener.yaml
+# Tekton Triggers infrastructure for ephemeral on-call agents.
+# Brain's EphemeralProvisioner fires HTTP POST to the EventListener,
+# which creates a TaskRun with the gemini-sidecar image configured
+# for dynamic role switching (AGENT_ROLE="", role comes from WS msg).
+{{- if .Values.ephemeralAgents.enabled }}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+spec:
+  params:
+    - name: event_id
+      description: Darwin event ID this agent is bound to
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: TaskRun
+      metadata:
+        generateName: darwin-oncall-
+        namespace: {{ .Release.Namespace }}
+        labels:
+          app: darwin-brain
+          app.kubernetes.io/component: ephemeral-agent
+          darwin.io/event-id: $(tt.params.event_id)
+      spec:
+        serviceAccountName: {{ .Release.Name }}-brain
+        timeout: {{ .Values.ephemeralAgents.taskRunTimeout | quote }}
+        taskSpec:
+          steps:
+            - name: agent
+              image: "{{ .Values.sidecars.image.repository }}:{{ .Values.sidecars.image.tag }}"
+              env:
+                - name: AGENT_ROLE
+                  value: ""
+                - name: EVENT_ID
+                  value: $(tt.params.event_id)
+                - name: BRAIN_WS_URL
+                  value: "ws://{{ .Release.Name }}-brain:8000{{ .Values.app.agentWsPath }}"
+                - name: BRAIN_HTTP_URL
+                  value: "http://{{ .Release.Name }}-brain:8000"
+                - name: AGENT_CLI
+                  value: {{ .Values.ephemeralAgents.cli | quote }}
+                - name: AGENT_MODEL
+                  value: {{ .Values.ephemeralAgents.model | quote }}
+                - name: AGENT_PERMISSION_MODE
+                  value: {{ .Values.ephemeralAgents.permissionMode | quote }}
+                - name: IDLE_TIMEOUT_MS
+                  value: {{ .Values.ephemeralAgents.idleTimeoutMs | quote }}
+                - name: GOOGLE_CLOUD_PROJECT
+                  value: {{ .Values.gcp.project | quote }}
+                - name: GOOGLE_CLOUD_LOCATION
+                  value: {{ .Values.gcp.location | quote }}
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  value: "/var/secrets/google/agent-service-account.json"
+                - name: GOOGLE_GENAI_USE_VERTEXAI
+                  value: "true"
+                - name: CLAUDE_CODE_USE_VERTEX
+                  value: "1"
+                - name: ANTHROPIC_VERTEX_PROJECT_ID
+                  value: {{ .Values.gcp.project | quote }}
+                - name: CLOUD_ML_REGION
+                  value: {{ .Values.gcp.location | quote }}
+                - name: ANTHROPIC_MODEL
+                  value: {{ .Values.ephemeralAgents.model | quote }}
+                {{- if .Values.gitlab.enabled }}
+                - name: GITLAB_TOKEN_PATH
+                  value: "/secrets/gitlab/token"
+                - name: GITLAB_HOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+                      key: host
+                {{- end }}
+                {{- if .Values.argocd.enabled }}
+                - name: ARGOCD_SERVER
+                  value: {{ .Values.argocd.server | quote }}
+                - name: ARGOCD_INSECURE
+                  value: "true"
+                {{- end }}
+                {{- if .Values.kargo.enabled }}
+                - name: KARGO_SERVER
+                  value: {{ .Values.kargo.server | quote }}
+                - name: KARGO_INSECURE
+                  value: "true"
+                {{- end }}
+              resources:
+                requests:
+                  memory: {{ .Values.sidecars.resources.requests.memory | default "256Mi" | quote }}
+                  cpu: {{ .Values.sidecars.resources.requests.cpu | default "100m" | quote }}
+                limits:
+                  memory: {{ .Values.sidecars.resources.limits.memory | default "6Gi" | quote }}
+                  cpu: {{ .Values.sidecars.resources.limits.cpu | default "6" | quote }}
+              volumeMounts:
+                {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+                - name: gcp-sa-key
+                  mountPath: /var/secrets/google
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.gitlab.enabled }}
+                - name: gitlab-token
+                  mountPath: /secrets/gitlab
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.argocd.enabled }}
+                - name: argocd-secret
+                  mountPath: /secrets/argocd
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.kargo.enabled }}
+                - name: kargo-secret
+                  mountPath: /secrets/kargo
+                  readOnly: true
+                {{- end }}
+                - name: gemini-rules
+                  mountPath: /tmp/agent-rules
+                  readOnly: true
+                - name: workspace
+                  mountPath: /data/workspace
+          volumes:
+            {{- if or .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
+            - name: gcp-sa-key
+              secret:
+                secretName: {{ .Values.gcp.agentExistingSecret | default .Values.gcp.existingSecret }}
+            {{- end }}
+            {{- if .Values.gitlab.enabled }}
+            - name: gitlab-token
+              secret:
+                secretName: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+            {{- end }}
+            {{- if .Values.argocd.enabled }}
+            - name: argocd-secret
+              secret:
+                secretName: {{ .Values.argocd.existingSecret | default (printf "%s-argocd" .Release.Name) }}
+            {{- end }}
+            {{- if .Values.kargo.enabled }}
+            - name: kargo-secret
+              secret:
+                secretName: {{ .Values.kargo.existingSecret | default (printf "%s-kargo" .Release.Name) }}
+            {{- end }}
+            - name: gemini-rules
+              configMap:
+                name: {{ .Release.Name }}-gemini-rules
+            - name: workspace
+              emptyDir: {}
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+spec:
+  params:
+    - name: event_id
+      value: $(body.event_id)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: {{ .Release.Name }}-ephemeral-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+spec:
+  serviceAccountName: {{ .Release.Name }}-brain
+  triggers:
+    - name: spawn-ephemeral-agent
+      bindings:
+        - ref: {{ .Release.Name }}-ephemeral-agent
+      template:
+        ref: {{ .Release.Name }}-ephemeral-agent
+{{- end }}
