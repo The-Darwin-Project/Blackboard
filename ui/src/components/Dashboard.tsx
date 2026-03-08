@@ -225,7 +225,10 @@ function DashboardInner() {
         return;
       }
       const evtId = msg.event_id as string;
-      const isEphemeralEvent = evtId && ephemeralAgents.some((a) => a.bound_event_id === evtId);
+      const isEphemeralEvent = evtId && (
+        ephemeralAgents.some((a) => a.bound_event_id === evtId)
+        || activeEvents?.some((e) => e.id === evtId && e.source === 'headhunter')
+      );
       if (!isEphemeralEvent && AGENTS.includes(actor as typeof AGENTS[number])) {
         setAgentStreams((prev) => {
           const current = prev[actor] || { messages: [], huddleMessages: [], eventId: null, isActive: false };
