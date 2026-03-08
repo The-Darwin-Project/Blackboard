@@ -1,0 +1,34 @@
+# BlackBoard/helm/templates/cert-manager.yaml
+# cert-manager Issuer + Certificate for Dex internal TLS
+# Requires: cert-manager operator installed in cluster
+{{- if .Values.dex.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Values.dex.tls.issuerName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}
+    app.kubernetes.io/component: dex
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-dex-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Release.Name }}
+    app.kubernetes.io/component: dex
+spec:
+  dnsNames:
+    - {{ .Release.Name }}-dex
+    - {{ .Release.Name }}-dex.{{ .Release.Namespace }}.svc
+    - {{ .Release.Name }}-dex.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ .Values.dex.tls.issuerName }}
+  secretName: {{ .Values.dex.tls.secretName }}
+{{- end }}

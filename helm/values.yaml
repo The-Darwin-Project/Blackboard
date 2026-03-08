@@ -309,6 +309,54 @@ headhunter:
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of emails for static source (e.g., "alice@redhat.com,bob@redhat.com")
 # =============================================================================
+# Dex OIDC Identity Provider (bundled, reverse-proxied via Brain at /dex/*)
+# Prerequisites: cert-manager operator installed in cluster
+# =============================================================================
+dex:
+  enabled: false
+  image:
+    repository: ghcr.io/dexidp/dex
+    tag: "v2.44.0"
+    pullPolicy: IfNotPresent
+  # TLS via cert-manager (self-signed, namespace Issuer)
+  tls:
+    secretName: "dex-tls"
+    issuerName: "darwin-selfsigned-issuer"
+  # Static client for Dashboard (public: true = PKCE, no client secret)
+  clientId: "darwin-dashboard"
+  # Connector configuration (maps directly to Dex connectors: block)
+  # OpenShift OAuth example:
+  #   connectors:
+  #     - type: openshift
+  #       id: openshift
+  #       name: OpenShift
+  #       config:
+  #         clientID: system:serviceaccount:<namespace>:<release>-dex
+  #         clientSecret: $CLIENT_SECRET
+  #         issuer: https://kubernetes.default.svc
+  #         redirectURI: https://<brain-route-host>/dex/callback
+  #         insecureCA: true
+  connectors: []
+  # Token expiry configuration
+  expiry:
+    idTokens: "24h"
+    refreshTokens:
+      validIfNotUsedFor: "72h"
+  # Optional: override the default AI disclaimer on the login page (empty = use built-in default)
+  loginDisclaimer: ""
+  # Env/volume injection for connector secrets (Kargo pattern)
+  env: []
+  envFrom: []
+  volumes: []
+  volumeMounts: []
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 500m
+# =============================================================================
 # Node Selection (optional)
 # =============================================================================
 nodeSelector: {}

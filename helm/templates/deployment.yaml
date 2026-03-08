@@ -239,6 +239,18 @@ spec:
             - name: TEKTON_EVENTLISTENER_URL
               value: "http://el-{{ .Release.Name }}-ephemeral-agent:8080"
             {{- end }}
+            {{- if .Values.dex.enabled }}
+            - name: DEX_ENABLED
+              value: "true"
+            - name: DEX_ISSUER_URL
+              value: "https://{{ required "route.host is required when dex.enabled=true" .Values.route.host }}/dex"
+            - name: DEX_CLIENT_ID
+              value: {{ .Values.dex.clientId | quote }}
+            - name: DEX_INTERNAL_URL
+              value: "https://{{ .Release.Name }}-dex:5556"
+            - name: DEX_LOGIN_DISCLAIMER
+              value: {{ .Values.dex.loginDisclaimer | quote }}
+            {{- end }}
             - name: LLM_MODEL_HEADHUNTER
               valueFrom:
                 configMapKeyRef:
