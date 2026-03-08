@@ -375,8 +375,8 @@ function DashboardInner() {
                   </div>
                   {showEphemeralSplit && (
                     <>
-                      <div style={{ width: 1, flexShrink: 0, background: '#334155', margin: '0 6px' }} />
-                      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                      <div style={{ width: 1, flexShrink: 0, background: '#334155', margin: '0 10px' }} />
+                      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0, padding: '4px 0' }}>
                         <AgentStreamCard
                           agentName={ephemeralAgentForEvent?.current_role || 'oncall'}
                           eventId={selectedEventId}

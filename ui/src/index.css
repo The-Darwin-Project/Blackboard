@@ -36,9 +36,11 @@
 }
 
 /* Base styles */
-body {
+html, body {
   @apply bg-bg-primary text-text-primary antialiased;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  overflow: hidden;
+  height: 100%;
 }
 
 /* Scrollbar styling */
@@ -62,6 +64,21 @@ body {
 /* Brain thinking indicator pulse (used by inline animation in ConversationFeed) */
 @keyframes pulse {
   50% { opacity: 0.5; }
+}
+
+/* Terminal view: hide scrollbar but keep scroll functionality */
+.terminal-scroll::-webkit-scrollbar { display: none; }
+.terminal-scroll { scrollbar-width: none; }
+
+@keyframes blink { 50% { opacity: 0; } }
+.terminal-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background: #4ade80;
+  margin-left: 4px;
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
 }
 
 /* Print styles -- hide chrome, show only report content */

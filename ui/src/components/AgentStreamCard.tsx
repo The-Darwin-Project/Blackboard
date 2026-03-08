@@ -8,7 +8,7 @@
  * Real-time streaming card for agent CLI output.
  * Developer card transforms into a pair programming chat when QE is active.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ACTOR_COLORS } from '../constants/colors';
 import type { HuddleMessage } from './Dashboard';
 
@@ -86,37 +86,46 @@ function MessageCards({ messages, color }: { messages: string[]; color: string }
 
 /** Terminal-style renderer for ephemeral on-call agent streams. */
 function TerminalView({ messages, isActive }: { messages: string[]; isActive: boolean }) {
+  const startLine = Math.max(0, messages.length - 80);
   if (messages.length === 0) {
     return (
-      <div style={{ color: '#4ade8040', fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12 }}>
+      <div style={{ color: '#4ade8040', fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12.5 }}>
         <span style={{ color: '#4ade80' }}>$</span> Waiting for dispatch...
-        {isActive && <span style={{ display: 'inline-block', width: 8, height: 14, background: '#4ade80', marginLeft: 4, animation: 'blink 1s step-end infinite' }} />}
+        {isActive && <span className="terminal-cursor" />}
       </div>
     );
   }
   return (
     <>
-      {messages.slice(-80).map((line, i) => (
-        <div key={i} style={{
-          padding: '1px 0',
-          fontSize: 12,
-          fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-          lineHeight: '1.5',
-          wordBreak: 'break-word' as const,
-          whiteSpace: 'pre-wrap' as const,
-          color: '#c4ecc4',
-        }}>
-          <span style={{ color: '#4ade8080', userSelect: 'none' }}>{'> '}</span>
-          {line}
-        </div>
-      ))}
+      {messages.slice(-80).map((line, i) => {
+        const lineNum = startLine + i + 1;
+        return (
+          <div key={i} style={{
+            padding: '1px 0',
+            fontSize: 12.5,
+            fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+            lineHeight: '1.55',
+            wordBreak: 'break-word' as const,
+            whiteSpace: 'pre-wrap' as const,
+            color: '#d1e8d1',
+            display: 'flex',
+          }}>
+            <span style={{
+              color: '#4ade8030', userSelect: 'none', minWidth: 36, textAlign: 'right',
+              paddingRight: 8, fontSize: 11, lineHeight: '1.75', flexShrink: 0,
+            }}>{lineNum}</span>
+            <span style={{ color: '#4ade8060', userSelect: 'none', flexShrink: 0 }}>{'> '}</span>
+            <span style={{ flex: 1 }}>{line}</span>
+          </div>
+        );
+      })}
       {isActive && (
-        <div style={{ padding: '1px 0' }}>
+        <div style={{ padding: '1px 0', display: 'flex' }}>
+          <span style={{ minWidth: 36, paddingRight: 8, flexShrink: 0 }} />
           <span style={{ color: '#4ade80' }}>$</span>
-          <span style={{ display: 'inline-block', width: 8, height: 14, background: '#4ade80', marginLeft: 4, animation: 'blink 1s step-end infinite' }} />
+          <span className="terminal-cursor" />
         </div>
       )}
-      <style>{`@keyframes blink { 50% { opacity: 0; } }`}</style>
     </>
   );
 }
@@ -211,26 +220,49 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
   const color = ephemeral ? '#4ade80' : (ACTOR_COLORS[agentName] || '#6b7280');
   const scrollRef = useRef<HTMLDivElement>(null);
   const [poppedOut, setPoppedOut] = useState(false);
+  const [userScrolled, setUserScrolled] = useState(false);
   const isChatMode = !ephemeral && agentName === 'developer' && huddleMessages.length > 0;
 
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages.length, huddleMessages.length]);
+    if (scrollRef.current && !userScrolled) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages.length, huddleMessages.length, userScrolled]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setUserScrolled(!atBottom);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      setUserScrolled(false);
+    }
+  }, []);
 
   if (ephemeral) {
+    const borderColor = isActive ? '#4ade80' : '#334155';
+    const glowShadow = isActive
+      ? '0 0 8px rgba(74, 222, 128, 0.15), inset 0 1px 3px rgba(0,0,0,0.5)'
+      : 'inset 0 1px 3px rgba(0,0,0,0.5)';
+
     return (
       <>
         <div style={{
           flex: 1, minWidth: 0, background: '#030712',
-          borderRadius: 4, border: `1px solid #1e293b`,
+          borderRadius: 6, border: `1px solid ${borderColor}`,
           display: 'flex', flexDirection: 'column',
-          boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)',
+          boxShadow: glowShadow,
           overflow: 'hidden', minHeight: 0,
+          transition: 'border-color 0.3s, box-shadow 0.3s',
         }}>
-          {/* Terminal title bar */}
+          {/* Title bar */}
           <div style={{
-            padding: '5px 10px', background: '#111827', borderBottom: '1px solid #1e293b',
-            borderRadius: '3px 3px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '4px 10px', background: '#0d1117', borderBottom: `1px solid ${isActive ? '#4ade8033' : '#1e293b'}`,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ display: 'flex', gap: 5 }}>
@@ -238,29 +270,70 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#f59e0b' }} />
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
               </div>
-              <span style={{ fontSize: 11, color: '#64748b', fontFamily: "'JetBrains Mono', monospace" }}>
-                oncall@{eventId?.slice(0, 12) || 'idle'} ~ {agentName}
+              <span style={{
+                fontSize: 11, color: '#64748b', fontFamily: "'JetBrains Mono', monospace",
+                letterSpacing: '0.02em',
+              }}>
+                {agentName}@{eventId?.slice(4, 16) || 'idle'}
               </span>
+              {isActive && (
+                <span style={{
+                  fontSize: 10, color: '#4ade80', background: '#4ade8018', padding: '1px 6px',
+                  borderRadius: 4, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600,
+                }}>LIVE</span>
+              )}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 6px #4ade80' }} />}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <button
                 onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
                 title="Copy stream" aria-label="Copy stream"
-                style={{ background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+                style={{
+                  background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12,
+                  cursor: 'pointer', padding: '2px 4px', lineHeight: 1, borderRadius: 3,
+                }}
               >&#x2398;</button>
               <button onClick={() => setPoppedOut(true)} title="Pop out" aria-label="Pop out"
-                style={{ background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12, cursor: 'pointer', padding: '0 4px', lineHeight: 1 }}
+                style={{
+                  background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12,
+                  cursor: 'pointer', padding: '2px 4px', lineHeight: 1, borderRadius: 3,
+                }}
               >&#x29c9;</button>
             </div>
           </div>
 
           {/* Terminal body */}
-          <div ref={scrollRef} style={{
-            flex: 1, overflow: 'auto', padding: '8px 12px',
-            background: '#030712',
-          }}>
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="terminal-scroll"
+            style={{
+              flex: 1, overflow: 'auto', padding: '6px 8px',
+              background: '#030712', minHeight: 0,
+            }}
+          >
             <TerminalView messages={messages} isActive={isActive} />
+          </div>
+
+          {/* Status bar */}
+          <div style={{
+            padding: '2px 10px', background: '#0d1117', borderTop: `1px solid ${isActive ? '#4ade8033' : '#1e293b'}`,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
+            fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: '#4b5563',
+          }}>
+            <span>Ln {messages.length}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {userScrolled && (
+                <button
+                  onClick={scrollToBottom}
+                  style={{
+                    background: '#4ade8018', border: '1px solid #4ade8033', color: '#4ade80',
+                    fontSize: 10, cursor: 'pointer', padding: '0 6px', borderRadius: 3,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >&#x25BC; Follow</button>
+              )}
+              <span>{isActive ? 'streaming' : messages.length > 0 ? 'done' : 'idle'}</span>
+            </div>
           </div>
         </div>
 
