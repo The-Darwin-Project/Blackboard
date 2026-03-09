@@ -1929,6 +1929,8 @@ class Brain:
         current_task = asyncio.current_task()
         try:
             agent_acked = False  # Track first progress (= agent received task)
+            evt = await self.blackboard.get_event(event_id)
+            event_source = evt.source if evt else ""
 
             async def on_progress(progress_data: dict) -> None:
                 """Broadcast agent progress to UI in real-time."""
@@ -1947,6 +1949,7 @@ class Brain:
                     "event_id": event_id,
                     "actor": progress_data.get("actor", agent_name),
                     "message": progress_data.get("message", ""),
+                    "event_source": event_source,
                 })
                 if progress_data.get("source") == "agent_message":
                     turn = ConversationTurn(
@@ -1974,6 +1977,7 @@ class Brain:
                 "event_id": event_id,
                 "actor": agent_name,
                 "message": f"{agent_name} starting...",
+                "event_source": event_source,
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
                 from ..dependencies import get_registry_and_bridge
