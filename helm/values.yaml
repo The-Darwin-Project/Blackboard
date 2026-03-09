@@ -6,14 +6,12 @@
 # =============================================================================
 global:
   namespace: "" # If non-empty, chart creates the Namespace with Tekton pruner labels
-
 # =============================================================================
 # Brain Container Configuration
 # =============================================================================
-
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "311e6b9" # Updated by CI to commit SHA
+  tag: "72d4816" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -305,10 +303,10 @@ ephemeralAgents:
   model: "claude-opus-4-6" # Single model for all role switches
   permissionMode: "bypassPermissions"
   cleanup:
-    strategy: "keep-since"   # "keep-since" (age-based) or "keep" (count-based)
-    keepSince: 1440           # Minutes to retain completed TaskRuns (1440 = 24h)
-    keep: 5                   # Number of TaskRuns to retain (when strategy=keep)
-    schedule: "0 */6 * * *"  # Cron schedule for the Tekton Operator pruner
+    strategy: "keep-since" # "keep-since" (age-based) or "keep" (count-based)
+    keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
+    keep: 5 # Number of TaskRuns to retain (when strategy=keep)
+    schedule: "0 */6 * * *" # Cron schedule for the Tekton Operator pruner
 # =============================================================================
 # Headhunter (GitLab Todo Poller)
 # =============================================================================
