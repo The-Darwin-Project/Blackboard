@@ -1740,11 +1740,23 @@ class Brain:
                 memory_text = f"Deep memory results for '{query}':\n"
                 for i, r in enumerate(results, 1):
                     p = r.get("payload", {})
+                    dur = p.get("duration_seconds", 0)
+                    dur_m = f"{dur // 60}m" if dur else "?"
+                    defers = p.get("defer_patterns", [])
+                    total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
+                    defer_m = f"{total_defer // 60}m" if total_defer else "0m"
+                    timings = p.get("operational_timings", [])
+                    timing_str = ", ".join(
+                        f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
+                        for t in timings if isinstance(t, dict)
+                    ) or "none"
                     memory_text += (
                         f"  {i}. [{p.get('service', '?')}] "
                         f"Symptom: {p.get('symptom', '?')} | "
                         f"Root cause: {p.get('root_cause', '?')} | "
-                        f"Fix: {p.get('fix_action', '?')} "
+                        f"Fix: {p.get('fix_action', '?')} | "
+                        f"Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], "
+                        f"outcome: {p.get('outcome', '?')} "
                         f"(score: {r.get('score', 0):.2f})\n"
                     )
             else:
