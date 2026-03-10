@@ -11,8 +11,7 @@
  * Row 2: Left panel (Activity/Chat) | Middle panel (Tickets/Architecture) | Right panel (Resources, collapsible)
  */
 import { useState, useCallback, useRef, useEffect } from 'react';
-import CytoscapeGraph from './CytoscapeGraph';
-import GraphContextMenu from './GraphContextMenu';
+import ArchitectureGraph from './graph/ArchitectureGraph';
 import NodeInspector from './NodeInspector';
 import MetricChart from './MetricChart';
 import AgentRegistryPanel from './AgentRegistryPanel';
@@ -29,11 +28,6 @@ import { useEventDocument } from '../hooks/useQueue';
 import { getAgents } from '../api/client';
 import type { AgentRegistryEntry } from '../api/types';
 import type { Tab } from './TabPanel';
-
-interface ContextMenuState {
-  serviceName: string;
-  position: { x: number; y: number };
-}
 
 // Resize constraints
 const MIN_SIDEBAR_WIDTH = 280;
@@ -91,8 +85,6 @@ const RIGHT_TABS: Tab[] = [
 function DashboardInner() {
   // -- Graph / inspector state (unchanged) --
   const [selectedService, setSelectedService] = useState<string | null>(null);
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-
   // -- Layout state (localStorage-persisted -- survives refresh + tab close) --
   const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(lsGet(SS.leftWidth, String(DEFAULT_SIDEBAR_WIDTH))));
   const [agentCardHeight, setAgentCardHeight] = useState(() => parseInt(lsGet(SS.agentCardHeight, '220')));
@@ -273,7 +265,6 @@ function DashboardInner() {
   const handleNodeClick = useCallback((serviceName: string) => {
     setSelectedService(serviceName);
   }, []);
-  const handleCloseContextMenu = useCallback(() => { setContextMenu(null); }, []);
 
   // -- Sidebar width resize --
   const startResize = useCallback((e: React.MouseEvent) => {
@@ -418,7 +409,7 @@ function DashboardInner() {
               <EventTicketList onEventSelect={onEventSelect} onEventClose={onEventClose} selectedEventId={selectedEventId} />
             </div>
             <div style={{ display: middleTab === 'architecture' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative' }}>
-              <CytoscapeGraph
+              <ArchitectureGraph
                 onNodeClick={handleNodeClick}
               />
             </div>
@@ -494,14 +485,6 @@ function DashboardInner() {
         onClose={() => { setSelectedService(null); }}
       />
 
-      {/* Context Menu */}
-      {contextMenu && (
-        <GraphContextMenu
-          serviceName={contextMenu.serviceName}
-          position={contextMenu.position}
-          onClose={handleCloseContextMenu}
-        />
-      )}
     </div>
   );
 }

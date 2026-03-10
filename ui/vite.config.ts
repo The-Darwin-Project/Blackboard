@@ -30,7 +30,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-cytoscape': ['cytoscape', 'cytoscape-cose-bilkent', 'cytoscape-node-html-label'],
+          'vendor-graph': ['@xyflow/react', '@dagrejs/dagre'],
           'vendor-ui': ['lucide-react', 'recharts'],
         },
       },

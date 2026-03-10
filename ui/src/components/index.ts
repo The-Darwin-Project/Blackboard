@@ -4,9 +4,8 @@
  */
 export { default as ConversationFeed } from './ConversationFeed';
 export { default as ChatInput } from './ChatInput';
-export { default as CytoscapeGraph } from './CytoscapeGraph';
+export { default as ArchitectureGraph } from './graph/ArchitectureGraph';
 export { default as Dashboard } from './Dashboard';
-export { default as GraphContextMenu } from './GraphContextMenu';
 export { default as Layout } from './Layout';
 export { default as MetricChart } from './MetricChart';
 export { ServiceMetricChart } from './ServiceMetricChart';
