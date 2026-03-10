@@ -1,8 +1,9 @@
 // BlackBoard/ui/src/constants/colors.ts
 // @ai-rules:
-// 1. [Constraint]: STATUS_COLORS and DOMAIN_COLORS are shared across ticket cards and badges; any new field must be documented.
+// 1. [Constraint]: All color maps are shared across multiple components; any new field must be documented.
 // 2. [Pattern]: border drives card left border color (status-based), bg/text drive pill badges.
 // 3. [Gotcha]: DOMAIN_COLORS border is for pill badges only; card border uses STATUS_COLORS.border.
+// 4. [Pattern]: SEVERITY_COLORS used by ReportHeader and ReportGrid for severity badge pills.
 /** Shared agent/actor color map used by ConversationFeed, AgentStreamCard, etc. */
 export const ACTOR_COLORS: Record<string, string> = {
   brain: '#8b5cf6',
@@ -30,4 +31,10 @@ export const STATUS_COLORS: Record<string, { bg: string; text: string; label: st
   deferred:         { bg: '#4c1d95', text: '#c4b5fd', label: 'Deferred', border: '#8b5cf6' },
   resolved:         { bg: '#14532d', text: '#86efac', label: 'Resolved', border: '#22c55e' },
   closed:           { bg: '#14532d', text: '#86efac', label: 'Closed',   border: '#22c55e' },
+};
+
+export const SEVERITY_COLORS: Record<string, { bg: string; text: string; label: string }> = {
+  info:     { bg: '#1e3a5f', text: '#7dd3fc', label: 'Info' },
+  warning:  { bg: '#78350f', text: '#fcd34d', label: 'Warning' },
+  critical: { bg: '#7f1d1d', text: '#fca5a5', label: 'Critical' },
 };

@@ -2,21 +2,15 @@
 // @ai-rules:
 // 1. [Pattern]: Tile design matches EventTicketCard -- full border ring, domain-colored.
 // 2. [Constraint]: Cards show metadata only -- no markdown content loaded until selected.
-// 3. [Pattern]: Severity badge uses inline SEVERITY_STYLES map (local, not shared).
+// 3. [Pattern]: Severity badge uses shared SEVERITY_COLORS from constants/colors.ts.
 /**
  * Responsive report tile grid for the Reports page State 1.
  * Displays persisted report metadata in a multi-column grid.
  */
 import type { ReportMeta } from '../api/types';
 import { extractReasonDisplay } from './EventTicketCard';
-import { DOMAIN_COLORS } from '../constants/colors';
+import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
-
-const SEVERITY_STYLES: Record<string, { bg: string; text: string; label: string }> = {
-  info:     { bg: '#1e3a5f', text: '#7dd3fc', label: 'Info' },
-  warning:  { bg: '#78350f', text: '#fcd34d', label: 'Warning' },
-  critical: { bg: '#7f1d1d', text: '#fca5a5', label: 'Critical' },
-};
 
 interface ReportGridProps {
   reports: ReportMeta[];
@@ -109,7 +103,7 @@ export default function ReportGrid({
 function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => void }) {
   const domain = (report.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
   const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
-  const severity = SEVERITY_STYLES[report.severity] || SEVERITY_STYLES.info;
+  const severity = SEVERITY_COLORS[report.severity] || SEVERITY_COLORS.info;
 
   return (
     <div

@@ -182,9 +182,9 @@ export default function ReportsPage() {
             )}
           </div>
 
-          {/* Markdown content */}
+          {/* Structured report content */}
           {selectedReport ? (
-            <ReportContent markdown={selectedReport.markdown} />
+            <ReportContent report={selectedReport} />
           ) : (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
               Loading report...

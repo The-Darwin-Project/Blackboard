@@ -87,4 +87,7 @@ html, body {
   main { overflow: visible !important; }
   body { background: white !important; color: black !important; }
   [data-report-content] { padding: 0 !important; }
+  [data-report-content] div { background: transparent !important; border-color: #ccc !important; color: #1a1a1a !important; }
+  [data-report-content] span { color: #1a1a1a !important; }
+  [data-report-content] button { color: #333 !important; }
 }
