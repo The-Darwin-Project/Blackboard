@@ -18,11 +18,18 @@ export interface ParsedTurn {
   body: string;
 }
 
+export interface JournalEntry {
+  timestamp: string;
+  title: string;
+  summary: string;
+  raw: string;
+}
+
 export interface ParsedReport {
   header: string;
   sections: ParsedSection[];
   turns: ParsedTurn[];
-  journal: string[];
+  journal: JournalEntry[];
 }
 
 const KNOWN_SECTIONS = [
@@ -102,10 +109,26 @@ function parseTurns(raw: string): ParsedTurn[] {
   return turns;
 }
 
-function parseJournal(raw: string): string[] {
+const CLOSE_RE = /\s*--\s*closed in (\d+) turns?\.\s*/;
+const PLAN_TITLE_RE = /plan:\s*"([^"]+)"/;
+const TIMESTAMP_RE = /^\[([^\]]+)\]\s*/;
+
+function parseJournal(raw: string): JournalEntry[] {
   if (!raw) return [];
-  return raw
-    .split('\n')
-    .map((line) => line.replace(/^-\s*/, '').trim())
-    .filter(Boolean);
+
+  const lines = raw.split('\n').map((l) => l.replace(/^-\s*/, '').trim()).filter(Boolean);
+  return lines.map((line) => {
+    const tsMatch = line.match(TIMESTAMP_RE);
+    const timestamp = tsMatch ? tsMatch[1] : '';
+    const body = tsMatch ? line.slice(tsMatch[0].length) : line;
+
+    const closeIdx = body.search(CLOSE_RE);
+    const planPart = closeIdx >= 0 ? body.slice(0, closeIdx) : body;
+    const closePart = closeIdx >= 0 ? body.slice(closeIdx).replace(CLOSE_RE, '').trim() : '';
+
+    const titleMatch = planPart.match(PLAN_TITLE_RE);
+    const title = titleMatch ? titleMatch[1] : planPart.slice(0, 100);
+
+    return { timestamp, title, summary: closePart, raw: line };
+  });
 }

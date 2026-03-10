@@ -5,12 +5,12 @@
 // 3. [Gotcha]: Report metadata (domain, severity, source) comes from ReportFull fields, NOT parsed from markdown.
 // 4. [Pattern]: Mermaid rendered via MarkdownPreview inside CollapsibleSection (Architecture Diagram).
 // 5. [Constraint]: Raw markdown is NOT passed here -- ReportToolbar receives it separately from ReportsPage.
-import { useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
 import { getCodeString } from 'rehype-rewrite';
 import MermaidBlock from './MermaidBlock';
 import type { ReportFull } from '../api/types';
-import { parseReportMarkdown } from '../utils/parseReport';
+import { parseReportMarkdown, type JournalEntry } from '../utils/parseReport';
 import ReportHeader from './ReportHeader';
 import ReportTurnCard from './ReportTurnCard';
 import CollapsibleSection from './CollapsibleSection';
@@ -37,6 +37,50 @@ function SectionMarkdown({ source }: { source: string }) {
   );
 }
 
+function JournalRow({ entry }: { entry: JournalEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div style={{
+      padding: '6px 8px',
+      borderRadius: 6,
+      background: '#1e293b',
+      fontSize: 12,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+        <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: 11, flexShrink: 0 }}>
+          {entry.timestamp}
+        </span>
+        <span style={{ color: '#e2e8f0', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {entry.title}
+        </span>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          style={{
+            background: 'transparent', border: 'none', color: '#64748b',
+            fontSize: 11, cursor: 'pointer', flexShrink: 0, padding: '0 4px',
+          }}
+        >
+          {expanded ? 'hide' : 'raw'}
+        </button>
+      </div>
+      {entry.summary && (
+        <div style={{ color: '#94a3b8', marginTop: 3, lineHeight: 1.5 }}>
+          {entry.summary}
+        </div>
+      )}
+      {expanded && (
+        <pre style={{
+          marginTop: 6, padding: 8, background: '#0f172a', borderRadius: 4,
+          fontSize: 11, color: '#64748b', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+          maxHeight: 200, overflow: 'auto',
+        }}>
+          {entry.raw}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 export default function ReportContent({ report }: { report: ReportFull }) {
   const parsed = useMemo(() => parseReportMarkdown(report.markdown), [report.markdown]);
 
@@ -48,7 +92,7 @@ export default function ReportContent({ report }: { report: ReportFull }) {
         <CollapsibleSection
           key={section.title}
           title={section.title}
-          defaultOpen={section.title === 'Architecture Diagram'}
+          defaultOpen={false}
         >
           <SectionMarkdown source={section.content} />
         </CollapsibleSection>
@@ -81,14 +125,9 @@ export default function ReportContent({ report }: { report: ReportFull }) {
             </span>
           }
         >
-          <div style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.7 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {parsed.journal.map((entry, i) => (
-              <div key={i} style={{
-                padding: '6px 0',
-                borderBottom: i < parsed.journal.length - 1 ? '1px solid #1e293b' : 'none',
-              }}>
-                {entry}
-              </div>
+              <JournalRow key={i} entry={entry} />
             ))}
           </div>
         </CollapsibleSection>
