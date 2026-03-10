@@ -402,27 +402,40 @@ class Brain:
             return
 
         # Dedup: if this is a new event (no turns yet), check for existing active events
-        # on the same service. Close as duplicate if one already exists.
+        # on the same service + same MR (if headhunter). Close as duplicate if found.
         if not event.conversation:
             active_ids = await self.blackboard.get_active_events()
+            new_ctx = (event.event.gitlab_context or {}) if event.event else {}
+            new_mr = new_ctx.get("mr_iid")
+            new_project = new_ctx.get("project_id")
             for eid in active_ids:
                 if eid == event_id:
                     continue
                 existing = await self.blackboard.get_event(eid)
-                if (existing
+                if not (existing
                         and existing.service == event.service
-                        and existing.conversation  # has turns = being worked on
+                        and existing.conversation
                         and existing.status.value in ("active", "new", "deferred")):
-                    logger.info(
-                        f"Closing duplicate event {event_id} -- "
-                        f"existing event {eid} already handling {event.service}"
-                    )
-                    await self._close_and_broadcast(
-                        event_id,
-                        f"Duplicate: merged with existing event {eid} for {event.service}.",
-                        close_reason="duplicate",
-                    )
-                    return
+                    continue
+                # Same service -- but if both have GitLab context, require same project + MR
+                ex_ctx = (existing.event.gitlab_context or {}) if existing.event else {}
+                ex_mr = ex_ctx.get("mr_iid")
+                ex_project = ex_ctx.get("project_id")
+                if new_project and ex_project and new_project != ex_project:
+                    continue
+                if new_mr and ex_mr and new_mr != ex_mr:
+                    continue
+                logger.info(
+                    f"Closing duplicate event {event_id} -- "
+                    f"existing event {eid} already handling {event.service}"
+                    f"{f' MR !{existing_mr}' if existing_mr else ''}"
+                )
+                await self._close_and_broadcast(
+                    event_id,
+                    f"Duplicate: merged with existing event {eid} for {event.service}.",
+                    close_reason="duplicate",
+                )
+                return
 
         if not event.conversation:
             await self.blackboard.record_event(
