@@ -405,7 +405,7 @@ class Brain:
         # on the same service + same MR (if headhunter). Close as duplicate if found.
         if not event.conversation:
             active_ids = await self.blackboard.get_active_events()
-            new_ctx = (event.event.gitlab_context or {}) if event.event else {}
+            new_ctx = (getattr(event.event.evidence, "gitlab_context", None) or {}) if (event.event and event.event.evidence) else {}
             new_mr = new_ctx.get("mr_iid")
             new_project = new_ctx.get("project_id")
             for eid in active_ids:
@@ -418,7 +418,7 @@ class Brain:
                         and existing.status.value in ("active", "new", "deferred")):
                     continue
                 # Same service -- but if both have GitLab context, require same project + MR
-                ex_ctx = (existing.event.gitlab_context or {}) if existing.event else {}
+                ex_ctx = (getattr(existing.event.evidence, "gitlab_context", None) or {}) if (existing.event and existing.event.evidence) else {}
                 ex_mr = ex_ctx.get("mr_iid")
                 ex_project = ex_ctx.get("project_id")
                 if new_project and ex_project and new_project != ex_project:
