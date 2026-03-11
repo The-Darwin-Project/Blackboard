@@ -90,12 +90,6 @@
   flex-shrink: 0;
 }
 
-.service-node-version {
-  font-family: monospace;
-  font-size: 0.7rem;
-  color: #9ca3af;
-}
-
 .service-node-metrics {
   display: flex;
   gap: 8px;
@@ -111,10 +105,23 @@
 
 .service-node-badge {
   font-size: 0.6rem;
+  font-family: monospace;
   padding: 1px 5px;
   border-radius: 3px;
   background: #374151;
   color: #9ca3af;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.service-node-badge-source {
+  background: #1e1e2e;
+  color: #4b5563;
+  border: 1px solid #374151;
+  font-style: italic;
 }
 
 .service-node-badge-gitops {

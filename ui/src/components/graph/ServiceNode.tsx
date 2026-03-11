@@ -28,6 +28,8 @@ interface ServiceNodeData {
   replicas_desired?: number;
 }
 
+const GENERIC_TAGS = new Set(['k8s', 'latest', 'unknown', '?', '']);
+
 function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
   const health = data.health || 'unknown';
   const healthColor = HEALTH_COLORS[health];
@@ -36,6 +38,8 @@ function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
   const mem = data.memory?.toFixed(0) || '0';
   const ready = data.replicas_ready;
   const desired = data.replicas_desired;
+  const version = data.version || '?';
+  const isGenericTag = GENERIC_TAGS.has(version.toLowerCase());
 
   const stateClass = health === 'critical' ? ' service-node-critical'
     : health === 'warning' ? ' service-node-warning' : '';
@@ -50,16 +54,22 @@ function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
           <span className="service-node-icon">{icon}</span>
         </div>
 
-        <div className="service-node-version" title={`v${data.version || '?'}`}>
-          v{data.version || '?'}
-        </div>
-
         <div className="service-node-metrics">
           <span>CPU: {cpu}%</span>
           <span>MEM: {mem}%</span>
         </div>
 
         <div className="service-node-meta">
+          {!isGenericTag && (
+            <span className="service-node-badge" title={version}>
+              {version}
+            </span>
+          )}
+          {isGenericTag && (
+            <span className="service-node-badge service-node-badge-source" title={`Platform: ${version}`}>
+              {version}
+            </span>
+          )}
           {desired != null && desired > 0 && (
             <span className="service-node-badge" title={`${ready ?? 0} ready / ${desired} desired`}>
               {ready ?? 0}/{desired}

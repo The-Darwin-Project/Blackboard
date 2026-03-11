@@ -662,24 +662,25 @@ class BlackboardState:
     async def update_service_metadata(
         self,
         name: str,
-        version: str,
         cpu: float,
         memory: float,
         error_rate: float,
+        version: Optional[str] = None,
         source_repo_url: Optional[str] = None,
         gitops_repo: Optional[str] = None,
         gitops_repo_url: Optional[str] = None,
         gitops_config_path: Optional[str] = None,
     ) -> None:
-        """Update service metadata in Redis hash."""
+        """Update service metadata in Redis hash. Version is only written when provided."""
         key = f"darwin:service:{name}"
-        mapping = {
-            "version": version,
+        mapping: dict[str, str] = {
             "cpu": str(cpu),
             "memory": str(memory),
             "error_rate": str(error_rate),
             "last_seen": str(time.time()),
         }
+        if version is not None:
+            mapping["version"] = version
         
         # Add GitOps metadata if provided
         if source_repo_url:

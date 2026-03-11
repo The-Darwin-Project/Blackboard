@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Agents (Aligner/Architect) cannot import kubernetes; this module is the only K8s touchpoint.
 # 2. [Pattern]: Darwin annotation discovery (darwin.io/*) is additive; label-based discovery remains the fallback.
-# 3. [Gotcha]: update_service_metadata requires version/cpu/memory/error_rate; K8s discovery supplies version (image tag), deps (env vars), error_rate (restart counts).
+# 3. [Pattern]: Discovery writes version (image tag) + GitOps metadata. Metrics poll writes cpu/memory only -- never overwrites version.
 """
 Kubernetes Metrics Observer.
 
@@ -702,14 +702,11 @@ class KubernetesObserver:
             # This enables K8s-only services (postgres, redis) to show up
             await self.blackboard.redis.sadd("darwin:services", service_name)
             
-            # Update service metadata with version (if available)
-            version = getattr(self, '_service_versions', {}).get(service_name, "k8s")
             await self.blackboard.update_service_metadata(
                 name=service_name,
-                version=version,
                 cpu=cpu_percent,
                 memory=memory_percent,
-                error_rate=0.0,  # K8s observer doesn't track error rate
+                error_rate=0.0,
             )
             
             # Update Blackboard with K8s-observed metrics
