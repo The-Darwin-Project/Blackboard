@@ -411,6 +411,7 @@ function DashboardInner() {
             <div style={{ display: middleTab === 'architecture' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden', position: 'relative' }}>
               <ArchitectureGraph
                 onNodeClick={handleNodeClick}
+                onTicketClick={onEventSelect}
               />
             </div>
           </TabPanel>

@@ -35,6 +35,7 @@ const LAYOUT_KEY = 'darwin:graph:layout';
 
 interface Props {
   onNodeClick?: (serviceName: string) => void;
+  onTicketClick?: (eventId: string) => void;
 }
 
 function nodeWidth(type: string | undefined): number {
@@ -121,7 +122,7 @@ const LAYOUT_OPTIONS: { value: LayoutType; icon: typeof LayoutGrid; label: strin
   { value: 'dagre-lr', icon: ArrowRight, label: 'Left-Right' },
 ];
 
-function ArchitectureGraphInner({ onNodeClick }: Props) {
+function ArchitectureGraphInner({ onNodeClick, onTicketClick }: Props) {
   const { data, isLoading } = useGraph();
   const { fitView } = useReactFlow();
   const [layout, setLayout] = useState<LayoutType>(
@@ -159,9 +160,13 @@ function ArchitectureGraphInner({ onNodeClick }: Props) {
   }, []);
 
   const handleNodeClick: NodeMouseHandler = useCallback((_event, node) => {
-    if (node.type === 'ticket') return;
+    if (node.type === 'ticket') {
+      const eventId = (node.data as { event_id?: string }).event_id;
+      if (eventId) onTicketClick?.(eventId);
+      return;
+    }
     onNodeClick?.(node.id);
-  }, [onNodeClick]);
+  }, [onNodeClick, onTicketClick]);
 
   if (isLoading) {
     return (
