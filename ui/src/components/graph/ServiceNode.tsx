@@ -1,80 +1,76 @@
 // BlackBoard/ui/src/components/graph/ServiceNode.tsx
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import type { GraphNode, HealthStatus, NodeType } from '../../api/types';
+import type { HealthStatus, NodeType } from '../../api/types';
+import './ArchitectureGraph.css';
 
 const HEALTH_COLORS: Record<HealthStatus, string> = {
   healthy: '#22c55e',
   warning: '#eab308',
   critical: '#ef4444',
-  unknown: '#64748b',
+  unknown: '#6b7280',
 };
 
 const NODE_ICONS: Record<NodeType, string> = {
-  service: '📦',
-  database: '🛢️',
-  cache: '⚡',
-  external: '🌐',
+  service: '📦', database: '🛢️', cache: '⚡', external: '🌐',
 };
 
-type ServiceNodeData = GraphNode['metadata'] & {
+interface ServiceNodeData {
   label: string;
   type: NodeType;
-};
+  health: HealthStatus;
+  version: string;
+  cpu: number;
+  memory: number;
+  gitops_repo?: string;
+  gitops_config_path?: string;
+  replicas_ready?: number;
+  replicas_desired?: number;
+}
 
 function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
   const health = data.health || 'unknown';
+  const healthColor = HEALTH_COLORS[health];
   const icon = NODE_ICONS[data.type] || '📦';
-  const version = data.version || '?';
   const cpu = data.cpu?.toFixed(0) || '0';
   const mem = data.memory?.toFixed(0) || '0';
-  const bg = HEALTH_COLORS[health];
-  const textColor = health === 'warning' ? '#000' : '#fff';
-
-  const gitopsRepo = data.gitops_repo;
-  const gitopsPath = data.gitops_config_path || 'helm/values.yaml';
-
   const ready = data.replicas_ready;
   const desired = data.replicas_desired;
+
+  const stateClass = health === 'critical' ? ' service-node-critical'
+    : health === 'warning' ? ' service-node-warning' : '';
 
   return (
     <>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
-      <div style={{
-        position: 'relative',
-        background: bg,
-        borderRadius: 8,
-        padding: '8px 12px',
-        color: textColor,
-        fontSize: 11,
-        textAlign: 'center',
-        width: 220,
-        boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
-      }}>
-        {gitopsRepo && (
-          <span
-            title={`GitOps Config\nRepo: ${gitopsRepo}\nPath: ${gitopsPath}`}
-            style={{ position: 'absolute', top: 4, right: 4, fontSize: 12, cursor: 'help', opacity: 0.9 }}
-          >🔗</span>
-        )}
-        {desired != null && desired > 0 && (
-          <span
-            title={`Replicas: ${ready ?? 0} ready / ${desired} desired`}
-            style={{
-              position: 'absolute', top: 4, left: 4, fontSize: 9,
-              background: 'rgba(0,0,0,0.4)', padding: '1px 5px', borderRadius: 4, cursor: 'help',
-            }}
-          >{ready ?? 0}/{desired}</span>
-        )}
-        <div style={{ fontSize: 16, marginBottom: 2 }}>{icon}</div>
-        <div style={{
-          fontWeight: 600, marginBottom: 2,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{data.label}</div>
-        <div style={{ fontSize: 9, opacity: 0.9, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`v${version}`}>
-          v{version}
+      <div className={`service-node${stateClass}`}>
+        <div className="service-node-header">
+          <span className="service-node-health" style={{ backgroundColor: healthColor }} title={health} />
+          <span className="service-node-name">{data.label}</span>
+          <span className="service-node-icon">{icon}</span>
         </div>
-        <div style={{ fontSize: 9, opacity: 0.8 }}>CPU:{cpu}% MEM:{mem}%</div>
+
+        <div className="service-node-version" title={`v${data.version || '?'}`}>
+          v{data.version || '?'}
+        </div>
+
+        <div className="service-node-metrics">
+          <span>CPU: {cpu}%</span>
+          <span>MEM: {mem}%</span>
+        </div>
+
+        <div className="service-node-meta">
+          {desired != null && desired > 0 && (
+            <span className="service-node-badge" title={`${ready ?? 0} ready / ${desired} desired`}>
+              {ready ?? 0}/{desired}
+            </span>
+          )}
+          {data.gitops_repo && (
+            <span className="service-node-badge service-node-badge-gitops" title={`GitOps: ${data.gitops_repo}`}>
+              🔗 GitOps
+            </span>
+          )}
+        </div>
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </>
