@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 
 if TYPE_CHECKING:
@@ -514,9 +515,14 @@ class KubernetesObserver:
             except Exception as e:
                 logger.debug(f"Failed to poll pod health in {namespace}: {e}")
 
-        # Store restart-derived error_rate in Blackboard per service
+        # Detect NEW restarts by comparing against previous snapshot (lifetime counter).
+        if not hasattr(self, '_prev_restart_counts'):
+            self._prev_restart_counts: dict[str, int] = {}
         for service_name, total_restarts in service_restarts.items():
-            error_rate = min(100.0, float(total_restarts) * 10.0) if total_restarts > 0 else 0.0
+            prev = self._prev_restart_counts.get(service_name, total_restarts)
+            new_restarts = max(0, total_restarts - prev)
+            self._prev_restart_counts[service_name] = total_restarts
+            error_rate = min(100.0, float(new_restarts) * 10.0)
             await self.blackboard.record_metric(
                 service_name, "error_rate", error_rate, source="kubernetes"
             )
@@ -699,17 +705,17 @@ class KubernetesObserver:
             # Metrics logged at TRACE level only (per-service, every 5s = too noisy for DEBUG)
             
             # Ensure service is registered in topology (so it appears in UI)
-            # This enables K8s-only services (postgres, redis) to show up
             await self.blackboard.redis.sadd("darwin:services", service_name)
-            
+            # Write cpu/memory to HASH for display (Brain/Aligner evidence).
+            # error_rate NOT written -- ZSET is the single source of truth for it.
+            # Health decisions use get_current_metrics() (ZSET), not the HASH.
             await self.blackboard.update_service_metadata(
                 name=service_name,
                 cpu=cpu_percent,
                 memory=memory_percent,
-                error_rate=0.0,
             )
             
-            # Update Blackboard with K8s-observed metrics
+            # Write metrics to ZSET (single source of truth for graph health + Mermaid)
             await self.blackboard.record_metric(
                 service_name, "cpu", cpu_percent, source="kubernetes"
             )
