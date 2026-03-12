@@ -97,7 +97,7 @@ When adding new fields to data models, APIs, or schemas:
 
 If your action triggers a long-running process (CI/CD pipelines, image builds, ArgoCD syncs):
 
-- Execute the action (post `/retest`, push commit, trigger pipeline)
+- Execute the action (post `/test`, push commit, trigger pipeline)
 - Confirm it was accepted (status changed to `running`)
 - **Return immediately** via `team_send_results` with state + `## Recommendation`
 - **NEVER** poll, sleep, or loop waiting for completion
