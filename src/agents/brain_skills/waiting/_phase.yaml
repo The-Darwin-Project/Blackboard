@@ -1,4 +1,5 @@
 thinking_level: "low"
 temperature: 0.2
 priority: 10
+max_output_tokens: 1024
 description: "Wait-for-user protocol enforcement"

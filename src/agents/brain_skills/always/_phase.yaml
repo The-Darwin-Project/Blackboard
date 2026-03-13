@@ -1,4 +1,5 @@
 thinking_level: "high"
 temperature: 0.8
 priority: 100
+max_output_tokens: 16384
 description: "Core identity, function calling rules, safety guardrails"

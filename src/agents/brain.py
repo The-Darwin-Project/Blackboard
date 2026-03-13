@@ -591,10 +591,11 @@ class Brain:
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
             active_phases = self._match_phases(event, context_flags)
             system_prompt = self._build_system_prompt(event, active_phases, context_flags)
-            thinking_level, call_temp = self._resolve_llm_params(active_phases)
+            thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
         else:
             system_prompt = BRAIN_SYSTEM_PROMPT
             thinking_level, call_temp = self._determine_thinking_params_legacy(event)
+            phase_max_tokens = self.max_output_tokens
             context_flags = None
 
         # Strip defer_event on defer-wake -- forces Brain to act (route/close/escalate)
@@ -636,7 +637,7 @@ class Brain:
                     contents=prompt,
                     tools=active_tools,
                     temperature=call_temp,
-                    max_output_tokens=self.max_output_tokens,
+                    max_output_tokens=phase_max_tokens,
                     thinking_level=thinking_level,
                 ):
                     if chunk.text:
@@ -747,7 +748,7 @@ class Brain:
         }
         active_phases = self._match_phases(event, ctx)
         system_prompt = self._build_system_prompt(event, active_phases, ctx)
-        thinking_level, call_temp = self._resolve_llm_params(active_phases)
+        thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
         contents = await self._build_contents(event, context_cache=ctx)
         await self._broadcast({
             "type": "brain_thinking", "event_id": event_id,
@@ -761,7 +762,7 @@ class Brain:
                 contents=contents,
                 tools=intermediate_tools,
                 temperature=call_temp,
-                max_output_tokens=max_tokens,
+                max_output_tokens=min(max_tokens, phase_max_tokens),
                 thinking_level=thinking_level,
             ):
                 if chunk.text:
@@ -814,18 +815,19 @@ class Brain:
         err_str = str(e)
         return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 
-    def _resolve_llm_params(self, active_phases: list[str]) -> tuple[str, float]:
-        """Resolve thinking_level + temperature from active phase _phase.yaml metadata.
+    def _resolve_llm_params(self, active_phases: list[str]) -> tuple[str, float, int]:
+        """Resolve thinking_level + temperature + max_output_tokens from phase metadata.
 
         Most specific phase wins (lowest priority number).
         Falls back to legacy heuristic if loader unavailable.
         """
         if not self._skill_loader:
-            return "high", 0.5
+            return "high", 0.5, self.max_output_tokens
 
         best_priority = float("inf")
         best_thinking = "high"
         best_temp = 0.5
+        best_tokens = self.max_output_tokens
 
         for phase_name in active_phases:
             meta = self._skill_loader.get_phase_meta(phase_name)
@@ -835,9 +837,10 @@ class Brain:
                     best_priority = priority
                     best_thinking = meta["thinking_level"]
                     best_temp = meta.get("temperature", 0.5)
+                    best_tokens = meta.get("max_output_tokens", self.max_output_tokens)
 
-        logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp} (priority={best_priority})")
-        return best_thinking, best_temp
+        logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp}, tokens={best_tokens} (priority={best_priority})")
+        return best_thinking, best_temp, best_tokens
 
     @staticmethod
     def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
