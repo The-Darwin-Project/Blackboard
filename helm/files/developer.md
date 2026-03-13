@@ -97,11 +97,15 @@ When adding new fields to data models, APIs, or schemas:
 
 If your action triggers a long-running process (CI/CD pipelines, image builds, ArgoCD syncs):
 
-- Execute the action (post `/test`, push commit, trigger pipeline)
+- Execute the action (post the retrigger comment, push commit, trigger pipeline)
 - Confirm it was accepted (status changed to `running`)
 - **Return immediately** via `team_send_results` with state + `## Recommendation`
 - **NEVER** poll, sleep, or loop waiting for completion
 - The Brain manages all wait cycles and timing -- it will re-route you to check status later
+
+## Pipeline Retrigger Commands -- Use Exactly What the MR Specifies
+
+When the MR description or Brain instructions specify a pipeline retrigger command (e.g., `/test`, `/retest`, `/ok-to-test`), post **exactly that command** as a comment. Do NOT substitute `/retest` for `/test` or vice versa -- different projects use different trigger commands configured in their CI. The MR description is the source of truth for which command to use.
 
 ## Engineering Principles
 
