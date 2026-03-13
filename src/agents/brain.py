@@ -658,8 +658,12 @@ class Brain:
             except Exception as e:
                 last_error = e
                 if attempt < max_retries and self._is_transient(e):
-                    delay = min(5 * (2 ** attempt), 30)
-                    logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}): {e}. Retrying in {delay}s...")
+                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                    base = 30 if is_rate_limit else 5
+                    delay = min(base * (2 ** attempt), 120)
+                    jitter = delay * 0.3 * (0.5 - __import__('random').random())
+                    delay = max(1, delay + jitter)
+                    logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
                     await asyncio.sleep(delay)
                     continue
                 logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
