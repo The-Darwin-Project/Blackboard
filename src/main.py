@@ -36,12 +36,14 @@ from .routes import (
     queue_router,
     reports_router,
     telemetry_router,
+    timekeeper_router,
     topology_router,
 )
 from .auth import DEX_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
+from .observers.timekeeper import TimeKeeperObserver, TIMEKEEPER_ENABLED
 from .agents.agent_registry import AgentRegistry
 from .agents.task_bridge import TaskBridge
 from .agents.agent_ws_handler import agent_websocket_handler
@@ -241,6 +243,17 @@ async def lifespan(app: FastAPI):
             logger.info("KubernetesObserver started for external metrics observation")
         else:
             logger.info("KubernetesObserver disabled (K8S_OBSERVER_ENABLED=false)")
+        
+        # === TIMEKEEPER OBSERVER ===
+        timekeeper_observer = None
+        if DEX_ENABLED and TIMEKEEPER_ENABLED:
+            timekeeper_observer = TimeKeeperObserver(blackboard=blackboard)
+            await timekeeper_observer.start()
+            logger.info("TimeKeeperObserver started (DEX + TIMEKEEPER enabled)")
+        elif TIMEKEEPER_ENABLED and not DEX_ENABLED:
+            logger.warning("TIMEKEEPER_ENABLED=true but DEX_ENABLED=false -- TimeKeeper requires auth, disabled")
+        else:
+            logger.info("TimeKeeperObserver disabled (TIMEKEEPER_ENABLED=false)")
     
     logger.info("Darwin Blackboard ready")
     
@@ -275,6 +288,11 @@ async def lifespan(app: FastAPI):
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:
         await k8s_observer.stop()
         logger.info("KubernetesObserver stopped")
+    
+    # Stop TimeKeeper observer
+    if redis and timekeeper_observer:
+        await timekeeper_observer.stop()
+        logger.info("TimeKeeperObserver stopped")
     
     await close_redis()
     logger.info("Redis connection closed")
@@ -394,6 +412,7 @@ app.include_router(feedback_router)
 app.include_router(reports_router)
 if DEX_ENABLED:
     app.include_router(dex_proxy_router)
+    app.include_router(timekeeper_router)
 
 
 # =============================================================================

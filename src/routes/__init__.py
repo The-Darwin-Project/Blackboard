@@ -9,6 +9,7 @@ from .reports import router as reports_router
 from .telemetry import router as telemetry_router
 from .topology import router as topology_router
 from .dex_proxy import router as dex_proxy_router
+from .timekeeper import router as timekeeper_router
 
 __all__ = [
     "chat_router",
@@ -19,5 +20,6 @@ __all__ = [
     "queue_router",
     "reports_router",
     "telemetry_router",
+    "timekeeper_router",
     "topology_router",
 ]
