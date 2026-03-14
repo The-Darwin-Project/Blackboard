@@ -32,6 +32,8 @@ data:
   LLM_MODEL_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.model }}"
   LLM_TEMPERATURE_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.temperature }}"
   LLM_THINKING_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.thinkingLevel }}"
+  # Quota rate limiter
+  LLM_TPM_LIMIT: "{{ .Values.gcp.tpmLimit }}"
   
   # Brain Progressive Skills
   BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"

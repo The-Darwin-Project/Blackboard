@@ -3,11 +3,13 @@
 # 1. [Constraint]: Only import google.genai inside this file. Never leak SDK types outside.
 # 2. [Pattern]: _build_config() shared by generate() and generate_stream(). tools=None omits tool config.
 # 3. [Gotcha]: generate_content_stream chunk may have .text AND .function_calls -- process both.
-# 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 4. [Pattern]: _convert_tools() converts plain dict schemas to google.genai FunctionDeclaration objects.
 # 5. [Gotcha]: Temperature range 0.0-2.0 -- passthrough, no normalization needed.
+# 6. [Pattern]: include_thoughts=True enables Gemini's thinking tokens. Check part.thought flag in candidates.
 # 7. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
+# 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
+# 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 class GeminiAdapter:
     """Vertex AI Gemini adapter implementing LLMPort."""
 
-    def __init__(self, project: str, location: str, model_name: str):
+    def __init__(self, project: str, location: str, model_name: str, quota_tracker=None):
         from google import genai
 
         self._client = genai.Client(
@@ -36,7 +38,31 @@ class GeminiAdapter:
             location=location,
         )
         self._model_name = model_name
-        logger.info(f"GeminiAdapter initialized: {model_name}")
+        self._tracker = quota_tracker
+        logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
+
+    # -----------------------------------------------------------------
+    # Quota tracking helpers
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _estimate_tokens(contents: str | list) -> int:
+        """Rough pre-request token estimate (char count / 4)."""
+        return max(1, len(str(contents)) // 4)
+
+    def _record_usage(self, usage_metadata, estimate: int) -> None:
+        """Record actual token usage from usage_metadata, correcting the estimate."""
+        if not self._tracker or usage_metadata is None:
+            return
+        actual = getattr(usage_metadata, "total_token_count", None)
+        if actual is None:
+            return
+        self._tracker.record(actual, estimate)
+        stats = self._tracker.get_stats()
+        logger.debug(
+            f"LLM usage: {actual} tokens (est={estimate}), "
+            f"bucket={stats['utilization_pct']}%"
+        )
 
     # -----------------------------------------------------------------
     # Shared helpers
@@ -170,11 +196,17 @@ class GeminiAdapter:
     ) -> LLMResponse:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
+        estimate = self._estimate_tokens(contents)
+        if self._tracker:
+            await self._tracker.acquire(estimate)
+
         response = await self._client.aio.models.generate_content(
             model=self._model_name,
             contents=self._convert_contents(contents),
             config=config,
         )
+
+        self._record_usage(getattr(response, "usage_metadata", None), estimate)
 
         raw_parts = None
         if response.candidates:
@@ -207,13 +239,21 @@ class GeminiAdapter:
     ) -> AsyncIterator[LLMChunk]:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
+        estimate = self._estimate_tokens(contents)
+        if self._tracker:
+            await self._tracker.acquire(estimate)
+
         stream = await self._client.aio.models.generate_content_stream(
             model=self._model_name,
             contents=self._convert_contents(contents),
             config=config,
         )
         last_parts = None
+        last_usage = None
         async for chunk in stream:
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                last_usage = chunk.usage_metadata
+
             # Accumulate last candidate parts for thought_signature preservation
             if chunk.candidates:
                 for candidate in chunk.candidates:
@@ -230,6 +270,7 @@ class GeminiAdapter:
             # Function call (final chunk)
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
+                self._record_usage(last_usage, estimate)
                 yield LLMChunk(
                     function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                     done=True,
@@ -237,4 +278,5 @@ class GeminiAdapter:
                 )
                 return
 
+        self._record_usage(last_usage, estimate)
         yield LLMChunk(done=True, raw_parts=last_parts)

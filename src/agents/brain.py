@@ -658,7 +658,7 @@ class Brain:
             except Exception as e:
                 last_error = e
                 if attempt < max_retries and self._is_transient(e):
-                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
                     base = 30 if is_rate_limit else 5
                     delay = min(base * (2 ** attempt), 120)
                     jitter = delay * 0.3 * (0.5 - __import__('random').random())
@@ -816,6 +816,9 @@ class Brain:
     @staticmethod
     def _is_transient(e: Exception) -> bool:
         """Check if exception is a transient rate-limit or availability error."""
+        from .llm.quota_tracker import QuotaExhaustedError
+        if isinstance(e, QuotaExhaustedError):
+            return True
         err_str = str(e)
         return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 

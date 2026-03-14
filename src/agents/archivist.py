@@ -1,10 +1,11 @@
 # BlackBoard/src/agents/archivist.py
 # @ai-rules:
 # 1. [Constraint]: archive_event() is fire-and-forget. MUST NOT block event closure.
-# 2. [Pattern]: Uses google-genai SDK for LLM summarization (LLM_MODEL_ARCHIVIST, LLM_THINKING_ARCHIVIST, LLM_TEMPERATURE_ARCHIVIST) and embedding (text-embedding-005).
+# 2. [Pattern]: Summarization via GeminiAdapter (create_adapter, shared QuotaTracker). Embeddings stay on direct genai.Client (separate 5M TPM quota).
 # 3. [Gotcha]: embed_content returns 768-dim vector. Qdrant collection must match.
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
+# 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -60,6 +61,7 @@ class Archivist:
 
     def __init__(self):
         self._client = None
+        self._adapter = None
         self._vector_store = None
         self._initialized = False
         self.project = os.getenv("GCP_PROJECT", "")
@@ -82,11 +84,24 @@ class Archivist:
             await self._vector_store.ensure_collection(COLLECTION_NAME, vector_size=768)
             await self._vector_store.ensure_collection(FEEDBACK_COLLECTION, vector_size=768)
             self._initialized = True
-            logger.info("Archivist initialized (LLM + embedding + Qdrant, darwin_events + darwin_feedback)")
+            logger.info("Archivist initialized (embedding + Qdrant, darwin_events + darwin_feedback)")
             return True
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
             return False
+
+    async def _get_adapter(self):
+        """Lazy-load LLM adapter for summarization (Gemini, ARCHIVIST model)."""
+        if self._adapter is None:
+            try:
+                from .llm import create_adapter
+
+                self._adapter = create_adapter("gemini", self.project, self.location, ARCHIVIST_MODEL)
+                logger.info(f"Archivist LLM adapter initialized: gemini/{ARCHIVIST_MODEL}")
+            except Exception as e:
+                logger.warning(f"LLM adapter not available for Archivist: {e}")
+                self._adapter = None
+        return self._adapter
 
     async def archive_event(self, event: EventDocument) -> None:
         """
@@ -117,21 +132,18 @@ class Archivist:
                 last_ts = event.conversation[-1].timestamp
                 duration = int(last_ts - first_ts)
 
-            # Step 1: Summarize with LLM
-            from google.genai import types
+            # Step 1: Summarize with LLM adapter (shared QuotaTracker)
+            adapter = await self._get_adapter()
+            if not adapter:
+                logger.warning(f"Archivist LLM unavailable, skipping summarization for {event.id}")
+                return
 
-            response = await self._client.aio.models.generate_content(
-                model=ARCHIVIST_MODEL,
+            response = await adapter.generate(
+                system_prompt=SUMMARIZE_PROMPT,
                 contents=conversation_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=SUMMARIZE_PROMPT,
-                    temperature=float(os.getenv("LLM_TEMPERATURE_ARCHIVIST", "0.3")),
-                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
-                    thinking_config=types.ThinkingConfig(
-                        include_thoughts=True,
-                        thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
-                    ),
-                ),
+                temperature=float(os.getenv("LLM_TEMPERATURE_ARCHIVIST", "0.3")),
+                max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
+                thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
             )
 
             summary_text = response.text.strip()

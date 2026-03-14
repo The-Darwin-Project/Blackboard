@@ -201,6 +201,12 @@ spec:
             # Debug mode
             - name: DEBUG
               value: "{{ .Values.app.debug }}"
+            # LLM quota rate limiter (tokens-per-minute)
+            - name: LLM_TPM_LIMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TPM_LIMIT
             # Kubernetes Observer configuration
             {{- if .Values.observer.enabled }}
             - name: K8S_OBSERVER_ENABLED
