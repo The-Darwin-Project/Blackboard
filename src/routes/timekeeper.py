@@ -31,6 +31,54 @@ TIMEKEEPER_MAX_PER_USER = int(os.getenv("TIMEKEEPER_MAX_PER_USER", "10"))
 TIMEKEEPER_MAX_TOTAL = int(os.getenv("TIMEKEEPER_MAX_TOTAL", "50"))
 
 _refine_semaphore = asyncio.Semaphore(1)
+_brain_context_cache: str | None = None
+
+
+def _load_brain_context() -> str:
+    """Load Brain skill files once and cache. Gives the refiner LLM
+    the same knowledge the Brain operates with."""
+    global _brain_context_cache
+    if _brain_context_cache is not None:
+        return _brain_context_cache
+
+    from pathlib import Path
+
+    skills_dir = Path(__file__).parent.parent / "agents" / "brain_skills"
+    helm_dir = Path(__file__).parent.parent.parent / "helm" / "files"
+
+    sections: list[str] = []
+
+    skill_files = [
+        ("Brain Identity & Agents", skills_dir / "always" / "00-identity.md"),
+        ("Function Rules", skills_dir / "always" / "01-function-rules.md"),
+        ("Decision Guidelines", skills_dir / "always" / "06-decision-guidelines.md"),
+        ("TimeKeeper Source Protocol", skills_dir / "source" / "timekeeper.md"),
+    ]
+    for label, path in skill_files:
+        if path.exists():
+            content = path.read_text().strip()
+            for line in content.splitlines():
+                if line.startswith("---") or line.startswith("description:") or line.startswith("tags:") or line.startswith("requires:"):
+                    continue
+                sections.append(line)
+            sections.append("")
+
+    agent_files = [
+        ("Developer Agent Rules", helm_dir / "developer.md"),
+        ("SysAdmin Agent Rules", helm_dir / "sysadmin.md"),
+        ("Architect Agent Rules", helm_dir / "architect.md"),
+    ]
+    for label, path in agent_files:
+        if path.exists():
+            text = path.read_text().strip()
+            summary = text[:800]
+            if len(text) > 800:
+                summary += "\n... (truncated)"
+            sections.append(f"## {label}\n{summary}\n")
+
+    _brain_context_cache = "\n".join(sections)
+    logger.info("Brain context loaded for refiner (%d chars)", len(_brain_context_cache))
+    return _brain_context_cache
 
 
 @router.post("", status_code=201)
@@ -160,18 +208,19 @@ async def refine_instructions(
                 context_parts.append(f"Service: {req.service}")
             context_str = "\n".join(context_parts) if context_parts else "No specific context provided."
 
+            brain_context = _load_brain_context()
+
             system_prompt = (
-                "You refine user task descriptions into clear instructions for an "
-                "autonomous AI operations system. The system can:\n"
-                "- Route tasks to specialized agents (code, infrastructure, analysis)\n"
-                "- Interact with Git repositories, MRs, pipelines\n"
-                "- Check service health metrics and Kubernetes state\n"
-                "- Create issues, post comments, notify maintainers via Slack\n"
-                "- Defer, retry, or escalate when blocked\n\n"
-                "Good instructions describe:\n"
-                "1. The EXPECTED OUTCOME (what 'done' looks like)\n"
-                "2. SUCCESS CRITERIA (how to verify it's done)\n"
-                "3. FAILURE PATH (what to do if it can't complete)\n\n"
+                "You are a prompt refinement assistant for an autonomous AI operations system called Darwin.\n"
+                "Below is the system's actual Brain knowledge -- its identity, agents, decision patterns, and protocols.\n"
+                "Use this to generate instructions that perfectly align with how the Brain reasons and routes tasks.\n\n"
+                f"=== BRAIN KNOWLEDGE ===\n{brain_context}\n=== END BRAIN KNOWLEDGE ===\n\n"
+                "Your job: refine the user's raw task description into clear instructions that:\n"
+                "1. Describe the EXPECTED OUTCOME (what 'done' looks like) -- not HOW to achieve it\n"
+                "2. Include SUCCESS CRITERIA the Brain can verify\n"
+                "3. Specify a FAILURE PATH (what to do if it can't complete)\n"
+                "4. Use vocabulary and patterns the Brain understands from its knowledge above\n"
+                "5. Never prescribe which agent to use or what commands to run\n\n"
                 "Return JSON with two fields:\n"
                 '- "refined": the improved instruction text (max 500 chars)\n'
                 '- "reasoning": one sentence explaining what you changed and why'
