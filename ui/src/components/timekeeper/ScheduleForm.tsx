@@ -140,7 +140,36 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
               </label>
             </div>
             {scheduleType === 'one_shot' ? (
-              <input type="datetime-local" value={fireAt} onChange={(e) => setFireAt(e.target.value)} className={inputClass} required />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>Date *</label>
+                  <input
+                    type="date"
+                    value={fireAt.split('T')[0] || ''}
+                    onChange={(e) => {
+                      const timePart = fireAt.split('T')[1] || '09:00';
+                      setFireAt(`${e.target.value}T${timePart}`);
+                    }}
+                    className={`${inputClass} color-scheme-dark`}
+                    style={{ colorScheme: 'dark' }}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className={labelClass}>Time (UTC) *</label>
+                  <input
+                    type="time"
+                    value={fireAt.split('T')[1] || ''}
+                    onChange={(e) => {
+                      const datePart = fireAt.split('T')[0] || new Date().toISOString().slice(0, 10);
+                      setFireAt(`${datePart}T${e.target.value}`);
+                    }}
+                    className={`${inputClass} color-scheme-dark`}
+                    style={{ colorScheme: 'dark' }}
+                    required
+                  />
+                </div>
+              </div>
             ) : (
               <div>
                 <input type="text" value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * MON" className={inputClass} required />
