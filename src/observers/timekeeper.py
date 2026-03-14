@@ -104,25 +104,27 @@ class TimeKeeperObserver:
             await asyncio.sleep(self.interval)
 
     async def _fire(self, sched) -> None:
-        """Create a Brain event as a user request -- Brain triages from scratch."""
+        """Create a Brain event with form fields as frontmatter, instructions as body."""
         from ..models import EventEvidence
+        import yaml
 
-        parts = [sched.instructions]
+        meta: dict = {"name": sched.name, "created_by": sched.created_by}
         if sched.repo_url:
-            parts.append(f"Repository: {sched.repo_url}")
+            meta["repo_url"] = sched.repo_url
         if sched.mr_url:
-            parts.append(f"MR: {sched.mr_url}")
-        if sched.approval_mode == "notify_and_wait":
-            parts.append(f"Approval mode: ask me via Slack before executing ({sched.created_by})")
-        if sched.notify_emails:
-            parts.append(f"Notify on completion: {', '.join(sched.notify_emails)}")
+            meta["mr_url"] = sched.mr_url
+        if sched.approval_mode != "autonomous":
+            meta["approval_mode"] = sched.approval_mode
         if sched.on_failure != "notify":
-            parts.append(f"On failure: {sched.on_failure.replace('_', ' ')}")
+            meta["on_failure"] = sched.on_failure
+        if sched.notify_emails:
+            meta["notify_emails"] = sched.notify_emails
 
-        reason = f"[Scheduled: {sched.name}] {' | '.join(parts)}"
+        frontmatter = yaml.dump(meta, default_flow_style=False).strip()
+        reason = f"---\n{frontmatter}\n---\n{sched.instructions}"
 
         evidence = EventEvidence(
-            display_text=reason,
+            display_text=f"Scheduled: {sched.name}",
             source_type="timekeeper",
             domain="complicated",
             severity="info",

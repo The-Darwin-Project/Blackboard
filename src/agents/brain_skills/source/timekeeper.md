@@ -1,33 +1,42 @@
 ---
-description: "TimeKeeper-sourced event: user-scheduled request, triage normally"
+description: "TimeKeeper-sourced event: user-scheduled request with structured metadata"
 tags: [timekeeper, scheduled, user-request]
 ---
 # TimeKeeper Source Environment
 
 ## Nature
 
-TimeKeeper events are **user requests on a timer**. They arrive exactly like chat or Slack messages but are triggered by a schedule instead of a human typing in real-time. Triage them the same way you would any user request.
+TimeKeeper events are **user requests on a timer**. Triage them the same way as chat or Slack messages. The Brain decides domain, severity, agent routing -- everything.
 
 ## Data Available
 
-- `event.event.reason`: The user's desired outcome, prefixed with `[Scheduled: <name>]`. May include repository URL, MR URL, approval preferences, and notification emails.
-- `evidence.triggered_by`: Email of the user who created the schedule.
-- `evidence.source_type`: "timekeeper"
+The `event.event.reason` has YAML frontmatter (structured metadata) followed by the user's desired outcome:
+
+```
+---
+name: "Weekly security audit"
+created_by: "thason@redhat.com"
+repo_url: "https://github.com/..."
+notify_emails: ["thason@redhat.com"]
+---
+Audit dependencies for security vulnerabilities. Report high/critical findings.
+```
+
+Frontmatter fields (all optional except `name` and `created_by`):
+- `name`: Schedule name (informational)
+- `created_by`: Email of the user who created the schedule
+- `repo_url`: Repository URL (environment context)
+- `mr_url`: Merge request URL (environment context)
+- `approval_mode`: If `notify_and_wait`, use `request_user_approval` before executing changes
+- `on_failure`: `close_event`, `retry_once`, or `escalate_human` (default behavior is notify)
+- `notify_emails`: List of emails to notify via Slack on completion or failure
+
+The body text after `---` is the user's request. Triage it normally.
 
 ## Triage
 
-Apply normal triage: classify the domain (Cynefin), assess risk, decide whether to self-answer, route to an agent, or request clarification. Do NOT treat TimeKeeper events differently from user requests -- the Brain decides the approach.
-
-## Approval Mode
-
-If the reason contains "ask me via Slack before executing," use `request_user_approval` before dispatching any agent to execute changes. The user is reachable at the email in `triggered_by`.
-
-If no approval instruction is present, execute autonomously.
-
-## Notification
-
-If the reason contains "Notify on completion," send notifications via `notify_user_slack` to the listed emails on both success and failure. If no notification instruction is present, close normally.
+Apply normal triage. The frontmatter provides context, not instructions. The body is what the user wants done. Classify domain, assess risk, route agents -- same as any user request.
 
 ## Close Protocol
 
-Close after the task is completed and verified, same as any user request. If the user requested approval mode, they are in the conversation -- follow normal `wait_for_user` patterns.
+Close after the task is completed and verified. If `notify_emails` is present, call `notify_user_slack` for each email before closing.
