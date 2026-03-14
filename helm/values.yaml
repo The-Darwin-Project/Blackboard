@@ -322,7 +322,7 @@ headhunter:
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================
 timekeeper:
-  enabled: false # Set to true + dex.enabled to activate
+  enabled: true # Set to true + dex.enabled to activate
   pollInterval: "30" # seconds between poll cycles
   maxPerUser: "10" # max schedules per authenticated user
   maxTotal: "50" # max schedules system-wide
