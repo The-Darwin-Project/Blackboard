@@ -232,8 +232,8 @@ async def refine_instructions(
             max_tokens = int(os.getenv("LLM_MAX_TOKENS_TIMEKEEPER", "2048"))
 
             response = await adapter.generate(
+                system_prompt=system_prompt,
                 contents=prompt,
-                system_instruction=system_prompt,
                 temperature=temp,
                 max_output_tokens=max_tokens,
             )
