@@ -1,50 +1,33 @@
 ---
-description: "TimeKeeper-sourced event environment, scheduling lifecycle, and approval protocol"
-tags: [timekeeper, scheduled, autonomous]
+description: "TimeKeeper-sourced event: user-scheduled request, triage normally"
+tags: [timekeeper, scheduled, user-request]
 ---
 # TimeKeeper Source Environment
 
+## Nature
+
+TimeKeeper events are **user requests on a timer**. They arrive exactly like chat or Slack messages but are triggered by a schedule instead of a human typing in real-time. Triage them the same way you would any user request.
+
 ## Data Available
 
-TimeKeeper events carry an embedded YAML work plan in the `reason` field (identical format to Headhunter Bot Instructions):
-
-- `event.event.reason`: YAML frontmatter with `plan`, `domain`, `risk`, `steps` (each with `id`, `mode`, `summary`, `approval_mode`, `on_failure`, `notify_emails`, `created_by`)
+- `event.event.reason`: The user's desired outcome, prefixed with `[Scheduled: <name>]`. May include repository URL, MR URL, approval preferences, and notification emails.
+- `evidence.triggered_by`: Email of the user who created the schedule.
 - `evidence.source_type`: "timekeeper"
-- `evidence.triggered_by`: Email of the user who created the schedule
 
-The step `summary` contains environment context (Repository URL, MR URL if provided) and the user's desired outcome instructions.
+## Triage
 
-## Routing Principle
+Apply normal triage: classify the domain (Cynefin), assess risk, decide whether to self-answer, route to an agent, or request clarification. Do NOT treat TimeKeeper events differently from user requests -- the Brain decides the approach.
 
-Route based on the plan's `domain` field:
+## Approval Mode
 
-- **CLEAR**: Route directly to the assigned agent without Architect review.
-- **COMPLICATED**: Route to the Architect first for analysis before execution.
+If the reason contains "ask me via Slack before executing," use `request_user_approval` before dispatching any agent to execute changes. The user is reachable at the email in `triggered_by`.
 
-## Approval Mode Protocol
+If no approval instruction is present, execute autonomously.
 
-Check the `approval_mode` field in the plan step:
+## Notification
 
-- **autonomous**: Execute fully without user interaction. Notify `notify_emails` on completion or failure only.
-- **notify_and_wait**: After building the execution plan, use `request_user_approval` before dispatching any agent. The schedule creator is reachable via Slack at the `created_by` email. Wait for user approval or rejection before proceeding.
-
-## Failure Handling
-
-Check the `on_failure` field:
-
-- **notify**: Notify `notify_emails` via Slack and close the event.
-- **close_event**: Close the event silently (no notification).
-- **retry_once**: Retry the failed step once. If still failing, notify and close.
-- **escalate_human**: Use `wait_for_user` to pause and notify via Slack. The creator decides next steps.
-
-## Notification Protocol
-
-Maintainer email addresses are in `notify_emails`. Notifications should include what was scheduled, what happened, and the outcome. If `notify_emails` is empty, note it in the close summary.
+If the reason contains "Notify on completion," send notifications via `notify_user_slack` to the listed emails on both success and failure. If no notification instruction is present, close normally.
 
 ## Close Protocol
 
-TimeKeeper events are scheduled tasks -- close after the plan step is completed and verified. No `wait_for_user` needed for `autonomous` mode. Notify maintainers via Slack before closing.
-
-## Operational History
-
-TimeKeeper events may be recurring. Consult deep memory for past outcomes from the same schedule name or repository before acting.
+Close after the task is completed and verified, same as any user request. If the user requested approval mode, they are in the conversation -- follow normal `wait_for_user` patterns.

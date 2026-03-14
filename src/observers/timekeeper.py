@@ -104,45 +104,28 @@ class TimeKeeperObserver:
             await asyncio.sleep(self.interval)
 
     async def _fire(self, sched) -> None:
-        """Construct evidence and create a Brain event from the schedule."""
+        """Create a Brain event as a user request -- Brain triages from scratch."""
         from ..models import EventEvidence
 
-        context_lines = []
+        parts = [sched.instructions]
         if sched.repo_url:
-            context_lines.append(f"Repository: {sched.repo_url}")
+            parts.append(f"Repository: {sched.repo_url}")
         if sched.mr_url:
-            context_lines.append(f"MR: {sched.mr_url}")
-        context_block = "\n".join(context_lines)
-        if context_block:
-            context_block += "\n"
+            parts.append(f"MR: {sched.mr_url}")
+        if sched.approval_mode == "notify_and_wait":
+            parts.append(f"Approval mode: ask me via Slack before executing ({sched.created_by})")
+        if sched.notify_emails:
+            parts.append(f"Notify on completion: {', '.join(sched.notify_emails)}")
+        if sched.on_failure != "notify":
+            parts.append(f"On failure: {sched.on_failure.replace('_', ' ')}")
 
-        emails_str = ", ".join(sched.notify_emails) if sched.notify_emails else ""
-
-        reason = (
-            f"---\n"
-            f'plan: "{sched.name}"\n'
-            f"service: {sched.service or 'general'}\n"
-            f"domain: {sched.domain.upper()}\n"
-            f"risk: low\n"
-            f"steps:\n"
-            f"  - id: scheduled-task\n"
-            f"    mode: execute\n"
-            f"    summary: |\n"
-            f"      {context_block}"
-            f"      {sched.instructions}\n"
-            f"    approval_mode: {sched.approval_mode}\n"
-            f"    on_failure: {sched.on_failure}\n"
-            f"    notify_emails: [{emails_str}]\n"
-            f"    created_by: {sched.created_by}\n"
-            f"status: pending\n"
-            f"---"
-        )
+        reason = f"[Scheduled: {sched.name}] {' | '.join(parts)}"
 
         evidence = EventEvidence(
-            display_text=f"Scheduled task: {sched.name}",
+            display_text=reason,
             source_type="timekeeper",
-            domain=sched.domain,
-            severity=sched.severity,
+            domain="complicated",
+            severity="info",
             triggered_by=sched.created_by,
         )
 
