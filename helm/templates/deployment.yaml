@@ -283,6 +283,21 @@ spec:
               value: "{{ .Values.timekeeper.maxPerUser }}"
             - name: TIMEKEEPER_MAX_TOTAL
               value: "{{ .Values.timekeeper.maxTotal }}"
+            - name: LLM_MODEL_TIMEKEEPER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_TIMEKEEPER
+            - name: LLM_TEMPERATURE_TIMEKEEPER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_TIMEKEEPER
+            - name: LLM_MAX_TOKENS_TIMEKEEPER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_TIMEKEEPER
             {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)

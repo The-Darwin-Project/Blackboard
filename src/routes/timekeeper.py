@@ -191,7 +191,7 @@ async def refine_instructions(
         try:
             from ..agents.llm import create_adapter
 
-            model = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-2.0-flash-lite")
+            model = os.getenv("LLM_MODEL_TIMEKEEPER", os.getenv("LLM_MODEL_HEADHUNTER", "gemini-2.0-flash-lite"))
             adapter = create_adapter(
                 provider="gemini",
                 project=os.getenv("GCP_PROJECT", ""),
@@ -228,11 +228,14 @@ async def refine_instructions(
 
             prompt = f"Context:\n{context_str}\n\nUser intent:\n{req.raw_intent}"
 
+            temp = float(os.getenv("LLM_TEMPERATURE_TIMEKEEPER", "0.3"))
+            max_tokens = int(os.getenv("LLM_MAX_TOKENS_TIMEKEEPER", "2048"))
+
             response = await adapter.generate(
                 contents=prompt,
                 system_instruction=system_prompt,
-                temperature=0.3,
-                max_output_tokens=1024,
+                temperature=temp,
+                max_output_tokens=max_tokens,
             )
 
             import json

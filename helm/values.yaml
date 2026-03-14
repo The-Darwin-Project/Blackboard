@@ -141,6 +141,10 @@ gcp:
       model: "gemini-3.1-flash-lite-preview" # MR triage classification (Tier 2)
       temperature: "1.0"
       thinkingLevel: "low"
+    timekeeper:
+      model: "gemini-3.1-flash-lite-preview" # Instruction refinement (user-facing, fast)
+      temperature: "0.3"
+      maxOutputTokens: "2048"
   tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
