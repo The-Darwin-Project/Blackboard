@@ -1925,3 +1925,134 @@ class BlackboardState:
         if not raw:
             return None
         return json.loads(raw)
+
+    # =========================================================================
+    # TimeKeeper (Scheduled Tasks)
+    # =========================================================================
+
+    TIMEKEEPER_SCHEDULES = "darwin:timekeeper:schedules"
+    TIMEKEEPER_PENDING = "darwin:timekeeper:pending"
+    TIMEKEEPER_USER_PREFIX = "darwin:timekeeper:user:"
+
+    async def create_schedule(self, sched) -> str:
+        """Persist a ScheduledEvent. HSET + ZADD + SADD user set."""
+        key = self.TIMEKEEPER_SCHEDULES
+        pending = self.TIMEKEEPER_PENDING
+        user_key = f"{self.TIMEKEEPER_USER_PREFIX}{sched.created_by}"
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(key)
+            pipe.multi()
+            pipe.hset(key, sched.id, sched.model_dump_json())
+            if sched.enabled:
+                pipe.zadd(pending, {sched.id: sched.fire_at})
+            pipe.sadd(user_key, sched.id)
+            await pipe.execute()
+        return sched.id
+
+    async def get_schedule(self, sched_id: str):
+        """Get a single ScheduledEvent by ID."""
+        from ..models import ScheduledEvent
+        raw = await self.redis.hget(self.TIMEKEEPER_SCHEDULES, sched_id)
+        if not raw:
+            return None
+        return ScheduledEvent.model_validate_json(raw)
+
+    async def list_schedules(self) -> list:
+        """List all ScheduledEvents."""
+        from ..models import ScheduledEvent
+        all_raw = await self.redis.hgetall(self.TIMEKEEPER_SCHEDULES)
+        return [ScheduledEvent.model_validate_json(v) for v in all_raw.values()]
+
+    async def update_schedule(self, sched_id: str, updates: dict) -> bool:
+        """Update fields on a schedule. Re-ZADD if fire_at changed."""
+        raw = await self.redis.hget(self.TIMEKEEPER_SCHEDULES, sched_id)
+        if not raw:
+            return False
+        data = json.loads(raw)
+        data.update(updates)
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(self.TIMEKEEPER_SCHEDULES)
+            pipe.multi()
+            pipe.hset(self.TIMEKEEPER_SCHEDULES, sched_id, json.dumps(data))
+            if "fire_at" in updates and data.get("enabled", True):
+                pipe.zadd(self.TIMEKEEPER_PENDING, {sched_id: updates["fire_at"]})
+            await pipe.execute()
+        return True
+
+    async def delete_schedule(self, sched_id: str, created_by: str) -> bool:
+        """Delete a schedule. HDEL + ZREM + SREM user set."""
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(self.TIMEKEEPER_SCHEDULES)
+            pipe.multi()
+            pipe.hdel(self.TIMEKEEPER_SCHEDULES, sched_id)
+            pipe.zrem(self.TIMEKEEPER_PENDING, sched_id)
+            pipe.srem(f"{self.TIMEKEEPER_USER_PREFIX}{created_by}", sched_id)
+            await pipe.execute()
+        return True
+
+    async def pop_due_schedule(self):
+        """Atomically pop the next due schedule via ZPOPMIN.
+
+        Returns (sched_id, ScheduledEvent) or None if nothing is due.
+        """
+        import time as _time
+        from ..models import ScheduledEvent
+        result = await self.redis.zpopmin(self.TIMEKEEPER_PENDING, count=1)
+        if not result:
+            return None
+        sched_id_bytes, score = result[0]
+        sched_id = sched_id_bytes if isinstance(sched_id_bytes, str) else sched_id_bytes.decode()
+        if score > _time.time():
+            await self.redis.zadd(self.TIMEKEEPER_PENDING, {sched_id: score})
+            return None
+        raw = await self.redis.hget(self.TIMEKEEPER_SCHEDULES, sched_id)
+        if not raw:
+            return None
+        return (sched_id, ScheduledEvent.model_validate_json(raw))
+
+    async def requeue_schedule(self, sched_id: str, score: float) -> None:
+        """Re-ZADD a schedule on fire failure (fallback safety net)."""
+        await self.redis.zadd(self.TIMEKEEPER_PENDING, {sched_id: score})
+
+    async def advance_schedule(self, sched_id: str, next_fire_at: float) -> None:
+        """Update fire_at in HASH and ZADD new score for recurring schedules."""
+        import time as _time
+        raw = await self.redis.hget(self.TIMEKEEPER_SCHEDULES, sched_id)
+        if not raw:
+            return
+        data = json.loads(raw)
+        data["fire_at"] = next_fire_at
+        data["last_fired"] = _time.time()
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(self.TIMEKEEPER_SCHEDULES)
+            pipe.multi()
+            pipe.hset(self.TIMEKEEPER_SCHEDULES, sched_id, json.dumps(data))
+            if data.get("enabled", True):
+                pipe.zadd(self.TIMEKEEPER_PENDING, {sched_id: next_fire_at})
+            await pipe.execute()
+
+    async def toggle_schedule(self, sched_id: str, enabled: bool) -> bool:
+        """Enable/disable a schedule. ZREM on pause, ZADD on resume."""
+        raw = await self.redis.hget(self.TIMEKEEPER_SCHEDULES, sched_id)
+        if not raw:
+            return False
+        data = json.loads(raw)
+        data["enabled"] = enabled
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(self.TIMEKEEPER_SCHEDULES)
+            pipe.multi()
+            pipe.hset(self.TIMEKEEPER_SCHEDULES, sched_id, json.dumps(data))
+            if enabled:
+                pipe.zadd(self.TIMEKEEPER_PENDING, {sched_id: data["fire_at"]})
+            else:
+                pipe.zrem(self.TIMEKEEPER_PENDING, sched_id)
+            await pipe.execute()
+        return True
+
+    async def count_user_schedules(self, email: str) -> int:
+        """Count active schedules for a user."""
+        return await self.redis.scard(f"{self.TIMEKEEPER_USER_PREFIX}{email}")
