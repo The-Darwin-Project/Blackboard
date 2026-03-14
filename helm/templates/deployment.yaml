@@ -273,6 +273,17 @@ spec:
                   name: {{ .Release.Name }}-config
                   key: LLM_THINKING_HEADHUNTER
             {{- end }}
+            {{- if .Values.timekeeper }}
+            # TimeKeeper (scheduled task observer)
+            - name: TIMEKEEPER_ENABLED
+              value: "{{ .Values.timekeeper.enabled }}"
+            - name: TIMEKEEPER_POLL_INTERVAL
+              value: "{{ .Values.timekeeper.pollInterval }}"
+            - name: TIMEKEEPER_MAX_PER_USER
+              value: "{{ .Values.timekeeper.maxPerUser }}"
+            - name: TIMEKEEPER_MAX_TOTAL
+              value: "{{ .Values.timekeeper.maxTotal }}"
+            {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)
             - name: SLACK_BOT_TOKEN

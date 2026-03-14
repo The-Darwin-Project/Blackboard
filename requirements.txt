@@ -43,3 +43,6 @@ kubernetes
 slack-bolt[async]>=1.22.0
 slack-sdk>=3.35.0
 aiohttp
+
+# TimeKeeper (cron expression parsing for scheduled tasks)
+croniter

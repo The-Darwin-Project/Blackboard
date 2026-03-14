@@ -319,6 +319,14 @@ headhunter:
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of emails for static source (e.g., "alice@redhat.com,bob@redhat.com")
 # =============================================================================
+# TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
+# =============================================================================
+timekeeper:
+  enabled: false # Set to true + dex.enabled to activate
+  pollInterval: "30" # seconds between poll cycles
+  maxPerUser: "10" # max schedules per authenticated user
+  maxTotal: "50" # max schedules system-wide
+# =============================================================================
 # Dex OIDC Identity Provider (bundled, reverse-proxied via Brain at /dex/*)
 # Prerequisites: cert-manager operator installed in cluster
 # =============================================================================
