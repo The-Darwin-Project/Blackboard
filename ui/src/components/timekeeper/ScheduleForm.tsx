@@ -44,8 +44,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
   const [notifyEmails, setNotifyEmails] = useState(
     editItem?.notify_emails?.join(', ') || userEmail,
   );
-  const [domain, setDomain] = useState<'clear' | 'complicated'>(editItem?.domain ?? 'clear');
-  const [severity, setSeverity] = useState<'info' | 'warning'>(editItem?.severity ?? 'info');
 
   const refineMutation = useRefineInstructions();
   const [refinedText, setRefinedText] = useState<string | null>(null);
@@ -94,8 +92,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
       approval_mode: approvalMode,
       on_failure: onFailure as ScheduleCreatePayload['on_failure'],
       notify_emails: emails,
-      domain,
-      severity,
     };
     onSubmit(payload);
   }
@@ -303,31 +299,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
             <div>
               <label className={labelClass}>Notify Emails (comma-separated)</label>
               <input type="text" value={notifyEmails} onChange={(e) => setNotifyEmails(e.target.value)} placeholder="alice@example.com, bob@example.com" className={inputClass} />
-            </div>
-          </fieldset>
-
-          {/* CLASSIFICATION */}
-          <fieldset className="border border-border/50 rounded-lg p-4">
-            <legend className="text-xs font-bold text-text-secondary px-2">CLASSIFICATION</legend>
-            <div className="flex gap-6">
-              <div className="flex gap-3 items-center">
-                <span className="text-xs text-text-secondary">Domain:</span>
-                <label className="flex items-center gap-1.5 text-sm text-text-primary cursor-pointer">
-                  <input type="radio" checked={domain === 'clear'} onChange={() => setDomain('clear')} /> Clear
-                </label>
-                <label className="flex items-center gap-1.5 text-sm text-text-primary cursor-pointer">
-                  <input type="radio" checked={domain === 'complicated'} onChange={() => setDomain('complicated')} /> Complicated
-                </label>
-              </div>
-              <div className="flex gap-3 items-center">
-                <span className="text-xs text-text-secondary">Severity:</span>
-                <label className="flex items-center gap-1.5 text-sm text-text-primary cursor-pointer">
-                  <input type="radio" checked={severity === 'info'} onChange={() => setSeverity('info')} /> Info
-                </label>
-                <label className="flex items-center gap-1.5 text-sm text-text-primary cursor-pointer">
-                  <input type="radio" checked={severity === 'warning'} onChange={() => setSeverity('warning')} /> Warning
-                </label>
-              </div>
             </div>
           </fieldset>
 

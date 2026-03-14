@@ -334,8 +334,6 @@ export interface ScheduleCreatePayload {
   approval_mode?: 'autonomous' | 'notify_and_wait';
   on_failure?: 'notify' | 'close_event' | 'retry_once' | 'escalate_human';
   notify_emails?: string[];
-  domain?: 'clear' | 'complicated';
-  severity?: 'info' | 'warning';
 }
 
 export async function getSchedules(): Promise<ScheduleItem[]> {
