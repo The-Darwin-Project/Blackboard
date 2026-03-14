@@ -12,15 +12,7 @@ TimeKeeper events are **user requests on a timer**. Triage them the same way as 
 
 The `event.event.reason` has YAML frontmatter (structured metadata) followed by the user's desired outcome:
 
-```
----
-name: "Weekly security audit"
-created_by: "thason@redhat.com"
-repo_url: "https://github.com/..."
-notify_emails: ["thason@redhat.com"]
----
-Audit dependencies for security vulnerabilities. Report high/critical findings.
-```
+Frontmatter has metadata fields, body has the user's request.
 
 Frontmatter fields (all optional except `name` and `created_by`):
 - `name`: Schedule name (informational)
