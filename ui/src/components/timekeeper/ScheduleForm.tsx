@@ -44,6 +44,7 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
   const refineMutation = useRefineInstructions();
   const [refinedText, setRefinedText] = useState<string | null>(null);
   const [refineReason, setRefineReason] = useState('');
+  const [refineError, setRefineError] = useState('');
 
   function handleTemplate(tpl: (typeof TEMPLATES)[number]) {
     setInstructions(tpl.instructions);
@@ -52,6 +53,8 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
 
   async function handleRefine() {
     if (!instructions.trim()) return;
+    setRefineError('');
+    setRefinedText(null);
     try {
       const res = await refineMutation.mutateAsync({
         raw_intent: instructions,
@@ -61,8 +64,9 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
       });
       setRefinedText(res.refined);
       setRefineReason(res.reasoning);
-    } catch {
-      // 429 or 503 handled gracefully
+    } catch (err: any) {
+      const msg = err?.detail || err?.message || 'Refine failed. Check backend connection.';
+      setRefineError(String(msg));
     }
   }
 
@@ -225,6 +229,11 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
                 Refine with AI
               </button>
             </div>
+            {refineError && (
+              <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2">
+                <p className="text-xs text-red-400">{refineError}</p>
+              </div>
+            )}
             {refinedText && (
               <div className="rounded-lg bg-bg-primary border border-accent/30 p-3 space-y-2">
                 <p className="text-xs text-accent font-semibold">AI Suggestion</p>

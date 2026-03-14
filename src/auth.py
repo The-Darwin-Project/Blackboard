@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import jwt
+from starlette.requests import Request
 
 if TYPE_CHECKING:
     from .adapters.oidc_adapter import OIDCKeyAdapter
@@ -142,7 +143,7 @@ def get_user_from_slack(user_id: str, display_name: str, email: str = "") -> Use
     return UserContext(user_id=user_id, display_name=display_name, email=email, source="slack")
 
 
-async def require_auth(request) -> UserContext:
+async def require_auth(request: Request) -> UserContext:
     """FastAPI Depends() -- enforces named identity. Raises 401 if user has no email (anonymous).
 
     Use on mutation endpoints that need owner attribution (e.g., TimeKeeper CRUD).
