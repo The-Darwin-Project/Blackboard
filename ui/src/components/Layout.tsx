@@ -20,6 +20,7 @@ function Layout() {
   const navigate = useNavigate();
   const onReports = location.pathname.startsWith('/reports');
   const onGuide = location.pathname === '/guide';
+  const onTimeKeeper = location.pathname === '/timekeeper';
   const { isError, isFetching } = useTopology();
   const { data: config } = useConfig();
   const { connected, send } = useWSConnection();
@@ -76,6 +77,15 @@ function Layout() {
           >
             {onGuide ? <Home className="w-3.5 h-3.5" /> : <BookOpen className="w-3.5 h-3.5" />}
             {onGuide ? 'Dashboard' : 'Guide'}
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate(onTimeKeeper ? '/' : '/timekeeper')}
+            title={onTimeKeeper ? 'Back to Dashboard' : 'TimeKeeper'}
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
+          >
+            {onTimeKeeper ? <Home className="w-3.5 h-3.5" /> : <Activity className="w-3.5 h-3.5" />}
+            {onTimeKeeper ? 'Dashboard' : 'TimeKeeper'}
           </button>
           <button
             type="button"

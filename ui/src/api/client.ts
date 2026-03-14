@@ -297,3 +297,85 @@ export async function submitFeedback(
     }),
   });
 }
+
+// =============================================================================
+// TimeKeeper API (scheduled tasks)
+// =============================================================================
+
+export interface ScheduleItem {
+  id: string;
+  name: string;
+  schedule_type: 'one_shot' | 'recurring';
+  cron: string | null;
+  fire_at: number;
+  repo_url: string | null;
+  mr_url: string | null;
+  service: string | null;
+  instructions: string;
+  approval_mode: 'autonomous' | 'notify_and_wait';
+  on_failure: 'notify' | 'close_event' | 'retry_once' | 'escalate_human';
+  notify_emails: string[];
+  domain: 'clear' | 'complicated';
+  severity: 'info' | 'warning';
+  created_by: string;
+  enabled: boolean;
+  last_fired: number | null;
+}
+
+export interface ScheduleCreatePayload {
+  name: string;
+  schedule_type: 'one_shot' | 'recurring';
+  cron?: string | null;
+  fire_at?: number | null;
+  repo_url?: string | null;
+  mr_url?: string | null;
+  service?: string | null;
+  instructions: string;
+  approval_mode?: 'autonomous' | 'notify_and_wait';
+  on_failure?: 'notify' | 'close_event' | 'retry_once' | 'escalate_human';
+  notify_emails?: string[];
+  domain?: 'clear' | 'complicated';
+  severity?: 'info' | 'warning';
+}
+
+export async function getSchedules(): Promise<ScheduleItem[]> {
+  return fetchApi<ScheduleItem[]>('/api/timekeeper');
+}
+
+export async function getSchedule(id: string): Promise<ScheduleItem> {
+  return fetchApi<ScheduleItem>(`/api/timekeeper/${id}`);
+}
+
+export async function createSchedule(payload: ScheduleCreatePayload): Promise<{ id: string; status: string }> {
+  return fetchApi('/api/timekeeper', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateSchedule(id: string, payload: ScheduleCreatePayload): Promise<{ id: string; status: string }> {
+  return fetchApi(`/api/timekeeper/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteSchedule(id: string): Promise<{ id: string; status: string }> {
+  return fetchApi(`/api/timekeeper/${id}`, { method: 'DELETE' });
+}
+
+export async function toggleSchedule(id: string): Promise<{ id: string; enabled: boolean }> {
+  return fetchApi(`/api/timekeeper/${id}/toggle`, { method: 'PATCH' });
+}
+
+export async function refineInstructions(payload: {
+  raw_intent: string;
+  repo_url?: string | null;
+  mr_url?: string | null;
+  service?: string | null;
+}): Promise<{ refined: string; reasoning: string }> {
+  return fetchApi('/api/timekeeper/refine', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}

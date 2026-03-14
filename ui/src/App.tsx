@@ -12,6 +12,7 @@ import Dashboard from './components/Dashboard';
 import GuidePage from './components/GuidePage';
 import ReportsPage from './components/ReportsPage';
 import LoginPage from './components/LoginPage';
+import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +48,7 @@ function AuthGate() {
           <Route index element={<Dashboard />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="guide" element={<GuidePage />} />
+          <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
