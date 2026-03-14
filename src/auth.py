@@ -5,6 +5,7 @@
 # 3. [Gotcha]: Slack users always have named identity regardless of DEX_ENABLED setting.
 # 4. [Pattern]: _validate_jwt() is pure crypto -- zero network calls. Keys provided by OIDCKeyAdapter.
 # 5. [Pattern]: get_user_from_request/get_user_from_slack are forward-looking scaffolding (RBAC v2).
+# 6. [Pattern]: require_auth is a FastAPI Depends() that enforces named identity (raises 401 if anonymous).
 """User identity domain -- pure JWT validation and UserContext abstraction.
 
 When dex.enabled=false (default): returns anonymous UserContext for Dashboard users.
@@ -139,3 +140,17 @@ def get_user_from_request(request) -> UserContext:
 def get_user_from_slack(user_id: str, display_name: str, email: str = "") -> UserContext:
     """Create UserContext from Slack user profile (always named, independent of dex setting)."""
     return UserContext(user_id=user_id, display_name=display_name, email=email, source="slack")
+
+
+async def require_auth(request) -> UserContext:
+    """FastAPI Depends() -- enforces named identity. Raises 401 if user has no email (anonymous).
+
+    Use on mutation endpoints that need owner attribution (e.g., TimeKeeper CRUD).
+    Read-only endpoints can use get_user_from_request() directly for graceful degradation.
+    """
+    from fastapi import HTTPException
+
+    user = get_user_from_request(request)
+    if not user.email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user

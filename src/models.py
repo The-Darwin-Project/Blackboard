@@ -330,7 +330,7 @@ class ConversationTurn(BaseModel):
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    source: Literal["aligner", "chat", "slack", "headhunter"]
+    source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper"]
     status: EventStatus = EventStatus.NEW
     service: str = Field(..., description="Target service name")
     event: EventInput
@@ -340,6 +340,139 @@ class EventDocument(BaseModel):
     slack_channel_id: Optional[str] = Field(None, description="DM channel or public channel ID")
     slack_user_id: Optional[str] = Field(None, description="Slack user who initiated (for DM events)")
     slack_thread_title: Optional[str] = Field(None, description="Assistant thread title (informational)")
+
+
+# =============================================================================
+# TimeKeeper (Scheduled Tasks)
+# =============================================================================
+
+class ScheduledEvent(BaseModel):
+    """A scheduled task persisted in Redis. Created from ScheduleCreateRequest."""
+    id: str = Field(default_factory=lambda: f"sched-{uuid.uuid4().hex[:8]}")
+    name: str = Field(..., min_length=5, max_length=120)
+    schedule_type: Literal["one_shot", "recurring"]
+    cron: Optional[str] = None
+    fire_at: float = Field(..., description="Next trigger timestamp (ZSET score)")
+    repo_url: Optional[str] = None
+    mr_url: Optional[str] = None
+    service: Optional[str] = None
+    instructions: str = Field(..., min_length=10, max_length=2000)
+    approval_mode: Literal["autonomous", "notify_and_wait"] = "autonomous"
+    on_failure: Literal["notify", "close_event", "retry_once", "escalate_human"]
+    notify_emails: list[str] = Field(default_factory=list)
+    domain: Literal["clear", "complicated"] = "clear"
+    severity: Literal["info", "warning"] = "info"
+    created_by: str = "system"
+    enabled: bool = True
+    last_fired: Optional[float] = None
+
+
+class ScheduleCreateRequest(BaseModel):
+    """API input for creating a scheduled task. Validates and converts to ScheduledEvent."""
+    name: str = Field(..., min_length=5, max_length=120)
+    schedule_type: Literal["one_shot", "recurring"]
+    cron: Optional[str] = None
+    fire_at: Optional[float] = None
+    repo_url: Optional[str] = None
+    mr_url: Optional[str] = None
+    service: Optional[str] = None
+    instructions: str = Field(..., max_length=2000)
+    approval_mode: Literal["autonomous", "notify_and_wait"] = "autonomous"
+    on_failure: Literal["notify", "close_event", "retry_once", "escalate_human"] = "notify"
+    notify_emails: list[str] = Field(default_factory=list)
+    domain: Literal["clear", "complicated"] = "clear"
+    severity: Literal["info", "warning"] = "info"
+
+    @field_validator("cron")
+    @classmethod
+    def _validate_cron(cls, v: Any, info) -> Any:
+        if v is None:
+            return v
+        from croniter import croniter
+        if not croniter.is_valid(v):
+            raise ValueError(f"Invalid cron expression: {v}")
+        it = croniter(v)
+        gap = it.get_next(float) - time.time()
+        if gap < 3600:
+            next_gap = it.get_next(float) - it.get_prev(float)
+            if next_gap < 3600:
+                raise ValueError("Minimum cron interval is 1 hour")
+        return v
+
+    @field_validator("instructions")
+    @classmethod
+    def _validate_instructions(cls, v: str, info) -> str:
+        has_context = info.data.get("repo_url") or info.data.get("mr_url")
+        min_len = 10 if has_context else 30
+        if len(v.strip()) < min_len:
+            raise ValueError(
+                f"Instructions must be at least {min_len} characters"
+                f"{' (more detail needed without repo/MR URL)' if not has_context else ''}"
+            )
+        return v.strip()
+
+    @field_validator("fire_at")
+    @classmethod
+    def _validate_fire_at(cls, v: Any, info) -> Any:
+        if v is None:
+            return v
+        if v <= time.time():
+            raise ValueError("fire_at must be in the future")
+        max_horizon = time.time() + 30 * 86400
+        if v > max_horizon:
+            raise ValueError("fire_at must be within 30 days")
+        return v
+
+    @field_validator("service")
+    @classmethod
+    def _validate_service(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if len(v) < 2 or len(v) > 120:
+            raise ValueError("Service name must be 2-120 characters")
+        return v
+
+    def to_scheduled_event(self, created_by: str) -> "ScheduledEvent":
+        """Convert validated request to a ScheduledEvent for Redis storage."""
+        fire_at = self.fire_at
+        if self.schedule_type == "recurring" and self.cron:
+            if not self.cron:
+                raise ValueError("cron is required for recurring schedules")
+            from croniter import croniter
+            fire_at = croniter(self.cron, time.time()).get_next(float)
+        elif self.schedule_type == "one_shot" and fire_at is None:
+            raise ValueError("fire_at is required for one-shot schedules")
+        return ScheduledEvent(
+            name=self.name,
+            schedule_type=self.schedule_type,
+            cron=self.cron,
+            fire_at=fire_at,
+            repo_url=self.repo_url,
+            mr_url=self.mr_url,
+            service=self.service,
+            instructions=self.instructions,
+            approval_mode=self.approval_mode,
+            on_failure=self.on_failure,
+            notify_emails=self.notify_emails,
+            domain=self.domain,
+            severity=self.severity,
+            created_by=created_by,
+        )
+
+
+class RefineRequest(BaseModel):
+    """Input for LLM-assisted instruction refinement."""
+    raw_intent: str = Field(..., min_length=3, max_length=500)
+    repo_url: Optional[str] = None
+    mr_url: Optional[str] = None
+    service: Optional[str] = None
+
+
+class RefineResponse(BaseModel):
+    """Refined instructions with reasoning."""
+    refined: str
+    reasoning: str
 
 
 # =============================================================================
