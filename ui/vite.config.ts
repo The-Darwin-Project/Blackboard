@@ -14,7 +14,7 @@ function devAuthMock() {
           contactEmail: '',
           feedbackFormUrl: '',
           appVersion: 'dev',
-          auth: { enabled: true, issuerUrl: 'http://localhost:5556/dex', clientId: 'darwin-dashboard', loginDisclaimer: '' },
+          auth: { enabled: false },
         }));
       });
     },
