@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Sparkles, Loader2 } from 'lucide-react';
 import { useRefineInstructions } from '../../hooks/useTimeKeeper';
+import { useAuth } from '../../contexts/AuthContext';
 import type { ScheduleCreatePayload, ScheduleItem } from '../../api/client';
 
 interface Props {
@@ -21,6 +22,9 @@ const TEMPLATES = [
 ] as const;
 
 export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting }: Props) {
+  const { user } = useAuth();
+  const userEmail = user?.profile?.email || '';
+
   const [name, setName] = useState(editItem?.name ?? '');
   const [scheduleType, setScheduleType] = useState<'one_shot' | 'recurring'>(editItem?.schedule_type ?? 'one_shot');
   const [cron, setCron] = useState(editItem?.cron ?? '');
@@ -37,7 +41,9 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
   const [instructions, setInstructions] = useState(editItem?.instructions ?? '');
   const [approvalMode, setApprovalMode] = useState<'autonomous' | 'notify_and_wait'>(editItem?.approval_mode ?? 'autonomous');
   const [onFailure, setOnFailure] = useState<string>(editItem?.on_failure ?? 'notify');
-  const [notifyEmails, setNotifyEmails] = useState(editItem?.notify_emails?.join(', ') ?? '');
+  const [notifyEmails, setNotifyEmails] = useState(
+    editItem?.notify_emails?.join(', ') || userEmail,
+  );
   const [domain, setDomain] = useState<'clear' | 'complicated'>(editItem?.domain ?? 'clear');
   const [severity, setSeverity] = useState<'info' | 'warning'>(editItem?.severity ?? 'info');
 
@@ -225,10 +231,28 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
                 disabled={refineMutation.isPending || instructions.length < 3}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/20 text-accent text-xs font-semibold hover:bg-accent/30 disabled:opacity-40 transition-colors cursor-pointer"
               >
-                {refineMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                Refine with AI
+                {refineMutation.isPending ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Refining...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Refine with AI
+                  </>
+                )}
               </button>
             </div>
+            {refineMutation.isPending && (
+              <div className="rounded-lg bg-accent/5 border border-accent/20 px-3 py-3 flex items-center gap-3">
+                <Loader2 className="w-4 h-4 animate-spin text-accent shrink-0" />
+                <div>
+                  <p className="text-xs text-accent font-semibold">Brain is refining your instructions...</p>
+                  <p className="text-xs text-text-secondary mt-0.5">Aligning with agent capabilities and decision patterns</p>
+                </div>
+              </div>
+            )}
             {refineError && (
               <div className="rounded-lg bg-red-500/10 border border-red-500/30 px-3 py-2">
                 <p className="text-xs text-red-400">{refineError}</p>
