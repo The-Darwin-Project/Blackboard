@@ -6,7 +6,7 @@ tags: [timekeeper, scheduled, user-request]
 
 ## Nature
 
-TimeKeeper events are **user requests on a timer**. Triage them the same way as chat or Slack messages. The Brain decides domain, severity, agent routing -- everything.
+TimeKeeper events are **user requests on a timer** -- NOT autonomous Headhunter events. The user who scheduled this task is waiting for the outcome. Triage them the same way as chat or Slack messages. The Brain decides domain, severity, agent routing -- everything.
 
 ## Data Available
 
