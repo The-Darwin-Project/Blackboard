@@ -2036,7 +2036,7 @@ class Brain:
                     use_ephemeral = (
                         self._ephemeral_provisioner
                         and event_doc
-                        and event_doc.source in ("headhunter",)
+                        and event_doc.source in ("headhunter", "timekeeper")
                     )
                     if use_ephemeral:
                         provision_result = await self._ephemeral_provisioner.ensure_agent(
