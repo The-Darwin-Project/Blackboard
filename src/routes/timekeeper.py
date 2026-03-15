@@ -221,9 +221,7 @@ async def refine_instructions(
                 "3. Specify a FAILURE PATH (what to do if it can't complete)\n"
                 "4. Use vocabulary and patterns the Brain understands from its knowledge above\n"
                 "5. Never prescribe which agent to use or what commands to run\n\n"
-                "Return JSON with two fields:\n"
-                '- "refined": the improved instruction text (max 500 chars)\n'
-                '- "reasoning": one sentence explaining what you changed and why'
+                "Return ONLY the refined instruction text. No JSON, no markdown, no explanation. Max 500 characters."
             )
 
             prompt = f"Context:\n{context_str}\n\nUser intent:\n{req.raw_intent}"
@@ -238,23 +236,8 @@ async def refine_instructions(
                 max_output_tokens=max_tokens,
             )
 
-            import json
-            import re
-            raw = response.text.strip()
-            json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
-            text_to_parse = json_match.group(1).strip() if json_match else raw
-
-            try:
-                data = json.loads(text_to_parse)
-                return RefineResponse(
-                    refined=data.get("refined", raw),
-                    reasoning=data.get("reasoning", "Refined for clarity and specificity."),
-                )
-            except (json.JSONDecodeError, KeyError):
-                return RefineResponse(
-                    refined=raw,
-                    reasoning="Raw LLM output (JSON parse failed).",
-                )
+            refined = response.text.strip()
+            return RefineResponse(refined=refined, reasoning="")
 
         except Exception as e:
             logger.exception("Refine endpoint error")

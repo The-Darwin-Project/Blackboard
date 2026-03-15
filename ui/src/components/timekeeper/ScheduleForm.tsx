@@ -258,7 +258,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
               <div className="rounded-lg bg-bg-primary border border-accent/30 p-3 space-y-2">
                 <p className="text-xs text-accent font-semibold">AI Suggestion</p>
                 <p className="text-sm text-text-primary whitespace-pre-wrap">{refinedText}</p>
-                <p className="text-xs text-text-secondary italic">{refineReason}</p>
                 <div className="flex gap-2">
                   <button type="button" onClick={() => setRefinedText(null)} className="text-xs text-text-secondary hover:text-text-primary cursor-pointer">
                     Keep Mine
