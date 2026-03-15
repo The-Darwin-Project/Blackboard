@@ -47,7 +47,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
 
   const refineMutation = useRefineInstructions();
   const [refinedText, setRefinedText] = useState<string | null>(null);
-  const [refineReason, setRefineReason] = useState('');
   const [refineError, setRefineError] = useState('');
 
   function handleTemplate(tpl: (typeof TEMPLATES)[number]) {
@@ -67,7 +66,6 @@ export default function ScheduleForm({ onClose, onSubmit, editItem, isSubmitting
         service: service || null,
       });
       setRefinedText(res.refined);
-      setRefineReason(res.reasoning);
     } catch (err: any) {
       const msg = err?.detail || err?.message || 'Refine failed. Check backend connection.';
       setRefineError(String(msg));
