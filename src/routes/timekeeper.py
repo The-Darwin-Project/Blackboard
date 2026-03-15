@@ -239,15 +239,20 @@ async def refine_instructions(
             )
 
             import json
+            import re
+            raw = response.text.strip()
+            json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", raw, re.DOTALL)
+            text_to_parse = json_match.group(1).strip() if json_match else raw
+
             try:
-                data = json.loads(response.text)
+                data = json.loads(text_to_parse)
                 return RefineResponse(
-                    refined=data.get("refined", response.text),
+                    refined=data.get("refined", raw),
                     reasoning=data.get("reasoning", "Refined for clarity and specificity."),
                 )
             except (json.JSONDecodeError, KeyError):
                 return RefineResponse(
-                    refined=response.text.strip(),
+                    refined=raw,
                     reasoning="Raw LLM output (JSON parse failed).",
                 )
 
