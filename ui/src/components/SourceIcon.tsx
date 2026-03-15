@@ -66,6 +66,17 @@ function AlignerIcon({ size }: { size: number }) {
   );
 }
 
+function TimeKeeperIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="6.5" stroke="#818cf8" strokeWidth="1.3" />
+      <line x1="8" y1="4" x2="8" y2="8" stroke="#818cf8" strokeWidth="1.4" strokeLinecap="round" />
+      <line x1="8" y1="8" x2="11" y2="10" stroke="#818cf8" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="8" cy="8" r="1" fill="#818cf8" />
+    </svg>
+  );
+}
+
 function FallbackIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -82,6 +93,7 @@ const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   github: GitHubIcon,
   chat: ChatIcon,
   aligner: AlignerIcon,
+  timekeeper: TimeKeeperIcon,
 };
 
 export default function SourceIcon({ source, size = 16 }: SourceIconProps) {
