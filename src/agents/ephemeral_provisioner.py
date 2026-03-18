@@ -93,13 +93,28 @@ class EphemeralProvisioner:
             self._infra_failures.pop(event_id, None)
             return agent
         except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError) as exc:
-            self._infra_failures[event_id] = failures + 1
             logger.warning(
-                "Ephemeral dispatch failed for %s (%d/%d): %s. Event stays queued.",
+                "Ephemeral dispatch failed for %s (%d/%d): %s. Cleaning up and retrying.",
                 event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
             await self._cancel_taskrun(event_id)
-            return INFRA_SENTINEL
+            await asyncio.sleep(5)
+
+            try:
+                await self._trigger_taskrun(event_id)
+                agent = await self._wait_for_registration(event_id, timeout=90)
+                self._active_sources[event_id] = source
+                self._infra_failures.pop(event_id, None)
+                logger.info("Ephemeral retry succeeded for %s after cleanup", event_id)
+                return agent
+            except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError) as retry_exc:
+                self._infra_failures[event_id] = failures + 1
+                logger.warning(
+                    "Ephemeral retry also failed for %s (%d/%d): %s.",
+                    event_id, failures + 1, MAX_INFRA_FAILURES, retry_exc or "handshake timeout",
+                )
+                await self._cancel_taskrun(event_id)
+                return INFRA_SENTINEL
 
     def on_ephemeral_registered(self, event_id: str) -> None:
         """Called by registry.register() when an ephemeral agent registers."""
