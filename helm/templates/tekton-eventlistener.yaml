@@ -150,6 +150,57 @@ spec:
             - name: workspace
               emptyDir: {}
 ---
+# Prune TriggerTemplate -- deletes stuck TaskRuns by event_id label.
+# Triggered by POST {"event_id": "evt-xxx", "action": "cancel"}.
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: {{ .Release.Name }}-ephemeral-prune
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: ephemeral-agent
+spec:
+  params:
+    - name: event_id
+      description: Darwin event ID whose TaskRuns should be pruned
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: TaskRun
+      metadata:
+        generateName: darwin-prune-
+        namespace: {{ .Release.Namespace }}
+        labels:
+          app: darwin-brain
+          app.kubernetes.io/component: ephemeral-prune
+      spec:
+        serviceAccountName: {{ .Release.Name }}-brain
+        timeout: "120s"
+        taskSpec:
+          steps:
+            - name: prune
+              image: "registry.redhat.io/openshift4/ose-cli:latest"
+              computeResources:
+                requests:
+                  memory: "32Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "64Mi"
+                  cpu: "100m"
+              script: |
+                #!/bin/sh
+                EVENT_ID="$(tt.params.event_id)"
+                echo "Pruning TaskRuns for event ${EVENT_ID}"
+                TASKRUNS=$(kubectl get taskrun -n {{ .Release.Namespace }} -l darwin.io/event-id=${EVENT_ID} -o name 2>/dev/null)
+                if [ -z "$TASKRUNS" ]; then
+                  echo "No TaskRuns found for ${EVENT_ID}"
+                  exit 0
+                fi
+                echo "Found: ${TASKRUNS}"
+                kubectl delete ${TASKRUNS} -n {{ .Release.Namespace }} --force --grace-period=0 2>&1 || true
+                echo "Prune complete for ${EVENT_ID}"
+---
 apiVersion: triggers.tekton.dev/v1beta1
 kind: TriggerBinding
 metadata:
@@ -177,8 +228,25 @@ spec:
   serviceAccountName: {{ .Release.Name }}-brain
   triggers:
     - name: spawn-ephemeral-agent
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "!has(body.action) || body.action == 'spawn'"
       bindings:
         - ref: {{ .Release.Name }}-ephemeral-agent
       template:
         ref: {{ .Release.Name }}-ephemeral-agent
+    - name: cancel-ephemeral-agent
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "has(body.action) && body.action == 'cancel'"
+      bindings:
+        - ref: {{ .Release.Name }}-ephemeral-agent
+      template:
+        ref: {{ .Release.Name }}-ephemeral-prune
 {{- end }}

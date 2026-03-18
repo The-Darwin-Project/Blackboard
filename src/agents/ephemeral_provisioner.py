@@ -98,6 +98,7 @@ class EphemeralProvisioner:
                 "Ephemeral dispatch failed for %s (%d/%d): %s. Event stays queued.",
                 event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
+            await self._cancel_taskrun(event_id)
             return INFRA_SENTINEL
 
     def on_ephemeral_registered(self, event_id: str) -> None:
@@ -120,9 +121,19 @@ class EphemeralProvisioner:
 
     async def _trigger_taskrun(self, event_id: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(self._url, json={"event_id": event_id})
+            resp = await client.post(self._url, json={"event_id": event_id, "action": "spawn"})
             resp.raise_for_status()
             logger.info("Triggered TaskRun for %s (status=%d)", event_id, resp.status_code)
+
+    async def _cancel_taskrun(self, event_id: str) -> None:
+        """Trigger prune TaskRun to delete stuck TaskRuns for this event."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(self._url, json={"event_id": event_id, "action": "cancel"})
+                resp.raise_for_status()
+                logger.info("Triggered prune TaskRun for %s (status=%d)", event_id, resp.status_code)
+        except Exception as exc:
+            logger.warning("Failed to trigger prune for %s: %s", event_id, exc)
 
     async def _wait_for_registration(
         self, event_id: str, timeout: float = 90,
