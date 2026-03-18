@@ -29,6 +29,9 @@ spec:
           app: darwin-brain
           app.kubernetes.io/component: ephemeral-agent
           darwin.io/event-id: $(tt.params.event_id)
+        annotations:
+          darwin.io/monitored: "true"
+          darwin.io/service-name: "oncall-agent"
       spec:
         serviceAccountName: {{ .Release.Name }}-brain
         timeout: {{ .Values.ephemeralAgents.taskRunTimeout | quote }}

@@ -98,6 +98,19 @@ These are **file-level constraints** that take precedence over general rules. Re
 
 When editing a file that **lacks** an `@ai-rules:` header, analyze its architectural patterns, constraints, and gotchas, then generate a header. Use the language-appropriate comment syntax (`//` for JS/TS, `#` for Python/YAML/Shell).
 
+## OnCall Agent TaskRuns
+
+Darwin uses ephemeral Tekton TaskRun agents (`darwin-oncall-*` pods, service name `oncall-agent`) for Headhunter and TimeKeeper events. These are short-lived pods that connect to the Brain via WebSocket.
+
+Common issues and remediation:
+- **Pending / Init:0/1 stuck pods**: Scheduling gates or node pressure. Delete the stuck TaskRun: `kubectl delete taskrun -l darwin.io/event-id=<event-id> -n darwin`
+- **CrashLoopBackOff**: Image pull failure or GCP SA key misconfiguration. Check `kubectl describe pod <name> -n darwin` for the init container error.
+- **TaskRunTimeout**: Agent exceeded the 24h hard ceiling. The TaskRun will self-terminate. If the pod lingers, delete it.
+- **Multiple TaskRuns for one event**: The dispatcher retried after a handshake timeout. Delete the older/stuck ones by event-id label.
+- **EventListener down** (`ephemeral-dispatcher` service unhealthy): No new agents can spawn. Check `kubectl get pods -l app.kubernetes.io/component=ephemeral-agent` for the EventListener pod. Restart if needed.
+
+All oncall TaskRuns carry the label `darwin.io/event-id` for correlation. Use it for cleanup and investigation.
+
 ## Environment
 
 - Kubernetes namespace: `darwin` (application workloads)
