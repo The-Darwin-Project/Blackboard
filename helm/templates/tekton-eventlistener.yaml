@@ -226,6 +226,17 @@ metadata:
     app.kubernetes.io/component: ephemeral-agent
 spec:
   serviceAccountName: {{ .Release.Name }}-brain
+  resources:
+    kubernetesResource:
+      spec:
+        template:
+          metadata:
+            annotations:
+              darwin.io/monitored: "true"
+              darwin.io/service-name: "ephemeral-dispatcher"
+              darwin.io/source-repo: "https://github.com/The-Darwin-Project/BlackBoard"
+              darwin.io/gitops-repo: "The-Darwin-Project/BlackBoard"
+              darwin.io/config-path: "helm/templates/tekton-eventlistener.yaml"
   triggers:
     - name: spawn-ephemeral-agent
       interceptors:
