@@ -428,7 +428,7 @@ class Brain:
                 logger.info(
                     f"Closing duplicate event {event_id} -- "
                     f"existing event {eid} already handling {event.service}"
-                    f"{f' MR !{existing_mr}' if existing_mr else ''}"
+                    f"{f' MR !{ex_mr}' if ex_mr else ''}"
                 )
                 await self._close_and_broadcast(
                     event_id,
