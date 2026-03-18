@@ -32,6 +32,7 @@ spec:
         annotations:
           darwin.io/monitored: "true"
           darwin.io/service-name: "oncall-agent"
+          darwin.io/event-id: $(tt.params.event_id)
       spec:
         serviceAccountName: {{ .Release.Name }}-brain
         timeout: {{ .Values.ephemeralAgents.taskRunTimeout | quote }}
