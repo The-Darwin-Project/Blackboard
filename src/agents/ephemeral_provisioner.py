@@ -24,6 +24,9 @@ CAPACITY_SENTINEL = "__EPHEMERAL_CAPACITY__"
 INFRA_SENTINEL = "__EPHEMERAL_INFRA_FAIL__"
 
 
+MAX_INFRA_FAILURES = 2
+
+
 class EphemeralProvisioner:
     """Provisions ephemeral agents via Tekton EventListener webhook.
 
@@ -43,6 +46,7 @@ class EphemeralProvisioner:
         self._url = event_listener_url
         self._pending: dict[str, asyncio.Event] = {}
         self._active_sources: dict[str, str] = {}
+        self._infra_failures: dict[str, int] = {}
 
     def get_source_limit(self, source: str) -> int:
         env_key = f"{source.upper().replace('-', '_')}_MAX_ACTIVE"
@@ -73,14 +77,26 @@ class EphemeralProvisioner:
             )
             return CAPACITY_SENTINEL
 
+        failures = self._infra_failures.get(event_id, 0)
+        if failures >= MAX_INFRA_FAILURES:
+            logger.warning(
+                "Ephemeral circuit breaker for %s: %d consecutive failures. Falling back to sidecar.",
+                event_id, failures,
+            )
+            self._infra_failures.pop(event_id, None)
+            return None
+
         try:
             await self._trigger_taskrun(event_id)
             agent = await self._wait_for_registration(event_id, timeout=90)
             self._active_sources[event_id] = source
+            self._infra_failures.pop(event_id, None)
             return agent
         except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError) as exc:
+            self._infra_failures[event_id] = failures + 1
             logger.warning(
-                "Ephemeral dispatch failed for %s: %s. Event stays queued.", event_id, exc,
+                "Ephemeral dispatch failed for %s (%d/%d): %s. Event stays queued.",
+                event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
             return INFRA_SENTINEL
 
@@ -100,6 +116,7 @@ class EphemeralProvisioner:
             except Exception:
                 logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
         self._active_sources.pop(event_id, None)
+        self._infra_failures.pop(event_id, None)
 
     async def _trigger_taskrun(self, event_id: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:

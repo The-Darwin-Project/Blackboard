@@ -2042,7 +2042,9 @@ class Brain:
                         provision_result = await self._ephemeral_provisioner.ensure_agent(
                             event_id, source=event_doc.source,
                         )
-                        if isinstance(provision_result, str):
+                        if provision_result is None:
+                            logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
+                        elif isinstance(provision_result, str):
                             defer_seconds = 120 if provision_result == CAPACITY_SENTINEL else 60
                             reason = (
                                 "Waiting for ephemeral agent slot"
@@ -2055,7 +2057,8 @@ class Brain:
                                 {"delay_seconds": defer_seconds, "reason": reason},
                             )
                             return
-                        agent_id_override = provision_result.agent_id
+                        else:
+                            agent_id_override = provision_result.agent_id
 
                     result, session_id = await dispatch_to_agent(
                         registry=registry,
