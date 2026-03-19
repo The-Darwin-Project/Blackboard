@@ -625,29 +625,46 @@ class KubernetesObserver:
                     )
         self._active_warnings = new_warnings
     
+    PENDING_THRESHOLD_SECONDS = 300  # 5 min -- pods stuck in Pending/Init longer than this are unhealthy
+
     def _get_unhealthy_reason(self, pod) -> Optional[str]:
-        """Extract unhealthy reason from pod container statuses."""
+        """Extract unhealthy reason from pod phase + container statuses."""
+        import time as _time
+
+        phase = (pod.status.phase or "").lower()
+        pod_name = pod.metadata.name
+
+        if phase == "pending":
+            start_ts = pod.metadata.creation_timestamp
+            if start_ts:
+                age = _time.time() - start_ts.timestamp()
+                if age > self.PENDING_THRESHOLD_SECONDS:
+                    conditions = pod.status.conditions or []
+                    reasons = [c.reason for c in conditions if c.reason and c.status != "True"]
+                    detail = ", ".join(reasons) if reasons else "scheduling blocked"
+                    return f"Pending: stuck for {int(age // 60)}m ({detail})"
+
         statuses = (pod.status.container_statuses or []) + (pod.status.init_container_statuses or [])
-        
+
         for cs in statuses:
             # Check waiting state (ImagePullBackOff, CrashLoopBackOff, etc.)
             if cs.state and cs.state.waiting:
                 reason = cs.state.waiting.reason or ""
                 if reason in self.UNHEALTHY_STATES:
                     return f"{reason}: {cs.state.waiting.message or cs.name}"
-            
+
             # Check terminated state (OOMKilled, Error)
             if cs.state and cs.state.terminated:
                 reason = cs.state.terminated.reason or ""
                 if reason in self.UNHEALTHY_STATES:
                     return f"{reason}: exit_code={cs.state.terminated.exit_code} ({cs.name})"
-            
+
             # Check lastState for recent OOMKills (container restarted but was OOMKilled)
             if cs.last_state and cs.last_state.terminated:
                 reason = cs.last_state.terminated.reason or ""
                 if reason == "OOMKilled" and (cs.restart_count or 0) > 2:
                     return f"{reason}: {cs.restart_count} restarts ({cs.name})"
-        
+
         return None
     
     async def _process_pod_metrics(self, pod_metrics: dict) -> None:
