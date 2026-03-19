@@ -36,6 +36,20 @@ spec:
       spec:
         serviceAccountName: {{ .Release.Name }}-brain
         timeout: {{ .Values.ephemeralAgents.taskRunTimeout | quote }}
+        {{- if .Values.ephemeralAgents.excludeNodes }}
+        podTemplate:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          {{- range .Values.ephemeralAgents.excludeNodes }}
+                          - {{ . | quote }}
+                          {{- end }}
+        {{- end }}
         taskSpec:
           steps:
             - name: agent

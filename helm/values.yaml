@@ -307,6 +307,10 @@ ephemeralAgents:
   cli: "claude" # CLI binary for ephemeral agents
   model: "claude-opus-4-6" # Single model for all role switches
   permissionMode: "bypassPermissions"
+  # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
+  # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
+  excludeNodes: []
+  #  - cnvqe-22.lab.eng.tlv2.redhat.com
   cleanup:
     strategy: "keep-since" # "keep-since" (age-based) or "keep" (count-based)
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
