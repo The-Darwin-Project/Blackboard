@@ -152,22 +152,22 @@ export async function getEventDocument(eventId: string): Promise<EventDocument> 
   return fetchApi<EventDocument>(`/queue/${encodeURIComponent(eventId)}`);
 }
 
-export async function approveEvent(eventId: string): Promise<any> {
-  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/approve`, {
+export async function approveEvent(eventId: string): Promise<unknown> {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/approve`, {
     method: 'POST',
   });
 }
 
-export async function rejectEvent(eventId: string, reason: string, image?: string): Promise<any> {
-  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/reject`, {
+export async function rejectEvent(eventId: string, reason: string, image?: string): Promise<unknown> {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/reject`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason, ...(image ? { image } : {}) }),
   });
 }
 
-export async function closeEvent(eventId: string, reason?: string): Promise<any> {
-  return fetchApi<any>(`/queue/${encodeURIComponent(eventId)}/close`, {
+export async function closeEvent(eventId: string, reason?: string): Promise<unknown> {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/close`, {
     method: 'POST',
     body: JSON.stringify({ reason: reason || 'User force-closed the event.' }),
   });

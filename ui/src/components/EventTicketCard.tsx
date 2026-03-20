@@ -9,6 +9,7 @@
  */
 import type { ActiveEvent } from '../api/types';
 import { DOMAIN_COLORS, STATUS_COLORS } from '../constants/colors';
+import { extractReasonDisplay } from '../utils/eventFormat';
 import SourceIcon from './SourceIcon';
 
 interface EventTicketCardProps {
@@ -16,13 +17,6 @@ interface EventTicketCardProps {
   isSelected: boolean;
   onSelect: () => void;
   onClose: (id: string) => void;
-}
-
-/** Extract plan title from YAML frontmatter reason, or return raw text for non-frontmatter. */
-export function extractReasonDisplay(reason: string): string {
-  if (!reason.startsWith('---')) return reason;
-  const match = reason.match(/plan:\s*"?([^"\n]+)"?/);
-  return match?.[1]?.trim() || reason.replace(/---[\s\S]*?---/, '').trim() || reason;
 }
 
 export default function EventTicketCard({ event, isSelected, onSelect, onClose }: EventTicketCardProps) {

@@ -13,8 +13,9 @@ import type { ConversationTurn } from '../api/types';
 import TurnBubble, { StatusBadge } from './TurnBubble';
 import MarkdownViewer from './MarkdownViewer';
 
-function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: any; timeDate: string }; conversation: ConversationTurn[] }): string {
-  const evidenceText = typeof event.event.evidence === 'string' ? event.event.evidence : event.event.evidence?.display_text || '';
+function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: unknown; timeDate: string }; conversation: ConversationTurn[] }): string {
+  const evidence = event.event.evidence;
+  const evidenceText = typeof evidence === 'string' ? evidence : (evidence as Record<string, string>)?.display_text || '';
   const lines: string[] = [
     `# Event: ${event.id}`, '',
     `- **Source:** ${event.source}`, `- **Service:** ${event.service}`,

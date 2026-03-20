@@ -18,7 +18,7 @@ import ReportGrid from './ReportGrid';
 import ReportContent from './ReportContent';
 import ReportToolbar from './ReportToolbar';
 import { DOMAIN_COLORS } from '../constants/colors';
-import { extractReasonDisplay } from './EventTicketCard';
+import { extractReasonDisplay } from '../utils/eventFormat';
 
 export default function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams();

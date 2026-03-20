@@ -121,7 +121,7 @@ function DashboardInner() {
     } catch { return {}; }
   });
   useEffect(() => {
-    try { sessionStorage.setItem('darwin:ephemeralStream', JSON.stringify(ephemeralStream)); } catch {}
+    try { sessionStorage.setItem('darwin:ephemeralStream', JSON.stringify(ephemeralStream)); } catch { /* fire-and-forget */ }
   }, [ephemeralStream]);
   const [ephemeralAgents, setEphemeralAgents] = useState<AgentRegistryEntry[]>([]);
 
@@ -130,7 +130,7 @@ function DashboardInner() {
       try {
         const agents = await getAgents();
         setEphemeralAgents(agents.filter((a: AgentRegistryEntry) => a.ephemeral));
-      } catch {}
+      } catch { /* fire-and-forget */ }
     };
     fetch();
     const id = setInterval(fetch, 10_000);

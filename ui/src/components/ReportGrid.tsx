@@ -8,7 +8,7 @@
  * Displays persisted report metadata in a multi-column grid.
  */
 import type { ReportMeta } from '../api/types';
-import { extractReasonDisplay } from './EventTicketCard';
+import { extractReasonDisplay } from '../utils/eventFormat';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
 
