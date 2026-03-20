@@ -10,6 +10,7 @@
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getActiveEvents, getEventDocument } from '../api/client';
+import type { ActiveEvent } from '../api/types';
 
 export function useActiveEvents() {
   return useQuery({
@@ -48,6 +49,12 @@ export function useQueueInvalidation() {
     invalidateAll: () => {
       queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
       queryClient.invalidateQueries({ queryKey: ['eventDocument'] });
+    },
+    optimisticRemoveEvent: (eventId: string) => {
+      queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
+        old ? old.filter((e) => e.id !== eventId) : [],
+      );
+      queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
     },
   };
 }
