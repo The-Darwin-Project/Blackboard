@@ -424,6 +424,7 @@ function is429Error(stderr) {
 
 function is400SessionError(output, stderr) {
     const combined = ((output || '') + (stderr || '')).toLowerCase();
+    if (combined.includes('no conversation found')) return true;
     return combined.includes('400') && (
         combined.includes('thinking') ||
         combined.includes('redacted_thinking') ||
