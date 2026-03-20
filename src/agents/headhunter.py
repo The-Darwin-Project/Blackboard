@@ -241,7 +241,7 @@ class Headhunter:
             context["failed_job_log"] = failed_job_log
 
             if action in ("directly_addressed", "mentioned"):
-                bot_username = os.getenv("GITLAB_BOT_USERNAME", "cnv-downstream-bot")
+                bot_username = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
                 notes_resp = await client.get(
                     self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
                     headers=headers,
@@ -456,7 +456,7 @@ class Headhunter:
         """Map GitLab project path to a Darwin service name via service registry.
 
         Fallback: extract the last path segment as a meaningful component name
-        (e.g., 'openshift-virtualization/konflux-builds/v4-99/kubevirt' -> 'kubevirt').
+        (e.g., 'org/group/subgroup/project' -> 'project').
         """
         try:
             services = await self.blackboard.get_services()

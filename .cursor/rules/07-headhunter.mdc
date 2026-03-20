@@ -38,7 +38,7 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 
 ## Security: @Mention Instruction Injection
 
-* MR comments tagging the bot (`@cnv-downstream-bot <instruction>`) are passed as plan context.
+* MR comments tagging the configured bot account (`GITLAB_BOT_USERNAME` env) are passed as plan context.
 * Only authors in the allowed list can inject instructions (default-closed).
 * Allowed authors = email local parts from `HEADHUNTER_MAINTAINERS` + explicit `HEADHUNTER_ALLOWED_AUTHORS` CSV.
 * If both are empty, all @mentions are blocked (`_nobody_` sentinel).

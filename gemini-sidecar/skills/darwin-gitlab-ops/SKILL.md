@@ -1,6 +1,6 @@
 ---
 name: darwin-gitlab-ops
-description: GitLab API interaction patterns for internal GitLab instances. Use when working with GitLab merge requests, pipelines, projects, or any GitLab API call.
+description: GitLab API interaction patterns for GitLab instances. Use when working with GitLab merge requests, pipelines, projects, or any GitLab API call.
 roles: [architect, sysadmin, developer]
 ---
 
@@ -8,14 +8,14 @@ roles: [architect, sysadmin, developer]
 
 ## Pre-Configured Environment
 
-`glab` CLI and GitLab MCP tools are pre-configured for `$GITLAB_HOST` with TLS verification disabled. You do not need to handle SSL certificates or authentication setup.
+`glab` CLI and GitLab MCP tools are pre-configured via `$GITLAB_HOST`. TLS behavior is controlled by the deployment environment. You do not need to handle authentication setup.
 
 Available environment variables:
 
 - `GITLAB_TOKEN` -- Personal Access Token for API calls
-- `GITLAB_HOST` -- The internal GitLab hostname
+- `GITLAB_HOST` -- The GitLab hostname
 
-Git operations (`clone`, `push`, `pull`) to `$GITLAB_HOST` also have SSL verification disabled -- you can use standard git commands without TLS workarounds.
+Git operations (`clone`, `push`, `pull`) to `$GITLAB_HOST` use the pre-configured TLS settings -- you can use standard git commands.
 
 ## Preferred: GitLab MCP Tools
 
@@ -37,8 +37,8 @@ Useful patterns:
 
 GitLab API requires URL-encoded project paths for nested groups:
 
-- `openshift-virtualization/konflux-builds/v4-22/my-repo`
-- Encoded: `openshift-virtualization%2Fkonflux-builds%2Fv4-22%2Fmy-repo`
+- `org/group/subgroup/project`
+- Encoded: `org%2Fgroup%2Fsubgroup%2Fproject`
 
 Use `glab api "/projects/$(python3 -c 'import urllib.parse; print(urllib.parse.quote("group/subgroup/repo", safe=""))')"` for dynamic encoding.
 
@@ -51,4 +51,4 @@ curl -k -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   "https://$GITLAB_HOST/api/v4/projects?per_page=20"
 ```
 
-The `-k` flag skips TLS verification for the internal instance.
+The `-k` flag skips TLS verification when required by the target instance.

@@ -244,8 +244,8 @@ class TestServiceResolution:
         bb.get_services = AsyncMock(return_value={})
         hh = _make_headhunter(blackboard=bb)
 
-        result = await hh._resolve_service("openshift-virtualization/konflux-builds/v5-99/kubevirt")
-        assert result == "kubevirt"
+        result = await hh._resolve_service("org/group/subgroup/my-service")
+        assert result == "my-service"
 
 
 # =========================================================================

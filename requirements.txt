@@ -1,18 +1,19 @@
 # BlackBoard/requirements.txt
 # Darwin Blackboard (Brain) dependencies
+# To pin exact versions: docker build -t darwin . && docker run --rm darwin pip freeze
 
 # Web framework
-fastapi
-uvicorn[standard]
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
 
 # CLI framework (for darwin CLI tool)
-typer
+typer>=0.15.0
 
 # Data validation
-pydantic
+pydantic>=2.10.0
 
 # Redis (with hiredis for async performance)
-redis[hiredis]
+redis[hiredis]>=5.2.0
 
 # Google Gen AI SDK (Vertex AI) -- replaces deprecated google-cloud-aiplatform
 google-genai>=1.60.0
@@ -21,28 +22,28 @@ google-genai>=1.60.0
 anthropic>=0.79.0
 
 # Git operations (for SysAdmin verification)
-gitpython
+gitpython>=3.1.0
 
 # YAML parsing (for Helm values)
-pyyaml
+pyyaml>=6.0
 
 # GitHub App authentication (for GitOps)
-pyjwt[crypto]
-requests
+pyjwt[crypto]>=2.9.0
+requests>=2.32.0
 
 # Async HTTP client (for sidecar communication and health checks)
-httpx
+httpx>=0.28.0
 
 # WebSocket client (for real-time agent sidecar communication)
-websockets
+websockets>=14.0
 
 # Kubernetes client (for K8s metrics observer)
-kubernetes
+kubernetes>=31.0.0
 
 # Slack integration (Socket Mode, async handlers, Assistant + streaming)
 slack-bolt[async]>=1.22.0
 slack-sdk>=3.35.0
-aiohttp
+aiohttp>=3.11.0
 
 # TimeKeeper (cron expression parsing for scheduled tasks)
-croniter
+croniter>=6.0.0

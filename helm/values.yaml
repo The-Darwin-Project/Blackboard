@@ -15,13 +15,13 @@ image:
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
-# Redis Sidecar Configuration (registry.redhat.io/rhel9/redis-7)
+# Redis Sidecar Configuration
 # =============================================================================
 redis:
   enabled: true
   image:
-    repository: registry.redhat.io/rhel9/redis-7
-    tag: "latest"
+    repository: redis
+    tag: "7-alpine"
   password: "" # Override via secret or ArgoCD app parameters
   persistence:
     enabled: true # Enables RDB snapshots to PVC -- survives pod restarts
@@ -171,6 +171,21 @@ route:
     termination: edge # edge, passthrough, or reencrypt
     insecureEdgeTerminationPolicy: Redirect # Allow, Redirect, or None
 # =============================================================================
+# Ingress Configuration (vanilla Kubernetes -- alternative to OpenShift Route)
+# =============================================================================
+ingress:
+  enabled: false
+  className: ""
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: ""
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+# =============================================================================
 # Application Metadata
 # =============================================================================
 app:
@@ -182,7 +197,7 @@ app:
   dryRun: false # Set to true for testing (no real changes)
   autoApprove: true # Enable closed-loop automation (values-only changes auto-approved)
   gitRepoPath: "/data/gitops"
-  contactEmail: "darwin-team@redhat.com" # Default contact, overridable per cluster
+  contactEmail: "" # Contact email for AI transparency footer, overridable per cluster
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
   agentWsMode: "reverse" # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
   agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
@@ -294,7 +309,7 @@ slack:
   existingSecret: "" # e.g., "slack-credentials" (keys: bot-token, app-token)
   channels:
     infrastructure: "" # Channel ID for #darwin-infra (e.g., "C0XXXXXXX")
-    mrFallback: "" # Channel ID for #cnv-ci-release (e.g., "C0YYYYYYY")
+    mrFallback: "" # Channel ID for MR notifications (e.g., "C0YYYYYYY")
   userMapping:
     method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================
@@ -309,8 +324,9 @@ ephemeralAgents:
   permissionMode: "bypassPermissions"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
+  pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup
   excludeNodes: []
-  #  - cnvqe-22.lab.eng.tlv2.redhat.com
+  #  - hostname-to-exclude
   cleanup:
     strategy: "keep-since" # "keep-since" (age-based) or "keep" (count-based)
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
@@ -325,7 +341,7 @@ headhunter:
   maxActive: "3" # max concurrent headhunter events (flow gate)
   startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
-  maintainers: "" # CSV of emails for static source (e.g., "alice@redhat.com,bob@redhat.com")
+  maintainers: "" # CSV of maintainer emails for static source
 # =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================

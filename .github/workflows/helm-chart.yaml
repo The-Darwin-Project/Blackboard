@@ -1,0 +1,79 @@
+# BlackBoard/.github/workflows/helm-chart.yaml
+# @ai-rules:
+# 1. [Pattern]: OCI push to GHCR. Chart version read from helm/Chart.yaml -- never hardcoded here.
+# 2. [Constraint]: PR builds lint + template only. Push to main builds + publishes.
+# 3. [Constraint]: Uses GITHUB_TOKEN for GHCR auth (packages:write). No App token needed.
+# 4. [Pattern]: azure/setup-helm@v4 required -- runners don't have Helm pre-installed.
+# Lint, validate, package, and publish Helm chart as OCI artifact to GHCR
+
+name: Helm Chart
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "helm/**"
+      - ".github/workflows/helm-chart.yaml"
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - "helm/**"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  CHART_PATH: helm
+
+jobs:
+  lint-and-publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint ${{ env.CHART_PATH }}
+
+      - name: Template validation
+        run: helm template darwin-brain ${{ env.CHART_PATH }}
+
+      - name: Package chart
+        if: github.event_name != 'pull_request'
+        run: helm package ${{ env.CHART_PATH }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Push chart to GHCR
+        if: github.event_name != 'pull_request'
+        run: |
+          CHART_VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}')
+          helm push darwin-brain-${CHART_VERSION}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Output chart info
+        if: github.event_name != 'pull_request'
+        run: |
+          CHART_VERSION=$(grep '^version:' ${{ env.CHART_PATH }}/Chart.yaml | awk '{print $2}')
+          echo "## Helm Chart Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Chart:** darwin-brain" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${CHART_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/darwin-brain" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Install" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "helm install darwin-brain oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/darwin-brain --version ${CHART_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

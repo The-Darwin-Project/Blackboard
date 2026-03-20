@@ -84,7 +84,7 @@ class GitLabTokenAuth:
 
         Args:
             repo_path: Path to the local git repository
-            project_path: GitLab project path (e.g., "openshift-virtualization/release-app")
+            project_path: GitLab project path (e.g., "org/project")
         """
         token = self.get_token()
 

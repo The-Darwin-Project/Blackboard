@@ -1,6 +1,11 @@
 # Darwin Blackboard (Brain)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Build and Push Image](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/build-push.yaml/badge.svg)](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/build-push.yaml)
+
 The central nervous system of Darwin -- an autonomous closed-loop cloud operations system.
+
+> **Contributing?** See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup. Report security issues via [SECURITY.md](SECURITY.md). Community standards in [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Architecture
 
@@ -74,18 +79,18 @@ Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the B
 | **Brain** | Orchestrator | Vertex AI Pro (Gemini 3 Pro) | Cynefin classification, progressive skill loading, agent routing, feedback loop verification |
 | **Aligner** | Truth Maintenance | In-process Python + Vertex AI Flash | Telemetry processing, LLM signal analysis, anomaly-triggered event creation |
 | **Archivist** | Deep Memory | In-process Python + Flash | Event summarization, vector embedding (text-embedding-005), similarity search via Qdrant |
-| **Architect** | Strategy | Gemini CLI sidecar | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
-| **SysAdmin** | Execution | Gemini CLI sidecar | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
-| **Developer** | Implementation | Gemini CLI sidecar (team: Dev + QE + Manager) | Source code changes, feature implementation, QE verification, manager review |
+| **Architect** | Strategy | CLI sidecar (configurable: `gemini` or `claude`) | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
+| **SysAdmin** | Execution | CLI sidecar (configurable: `gemini` or `claude`) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
+| **Developer** | Implementation | CLI sidecar (configurable: `gemini` or `claude`) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
+| **QE** | Verification | CLI sidecar (configurable: `gemini` or `claude`) | Test writing, test execution, verification of Developer changes |
 
-### Dev Team Manager Pattern
+### Agent Dispatch (Reverse WebSocket)
 
-The Developer agent is a **Dev Team** with a central **Manager** (Flash LLM) that decides work split:
+In reverse-WS mode (`AGENT_WS_MODE=reverse`), sidecars connect to the Brain and register their role. Brain dispatches tasks directly to individual agents:
 
-- Brain dispatches to **DevTeam**; the Manager receives the task and decides how to split work.
-- Manager uses function calling: `dispatch_developer`, `dispatch_qe`, `dispatch_both`, etc.
-- Skills are loaded from the `manager_skills/` directory (ConfigMap in production).
-- Manager progress is visible in the Dashboard conversation feed (`actor="manager"`).
+- Developer and QE are **separate first-class agents** dispatched independently by the Brain.
+- Brain decides which agent to route to based on the task mode (`execute`, `investigate`, `implement`, `test`).
+- Ephemeral agents (Tekton TaskRun) handle Headhunter and TimeKeeper events, with circuit breaker fallback to in-pod sidecars.
 
 ## Progressive Skill System
 
@@ -208,16 +213,17 @@ Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automati
 
 ## SDK
 
-The Brain and Aligner use the `google-genai` SDK. The sidecar agents use the Gemini CLI with Vertex AI backend.
+The Brain and Aligner use the `google-genai` SDK. Sidecar agents use either Gemini CLI or Claude Code CLI (configurable per agent via `sidecars.<role>.cliType` in Helm values).
 
-| Component | SDK | Model |
+| Component | SDK | Default Model |
 | --- | --- | --- |
-| Brain | `google-genai` Python SDK | `gemini-3-pro-preview` |
-| Aligner | `google-genai` Python SDK | `gemini-3-flash-preview` |
-| Archivist | `google-genai` Python SDK | `gemini-3-flash-preview` |
-| Architect sidecar | Gemini CLI | `gemini-3-pro-preview` |
-| SysAdmin sidecar | Gemini CLI | `gemini-3-flash-preview` |
-| Developer sidecar | Gemini CLI | `gemini-2.5-pro` |
+| Brain | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
+| Aligner | `google-genai` Python SDK | `gemini-3.1-flash-lite-preview` |
+| Archivist | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
+| Architect sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
+| SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
+| Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
+| QE sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 
 ## Quick Start
 
@@ -403,8 +409,7 @@ BlackBoard/
       task_bridge.py         # TaskBridge (asyncio.Queue per task_id)
       agent_ws_handler.py    # /agent/ws WebSocket handler
       dispatch.py            # Unified dispatch_to_agent + send_cancel
-      dev_team.py            # DevTeam with Manager function calling
-      manager_skills/        # Manager skill Markdown files (ConfigMap in production)
+      ephemeral_provisioner.py  # Tekton TaskRun ephemeral agents with circuit breaker
       llm/
         gemini_client.py     # Gemini API client (streaming, thought_signature handling)
         types.py             # Function declarations for Brain tools
@@ -449,6 +454,10 @@ BlackBoard/
   docs/                      # External service access docs, remediation examples
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and PR process.
+
 ## License
 
-See [LICENSE](LICENSE) file.
+MIT License. See [LICENSE](LICENSE) file.

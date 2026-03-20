@@ -1,15 +1,24 @@
 # BlackBoard/helm/Chart.yaml
+# @ai-rules:
+# 1. [Constraint]: version: field is the Helm chart version. Bumped manually -- no CI auto-increment.
+# 2. [Constraint]: appVersion: tracks the Brain application version. Keep in sync with CHANGELOG.md.
+# 3. [Constraint]: home: and sources: must point to the public GitHub repo.
 apiVersion: v2
 name: darwin-brain
 description: Darwin Blackboard (Brain) - The central nervous system for autonomous infrastructure management
 type: application
-version: 0.1.0
+version: 1.0.0
 appVersion: "1.0.0"
+home: https://github.com/The-Darwin-Project/Blackboard
+sources:
+  - https://github.com/The-Darwin-Project/Blackboard
 keywords:
   - darwin
   - ai
   - infrastructure
   - automation
   - gitops
+  - kubernetes
+  - multi-agent
 maintainers:
   - name: Tal Hason

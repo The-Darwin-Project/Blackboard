@@ -1,0 +1,25 @@
+# BlackBoard/docker-compose.yml
+# @ai-rules:
+# 1. [Constraint]: Dev dependencies ONLY (Redis, Qdrant). Brain server runs via uvicorn, not in compose.
+# 2. [Pattern]: Image versions must match helm/values.yaml defaults (redis:7-alpine, qdrant:v1.16.3).
+# 3. [Constraint]: No secrets or env vars here. Brain env is set in shell or .env (gitignored).
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+volumes:
+  redis-data:
+  qdrant-data:

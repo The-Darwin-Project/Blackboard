@@ -1,0 +1,10 @@
+# BlackBoard/requirements-dev.txt
+# @ai-rules:
+# 1. [Constraint]: NEVER add test deps to requirements.txt -- they ship in the production Docker image.
+# 2. [Pattern]: Inherits prod deps via -r requirements.txt. Only test-specific packages here.
+# 3. [Constraint]: httpx is already in requirements.txt (prod dep). Do not duplicate here.
+
+-r requirements.txt
+
+pytest>=8.0.0
+fakeredis[lua]>=2.26.0

@@ -13,8 +13,8 @@ The K8s Observer discovers services by scanning pod annotations in configured na
 |---|---|---|---|
 | `darwin.io/monitored` | Yes | `"true"` | `"true"` |
 | `darwin.io/service-name` | Yes | Unique service identifier | `"kubevirt"`, `"hco"` |
-| `darwin.io/source-repo` | Yes | Source code repository URL | `"https://gitlab.cee.redhat.com/..."` |
-| `darwin.io/gitops-repo` | Yes | GitOps config repository URL | `"https://gitlab.cee.redhat.com/..."` |
+| `darwin.io/source-repo` | Yes | Source code repository URL | `"source repo URL"` |
+| `darwin.io/gitops-repo` | Yes | GitOps config repository URL | `"GitOps config repo URL"` |
 | `darwin.io/config-path` | Yes | Path to Helm chart or Kustomize dir in gitops repo | `"sync-controller/chart"` |
 
 ## Discovery Behavior
