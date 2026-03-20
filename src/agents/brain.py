@@ -2112,9 +2112,34 @@ class Brain:
                 self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
                 self._agent_session_modes.setdefault(event_id, {})[agent_name] = mode or ""
             elif is_error_result and event_id in self._agent_sessions:
+                had_resume = resume_session_id is not None
                 self._agent_sessions.get(event_id, {}).pop(agent_name, None)
                 self._agent_session_modes.get(event_id, {}).pop(agent_name, None)
                 logger.info(f"Cleared corrupted session for {agent_name} on {event_id}")
+                if had_resume and "No conversation found" in result_str_check:
+                    logger.info(f"Retrying {agent_name} on {event_id} without --resume (stale session)")
+                    try:
+                        if self._ws_mode == "reverse" and registry and bridge:
+                            result, session_id = await dispatch_to_agent(
+                                registry=registry, bridge=bridge, role=agent_name,
+                                event_id=event_id, task=task, on_progress=on_progress,
+                                on_huddle=on_huddle, agent_id=agent_id_override,
+                                session_id=None, event_md_path=event_md_path,
+                            )
+                        elif agent:
+                            async with self._agent_locks[agent_name]:
+                                result, session_id = await agent.process(
+                                    event_id=event_id, task=task, event_md_path=event_md_path,
+                                    on_progress=on_progress, mode=mode, session_id=None,
+                                )
+                        if session_id and result and not str(result).strip().startswith("Error:"):
+                            self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
+                            self._agent_session_modes.setdefault(event_id, {})[agent_name] = mode or ""
+                            logger.info(f"Fresh session retry succeeded for {agent_name} on {event_id}")
+                            is_error_result = False
+                            result_str_check = str(result).strip()
+                    except Exception as retry_exc:
+                        logger.warning(f"Fresh session retry failed for {agent_name} on {event_id}: {retry_exc}")
             # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
