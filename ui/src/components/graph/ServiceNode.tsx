@@ -26,6 +26,7 @@ interface ServiceNodeData {
   gitops_config_path?: string;
   replicas_ready?: number;
   replicas_desired?: number;
+  icon?: string;
 }
 
 const GENERIC_TAGS = new Set(['k8s', 'latest', 'unknown', '?', '']);
@@ -33,7 +34,7 @@ const GENERIC_TAGS = new Set(['k8s', 'latest', 'unknown', '?', '']);
 function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
   const health = data.health || 'unknown';
   const healthColor = HEALTH_COLORS[health];
-  const icon = NODE_ICONS[data.type] || '📦';
+  const icon = data.icon || NODE_ICONS[data.type] || '📦';
   const cpu = data.cpu?.toFixed(0) || '0';
   const mem = data.memory?.toFixed(0) || '0';
   const ready = data.replicas_ready;

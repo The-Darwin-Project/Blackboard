@@ -454,6 +454,8 @@ class BlackboardState:
                     f"cpu={cpu}, memory={memory}, error_rate={error_rate}"
                 )
             
+            icon = await self.redis.hget(f"darwin:service:{service_name}", "icon")
+
             nodes.append(GraphNode(
                 id=service_name,
                 type=node_type,
@@ -471,6 +473,7 @@ class BlackboardState:
                     "gitops_config_path": metadata.gitops_config_path if metadata else None,
                     "replicas_ready": metadata.replicas_ready if metadata else None,
                     "replicas_desired": metadata.replicas_desired if metadata else None,
+                    "icon": icon,
                 }
             ))
         
@@ -703,6 +706,7 @@ class BlackboardState:
         gitops_repo: Optional[str] = None,
         gitops_repo_url: Optional[str] = None,
         gitops_config_path: Optional[str] = None,
+        icon: Optional[str] = None,
     ) -> None:
         """Update service discovery metadata WITHOUT overwriting metrics.
         
@@ -723,6 +727,8 @@ class BlackboardState:
             mapping["gitops_repo_url"] = gitops_repo_url
         if gitops_config_path:
             mapping["gitops_config_path"] = gitops_config_path
+        if icon:
+            mapping["icon"] = icon
         
         await self.redis.hset(key, mapping=mapping)
 

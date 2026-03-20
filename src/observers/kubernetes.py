@@ -39,6 +39,7 @@ DARWIN_SOURCE_REPO = f"{DARWIN_ANNOTATION_PREFIX}source-repo"
 DARWIN_GITOPS_REPO = f"{DARWIN_ANNOTATION_PREFIX}gitops-repo"
 DARWIN_CONFIG_PATH = f"{DARWIN_ANNOTATION_PREFIX}config-path"
 DARWIN_SERVICE_NAME = f"{DARWIN_ANNOTATION_PREFIX}service-name"
+DARWIN_ICON = f"{DARWIN_ANNOTATION_PREFIX}icon"
 
 
 class KubernetesObserver:
@@ -261,6 +262,8 @@ class KubernetesObserver:
                         # Do NOT write cpu/memory/error_rate -- those come from
                         # _process_pod_metrics. Writing zeros here caused a race
                         # where the Aligner read 0% between discovery and metrics poll.
+                        icon = annotations.get(DARWIN_ICON)
+
                         await self.blackboard.update_service_discovery(
                             name=service_name,
                             version=version,
@@ -268,6 +271,7 @@ class KubernetesObserver:
                             gitops_repo=gitops_repo,
                             gitops_repo_url=gitops_repo_url,
                             gitops_config_path=config_path,
+                            icon=icon,
                         )
 
                     # Count ready replicas
