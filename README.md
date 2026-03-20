@@ -99,7 +99,7 @@ src/agents/brain_skills/
   post-agent/     # Plan activation, recommendations, when-to-close (after agent returns)
   waiting/        # Wait-for-user protocol (when paused for human input)
   context/        # Cross-event awareness, architecture diagram, aligner observations
-  source/         # Source-specific rules (slack, chat, aligner)
+  source/         # Source-specific rules (slack, chat, aligner, headhunter, timekeeper)
   multi-user/     # Multi-participant conversation protocol
 ```
 
@@ -197,6 +197,9 @@ Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automati
 - **AI Transparency** -- All AI-generated messages tagged, user guide page, feedback mechanism
 - **User Feedback** -- POST `/feedback` endpoint stores ratings in Qdrant for quality tracking
 - **Auth Scaffolding** -- Dex OIDC identity ready (gated behind `DEX_ENABLED`, anonymous mode when off)
+- **TimeKeeper** -- Schedule one-shot or recurring tasks via Dashboard UI. LLM-powered instruction refinement aligns user intent with Brain capabilities. Observer fires when queue is idle (lowest priority). Events arrive as user requests with YAML frontmatter context
+- **Ephemeral Agents** -- On-demand Tekton TaskRun agents for Headhunter and TimeKeeper events. Circuit breaker falls back to sidecar after 2 infra failures. Prune trigger cleans up stuck TaskRuns via the same EventListener
+- **darwin.io Annotations** -- Service discovery via pod annotations (`darwin.io/monitored`, `darwin.io/service-name`, `darwin.io/icon`). Custom graph node icons per service. Aligner monitors annotated pods for anomalies including stuck Pending pods (>5min)
 
 ## Autonomous Remediation Examples
 
@@ -278,6 +281,18 @@ POST /queue/{event_id}/reject  # Reject a pending plan with reason
 GET  /queue/closed/list        # Recently closed events
 ```
 
+### TimeKeeper (Scheduled Tasks, requires DEX auth)
+
+```text
+POST   /api/timekeeper         # Create schedule (auth required)
+GET    /api/timekeeper         # List all schedules
+GET    /api/timekeeper/{id}    # Get one schedule
+PUT    /api/timekeeper/{id}    # Update schedule (owner only)
+DELETE /api/timekeeper/{id}    # Delete schedule (owner only)
+PATCH  /api/timekeeper/{id}/toggle  # Enable/disable (owner only)
+POST   /api/timekeeper/refine  # LLM instruction refinement (auth required)
+```
+
 ### Chat
 
 ```json
@@ -343,6 +358,11 @@ GET /events/                   # Architecture event timeline
 | `DEX_ENABLED` | Enable Dex OIDC auth | `false` |
 | `AGENT_WS_MODE` | WebSocket mode: `legacy` (Brain→sidecar) or `reverse` (sidecar→Brain) | `legacy` |
 | `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
+| `TIMEKEEPER_ENABLED` | Enable TimeKeeper scheduled tasks (requires DEX) | `false` |
+| `TIMEKEEPER_POLL_INTERVAL` | TimeKeeper observer poll interval (seconds) | `30` |
+| `TIMEKEEPER_MAX_PER_USER` | Max schedules per authenticated user | `10` |
+| `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
+| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.1-flash-lite-preview` |
 | `DEBUG` | Enable debug logging | `false` |
 
 ## Safety
@@ -403,8 +423,12 @@ BlackBoard/
       topology.py            # Topology graph and Mermaid diagram
       telemetry.py           # Telemetry ingestion from services
       reports.py             # Reports SPA serving
+      timekeeper.py          # TimeKeeper CRUD + LLM refine (DEX auth required)
     models.py                # Pydantic models (EventDocument, ConversationTurn, PlanStep)
-    auth.py                  # Dex OIDC scaffolding (gated behind DEX_ENABLED)
+    auth.py                  # Dex OIDC identity + require_auth dependency
+    observers/
+      kubernetes.py          # K8s metrics observer (darwin.io annotations, pending pod detection)
+      timekeeper.py          # TimeKeeper observer (idle-gated, ZPOPMIN, YAML frontmatter)
     main.py                  # FastAPI app, WebSocket endpoint, lifespan
   gemini-sidecar/
     Dockerfile               # Sidecar image (Node.js 22, CLI toolkit)
@@ -414,7 +438,7 @@ BlackBoard/
     skills/                  # 12 agent skills (plan-template, code-review, gitops, investigate, etc.)
   helm/
     values.yaml              # Helm values (sidecars, GCP, ArgoCD, Kargo, Slack, observer thresholds)
-    templates/               # Deployment, RBAC, secrets, ConfigMaps, PVC
+    templates/               # Deployment, RBAC, secrets, ConfigMaps, PVC, EventListener (ephemeral agents + prune trigger)
     files/                   # Agent rule copies for Helm .Files.Get
   ui/
     src/
