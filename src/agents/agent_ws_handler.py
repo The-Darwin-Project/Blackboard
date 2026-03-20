@@ -70,7 +70,7 @@ async def agent_websocket_handler(
             if not event or event.status.value == "closed":
                 logger.info("Terminating orphan ephemeral agent %s: event %s is %s",
                             agent_id, event_id, event.status.value if event else "missing")
-                await websocket.send_json({"type": "cancel", "task_id": "", "reason": "Event closed"})
+                await websocket.send_json({"type": "terminate", "event_id": event_id, "reason": "Event closed"})
                 await websocket.close(code=1000, reason=f"Event {event_id} no longer active")
                 return
 
