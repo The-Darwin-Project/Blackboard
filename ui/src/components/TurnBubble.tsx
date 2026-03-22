@@ -125,9 +125,19 @@ function HuddleResultViewer({ result }: { result: string }) {
 }
 
 function ResultViewer({ result }: { result: string }) {
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <div style={{ margin: '4px 0' }}>
-      <MarkdownPreview source={result} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0', lineHeight: 1.6 }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />
+      <div style={{ position: 'relative', maxHeight: expanded ? undefined : 160, overflow: 'hidden' }}>
+        <MarkdownPreview source={result} style={{ fontSize: 13, background: 'transparent', color: '#e2e8f0', lineHeight: 1.6 }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />
+        {!expanded && (
+          <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(transparent, #0f172a)', pointerEvents: 'none' }} />
+        )}
+      </div>
+      <button onClick={() => setExpanded(!expanded)} style={{ background: '#1e3a5f', border: '1px solid #2563eb44', borderRadius: 6, color: '#93c5fd', fontSize: 11, padding: '3px 10px', cursor: 'pointer', fontWeight: 500, marginTop: 6 }}>
+        {expanded ? 'Collapse' : 'Expand'}
+      </button>
     </div>
   );
 }
@@ -174,8 +184,10 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange }
   attachment?: { filename: string; content: string } | null;
   onStatusChange?: () => void;
 }) {
+  const [reportViewerOpen, setReportViewerOpen] = useState(false);
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   const isHuman = turn.actor === 'user';
+  const isLongExecute = !isHuman && turn.action === 'execute' && turn.result && turn.result.length > 500;
   const isTransientError = turn.action === 'error' && turn.thoughts && (/429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|rate.limit|quota/i.test(turn.thoughts));
 
   if (isTransientError) {
@@ -198,7 +210,13 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange }
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
+        {isLongExecute && (
+          <button onClick={() => setReportViewerOpen(true)} title="Open full report in viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
+            View <span style={{ fontSize: 9 }}>↗</span>
+          </button>
+        )}
       </div>
+      {reportViewerOpen && turn.result && <MarkdownViewer filename={`${turn.actor}-report.md`} content={turn.result} onClose={() => setReportViewerOpen(false)} />}
       {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       {turn.image && (
         <img src={turn.image} alt="User attachment" style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }} onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')} />
