@@ -69,6 +69,9 @@ class ContextFlags(TypedDict, total=False):
     has_slack_participant: bool
     is_intermediate: bool
     has_pending_huddle: bool
+    event_domain: str
+    domain_confidence: str
+    brain_has_classified: bool
     _cached_active_ids: list[str]
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
@@ -231,7 +234,7 @@ VOLUME_PATHS = {
 # Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
 PHASE_CONDITIONS: dict[str, Any] = {
     "always":       lambda e, c: True,
-    "dispatch":     lambda e, c: c["turn_count"] <= 4 or not c["has_agent_result"],
+    "dispatch":     lambda e, c: (c["turn_count"] <= 4 or not c["has_agent_result"]) and c.get("brain_has_classified", False),
     "post-agent":   lambda e, c: c["has_agent_result"],
     "waiting":      lambda e, c: c["is_waiting"],
     "defer-wake":   lambda e, c: c.get("is_defer_wakeup", False),
@@ -604,6 +607,23 @@ class Brain:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
             logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
 
+        # Domain classification gate: mandatory classify_event before any agent dispatch
+        if context_flags and not context_flags.get("brain_has_classified", False):
+            pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event"}
+            active_tools = [t for t in active_tools if t["name"] in pre_classify_tools]
+            logger.info(f"Pre-classification gate: only lookup+classify tools for {event_id}")
+        elif context_flags:
+            domain = context_flags.get("event_domain", "complicated")
+            if domain == "complex":
+                agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner"))
+                if agent_rounds < 2:
+                    active_tools = [t for t in active_tools if t["name"] != "close_event"]
+                    logger.info(f"COMPLEX domain: close_event gated until 2+ agent rounds ({agent_rounds} so far) for {event_id}")
+            elif domain == "chaotic":
+                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack"}
+                active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
+                logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
+
         prompt = await self._build_contents(event, context_cache=context_flags)
 
         prompt = [
@@ -969,6 +989,17 @@ class Brain:
         flags["is_defer_wakeup"] = consecutive_defers > 0
         flags["consecutive_defers"] = consecutive_defers
 
+        from ..models import EventEvidence
+        evidence = event.event.evidence
+        if isinstance(evidence, EventEvidence):
+            flags["event_domain"] = evidence.brain_domain or evidence.domain
+            flags["domain_confidence"] = evidence.domain_confidence
+            flags["brain_has_classified"] = evidence.brain_domain is not None
+        else:
+            flags["event_domain"] = "complicated"
+            flags["domain_confidence"] = "default"
+            flags["brain_has_classified"] = False
+
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
@@ -1169,7 +1200,12 @@ class Brain:
             f"Time: {event.event.timeDate}",
         ]
         if isinstance(evidence, EventEvidence):
-            lines.append(f"Domain: {evidence.domain}")
+            if evidence.brain_domain:
+                lines.append(f"Domain: {evidence.brain_domain} (Brain-assessed)")
+            elif evidence.domain_confidence == "assessed":
+                lines.append(f"Domain: {evidence.domain} (source-assessed)")
+            else:
+                lines.append(f"Source suggestion: {evidence.domain} (unverified -- classify independently)")
             lines.append(f"Severity: {evidence.severity}")
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context
@@ -1773,8 +1809,10 @@ class Brain:
                         f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
                         for t in timings if isinstance(t, dict)
                     ) or "none"
+                    domain_str = p.get("brain_domain", p.get("domain", "?"))
                     memory_text += (
                         f"  {i}. [{p.get('service', '?')}] "
+                        f"domain: {domain_str} | "
                         f"Symptom: {p.get('symptom', '?')} | "
                         f"Root cause: {p.get('root_cause', '?')} | "
                         f"Fix: {p.get('fix_action', '?')} | "
@@ -1922,6 +1960,21 @@ class Brain:
             )
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
+            return True
+
+        elif function_name == "classify_event":
+            domain = args.get("domain", "complicated")
+            reasoning = args.get("reasoning", "")
+            await self.blackboard.update_event_domain(event_id, domain)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain", action="triage",
+                thoughts=f"Cynefin: {domain.upper()}. {reasoning}",
+                timestamp=time.time(),
+            )
+            await self.blackboard.append_turn(event_id, turn)
+            await self._broadcast_turn(event_id, turn)
+            await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
             return True
 
         else:
@@ -2584,7 +2637,7 @@ class Brain:
         ]
         if isinstance(evidence, EventEvidence):
             lines.append(f"- **Evidence:** {evidence.display_text}")
-            lines.append(f"- **Domain:** {evidence.domain}")
+            lines.append(f"- **Domain:** {evidence.brain_domain or evidence.domain}")
             lines.append(f"- **Severity:** {evidence.severity}")
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context

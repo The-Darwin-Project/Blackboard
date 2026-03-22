@@ -49,9 +49,10 @@ Include these fields:
 - agent_execution_times: Array of agent tasks, each with agent name and duration_seconds (route to execute)
 - procedures: Short workflow description (e.g., "retest pipeline, wait for completion, merge MR")
 - outcome: Final state -- one of: resolved, escalated, user_closed, force_closed, stale
+- domain: Cynefin classification (clear|complicated|complex|chaotic) -- use the Brain's assessment from brain.triage turns
 
 Example output:
-{{"symptom": "pipeline failed for MR !289", "root_cause": "Transient Platform Services infrastructure issue", "fix_action": "Retested pipeline, merged MR after pass", "keywords": ["Platform Services", "pipeline", "kubevirt-plugin", "retest"], "service": "kubevirt-plugin", "turns": 12, "duration_seconds": 1800, "operational_timings": [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}], "defer_patterns": [{{"reason": "Waiting for pipeline", "duration_seconds": 1200}}], "agent_execution_times": [{{"agent": "developer", "duration_seconds": 90}}], "procedures": "retest pipeline, defer for completion, verify result, merge MR", "outcome": "resolved"}}
+{{"symptom": "pipeline failed for MR !289", "root_cause": "Transient Platform Services infrastructure issue", "fix_action": "Retested pipeline, merged MR after pass", "keywords": ["Platform Services", "pipeline", "kubevirt-plugin", "retest"], "service": "kubevirt-plugin", "turns": 12, "duration_seconds": 1800, "operational_timings": [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}], "defer_patterns": [{{"reason": "Waiting for pipeline", "duration_seconds": 1200}}], "agent_execution_times": [{{"agent": "developer", "duration_seconds": 90}}], "procedures": "retest pipeline, defer for completion, verify result, merge MR", "outcome": "resolved", "domain": "complicated"}}
 
 Respond with JSON only, no markdown fences."""
 
@@ -168,10 +169,18 @@ class Archivist:
                     "outcome": "unknown",
                 }
 
-            # Ensure service + turns + duration are in the payload
+            # Ensure service + turns + duration + domain are in the payload
             summary.setdefault("service", event.service)
             summary.setdefault("turns", len(event.conversation))
             summary.setdefault("duration_seconds", duration)
+            from ..models import EventEvidence
+            evidence = event.event.evidence
+            if isinstance(evidence, EventEvidence):
+                summary["brain_domain"] = evidence.brain_domain or evidence.domain
+                summary["source_domain"] = evidence.domain
+            else:
+                summary.setdefault("brain_domain", "complicated")
+                summary.setdefault("source_domain", "complicated")
 
             # Step 2: Generate embedding
             timings = summary.get("operational_timings", [])

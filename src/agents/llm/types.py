@@ -141,7 +141,33 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["query"],
         },
     },
-    # --- Routing tools (use AFTER lookup tools when agent action is needed) ---
+    # --- Classification (mandatory gate before routing) ---
+    {
+        "name": "classify_event",
+        "description": (
+            "Classify or reclassify this event's Cynefin domain based on YOUR OWN analysis. "
+            "MANDATORY before first agent dispatch -- select_agent is unavailable until you classify. "
+            "Also call mid-event when evidence changes the domain (e.g., CLEAR -> COMPLEX after agent "
+            "reports unknown root cause). Each call is recorded as a brain.triage turn and the "
+            "pipeline adapts immediately."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "enum": ["clear", "complicated", "complex", "chaotic"],
+                    "description": "Your assessed Cynefin domain",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "One sentence explaining why this domain (not the source's suggestion)",
+                },
+            },
+            "required": ["domain", "reasoning"],
+        },
+    },
+    # --- Routing tools (use AFTER classification when agent action is needed) ---
     {
         "name": "select_agent",
         "description": (

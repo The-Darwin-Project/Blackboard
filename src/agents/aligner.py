@@ -636,6 +636,7 @@ class Aligner:
             source_type="aligner",
             triggered_by="system",
             domain=domain,
+            domain_confidence="assessed",
             severity=severity_level,
             metrics=EventMetrics(
                 cpu=svc.metrics.cpu if svc else 0.0,

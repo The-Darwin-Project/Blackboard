@@ -150,6 +150,8 @@ export interface EventEvidence {
   source_type: string;
   triggered_by?: string | null;
   domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
+  brain_domain?: string;
+  domain_confidence?: 'assessed' | 'default';
   severity: 'info' | 'warning' | 'critical';
   metrics?: EventMetrics;
 }

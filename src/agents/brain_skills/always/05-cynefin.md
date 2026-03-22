@@ -36,3 +36,33 @@ Before deciding how to respond to an event, classify it into a domain:
 
 ## DISORDER (Default)
 - You don't know which domain. Ask sysAdmin to investigate first to gather data.
+
+## Classification Protocol
+
+classify_event is MANDATORY before any agent dispatch. The system enforces this structurally --
+select_agent is not available until you classify. Base your classification on:
+1. The event evidence (what happened)
+2. Deep memory results (how similar events were classified historically)
+3. Your own analysis -- NOT the source's suggestion
+
+The source's domain label is a hint, not a classification. You must assess independently.
+
+## Reclassification
+
+classify_event is always available. You can and should reclassify when evidence changes:
+- Agent reports unexpected complexity: reclassify upward (CLEAR -> COMPLICATED or COMPLEX)
+- Investigation reveals unknown root cause: reclassify to COMPLEX
+- System enters crisis mid-event: reclassify to CHAOTIC
+- Probe results clarify the situation: reclassify downward (COMPLEX -> COMPLICATED)
+- Stabilization confirmed: reclassify from CHAOTIC to COMPLICATED for root cause analysis
+
+Each reclassification is recorded in the conversation as a brain.triage turn.
+The pipeline adapts immediately: tool availability changes on the next turn.
+
+## Domain-Specific Behavior
+
+After classification, the system enforces domain-appropriate constraints:
+- CLEAR: Full tool set. Act directly on known patterns.
+- COMPLICATED: Full tool set. Analyze, then act.
+- COMPLEX: close_event is blocked until at least 2 agent rounds complete (probe-sense-respond).
+- CHAOTIC: Only select_agent + notify available. No defer, no wait. Stabilize first, then reclassify.

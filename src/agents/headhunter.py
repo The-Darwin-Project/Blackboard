@@ -422,6 +422,7 @@ class Headhunter:
             source_type="headhunter",
             triggered_by="gitlab-bot",
             domain=domain,
+            domain_confidence="assessed",
             severity="info",
             gitlab_context={
                 "todo_id": todo["id"],

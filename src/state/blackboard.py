@@ -1788,6 +1788,28 @@ class BlackboardState:
                     continue
         logger.debug(f"Slack context set on event {event_id}: ch={channel_id} ts={thread_ts}")
 
+    async def update_event_domain(self, event_id: str, brain_domain: str) -> None:
+        """Set Brain's Cynefin classification on an EventDocument (WATCH/MULTI)."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for domain update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    if isinstance(event.event.evidence, EventEvidence):
+                        event.event.evidence.brain_domain = brain_domain
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"Brain domain set on event {event_id}: {brain_domain}")
+
     SLACK_MAPPING_TTL = 86400  # 24h safety net (cleaned explicitly on event close)
 
     async def set_slack_mapping(
@@ -1861,7 +1883,7 @@ class BlackboardState:
             domain = "complicated"
             severity = "warning"
             if isinstance(evidence, EventEvidence):
-                domain = evidence.domain
+                domain = evidence.brain_domain or evidence.domain
                 severity = evidence.severity
 
             report_data = {

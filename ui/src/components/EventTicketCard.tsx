@@ -20,7 +20,7 @@ interface EventTicketCardProps {
 }
 
 export default function EventTicketCard({ event, isSelected, onSelect, onClose }: EventTicketCardProps) {
-  const domain = (event.evidence?.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
+  const domain = (event.evidence?.brain_domain || event.evidence?.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
   const domainColor = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
   const statusStyle = STATUS_COLORS[event.status] || STATUS_COLORS.active;
   const metrics = event.evidence?.metrics;

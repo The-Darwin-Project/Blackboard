@@ -59,20 +59,28 @@ class TestMatchPhases:
             "has_recent_closed": False,
             "has_graph_edges": False,
             "has_aligner_turns": False,
+            "brain_has_classified": False,
+            "event_domain": "complicated",
+            "domain_confidence": "default",
         }
         defaults.update(overrides)
         return defaults
 
-    def test_new_event_dispatch(self):
+    def test_new_event_dispatch_gated_before_classify(self):
         ctx = self._make_ctx(turn_count=0)
         active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
         assert "always" in active
-        assert "dispatch" in active
+        assert "dispatch" not in active, "dispatch must be gated until brain classifies"
         assert "source" in active
         assert "post-agent" not in active
 
+    def test_new_event_dispatch_unlocked_after_classify(self):
+        ctx = self._make_ctx(turn_count=1, brain_has_classified=True)
+        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+        assert "dispatch" in active, "dispatch available after classify_event"
+
     def test_post_agent_excludes_dispatch(self):
-        ctx = self._make_ctx(turn_count=1, has_agent_result=True)
+        ctx = self._make_ctx(turn_count=1, has_agent_result=True, brain_has_classified=True)
         active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
         assert "post-agent" in active
         assert "dispatch" in active
