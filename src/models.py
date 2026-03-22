@@ -265,7 +265,7 @@ class EventEvidence(BaseModel):
     """Structured evidence for event ticket cards and multi-source rendering."""
     display_text: str = Field(..., description="Human-readable evidence string")
     source_type: str = Field("unknown", description="aligner | chat | headhunter | ...")
-    domain: str = Field("complicated", description="Cynefin: clear|complicated|complex|chaotic")
+    domain: str = Field("disorder", description="Cynefin: disorder|clear|complicated|complex|chaotic")
     severity: str = Field("warning", description="info|warning|critical")
     triggered_by: Optional[str] = Field(
         None, description="Who initiated: Slack display name, 'dashboard', 'system', 'gitlab-bot'"

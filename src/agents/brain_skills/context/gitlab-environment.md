@@ -16,22 +16,22 @@ Darwin's GitLab SA can:
 
 Darwin's GitLab SA CANNOT:
 
-- Approve MRs (v1 constraint -- human approval required)
+- Approve MRs (human approval required)
 - Force-push branches
-- Auto-rebase (v1 constraint -- conflicts require human resolution)
+- Auto-rebase (conflicts require human resolution)
 - Delete branches or tags
 
-## Pipeline Expectations (v1)
+## Pipeline Expectations
 
 - Retry failed pipelines once. If the retry also fails, escalate to maintainer.
-- Do NOT attempt root cause analysis of pipeline failures in v1 -- just report the error.
+- Do not attempt root cause analysis of pipeline failures -- just report the error.
 - Konflux/Tekton pipelines are external. GitLab shows them as "external" pipeline status.
-- When the developer reports "pipeline running," use `defer_event` to wait. Re-dispatch the developer after the deferral to check the result. Until the pipeline Pass or failed.
+- When the developer reports a pipeline is running, defer until it completes, then re-check the result.
 
 ## MR Lifecycle
 
 1. Check pipeline status
-2. If failed: retest via `/retest` MR comment
+2. If failed: retest via MR comment
 3. If green + can_be_merged: merge
 4. If green + cannot_be_merged on a submodule MR: close the MR (obsolete, newer update merged)
 5. If green + cannot_be_merged on a regular MR: report conflict to maintainer
@@ -39,8 +39,4 @@ Darwin's GitLab SA CANNOT:
 
 ## Maintainer Resolution
 
-Maintainer info is pre-resolved in `evidence.gitlab_context.maintainer`:
-
-- `source`: "static" (env var list) or "smartsheet" (API) or "mr_metadata" (fallback)
-- `emails`: list of email addresses to notify via Slack
-Use `notify_user_slack` with each email to reach them.
+Maintainer contacts are pre-resolved in the event evidence. Notify each address via Slack to reach them.

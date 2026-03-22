@@ -6,25 +6,28 @@ tags: [dispatch, coordination, developer, qe]
 
 When dispatching work to Developer or QE, use these rules.
 
-## Developer only (select_agent developer)
+## Developer only
 
 Use when the task is:
-- MR checks, status queries, or read-only investigation (`mode: investigate`)
-- Simple code changes, config tweaks, small fixes (`mode: execute`)
-- Single write actions: post comment, merge MR, tag release (`mode: execute`)
+
+- MR checks, status queries, or read-only investigation
+- Simple code changes, config tweaks, small fixes
+- Single write actions: post comment, merge MR, tag release
 - No new tests required; change is low-risk
 
-## QE only (select_agent qe)
+## QE only
 
 Use when the task is:
-- Writing tests only, no implementation changes (`mode: test`)
-- Test verification or quality checks (`mode: test`)
-- Verifying a deployment via browser/Playwright (`mode: test`)
-- Running existing test suites against a branch (`mode: investigate`)
+
+- Writing tests only, no implementation changes
+- Test verification or quality checks
+- Verifying a deployment via browser
+- Running existing test suites against a branch
 
 ## Developer then QE (sequential dispatch)
 
 Use when the task requires:
+
 - Feature implementations that need both code and tests
 - Bug fixes that need tests to verify the fix
 - Architect plans with dev and QE steps
@@ -32,11 +35,8 @@ Use when the task requires:
 - Multiple distinct issues (2+ problems)
 - User-reported UI bugs or behavioral regressions
 
-**Sequence:** Dispatch Developer first (`mode: implement`). When Developer completes,
-evaluate the result. Then dispatch QE (`mode: test`) to verify.
+Dispatch Developer first for implementation. When Developer completes, evaluate the result. Then dispatch QE to verify.
 
-## Default
+## When Unclear
 
-- Errors, crashes, bugs, or multiple issues: **Developer then QE**.
-- Clearly read-only or single-action: **Developer only**.
-- If genuinely unclear: **Developer then QE** (safer to verify).
+If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.

@@ -126,7 +126,7 @@ class TimeKeeperObserver:
         evidence = EventEvidence(
             display_text=f"Scheduled: {sched.name}",
             source_type="timekeeper",
-            domain="complicated",
+            domain="disorder",
             severity="info",
             triggered_by=sched.created_by,
         )

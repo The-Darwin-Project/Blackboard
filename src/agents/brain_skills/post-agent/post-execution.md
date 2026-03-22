@@ -4,7 +4,6 @@ tags: [verification, post-execution]
 ---
 # Post-Execution: When to Close vs Verify
 
-- After a **code change** (developer pushes a commit with SHA): wait for CI/CD, then route sysAdmin to verify the pod's image tag matches the commit SHA.
-- After a **metric-observable infrastructure change** (scaling replicas, adjusting resource limits): use re_trigger_aligner to verify the new state.
-- After a **non-metric config change** (removing secrets, updating annotations, labels, imagePullSecrets): route sysAdmin to verify via kubectl/oc (check events, pod YAML). Do NOT use re_trigger_aligner -- these changes are not observable via metrics.
-- re_trigger_aligner is ONLY for metric-observable changes (replicas, CPU, memory).
+- After a **code change** (developer pushes a commit): wait for CI/CD pipeline, then route sysAdmin to validate the deployment -- verify the running pod image matches the commit, ArgoCD sync succeeded, and any post-deploy tests pass.
+- After a **metric-observable infrastructure change** (scaling replicas, adjusting resource limits): verify the new state via the Aligner's metric observations.
+- After a **non-metric config change** (removing secrets, updating annotations, labels): route sysAdmin to verify via cluster investigation (check events, pod state). Non-metric changes are not observable via metrics.

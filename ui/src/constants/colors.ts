@@ -18,6 +18,7 @@ export const ACTOR_COLORS: Record<string, string> = {
 };
 
 export const DOMAIN_COLORS = {
+  disorder:    { border: '#6b7280', bg: '#6b728015', text: '#9ca3af' },
   clear:       { border: '#22c55e', bg: '#22c55e15', text: '#4ade80' },
   complicated: { border: '#eab308', bg: '#eab30815', text: '#facc15' },
   complex:     { border: '#a855f7', bg: '#a855f715', text: '#c084fc' },

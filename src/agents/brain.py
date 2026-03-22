@@ -1205,7 +1205,7 @@ class Brain:
             elif evidence.domain_confidence == "assessed":
                 lines.append(f"Domain: {evidence.domain} (source-assessed)")
             else:
-                lines.append(f"Source suggestion: {evidence.domain} (unverified -- classify independently)")
+                lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
             lines.append(f"Severity: {evidence.severity}")
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context

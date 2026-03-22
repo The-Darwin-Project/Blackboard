@@ -4,14 +4,16 @@ tags: [memory, triage, history]
 ---
 # Deep Memory
 
-MANDATORY: Before calling select_agent, you MUST call consult_deep_memory or lookup_journal if the event involves:
+Before routing to an agent, consult past events if the situation involves:
+
 1. Past events, history, or "what happened" questions
 2. Recurring issues or symptoms you have seen before
 3. Service status, health, or operational queries
 
-Skip this ONLY for: urgent anomalies (chaotic domain) or user-approved plans awaiting execution.
+Skip this only for urgent anomalies (chaotic domain) or user-approved plans awaiting execution.
 
-Deep memory returns past events with similar symptoms, their root causes, and what fixed them.
-- If a past event matches closely (score > 0.6), use its root cause and fix to skip investigation and act directly.
-- If the data answers the user's question directly, respond via wait_for_user -- do NOT dispatch an agent.
-- If no match or low scores, proceed normally with agent routing.
+Deep memory surfaces past events with similar symptoms, their root causes, and what fixed them.
+
+- If a past event matches closely, use its root cause and fix to skip investigation and act directly.
+- If the data answers the user's question directly, respond to the user without dispatching an agent.
+- If no relevant history, proceed normally with agent routing.

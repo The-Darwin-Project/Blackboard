@@ -16,17 +16,27 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 | Field | Required | Description |
 |---|---|---|
 | `display_text` | Yes | The user's actual message or anomaly description. Never a generic label. |
-| `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"` |
-| `domain` | Yes | Cynefin classification: `"clear"`, `"complicated"`, `"complex"`, `"chaotic"`. Default `"complicated"` for user requests. |
+| `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"`, `"timekeeper"` |
+| `domain` | Yes | Initial Cynefin state. `"disorder"` for unclassified sources (chat, slack, timekeeper). Real domain for assessed sources (headhunter, aligner). |
+| `domain_confidence` | Yes | `"assessed"` when source did real LLM triage (headhunter, aligner). `"default"` for unclassified sources. |
+| `brain_domain` | No | Set by Brain's `classify_event` function call. Overrides `domain` once set. Starts `None`. |
 | `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. |
 | `metrics` | Conditional | Required for aligner events (`EventMetrics` with cpu/memory/error_rate/replicas). `None` for user-initiated events. |
 
+## Cynefin Domain Classification Pipeline
+
+* **Mandatory gate**: The Brain MUST call `classify_event` before dispatching any agent. `select_agent` is structurally unavailable until classification.
+* **DISORDER**: Initial state for unclassified events. The Brain sees "Domain: DISORDER (unclassified)" and must classify into a real domain.
+* **Reclassification**: `classify_event` is always available. The Brain can reclassify mid-event when evidence changes. Each classification is recorded as a `brain.triage` conversation turn.
+* **Domain-specific tool sets**: After classification, the pipeline enforces domain constraints -- COMPLEX blocks `close_event` until 2+ agent rounds; CHAOTIC restricts to act-first tools only.
+
 ## Source-Specific Patterns
 
-* **Aligner**: Full evidence with LLM-classified domain/severity + metrics snapshot. Gold standard.
-* **Chat/Slack**: `source_type` matches source, `severity="info"`, `domain="complicated"`, `display_text` = user message, no metrics.
-* **Headhunter** (future): Same as chat/slack but `source_type="headhunter"`. Include work plan description in `display_text`.
+* **Aligner**: Full evidence with LLM-classified domain/severity + metrics. `domain_confidence="assessed"`.
+* **Headhunter**: Bot Instructions or LLM-triaged domain. `domain_confidence="assessed"`.
+* **Chat/Slack**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`, `display_text` = user message.
+* **TimeKeeper**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`.
 
 ## Why This Matters
 
-Structured evidence directly affects Brain triage speed. Events with rich evidence (real source_type, domain, severity) are triaged faster than events with `source_type="unknown"` and default fields.
+The domain classification closes the Cynefin feedback loop. Events with `domain="disorder"` force the Brain to independently assess before acting. Events with assessed domains still require Brain classification but benefit from the source's analysis as a starting hypothesis. Historical domain classifications are stored in deep memory (Qdrant) and surfaced on future similar events.

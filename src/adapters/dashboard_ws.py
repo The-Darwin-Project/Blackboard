@@ -97,7 +97,7 @@ class DashboardWSAdapter:
                 display_text=message,
                 source_type="chat",
                 triggered_by="dashboard",
-                domain="complicated",
+                domain="disorder",
                 severity="info",
             ),
         )

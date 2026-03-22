@@ -23,9 +23,10 @@ alwaysApply: true
 
 ## 3. The Conversation Queue Protocol
 
-* **Event Creation:** Events are created by Aligner (anomaly), Chat (user request), Headhunter (GitLab todo), or Slack (DM/slash command)
-* **Triage:** Brain triages events via LLM function calling
-* **Conversation:** Conversation is an append-only log of turns in the event document
+* **Event Creation:** Events are created by Aligner (anomaly), Chat (user request), Headhunter (GitLab todo), TimeKeeper (scheduled), or Slack (DM/slash command)
+* **Classification Gate:** Brain MUST call `classify_event` before any agent dispatch. Unclassified events start in DISORDER domain. `select_agent` is structurally unavailable until classified. See `05-event-evidence-contract.mdc`.
+* **Domain-Specific Pipeline:** After classification, tool availability adapts to domain: COMPLEX blocks premature closure, CHAOTIC restricts to act-first. Brain can reclassify mid-event.
+* **Conversation:** Conversation is an append-only log of turns in the event document. Classification produces a `brain.triage` turn.
 * **Plans:** Plans are Markdown turns, not JSON
 * **Event Lifecycle:** `new` -> `active` -> `waiting_approval` -> `resolved` -> `closed`
 

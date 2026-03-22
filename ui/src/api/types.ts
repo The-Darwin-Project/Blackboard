@@ -149,7 +149,7 @@ export interface EventEvidence {
   display_text: string;
   source_type: string;
   triggered_by?: string | null;
-  domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
+  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
   brain_domain?: string;
   domain_confidence?: 'assessed' | 'default';
   severity: 'info' | 'warning' | 'critical';
@@ -299,7 +299,7 @@ export interface ReportMeta {
   event_id: string;
   service: string;
   source: string;
-  domain: 'clear' | 'complicated' | 'complex' | 'chaotic';
+  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
   severity: 'info' | 'warning' | 'critical';
   turns: number;
   reason: string;

@@ -121,7 +121,7 @@ class SlackChannel:
                             display_text=text,
                             source_type="slack",
                             triggered_by=display_name,
-                            domain="complicated",
+                            domain="disorder",
                             severity="info",
                         ),
                     )
@@ -185,7 +185,7 @@ class SlackChannel:
                     display_text=text,
                     source_type="slack",
                     triggered_by=display_name,
-                    domain="complicated",
+                    domain="disorder",
                     severity="info",
                 ),
             )
@@ -373,7 +373,7 @@ class SlackChannel:
                     display_text=text.strip(),
                     source_type="slack",
                     triggered_by=display_name,
-                    domain="complicated",
+                    domain="disorder",
                     severity="info",
                 ),
             )

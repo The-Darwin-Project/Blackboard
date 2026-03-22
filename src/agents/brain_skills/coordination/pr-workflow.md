@@ -1,29 +1,18 @@
 ---
-description: "PR gate checklist and CI feedback loop for Brain-coordinated dispatch."
+description: "PR lifecycle awareness: CI gate, pipeline wait, and failure routing."
 tags: [coordination, pr, ci-feedback]
 ---
-# PR Workflow -- Brain Coordination
+# PR Workflow
 
-After dispatching Developer to open a PR, the workflow is NOT complete until CI reports back.
+A PR is NOT complete until CI reports back. The agent waits for the pipeline result as part of its dispatch.
 
-## PR Sequence
+## CI Gate
 
-1. Developer creates feature branch and pushes changes
-2. Developer opens PR
-3. Developer waits for CI pipeline
-4. Developer huddles with CI result
+- Do not close or defer an event while an agent is waiting for a CI pipeline. The agent handles the wait.
+- When the agent reports the CI result, evaluate the outcome and decide the next step.
 
-## CI Feedback Loop
+## CI Failure Routing
 
-When the Developer huddles with CI results:
-
-- **CI passes, PR merged** -> Agent work is complete. Let the agent finish and evaluate the result.
-- **CI fails on test files** -> Reply: "CI failed on tests. Dispatch QE to fix test failures on the branch."
-  Then dispatch QE with `select_agent(qe, mode=test)` pointing to the branch.
-- **CI fails on implementation** -> Reply with specific fix guidance based on the failure.
-
-## Pipeline Pending
-
-If the Developer huddles "pipeline running, waiting for results":
-- Reply: "Acknowledged. Continue waiting for pipeline results."
-- Do NOT defer or cancel -- the agent handles the wait.
+- If CI fails on tests: determine whether Developer or QE is better positioned to fix, based on what failed.
+- If CI fails on implementation: the Developer who made the change should fix it.
+- If CI passes and the PR is merged: the agent's work is complete. Proceed to verification or close.

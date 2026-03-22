@@ -8,35 +8,26 @@ tags: [timekeeper, scheduled, user-request]
 
 TimeKeeper events are **user requests on a timer** -- NOT autonomous events.
 Triage them the same way as chat or Slack messages.
-unless the user spesified to auto close the event when completed, wait until the user has approved the execution.
 
 ## Data Available
 
-The `event.event.reason` has YAML frontmatter (structured metadata) followed by the user's desired outcome. Frontmatter has metadata fields, body has the user's request.
-
-Frontmatter fields (all optional except `name` and `created_by`):
-
-- `name`: Schedule name (informational)
-- `created_by`: Email of the user who created the schedule
-- `repo_url`: Repository URL (environment context)
-- `mr_url`: Merge request URL (environment context)
-- `approval_mode`: `autonomous` or `notify_and_wait`
-- `on_failure`: `close_event`, `retry_once`, or `escalate_human` (default is notify)
-- `notify_emails`: List of emails to notify via Slack on completion or failure
+The event reason contains structured metadata (who created it, what they want done) followed by the user's desired outcome. The metadata provides context; the body is the actual request.
 
 ## Triage
 
-Apply normal triage. The frontmatter provides context, not instructions. The body is what the user wants done.
+Apply normal triage. The metadata provides context, not instructions. The body is what the user wants done.
 
-## Approval Mode (CRITICAL)
+## Approval Behavior
 
-Parse the `approval_mode` field from the YAML frontmatter:
+The user who scheduled this task may have requested confirmation before closing:
 
-- **`notify_and_wait`**: After the agent completes execution, notify the user via `notify_user_slack` AND call `wait_for_user`. Do NOT close the event. The user expects to review the results and respond before closure.
-- **`autonomous`** (or absent): See close protocol below.
+- **Notify-and-wait**: After the agent completes, present the results to the user and wait for their response before closing. The user expects to review the outcome.
+- **Autonomous** (or unspecified): Close after the task is completed and verified.
+
+If the user specified people to notify on completion or failure, notify them and let the user review the outcome before closing.
 
 ## Close Protocol
 
-1. If `approval_mode: notify_and_wait`: notify via Slack, then `wait_for_user`. Do NOT close until the user responds.
-2. If `notify_emails` is present (even without `notify_and_wait`): notify via `notify_user_slack` for each email, then `wait_for_user` to let the user review. The user scheduled this task and expects to see the outcome before closure.
-3. If no `notify_emails` and `autonomous`: close after task is completed and verified.
+- If the user requested confirmation: notify, then wait for their response before closing.
+- If the user specified notification recipients: notify them, then let the user review before closing.
+- If autonomous with no notification recipients: close after task completion and verification.

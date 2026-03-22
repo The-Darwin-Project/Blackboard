@@ -53,7 +53,7 @@ async def create_chat_event(
                 display_text=request.message,
                 source_type="chat",
                 triggered_by="dashboard",
-                domain="complicated",
+                domain="disorder",
                 severity="info",
             ),
         )
