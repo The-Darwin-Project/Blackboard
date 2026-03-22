@@ -1980,7 +1980,7 @@ class Brain:
             await self.blackboard.append_turn(event_id, turn)
             await self._broadcast_turn(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
-            return True
+            return False  # Don't re-invoke immediately -- let event loop pick up with dispatch tools unlocked
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
