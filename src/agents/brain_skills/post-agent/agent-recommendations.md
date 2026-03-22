@@ -7,6 +7,10 @@ tags: [agent-results, recommendations, memory]
 ---
 # Agent Recommendations
 
+## Reassess Domain After Agent Results
+
+After each agent completes, consider whether the domain classification still holds. If the agent's findings simplify the situation (e.g., the requested change already exists, or the root cause is now known), reclassify to the appropriate domain.
+
 ## Cross-Reference History First
 
 Before acting on any agent recommendation, consult deep memory with the agent's key findings (service name, symptom, proposed fix). This lets you:
