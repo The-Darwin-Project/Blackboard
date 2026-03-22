@@ -158,7 +158,12 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         agents = ", ".join(turn.selectedAgents or [])
         header = f"*:arrow_right: Routing to {agents}*"
         if turn.thoughts:
-            header += f"\n{turn.thoughts}"
+            task = turn.thoughts
+            for agent in (turn.selectedAgents or []):
+                task = task.removeprefix(f"Routing to {agent}: ").removeprefix(f"Routing to {agent}. ").removeprefix(f"Routing to {agent}")
+            task = task.strip()
+            if task:
+                header += f"\n{task}"
         blocks.append(_section(header))
 
     elif key == "brain.request_approval":
