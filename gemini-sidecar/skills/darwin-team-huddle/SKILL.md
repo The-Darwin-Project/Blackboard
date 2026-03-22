@@ -1,8 +1,8 @@
 ---
 name: darwin-team-huddle
-description: Implement mode coordination. Developer and QE use team_send_results for final reports, team_huddle for mid-task questions to the Brain.
+description: Team coordination for implement and test modes. Developer and QE use team_send_results for final reports, team_huddle for mid-task questions to the Brain.
 roles: [developer, qe]
-modes: [implement]
+modes: [implement, test]
 ---
 
 # Implement Mode Communication

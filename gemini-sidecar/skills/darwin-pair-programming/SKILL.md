@@ -1,8 +1,8 @@
 ---
 name: darwin-pair-programming
-description: Pair programming rules for Developer + QE working on the same feature branch. Auto-loaded context for implement mode.
+description: Pair programming rules for Developer + QE working on the same feature branch. Auto-loaded for implement and test modes.
 roles: [developer, qe]
-modes: [implement]
+modes: [implement, test]
 ---
 
 # Pair Programming -- Developer + QE

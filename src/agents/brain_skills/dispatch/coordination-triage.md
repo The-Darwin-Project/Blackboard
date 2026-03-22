@@ -37,6 +37,13 @@ Use when the task requires:
 
 Dispatch Developer first for implementation. When Developer completes, evaluate the result. Then dispatch QE to verify.
 
+## Sequential Dispatch Coordination
+
+When dispatching in a sequential pair (Developer then QE):
+
+- **First agent (Developer)**: Remind them that a teammate will verify after them. They should leave notes about shared concerns -- especially test files they created or modified -- via team coordination.
+- **Second agent (QE)**: Include a summary of what the previous agent changed (files, branches, test modifications) so they don't start blind. If the Developer wrote tests, QE should review and extend them, not duplicate.
+
 ## When Unclear
 
 If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.

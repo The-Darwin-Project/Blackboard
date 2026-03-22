@@ -53,6 +53,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose }: Conve
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportContent, setReportContent] = useState<string>('');
+  const [turnViewer, setTurnViewer] = useState<{ content: string; filename: string } | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: selectedEvent } = useEventDocument(eventId);
@@ -114,6 +115,9 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose }: Conve
           <span style={{ fontSize: 13, color: '#e2e8f0', fontWeight: 600 }}>{selectedEvent.service}</span>
           <StatusBadge status={selectedEvent.status} />
           <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{selectedEvent.id}</span>
+          {selectedEvent.event?.evidence?.triggered_by && (
+            <span style={{ fontSize: 11, color: '#93c5fd', fontWeight: 500 }}>{selectedEvent.event.evidence.triggered_by}</span>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ fontSize: 11, color: '#64748b' }}>{selectedEvent.source} | {selectedEvent.conversation.length} turns</span>
@@ -141,6 +145,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose }: Conve
       </div>
 
       {reportOpen && <MarkdownViewer filename={`event-${selectedEvent.id}.md`} content={reportContent} onClose={() => setReportOpen(false)} />}
+      {turnViewer && <MarkdownViewer filename={turnViewer.filename} content={turnViewer.content} onClose={() => setTurnViewer(null)} />}
 
       <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
         {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
@@ -148,7 +153,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose }: Conve
             ? attachments.find((a) => a.eventId === eventId)
             : null;
           return (
-            <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} onStatusChange={handleStatusChange} />
+            <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} onStatusChange={handleStatusChange} onViewReport={(content, filename) => setTurnViewer({ content, filename })} />
           );
         })}
         {brainThinking && brainThinking.eventId === eventId && (

@@ -179,12 +179,12 @@ function FeedbackButtons({ eventId, turnNumber }: { eventId: string; turnNumber:
   );
 }
 
-export default function TurnBubble({ turn, eventId, attachment, onStatusChange }: {
+export default function TurnBubble({ turn, eventId, attachment, onStatusChange, onViewReport }: {
   turn: ConversationTurn; eventId?: string;
   attachment?: { filename: string; content: string } | null;
   onStatusChange?: () => void;
+  onViewReport?: (content: string, filename: string) => void;
 }) {
-  const [reportViewerOpen, setReportViewerOpen] = useState(false);
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   const isHuman = turn.actor === 'user';
   const isLongExecute = !isHuman && turn.action === 'execute' && turn.result && turn.result.length > 500;
@@ -210,13 +210,12 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange }
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
-        {isLongExecute && (
-          <button onClick={() => setReportViewerOpen(true)} title="Open full report in viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
+        {isLongExecute && onViewReport && (
+          <button onClick={() => onViewReport(turn.result!, `${turn.actor}-report.md`)} title="Open full report in viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
             View <span style={{ fontSize: 9 }}>↗</span>
           </button>
         )}
       </div>
-      {reportViewerOpen && turn.result && <MarkdownViewer filename={`${turn.actor}-report.md`} content={turn.result} onClose={() => setReportViewerOpen(false)} />}
       {turn.thoughts && <MarkdownPreview source={turn.thoughts} style={{ margin: '4px 0', fontSize: 14, background: 'transparent', color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       {turn.image && (
         <img src={turn.image} alt="User attachment" style={{ maxWidth: 400, maxHeight: 300, borderRadius: 8, border: '1px solid #334155', marginTop: 4, cursor: 'pointer', ...(isHuman ? { marginLeft: 'auto', display: 'block' } : {}) }} onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')} />

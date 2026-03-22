@@ -616,9 +616,9 @@ class Brain:
             domain = context_flags.get("event_domain", "complicated")
             if domain == "complex":
                 agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner"))
-                if agent_rounds < 2:
+                if agent_rounds < 4:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
-                    logger.info(f"COMPLEX domain: close_event gated until 2+ agent rounds ({agent_rounds} so far) for {event_id}")
+                    logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
             elif domain == "chaotic":
                 chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
@@ -804,6 +804,11 @@ class Brain:
                 f"Intermediate result discarded for {event_id}: "
                 f"status changed to {fresh.status.value if fresh else 'deleted'}"
             )
+            up_to = max(t.turn for t in turns) + 1
+            await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
+            evaluated_turns = [t.turn for t in turns if t.turn < up_to]
+            if evaluated_turns:
+                await self._broadcast_status_update(event_id, "evaluated", turns=evaluated_turns)
             return
 
         if accumulated_text:
