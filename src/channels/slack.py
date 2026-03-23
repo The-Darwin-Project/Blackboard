@@ -56,6 +56,7 @@ class SlackChannel:
         self._thinking_msg: dict[str, tuple[str, str]] = {}  # event_id -> (channel, msg_ts)
         self._assistant_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id}
         self._stream_sessions: dict[str, Any] = {}  # event_id -> AsyncChatStream
+        self._quiet_events: set[str] = set()  # events from @mention -- suppress noise, show only results
 
         self._app = AsyncApp(token=bot_token)
         self._assistant = AsyncAssistant()
@@ -262,8 +263,9 @@ class SlackChannel:
             )
             await self._blackboard.set_slack_mapping(channel, thread_ts, event_id)
 
+            self._quiet_events.add(event_id)
             await self._safe_react(client, channel, event["ts"], "brain")
-            logger.info(f"Slack @mention: event {event_id} by {user_id} in thread {thread_ts}")
+            logger.info(f"Slack @mention: event {event_id} (quiet) by {user_id} in thread {thread_ts}")
 
         @self._app.event("message")
         async def on_dm_message(event: dict, client: Any) -> None:
@@ -516,7 +518,13 @@ class SlackChannel:
         event_id = message.get("event_id", "")
         is_assistant = event_id in self._assistant_context
 
+        is_quiet = event_id in self._quiet_events
+
         if msg_type == "brain_thinking":
+            if is_quiet:
+                if event_id not in self._thinking_msg:
+                    await self._handle_legacy_thinking(event_id, message)
+                return
             if is_assistant:
                 await self._handle_assistant_thinking(event_id, message)
             else:
@@ -527,6 +535,11 @@ class SlackChannel:
             return
 
         if msg_type == "turn":
+            if is_quiet:
+                turn_data = message.get("turn", {})
+                action = turn_data.get("action", "")
+                if action not in ("execute", "request_approval", "error"):
+                    return
             if is_assistant and event_id in self._stream_sessions:
                 await self._handle_assistant_turn(event_id, message)
             else:
@@ -549,6 +562,7 @@ class SlackChannel:
                     event_doc.slack_channel_id, event_doc.slack_thread_ts,
                 )
             self._assistant_context.pop(event_id, None)
+            self._quiet_events.discard(event_id)
             stream = self._stream_sessions.pop(event_id, None)
             if stream:
                 try:
