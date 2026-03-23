@@ -1,7 +1,7 @@
 # BlackBoard/src/channels/slack.py
 # @ai-rules:
 # 1. [Constraint]: Single Socket Mode connection. If Brain scales, only one replica enables Slack.
-# 2. [Pattern]: Events from Slack via /darwin (channels) or Assistant split-pane (DMs). Non-threaded bare DMs still ignored.
+# 2. [Pattern]: Events from Slack via /darwin (channels), @mention (join existing threads), or Assistant split-pane (DMs). Non-threaded bare DMs still ignored.
 # 6. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
 # 3. [Pattern]: broadcast_handler routes by message["type"]. Assistant threads: brain_thinking -> streaming, turn -> stream.stop(). Legacy: brain_thinking -> emoji, turn -> Block Kit.
 # 4. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -209,13 +210,70 @@ class SlackChannel:
             await self._safe_react(client, channel_id, thread_ts, "ticket")
             logger.info(f"Slack /darwin: event {event_id} by {user_id} in {channel_id}")
 
-        @self._app.event("message")
-        async def on_dm_message(event: dict, client: Any) -> None:
-            # Skip bot's own messages and subtypes (edits, deletes, etc.)
+        @self._app.event("app_mention")
+        async def handle_app_mention(event: dict, client: Any) -> None:
             if event.get("bot_id") or event.get("subtype"):
                 return
 
-            # DMs + infra channel threads (Phase 2). Other channels are ignored.
+            channel = event.get("channel", "")
+            user_id = event["user"]
+            raw_text = event.get("text", "")
+            text = re.sub(r"<@[A-Z0-9]+>\s*", "", raw_text, count=1).strip()
+
+            if not text:
+                return
+
+            thread_ts = event.get("thread_ts", event["ts"])
+
+            existing_event_id = await self._blackboard.get_event_by_slack_thread(channel, thread_ts)
+            if existing_event_id:
+                event_doc = await self._blackboard.get_event(existing_event_id)
+                if event_doc and event_doc.status != "closed":
+                    display_name = await self._resolve_display_name(client, user_id)
+                    from ..models import ConversationTurn
+                    turn = ConversationTurn(
+                        turn=len(event_doc.conversation) + 1,
+                        actor="user", action="message",
+                        thoughts=text, source="slack",
+                        user_name=display_name,
+                    )
+                    await self._blackboard.append_turn(existing_event_id, turn)
+                    self._brain.clear_waiting(existing_event_id)
+                    await self._safe_react(client, channel, event["ts"], "eyes")
+                    logger.info(f"Slack @mention: reply on {existing_event_id} from {display_name}")
+                    return
+
+            display_name = await self._resolve_display_name(client, user_id)
+            event_id = await self._blackboard.create_event(
+                source="slack",
+                service="general",
+                reason=text,
+                evidence=EventEvidence(
+                    display_text=text,
+                    source_type="slack",
+                    triggered_by=display_name,
+                    domain="disorder",
+                    severity="info",
+                ),
+            )
+
+            await self._blackboard.update_event_slack_context(
+                event_id, channel, thread_ts, user_id,
+            )
+            await self._blackboard.set_slack_mapping(channel, thread_ts, event_id)
+
+            await self._safe_react(client, channel, event["ts"], "brain")
+            logger.info(f"Slack @mention: event {event_id} by {user_id} in thread {thread_ts}")
+
+        @self._app.event("message")
+        async def on_dm_message(event: dict, client: Any) -> None:
+            if event.get("bot_id") or event.get("subtype"):
+                return
+
+            text = event.get("text", "")
+            if re.match(r"<@[A-Z0-9]+>", text):
+                return
+
             channel_type = event.get("channel_type", "")
             channel = event.get("channel", "")
             if channel_type != "im" and channel != self._infra_channel:
@@ -223,11 +281,9 @@ class SlackChannel:
 
             thread_ts = event.get("thread_ts")
             if thread_ts is None:
-                # Not a thread reply -- ignore (events only via /darwin)
                 return
 
             user = event["user"]
-            text = event.get("text", "")
 
             # Lookup event by thread
             event_id = await self._blackboard.get_event_by_slack_thread(channel, thread_ts)
