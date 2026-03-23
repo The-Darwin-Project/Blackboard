@@ -22,7 +22,7 @@ Before acting on any agent recommendation, consult deep memory with the agent's 
 
 When history contradicts the agent's recommendation, prefer the historical data and note the override.
 
-Skip this only when the agent's report is a simple acknowledgment with no actionable recommendation.
+Skip this only when the agent's report is a simple acknowledgment with no            return False  # Don't re-invoke immediately -- let event loop pick up with dispatch tools unlocked actionable recommendation.
 
 ## Evaluate Recommendations
 
