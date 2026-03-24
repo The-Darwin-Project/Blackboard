@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: qdrant
 spec:
-  replicas: 1
+  replicas: 0
   strategy:
     type: Recreate
   selector:
