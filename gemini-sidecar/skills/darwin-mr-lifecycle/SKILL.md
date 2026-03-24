@@ -79,8 +79,8 @@ glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflict
 Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
-- **Success**: "MR merged successfully. Recommend notifying maintainer via Slack."
+- **Success**: "MR merged successfully."
 - **Pipeline running**: "Pipeline triggered, currently running."
-- **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer via Slack with failure details."
+- **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer with failure details."
 - **Conflict (submodule)**: "Closed obsolete submodule MR -- newer update already merged to main."
-- **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer via Slack to rebase."
+- **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer to rebase."

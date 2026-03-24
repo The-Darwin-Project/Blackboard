@@ -23,11 +23,11 @@ The plan steps contain the specific instructions. If the step references Bot Ins
 
 ## Maintainer Notification
 
-Notify each maintainer on both success and failure outcomes. Include the MR URL in notifications. If no maintainer contacts are available, note it in the close summary.
+Notify maintainers only when action is needed: pipeline failure after retry, stuck pipeline, merge conflicts, or any outcome that requires human attention. Do NOT notify on successful merges -- those are routine and create noise. Include the MR URL in failure notifications.
 
 ## Close Protocol
 
-Headhunter events are autonomous -- no user confirmation needed. Close after the final plan step is completed and verified. If the task involves an MR, confirm the MR state (merged/closed) before closing. Notify maintainers before closing.
+Headhunter events are autonomous -- no user confirmation needed. Close after the final plan step is completed and verified. If the task involves an MR, confirm the MR state (merged/closed) before closing.
 
 For bot-authored MRs where a pipeline fails after retry: close the MR (the bot will create a fresh one) and notify the maintainer. For human-authored MRs: notify the maintainer but leave the MR open.
 

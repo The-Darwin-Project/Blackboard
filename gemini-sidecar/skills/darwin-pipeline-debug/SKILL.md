@@ -52,6 +52,6 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
-- **Transient (retry succeeded)**: "Pipeline green after retry. Recommend merging and notifying maintainer via Slack."
+- **Transient (retry succeeded)**: "Pipeline green after retry. Recommend merging."
 - **Pipeline running**: "Pipeline retested, currently running."
-- **Persistent failure**: "Pipeline still failing after retry. Error: {description}. Recommend notifying maintainer via Slack with failure details."
+- **Persistent failure**: "Pipeline still failing after retry. Error: {description}. Recommend notifying maintainer with failure details."
