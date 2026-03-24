@@ -1,0 +1,88 @@
+{{- if .Values.qdrant.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-qdrant
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-qdrant
+    app.kubernetes.io/name: darwin-qdrant
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: qdrant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: darwin-qdrant
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: darwin-qdrant
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: qdrant
+    spec:
+      serviceAccountName: {{ .Release.Name }}-brain
+      containers:
+        - name: qdrant
+          image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: {{ .Values.qdrant.port }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.qdrant.grpcPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+          {{- if .Values.qdrant.persistence.enabled }}
+          volumeMounts:
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.qdrant.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.qdrant.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      {{- if .Values.qdrant.persistence.enabled }}
+      volumes:
+        - name: qdrant-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-qdrant-data
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-qdrant
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-qdrant
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: qdrant
+spec:
+  selector:
+    app: darwin-qdrant
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.qdrant.port }}
+      targetPort: {{ .Values.qdrant.port }}
+    - name: grpc
+      port: {{ .Values.qdrant.grpcPort }}
+      targetPort: {{ .Values.qdrant.grpcPort }}
+{{- end }}

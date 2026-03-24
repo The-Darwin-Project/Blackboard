@@ -35,7 +35,7 @@ redis:
       memory: 6Gi
       cpu: 6
 # =============================================================================
-# Qdrant Vector DB Sidecar (Deep Memory)
+# Qdrant Vector DB (Deep Memory) -- standalone Deployment + Service
 # =============================================================================
 qdrant:
   enabled: true

@@ -169,7 +169,7 @@ spec:
             {{- end }}
             {{- if .Values.qdrant.enabled }}
             - name: QDRANT_URL
-              value: "http://localhost:{{ .Values.qdrant.port }}"
+              value: "http://{{ .Release.Name }}-qdrant:{{ .Values.qdrant.port }}"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
@@ -417,46 +417,7 @@ spec:
                 - ALL
         {{- end }}
         
-        # =================================================================
-        # Qdrant Vector DB Sidecar (Deep Memory)
-        # =================================================================
-        {{- if .Values.qdrant.enabled }}
-        - name: qdrant
-          image: "{{ .Values.qdrant.image.repository }}:{{ .Values.qdrant.image.tag }}"
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: qdrant-http
-              containerPort: {{ .Values.qdrant.port }}
-              protocol: TCP
-            - name: qdrant-grpc
-              containerPort: {{ .Values.qdrant.grpcPort }}
-              protocol: TCP
-          resources:
-            {{- toYaml .Values.qdrant.resources | nindent 12 }}
-          {{- if .Values.qdrant.persistence.enabled }}
-          volumeMounts:
-            - name: qdrant-data
-              mountPath: /qdrant/storage
-          {{- end }}
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.qdrant.port }}
-            initialDelaySeconds: 5
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: {{ .Values.qdrant.port }}
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          securityContext:
-            runAsNonRoot: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-        {{- end }}
+        # Qdrant moved to standalone Deployment (qdrant-deployment.yaml)
         
         # =================================================================
         # Architect Agent Sidecar
@@ -1053,11 +1014,7 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-redis-data
         {{- end }}
-        {{- if and .Values.qdrant.enabled .Values.qdrant.persistence.enabled }}
-        - name: qdrant-data
-          persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-qdrant-data
-        {{- end }}
+        # Qdrant PVC now managed by qdrant-deployment.yaml
         # GitOps data volumes - shared PVC with subPaths per agent
         {{- if .Values.sidecars.persistence.enabled }}
         - name: gitops-data
