@@ -38,8 +38,10 @@ spec:
               protocol: TCP
           resources:
             {{- toYaml .Values.qdrant.resources | nindent 12 }}
-          {{- if .Values.qdrant.persistence.enabled }}
           volumeMounts:
+            - name: qdrant-snapshots
+              mountPath: /qdrant/snapshots
+          {{- if .Values.qdrant.persistence.enabled }}
             - name: qdrant-data
               mountPath: /qdrant/storage
           {{- end }}
@@ -58,12 +60,14 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
-      {{- if .Values.qdrant.persistence.enabled }}
       volumes:
+        - name: qdrant-snapshots
+          emptyDir: {}
+        {{- if .Values.qdrant.persistence.enabled }}
         - name: qdrant-data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-qdrant-data
-      {{- end }}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
