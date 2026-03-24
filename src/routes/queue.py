@@ -308,6 +308,8 @@ async def rebuild_deep_memory(
         except Exception as e:
             logger.warning(f"Rebuild archive failed for {eid}: {e}")
             failed += 1
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                await asyncio.sleep(5)
 
     logger.info(
         f"Deep memory rebuild: {archived} archived, "

@@ -2587,13 +2587,13 @@ class Brain:
         if not event:
             return
 
-        # Enrich with GitOps metadata + architecture diagram from Blackboard
         service_meta = await self.blackboard.get_service(event.service)
         mermaid = ""
-        try:
-            mermaid = await self.blackboard.generate_mermaid()
-        except Exception as e:
-            logger.warning(f"Failed to generate mermaid for event MD: {e}")
+        if event.source != "headhunter":
+            try:
+                mermaid = await self.blackboard.generate_mermaid()
+            except Exception as e:
+                logger.warning(f"Failed to generate mermaid for event MD: {e}")
 
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
