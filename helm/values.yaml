@@ -328,7 +328,7 @@ ephemeralAgents:
   excludeNodes: []
   #  - hostname-to-exclude
   cleanup:
-    strategy: "keep-since" # "keep-since" (age-based) or "keep" (count-based)
+    strategy: "keep" # "keep-since" (age-based) or "keep" (count-based)
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
     keep: 5 # Number of TaskRuns to retain (when strategy=keep)
     schedule: "0 */6 * * *" # Cron schedule for the Tekton Operator pruner
