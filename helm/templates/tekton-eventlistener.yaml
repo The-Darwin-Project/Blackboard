@@ -240,7 +240,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
+    app: darwin-ephemeral-agent
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: ephemeral-agent
 spec:
