@@ -649,15 +649,13 @@ class Headhunter:
 
             close_turn = event.conversation[-1] if event.conversation else None
             close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
-            summary = (close_turn.thoughts or close_turn.result or "Event closed.") if close_turn else "Event closed."
 
             if close_reason in ("stale", "duplicate"):
                 await self.blackboard.mark_feedback_sent(event.id)
                 logger.info(f"Headhunter feedback skipped for {event.id}: {close_reason} on !{mr_iid} (todo left alive)")
                 continue
 
-            is_escalation = close_reason in ("timeout", "force_closed") or "fail" in summary.lower()
-            comment = f"**Darwin {'escalation' if is_escalation else 'resolved'}:** {summary[:500]}"
+            outcome = self._build_feedback_comment(event, close_reason)
 
             async with httpx.AsyncClient(verify=False, timeout=30) as client:
                 headers = self._headers()
@@ -665,7 +663,7 @@ class Headhunter:
                 resp = await client.post(
                     self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
                     headers=headers,
-                    json={"body": comment},
+                    json={"body": outcome},
                 )
                 if resp.status_code == 404:
                     logger.info(f"Feedback skip: MR !{mr_iid} not found (deleted?)")
@@ -683,6 +681,31 @@ class Headhunter:
 
             await self.blackboard.mark_feedback_sent(event.id)
             logger.info(f"Headhunter feedback for {event.id}: {close_reason} on !{mr_iid}")
+
+    @staticmethod
+    def _build_feedback_comment(event: "EventDocument", close_reason: str) -> str:
+        """Build a structured GitLab MR comment from event outcome."""
+        actions = []
+        for t in event.conversation:
+            if t.actor in ("user", "brain"):
+                continue
+            if t.action == "execute" and t.result:
+                ts = time.strftime("%H:%M", time.gmtime(t.timestamp)) if t.timestamp else ""
+                first_line = t.result.strip().split("\n")[0].replace("#", "").strip()
+                actions.append(f"- `{ts}` {first_line[:150]}")
+
+        close_turn = event.conversation[-1] if event.conversation else None
+        close_summary = (close_turn.thoughts or "") if close_turn else ""
+
+        turns = len(event.conversation)
+        lines = [f"**Darwin** ({turns} turns)"]
+        if close_summary:
+            lines.append(f"\n{close_summary}")
+        if actions:
+            lines.append("\n**Trace (UTC):**")
+            lines.extend(actions[:5])
+
+        return "\n".join(lines)
 
     async def _is_recently_processed(self, project_id: int, mr_iid: int) -> bool:
         """Check if this MR was processed in the last 30 minutes (Redis-backed dedup)."""
