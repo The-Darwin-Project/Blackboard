@@ -74,6 +74,10 @@ glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflict
 
 - In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
+## Critical: No @mentions
+
+Do NOT tag individual users (`@username`) in MR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+
 ## Reporting Results
 
 Always end your response with a clear recommendation for the Brain.

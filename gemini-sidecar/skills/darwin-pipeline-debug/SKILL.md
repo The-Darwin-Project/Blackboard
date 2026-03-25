@@ -47,6 +47,10 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 - Do NOT attempt root cause analysis
 - Do NOT modify code or config to fix the pipeline
 
+## Critical: No @mentions
+
+Do NOT tag individual users (`@username`) in MR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+
 ## Reporting Results
 
 Always end your response with a clear recommendation for the Brain.

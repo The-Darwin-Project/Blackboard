@@ -25,7 +25,7 @@ glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: your response 
 
 - Always reference the original comment or discussion when responding
 - Keep responses concise and actionable
-- Tag users by @username in MR comments when they need to take action
+- Do NOT tag individual users (@username) in MR comments -- the Brain handles all human notifications via Slack
 - If the question is about code: investigate and answer
 - If the question is about process/approval: escalate to maintainer
 - If unsure about the answer: say so explicitly and escalate
