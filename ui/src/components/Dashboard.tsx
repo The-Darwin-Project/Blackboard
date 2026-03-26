@@ -148,7 +148,7 @@ function DashboardInner() {
 
   // -- WS + query hooks --
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, optimisticRemoveEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, optimisticRemoveEvent } = useQueueInvalidation();
 
   // Stale-event guard: if selected event was deleted (404), clear selection
   const { isError: selectedEventError } = useEventDocument(selectedEventId);
@@ -259,6 +259,7 @@ function DashboardInner() {
       if (msg.event_id) {
         optimisticRemoveEvent(msg.event_id as string);
         invalidateEvent(msg.event_id as string);
+        invalidateClosed();
       }
     }
   });

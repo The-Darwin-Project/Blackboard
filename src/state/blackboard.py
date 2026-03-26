@@ -1855,17 +1855,17 @@ class BlackboardState:
                 logger.warning(f"persist_report: event {event_id} not found in Redis, skipping")
                 return
 
-            # Fetch enrichment data (best-effort)
             service_meta = None
             mermaid = ""
             try:
                 service_meta = await self.get_service(event.service)
             except Exception:
                 pass
-            try:
-                mermaid = await self.generate_mermaid()
-            except Exception:
-                pass
+            if event.source != "headhunter":
+                try:
+                    mermaid = await self.generate_mermaid()
+                except Exception:
+                    pass
 
             # Lazy import to avoid circular dependency (Brain imports blackboard)
             from ..agents.brain import Brain

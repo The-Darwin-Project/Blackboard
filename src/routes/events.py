@@ -56,9 +56,10 @@ async def get_event_document(
         raise HTTPException(404, f"Event {event_id} not found")
     service_meta = await blackboard.get_service(event.service)
     mermaid = ""
-    try:
-        mermaid = await blackboard.generate_mermaid()
-    except Exception:
-        pass
+    if event.source != "headhunter":
+        try:
+            mermaid = await blackboard.generate_mermaid()
+        except Exception:
+            pass
     content = brain._event_to_markdown(event, service_meta, mermaid)
     return PlainTextResponse(content=content, media_type="text/markdown")

@@ -227,12 +227,12 @@ async def get_event_report(
 
     service_meta = await blackboard.get_service(event.service)
     mermaid = ""
-    try:
-        mermaid = await blackboard.generate_mermaid()
-    except Exception:
-        pass
+    if event.source != "headhunter":
+        try:
+            mermaid = await blackboard.generate_mermaid()
+        except Exception:
+            pass
 
-    # Reuse Brain's markdown format (extracted as @staticmethod)
     from ..agents.brain import Brain
     content = Brain._event_to_markdown(event, service_meta, mermaid)
 

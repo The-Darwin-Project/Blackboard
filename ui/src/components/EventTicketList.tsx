@@ -43,8 +43,11 @@ export default function EventTicketList({ onEventSelect, onEventClose, selectedE
     return age >= 30 * 60 * 1000;
   });
 
+  const closedIds = new Set((closedEvents || []).map((e) => e.id));
+  const dedupedActive = (activeEvents || []).filter((e) => !closedIds.has(e.id));
+
   const allEvents: ActiveEvent[] = [
-    ...(activeEvents || []),
+    ...dedupedActive,
     ...recentClosed,
     ...(showOlderClosed ? olderClosed : []),
   ];
@@ -61,7 +64,7 @@ export default function EventTicketList({ onEventSelect, onEventClose, selectedE
         alignItems: 'center', borderBottom: '1px solid #334155', flexShrink: 0,
       }}>
         <span style={{ fontSize: 12, color: '#94a3b8' }}>
-          {activeEvents?.length || 0} active
+          {dedupedActive.length} active
         </span>
         <button
           onClick={() => setShowOlderClosed(!showOlderClosed)}

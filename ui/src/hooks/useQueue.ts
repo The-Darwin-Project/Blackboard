@@ -50,11 +50,11 @@ export function useQueueInvalidation() {
       queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
       queryClient.invalidateQueries({ queryKey: ['eventDocument'] });
     },
+    invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
     optimisticRemoveEvent: (eventId: string) => {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
         old ? old.filter((e) => e.id !== eventId) : [],
       );
-      queryClient.invalidateQueries({ queryKey: ['activeEvents'] });
     },
   };
 }
