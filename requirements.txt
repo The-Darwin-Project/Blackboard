@@ -16,7 +16,7 @@ pydantic>=2.10.0
 redis[hiredis]>=5.2.0
 
 # Google Gen AI SDK (Vertex AI) -- replaces deprecated google-cloud-aiplatform
-google-genai>=1.60.0
+google-genai>=1.69.0
 
 # Anthropic SDK (Claude via Vertex AI) -- lazy-loaded when LLM_PROVIDER=claude
 anthropic>=0.79.0
