@@ -45,6 +45,28 @@ function proxyGet(brainPath) {
   });
 }
 
+function proxyPost(brainPath, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(brainPath, BRAIN_BASE);
+    const data = JSON.stringify(body);
+    const req = http.request(url.href, {
+      method: 'POST', timeout: 10000,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+    }, (resp) => {
+      let chunks = '';
+      resp.on('data', c => chunks += c);
+      resp.on('end', () => {
+        try { resolve({ status: resp.statusCode, data: JSON.parse(chunks) }); }
+        catch { resolve({ status: resp.statusCode, data: chunks }); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Brain proxy timeout')); });
+    req.write(data);
+    req.end();
+  });
+}
+
 /**
  * Parse request body as JSON
  */
@@ -471,6 +493,28 @@ async function handleRequest(req, res) {
       const data = await proxyGet('/topology/mermaid');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/proxy/plan-step' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const task = state.getCurrentTask();
+      const eventId = task?.eventId;
+      if (!eventId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No active task' }));
+        return;
+      }
+      body.event_id = eventId;
+      body.role = AGENT_ROLE || '';
+      const result = await proxyPost(`/queue/${eventId}/plan-step`, body);
+      res.writeHead(result.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result.data));
     } catch (err) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));

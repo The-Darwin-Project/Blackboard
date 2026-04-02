@@ -68,6 +68,12 @@ Before dispatching, ask: "Does this need a work plan or just a quick answer?"
 
 When in doubt, use select_agent -- it has full task tracking. message_agent is for lightweight, single-turn interactions where a full dispatch is overkill.
 
+## Plan Before Routing (COMPLICATED/COMPLEX only)
+
+For COMPLICATED or COMPLEX events, call `create_plan` before `select_agent` to chalk your intended agent sequence on the blackboard. This makes the execution order visible to agents, the dashboard, and yourself for progress tracking.
+
+For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan. If you later discover the event needs multi-step planning, reclassify via `classify_event` first to unlock `create_plan`.
+
 ## When Unclear
 
 If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.

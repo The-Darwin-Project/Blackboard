@@ -614,13 +614,16 @@ class Brain:
             logger.info(f"Pre-classification gate: only lookup+classify tools for {event_id}")
         elif context_flags:
             domain = context_flags.get("event_domain", "complicated")
-            if domain == "complex":
+            if domain == "clear":
+                active_tools = [t for t in active_tools if t["name"] != "create_plan"]
+                logger.info(f"CLEAR domain: create_plan gated (act directly) for {event_id}")
+            elif domain == "complex":
                 agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner"))
                 if agent_rounds < 4:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
                     logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
             elif domain == "chaotic":
-                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack"}
+                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
@@ -1998,6 +2001,68 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return True
 
+        elif function_name == "create_plan":
+            steps = args.get("steps", [])
+            reasoning = args.get("reasoning", "")
+            if not steps:
+                logger.warning(f"create_plan called with no steps for {event_id}")
+                return True
+            plan_lines = [f"## Plan\n\n{reasoning}\n"]
+            for s in steps:
+                plan_lines.append(f"{s.get('id', '?')}. **{s.get('agent', '?')}**: {s.get('summary', '')}")
+            plan_md = "\n".join(plan_lines)
+            step_map = [{"id": str(s.get("id", "")), "agent": s.get("agent", ""), "summary": s.get("summary", "")} for s in steps]
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="plan",
+                plan=plan_md,
+                thoughts=f"Plan created: {len(steps)} steps. {reasoning}",
+                taskForAgent={"steps": step_map, "source": "brain"},
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info(f"Brain chalked plan for {event_id}: {len(steps)} steps")
+            return True
+
+        elif function_name == "get_plan_progress":
+            event_doc = await self.blackboard.get_event(event_id)
+            if not event_doc:
+                return True
+            plan_turn = None
+            for t in reversed(event_doc.conversation):
+                if t.action == "plan" and t.taskForAgent and "steps" in t.taskForAgent:
+                    plan_turn = t
+                    break
+            if not plan_turn:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="think",
+                    thoughts="No plan exists for this event.",
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            steps = {s["id"]: {**s, "status": "pending"} for s in plan_turn.taskForAgent["steps"]}
+            for t in event_doc.conversation:
+                if t.action == "plan_step" and t.taskForAgent and "step_id" in t.taskForAgent:
+                    sid = t.taskForAgent["step_id"]
+                    if sid in steps:
+                        steps[sid]["status"] = t.taskForAgent.get("status", "completed")
+            progress = list(steps.values())
+            done = sum(1 for s in progress if s["status"] == "completed")
+            summary = f"Plan progress: {done}/{len(progress)} steps completed.\n"
+            for s in progress:
+                icon = {"completed": "[x]", "in_progress": "[~]", "blocked": "[!]"}.get(s["status"], "[ ]")
+                summary += f"  {icon} Step {s['id']}: {s.get('summary', '')} ({s.get('agent', '?')}) - {s['status']}\n"
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain", action="think",
+                thoughts=summary.strip(),
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
         elif function_name == "classify_event":
             domain = args.get("domain", "complicated")
             reasoning = args.get("reasoning", "")
@@ -2263,22 +2328,34 @@ class Brain:
 
             # Append agent result turn (cancel = clean termination, not an error)
             is_cancel = result_str.strip() == "Cancelled by Brain"
+            is_plan = (
+                not is_cancel
+                and agent_name == "architect"
+                and result_str.lstrip().startswith("---")
+            )
+
+            plan_md, plan_steps = None, None
+            if is_plan:
+                plan_md, plan_steps = self._parse_plan_frontmatter(result_str)
+
+            has_structured_plan = plan_md and plan_steps
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
-                action="cancel" if is_cancel else "execute",
-                result=result_str[:15000],  # Cap result length (raised for Dev+QE merged output)
+                action="cancel" if is_cancel else ("plan" if has_structured_plan else "execute"),
+                result=result_str[:15000],
+                plan=plan_md if has_structured_plan else None,
+                taskForAgent=(
+                    {"steps": plan_steps, "source": "architect"}
+                    if has_structured_plan else None
+                ),
             )
             await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Agent task {'cancelled' if is_cancel else 'completed'}: {agent_name} for {event_id}")
+            logger.info(f"Agent task {'cancelled' if is_cancel else 'plan' if has_structured_plan else 'completed'}: {agent_name} for {event_id}")
 
             if is_cancel:
                 self._release_task_state(event_id)
                 return
-
-            # Write architect plan as standalone file to agent volumes
-            if agent_name == "architect" and result_str.lstrip().startswith("---"):
-                await self._write_plan_to_volumes(event_id, result_str)
 
             # Mark routing turn as EVALUATED (agent completed its work)
             if routing_turn_num:
@@ -2661,24 +2738,42 @@ class Brain:
         file_path.write_text(content)
         logger.debug(f"Wrote event MD to {file_path}")
 
-    async def _write_plan_to_volumes(self, event_id: str, plan_content: str) -> None:
-        """Write architect plan as standalone .plan.md file to agent volumes.
-        Agents read this directly -- same pattern as Cursor .cursor/plans/*.plan.md files.
-        Deduplicates by resolved path to avoid race conditions on shared subPaths.
+    @staticmethod
+    def _parse_plan_frontmatter(raw: str) -> tuple[str | None, list[dict] | None]:
+        """Extract plan markdown body and structured steps from YAML frontmatter.
+
+        Returns (plan_markdown, steps_list) or (None, None) if parsing fails.
+        Frontmatter format defined in brain_skills/post-agent/plan-activation.md.
         """
-        filename = f"plan-{event_id}.md"
-        written: set[str] = set()
-        for role, base_path in VOLUME_PATHS.items():
-            if role == "architect":
+        import yaml
+
+        stripped = raw.lstrip()
+        if not stripped.startswith("---"):
+            return None, None
+        end_idx = stripped.find("---", 3)
+        if end_idx == -1:
+            return stripped, None
+        frontmatter_str = stripped[3:end_idx].strip()
+        body = stripped[end_idx + 3:].strip()
+        try:
+            fm = yaml.safe_load(frontmatter_str)
+        except Exception:
+            return body or stripped, None
+        if not isinstance(fm, dict):
+            return body or stripped, None
+        raw_steps = fm.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return body or stripped, None
+        steps = []
+        for s in raw_steps:
+            if not isinstance(s, dict) or "id" not in s:
                 continue
-            plans_dir = Path(base_path) / "plans"
-            resolved = str(plans_dir.resolve())
-            if resolved in written:
-                continue
-            plans_dir.mkdir(parents=True, exist_ok=True)
-            (plans_dir / filename).write_text(plan_content)
-            written.add(resolved)
-        logger.info(f"Wrote plan {filename} to {len(written)} unique volume(s)")
+            steps.append({
+                "id": str(s["id"]),
+                "agent": s.get("agent", ""),
+                "summary": s.get("summary", ""),
+            })
+        return body or stripped, steps if steps else None
 
     @staticmethod
     def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:

@@ -1592,8 +1592,9 @@ class BlackboardState:
                 if turn.action == "defer":
                     defer_count += 1
 
-            # HeadHunter work plan detection (YAML frontmatter)
-            has_plan = event.event.reason.lstrip().startswith("---")
+            has_plan = any(t.action == "plan" for t in event.conversation)
+            if not has_plan:
+                has_plan = event.event.reason.lstrip().startswith("---")
             if not has_plan and isinstance(event.event.evidence, EventEvidence):
                 has_plan = event.event.evidence.source_type == "headhunter"
 

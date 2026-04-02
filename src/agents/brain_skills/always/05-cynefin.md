@@ -61,3 +61,5 @@ Reclassify when evidence changes during an event:
 - System enters crisis mid-event: reclassify to CHAOTIC
 - Probe results clarify the situation: reclassify downward (COMPLEX -> COMPLICATED)
 - Stabilization confirmed: reclassify from CHAOTIC to COMPLICATED for root cause analysis
+
+Reclassification unlocks domain-gated tools. If an agent reports that a CLEAR event requires multi-step planning, reclassify to COMPLICATED -- this unlocks the `create_plan` tool for structuring the next steps on the blackboard. After CHAOTIC stabilization, reclassify to COMPLICATED to unlock planning tools for root cause analysis.

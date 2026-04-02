@@ -120,6 +120,43 @@ async def get_event_turns(
     }
 
 
+class PlanStepRequest(BaseModel):
+    """Request body for plan step status update from agent sidecar."""
+    step_id: str = Field(..., description="Step ID from the plan")
+    status: str = Field(..., description="in_progress, completed, or blocked")
+    notes: str = Field("", description="What was done or why blocked")
+    role: str = Field("", description="Agent role (auto-set by sidecar proxy)")
+    event_id: str = Field("", description="Event ID (auto-set by sidecar proxy)")
+
+
+@router.post("/{event_id}/plan-step")
+async def update_plan_step(
+    event_id: str,
+    req: PlanStepRequest,
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Update a plan step status. Called by agent sidecars via bb_update_plan_step MCP tool.
+
+    Uses brain._append_and_broadcast to go through the standard broadcast pipeline
+    (WS push to UI, Slack mirror, agent blackboard_update).
+    """
+    from ..dependencies import get_brain
+    brain = await get_brain()
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    turn = ConversationTurn(
+        turn=(await brain._next_turn_number(event_id)),
+        actor=req.role or "agent",
+        action="plan_step",
+        thoughts=req.notes or f"Step {req.step_id}: {req.status}",
+        taskForAgent={"step_id": req.step_id, "status": req.status},
+    )
+    await brain._append_and_broadcast(event_id, turn)
+    return {"ok": True, "turn": turn.turn}
+
+
 @router.get("/{event_id}", response_model=EventDocument)
 async def get_event_document(
     event_id: str,

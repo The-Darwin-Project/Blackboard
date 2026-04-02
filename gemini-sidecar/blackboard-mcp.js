@@ -29,6 +29,19 @@ const TOOLS = [
     description: 'List all active events in the system. Use to see if related events are being worked on.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'bb_update_plan_step',
+    description: 'Mark a plan step as in_progress, completed, or blocked. Call this when you start or finish a step from the plan on the blackboard. The update is visible to the Brain, other agents, and the dashboard in real time.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        step_id: { type: 'string', description: 'Step ID from the plan (e.g., "1", "2")' },
+        status: { type: 'string', enum: ['in_progress', 'completed', 'blocked'], description: 'New status for this step' },
+        notes: { type: 'string', description: 'Optional: what was done or why blocked' },
+      },
+      required: ['step_id', 'status'],
+    },
+  },
 ];
 
 function httpGet(port, path) {
@@ -94,6 +107,13 @@ async function handleToolCall(name, args) {
   }
   if (name === 'bb_get_active_events') {
     return await httpGet(SIDECAR_PORT, '/proxy/active-events');
+  }
+  if (name === 'bb_update_plan_step') {
+    return await httpPost(SIDECAR_PORT, '/proxy/plan-step', {
+      step_id: args.step_id || '',
+      status: args.status || 'completed',
+      notes: args.notes || '',
+    });
   }
   return { error: `Unknown tool: ${name}` };
 }

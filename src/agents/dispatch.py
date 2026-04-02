@@ -35,10 +35,9 @@ def _build_prompt(task: str, event_md_path: str) -> str:
     parts = []
     if event_md_path:
         parts.append(f"Read the event document at {event_md_path} for full context.")
-        plan_path = event_md_path.replace("events/event-", "plans/plan-")
         parts.append(
-            f"If a plan file exists at {plan_path}, read it for the architect's "
-            f"implementation plan. Update the frontmatter step status as you complete each step."
+            "Use bb_catch_up to read the blackboard for plan steps and progress. "
+            "Use bb_update_plan_step to mark steps as in_progress or completed."
         )
     parts.append(f"Execute the following task:\n\n{task}")
     return " ".join(parts) if event_md_path else task

@@ -425,6 +425,56 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["project_id", "mr_iid", "result", "summary"],
         },
     },
+    {
+        "name": "create_plan",
+        "description": (
+            "Chalk a structured plan on the blackboard. Use for COMPLICATED or COMPLEX "
+            "events to define the intended agent sequence before routing. Each step specifies "
+            "which agent handles it. The plan is visible to all agents and the dashboard. "
+            "For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan. "
+            "If you need this tool but are in CLEAR/CHAOTIC, reclassify the event first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Step number (e.g., '1', '2')"},
+                            "agent": {
+                                "type": "string",
+                                "enum": ["architect", "sysadmin", "developer", "qe"],
+                                "description": "Which agent handles this step",
+                            },
+                            "summary": {"type": "string", "description": "What this step accomplishes"},
+                        },
+                        "required": ["id", "agent", "summary"],
+                    },
+                    "description": "Ordered list of plan steps",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why this plan sequence (one sentence)",
+                },
+            },
+            "required": ["steps", "reasoning"],
+        },
+    },
+    {
+        "name": "get_plan_progress",
+        "description": (
+            "Read the current plan and step completion status for this event. "
+            "Returns the active plan steps with their assigned agents and current status "
+            "(pending, in_progress, completed, blocked). Use to decide which step to "
+            "execute next or whether to close the event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
