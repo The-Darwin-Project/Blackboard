@@ -1,10 +1,12 @@
 // gemini-sidecar/http-handler.js
 // @ai-rules:
-// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute. All state via state.js.
+// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute, /proxy/*. All state via state.js.
 // 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message/teammate_forward — task_id and event_id from state.getCurrentTask().
 // 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 90s timeout.
 // 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set.
 // 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
+// 6. [Pattern]: /proxy/* endpoints forward GET requests to Brain API at BRAIN_HTTP_URL || localhost:8000. Read-only, no auth.
+// 7. [Gotcha]: /proxy/turns returns empty response if no active task (eventId is null).
 
 const { executeCLI } = require('./cli-executor');
 const { tryWake } = require('./ws-client');
@@ -22,9 +24,26 @@ const {
   GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, DEFAULT_WORK_DIR, PORT } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL } = require('./config');
 const { wsSend } = require('./ws-utils');
 const fs = require('fs');
+const http = require('http');
+
+const BRAIN_BASE = BRAIN_HTTP_URL || 'http://localhost:8000';
+
+function proxyGet(brainPath) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(brainPath, BRAIN_BASE);
+    http.get(url.href, { timeout: 10000 }, (resp) => {
+      let data = '';
+      resp.on('data', c => data += c);
+      resp.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(data); }
+      });
+    }).on('error', reject).on('timeout', function() { this.destroy(); reject(new Error('Brain proxy timeout')); });
+  });
+}
 
 /**
  * Parse request body as JSON
@@ -239,6 +258,83 @@ async function handleRequest(req, res) {
         status: 'error',
         message: err.message
       }));
+    }
+    return;
+  }
+
+  // =========================================================================
+  // Proxy endpoints — forward to Brain API (read-only)
+  // =========================================================================
+
+  if (url.pathname === '/proxy/turns' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    const eventId = task?.eventId;
+    if (!eventId) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ turns: [], total: 0, event_status: 'unknown', gap_from_turn: 0, role_last_seen_turn: 0 }));
+      return;
+    }
+    try {
+      const since = url.searchParams.get('since');
+      let brainPath = `/queue/${eventId}/turns?role=${AGENT_ROLE || ''}`;
+      if (since) brainPath += `&since=${since}`;
+      const data = await proxyGet(brainPath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/proxy/active-events' && req.method === 'GET') {
+    try {
+      const data = await proxyGet('/queue/active');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith('/proxy/journal') && req.method === 'GET') {
+    try {
+      const service = url.pathname.replace('/proxy/journal', '').replace(/^\//, '');
+      const brainPath = service ? `/api/journal/${service}` : '/api/journal/';
+      const data = await proxyGet(brainPath);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith('/proxy/service/') && req.method === 'GET') {
+    try {
+      const name = url.pathname.replace('/proxy/service/', '');
+      const data = await proxyGet(`/topology/service/${name}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/proxy/topology/mermaid' && req.method === 'GET') {
+    try {
+      const data = await proxyGet('/topology/mermaid');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(data));
+    } catch (err) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `Brain proxy failed: ${err.message}` }));
     }
     return;
   }
