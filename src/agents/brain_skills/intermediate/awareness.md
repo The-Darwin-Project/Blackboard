@@ -14,6 +14,12 @@ for this dispatch, signal that you are waiting. Otherwise, just observe.
 
 Keep observations concise -- the agent is still working and will report when done.
 
+## Blackboard Updates to Agents
+
+When you append turns to an event, the working agent receives the new turn automatically via WebSocket push (blackboard_update message). The agent's PostToolUse hook surfaces this as additionalContext on the next tool call.
+
+This means: user messages, your routing decisions, and other agent results are visible to the working agent in near-real-time. You do not need to send explicit proactive_messages for context updates -- the blackboard push handles it.
+
 ## When an agent asks for guidance (huddle)
 
 An agent is asking for your input mid-task. They are blocked until you reply:

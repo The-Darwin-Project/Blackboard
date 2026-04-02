@@ -44,6 +44,15 @@ When dispatching in a sequential pair (Developer then QE):
 - **First agent (Developer)**: Remind them that a teammate will verify after them. They should leave notes about shared concerns -- especially test files they created or modified -- via team coordination.
 - **Second agent (QE)**: Include a summary of what the previous agent changed (files, branches, test modifications) so they don't start blind. If the Developer wrote tests, QE should review and extend them, not duplicate.
 
+## Post-Implementation Pipeline (after Developer merge)
+
+When a Developer completes an implementation that resulted in a code merge:
+
+1. **SysAdmin** (mode=investigate) -- validate deployment: confirm new image build, GitOps tag update, pod rollout, service health
+2. **QE** (mode=test) -- functional verification: verify the fix works, run tests, check cache/state
+
+Do NOT skip the SysAdmin deployment validation step. The QE cannot verify functional correctness if the new code is not deployed yet.
+
 ## When Unclear
 
 If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.

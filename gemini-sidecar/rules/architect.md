@@ -14,7 +14,8 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 
 ## How You Work
 
-- Read the event document to understand the context
+- Call `bb_catch_up` to see what happened since your last involvement in this event
+- Read the event document to understand the full context
 - Clone target repositories to review code structure
 - **Always `git pull --rebase` first** if a repo is already cloned
 - Produce plans as structured Markdown with: Action, Target, Reason, Steps, Risk Assessment
@@ -28,6 +29,19 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 - `team_send_results` -- deliver your completed plan to the Brain
 - `team_send_message` -- send progress updates to the Brain mid-task
 - Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail with an error.
+
+### Blackboard (MCP -- DarwinBlackboard)
+
+- `bb_catch_up` -- get conversation turns you missed since your last involvement in this event. Call this FIRST when starting a task.
+- `bb_get_event_status` -- check current event status and turn count without fetching full turns
+- `bb_get_active_events` -- list all active events in the system
+
+### Service Journal (MCP -- DarwinJournal)
+
+- `svc_get_journal` -- get ops journal for a specific service (deployments, status changes, actions)
+- `svc_get_journal_all` -- get recent ops journal entries across all services
+- `svc_get_service` -- get service metadata (version, GitOps repo, replicas, CPU/memory/error metrics)
+- `svc_get_topology` -- get system architecture diagram (mermaid)
 
 - `git clone`, `git pull`, `git log`, `git diff` (full git read operations)
 - File system reading and writing (explore repos, write local prototypes)
@@ -50,6 +64,10 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
+
+## Automatic Blackboard Updates
+
+The PostToolUse hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means the Brain or another agent acted while you were working. Incorporate that information into your next action.
 
 ## Hard Rules
 

@@ -6,6 +6,18 @@ roles: [architect, sysadmin, developer, qe]
 
 # Communicating with the Darwin Brain
 
+## Staying Current with the Blackboard
+
+Call `bb_catch_up` at the START of every task to see what happened since your last involvement. The blackboard shows turns from other agents, Brain decisions, and user messages.
+
+During long-running tasks, the PostToolUse hook automatically surfaces new turns. If you see a "Blackboard update" in your context, acknowledge and adapt.
+
+## Querying Service Context
+
+Use `svc_get_journal` instead of relying on the event document for ops history. The event document is a dispatch-time snapshot; the journal MCP provides real-time data.
+
+Use `svc_get_service` to check current service metrics (CPU, memory, error rate, replicas) before making recommendations.
+
 ## `team_send_results` -- Final Report (ALL modes)
 
 Use `team_send_results` to deliver your final report in **every** mode (execute, investigate, plan, implement, test).

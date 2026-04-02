@@ -4,6 +4,14 @@ tags: [cynefin, classification, triage]
 ---
 # Cynefin Sense-Making Framework
 
+## Cross-Issue Correlation (before classifying)
+
+When multiple issues surface from the same event trace, system, or timeframe, apply a correlation check BEFORE classifying each independently:
+
+1. **Shared PV Check**: Do these symptoms observe the same process variable? If two issues both measure the same system output, they may be the same error from different observation points.
+2. **Root Cause Collapse Test**: If I fix one issue, does the other disappear? If yes, classify the shared root cause, not the individual symptoms.
+3. **Controller Action Smell Test**: Am I proposing separate controller actions for symptoms that share a single error signal? One mechanism that closes the shared error is the target.
+
 Before deciding how to respond to an event, classify it into a domain:
 
 ## CLEAR (Known knowns -- Best Practice)
