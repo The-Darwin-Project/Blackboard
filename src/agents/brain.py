@@ -1553,7 +1553,13 @@ class Brain:
             msg_type = "huddle_reply" if function_name == "reply_to_agent" else "proactive_message"
             from ..dependencies import get_registry_and_bridge
             registry, _ = get_registry_and_bridge()
-            agent_conn = await registry.get_by_id(agent_id) if registry else None
+            agent_conn = None
+            if registry:
+                agent_conn = await registry.get_by_id(agent_id)
+                if not agent_conn:
+                    agent_conn = await registry.get_by_event(event_id)
+                if not agent_conn:
+                    agent_conn = await registry.get_available(agent_id)
             if agent_conn and agent_conn.ws:
                 try:
                     await agent_conn.ws.send_json({
