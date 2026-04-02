@@ -50,4 +50,5 @@ module.exports = {
   getBlackboardStatus: () => ({ status: _blackboardStatus, total: _blackboardTotal, highwater: _hookHighwater }),
   getHookHighwater: () => _hookHighwater,
   setHookHighwater: (n) => { _hookHighwater = n; },
+  clearBlackboardCache: () => { _blackboardTurns = []; _blackboardStatus = 'unknown'; _blackboardTotal = 0; _hookHighwater = 0; },
 };

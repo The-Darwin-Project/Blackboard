@@ -44,6 +44,27 @@ function httpGet(port, path) {
   });
 }
 
+function httpPost(port, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request({ hostname: '127.0.0.1', port, path, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+      timeout: 5000 }, (res) => {
+      let chunks = '';
+      res.on('data', c => chunks += c);
+      res.on('end', () => { try { resolve(JSON.parse(chunks)); } catch { resolve(chunks); } });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(data);
+    req.end();
+  });
+}
+
+function syncHighwater() {
+  httpPost(SIDECAR_PORT, '/blackboard/sync-highwater', { highwater: _highwater }).catch(() => {});
+}
+
 function respond(id, result) {
   process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
 }
@@ -59,11 +80,13 @@ async function handleToolCall(name, args) {
       _coldStartDone = true;
       const maxTurn = (data.turns || []).reduce((m, t) => Math.max(m, t.turn || 0), 0);
       if (maxTurn > _highwater) _highwater = maxTurn;
+      syncHighwater();
       return data;
     }
     const data = await httpGet(SIDECAR_PORT, `/blackboard/turns?since=${_highwater}`);
     const maxTurn = (data.turns || []).reduce((m, t) => Math.max(m, t.turn || 0), _highwater);
     if (maxTurn > _highwater) _highwater = maxTurn;
+    syncHighwater();
     return data;
   }
   if (name === 'bb_get_event_status') {

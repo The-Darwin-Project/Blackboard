@@ -114,7 +114,9 @@ async function handleRequest(req, res) {
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (parts.length > 0) {
-        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: parts.join('\n') } }));
+        const ctx = parts.join('\n');
+        console.log(`[${new Date().toISOString()}] PostToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${teammate.length} teammate msgs`);
+        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: ctx } }));
       } else {
         res.end('{}');
       }
@@ -368,6 +370,20 @@ async function handleRequest(req, res) {
   // =========================================================================
   // Blackboard local cache endpoints — read from WebSocket-fed state.js
   // =========================================================================
+
+  if (url.pathname === '/blackboard/sync-highwater' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req);
+      const hw = parseInt(body.highwater || '0', 10);
+      if (hw > state.getHookHighwater()) state.setHookHighwater(hw);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ highwater: state.getHookHighwater() }));
+    } catch {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ highwater: state.getHookHighwater() }));
+    }
+    return;
+  }
 
   if (url.pathname === '/blackboard/turns' && req.method === 'GET') {
     const since = parseInt(url.searchParams.get('since') || '0', 10);

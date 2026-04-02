@@ -171,6 +171,7 @@ async function handleTask(ws, msg) {
   }
 
   state.resetCallbackResult();
+  state.clearBlackboardCache();
   console.log(`[${new Date().toISOString()}] Task ${taskId}: ${eventId} (${prompt.length} chars, session: ${sessionId})`);
 
   if (hasGitHubCredentials()) {
