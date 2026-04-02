@@ -5,7 +5,7 @@
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
 // 5. [Pattern]: filterSkillsByRole uses .disabled rename (re-entrant). swapActiveRules copies role-specific rules for dynamic switching.
-// 6. [Pattern]: TeamChat MCP: Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool, Claude PreToolUse (both in settings.json).
+// 6. [Pattern]: MCPs (TeamChat + Blackboard + Journal): Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool (command), Claude PostToolUse+Stop+SessionStart (HTTP to sidecar).
 // 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
 // 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
 
@@ -58,20 +58,34 @@ function writeClaudeMcpServer(name, config) {
  * @param {object} settings - The settings object to modify (gemini or claude)
  * @param {string} cli - 'gemini' or 'claude'
  */
-function registerTeamChat(settings, cli) {
+function registerMCPsAndHooks(settings, cli) {
     const role = process.env.AGENT_ROLE || '';
     const port = process.env.PORT || '9090';
     const peerPort = process.env.PEER_SIDECAR_PORT || '';
+    const nodeCmd = resolveCommand('node');
 
-    const mcpConfig = {
-        command: resolveCommand('node'), args: ['/app/team-chat-mcp.js'],
+    const teamChatConfig = {
+        command: nodeCmd, args: ['/app/team-chat-mcp.js'],
         env: { AGENT_ROLE: role, SIDECAR_PORT: port, AGENT_CLI: cli, PEER_PORT: peerPort },
     };
+    const blackboardConfig = {
+        command: nodeCmd, args: ['/app/blackboard-mcp.js'],
+        env: { SIDECAR_PORT: port, AGENT_ROLE: role },
+    };
+    const journalConfig = {
+        command: nodeCmd, args: ['/app/journal-mcp.js'],
+        env: { SIDECAR_PORT: port },
+    };
+
     if (cli === 'gemini') {
         settings.mcpServers = settings.mcpServers || {};
-        settings.mcpServers.TeamChat = mcpConfig;
+        settings.mcpServers.TeamChat = teamChatConfig;
+        settings.mcpServers.DarwinBlackboard = blackboardConfig;
+        settings.mcpServers.DarwinJournal = journalConfig;
     } else {
-        writeClaudeMcpServer('TeamChat', mcpConfig);
+        writeClaudeMcpServer('TeamChat', teamChatConfig);
+        writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
+        writeClaudeMcpServer('DarwinJournal', journalConfig);
     }
 
     settings.hooks = settings.hooks || {};
@@ -82,7 +96,7 @@ function registerTeamChat(settings, cli) {
                 matcher: '*',
                 hooks: [{ name: 'team-inbox', type: 'command',
                            command: '/app/hooks/check-inbox.sh', timeout: 2000,
-                           description: 'Check for pending team messages after each tool call' }],
+                           description: 'Check for pending team messages and blackboard turns after each tool call' }],
             });
         }
         settings.hooks.SessionStart = settings.hooks.SessionStart || [];
@@ -94,22 +108,12 @@ function registerTeamChat(settings, cli) {
             });
         }
     } else {
-        settings.hooks.PreToolUse = settings.hooks.PreToolUse || [];
-        if (!settings.hooks.PreToolUse.some(h => h.hooks?.some(hh => hh.command === '/app/hooks/check-inbox.sh'))) {
-            settings.hooks.PreToolUse.push({
-                matcher: '',
-                hooks: [{ type: 'command', command: '/app/hooks/check-inbox.sh' }],
-            });
-        }
-        settings.hooks.SessionStart = settings.hooks.SessionStart || [];
-        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.command === '/app/hooks/check-inbox.sh'))) {
-            settings.hooks.SessionStart.push({
-                matcher: 'compact',
-                hooks: [{ type: 'command', command: '/app/hooks/check-inbox.sh' }],
-            });
-        }
+        const hookUrl = `http://localhost:${port}`;
+        settings.hooks.PostToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/post-tool-use`, timeout: 5 }] }];
+        settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
+        settings.hooks.SessionStart = [{ matcher: 'compact', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
     }
-    console.log(`TeamChat MCP + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);
+    console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);
 }
 
 /**
@@ -157,9 +161,9 @@ function initializeCLISettings() {
         geminiSettings.security.folderTrust = { enabled: false };
         // Preserve any existing MCP server configs
         geminiSettings.mcpServers = geminiSettings.mcpServers || {};
-        registerTeamChat(geminiSettings, 'gemini');
+        registerMCPsAndHooks(geminiSettings, 'gemini');
         fs.writeFileSync(geminiSettingsPath, JSON.stringify(geminiSettings, null, 2));
-        console.log('Gemini settings.json created (trust disabled, TeamChat MCP registered)');
+        console.log('Gemini settings.json created (trust disabled, MCPs + hooks registered)');
     } catch (err) {
         console.error(`Gemini settings.json error: ${err.message}`);
     }
@@ -169,9 +173,9 @@ function initializeCLISettings() {
         if (fs.existsSync(claudeSettingsPath)) {
             try { claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8')); } catch { /* fresh start */ }
         }
-        registerTeamChat(claudeSettings, 'claude');
+        registerMCPsAndHooks(claudeSettings, 'claude');
         fs.writeFileSync(claudeSettingsPath, JSON.stringify(claudeSettings, null, 2));
-        console.log('Claude settings.json updated (TeamChat hooks registered)');
+        console.log('Claude settings.json updated (MCPs + HTTP hooks registered)');
     } catch (err) {
         console.error(`Claude TeamChat registration error: ${err.message}`);
     }

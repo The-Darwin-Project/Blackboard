@@ -111,10 +111,10 @@ WORKDIR /app
 COPY package.json .
 RUN npm install --omit=dev
 
-# Copy server code (modular -- entrypoint + 10 modules)
+# Copy server code (modular -- entrypoint + 12 modules + 2 MCP servers)
 COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
-     team-chat-mcp.js ./
+     team-chat-mcp.js blackboard-mcp.js journal-mcp.js ./
 
 # Install agent-to-brain callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
