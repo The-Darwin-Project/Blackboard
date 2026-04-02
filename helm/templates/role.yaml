@@ -36,54 +36,58 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
 ---
-# ClusterRole for reading ArgoCD Application and ApplicationSet CRDs
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: ClusterRole
-# metadata:
-#   name: {{ .Release.Name }}-argocd-reader
-#   labels:
-#     app: darwin-brain
-#     app.kubernetes.io/name: darwin-brain
-#     app.kubernetes.io/instance: {{ .Release.Name }}
-# rules:
-#   # Read ArgoCD Applications
-#   - apiGroups: ["argoproj.io"]
-#     resources: ["applications", "applicationsets"]
-#     verbs: ["get", "list", "watch"]
-#   # Tekton pipeline resources (read-only)
-#   - apiGroups: ["tekton.dev"]
-#     resources: ["pipelines", "pipelineruns", "tasks", "taskruns", "pipelineresources"]
-#     verbs: ["get", "list", "watch"]
-#   # Kargo resources (read-only)
-#   - apiGroups: ["kargo.akuity.io"]
-#     resources: ["projects", "stages", "promotions", "freight", "warehouses"]
-#     verbs: ["get", "list", "watch"]
-#   # Cluster-level read access for investigation
-#   - apiGroups: [""]
-#     resources: ["nodes", "namespaces"]
-#     verbs: ["get", "list"]
-#   # Node metrics
-#   - apiGroups: ["metrics.k8s.io"]
-#     resources: ["nodes"]
-#     verbs: ["get", "list"]
-# ---
-# ClusterRoleBinding for cluster-scoped resources (nodes, namespaces, ArgoCD)
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: ClusterRoleBinding
-# metadata:
-#   name: {{ .Release.Name }}-argocd-reader
-#   labels:
-#     app: darwin-brain
-#     app.kubernetes.io/name: darwin-brain
-#     app.kubernetes.io/instance: {{ .Release.Name }}
-# subjects:
-#   - kind: ServiceAccount
-#     name: {{ .Release.Name }}-brain
-#     namespace: {{ .Release.Namespace }}
-# roleRef:
-#   kind: ClusterRole
-#   name: {{ .Release.Name }}-argocd-reader
-#   apiGroup: rbac.authorization.k8s.io
+# ClusterRole for cross-namespace read access: ArgoCD, Tekton, Kargo, core K8s
+# Grants the SysAdmin agent kubectl access to PipelineRuns, Stages, etc. across all namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-cluster-reader
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  # ArgoCD Applications
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets"]
+    verbs: ["get", "list", "watch"]
+  # Tekton pipeline resources (read-only)
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelines", "pipelineruns", "tasks", "taskruns", "pipelineresources"]
+    verbs: ["get", "list", "watch"]
+  # Kargo resources (read-only)
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["projects", "stages", "promotions", "freight", "warehouses"]
+    verbs: ["get", "list", "watch"]
+  # Core resources across namespaces (read-only investigation)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "namespaces", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Apps across namespaces
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  # Node metrics
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-cluster-reader
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-cluster-reader
+  apiGroup: rbac.authorization.k8s.io
 {{- end }}
 {{- if .Values.ephemeralAgents.enabled }}
 ---
