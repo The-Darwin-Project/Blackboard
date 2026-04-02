@@ -263,6 +263,26 @@ async function handleRequest(req, res) {
   }
 
   // =========================================================================
+  // Blackboard local cache endpoints — read from WebSocket-fed state.js
+  // =========================================================================
+
+  if (url.pathname === '/blackboard/turns' && req.method === 'GET') {
+    const since = parseInt(url.searchParams.get('since') || '0', 10);
+    const turns = state.getBlackboardTurnsSince(since);
+    const { status, total } = state.getBlackboardStatus();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ turns, total, event_status: status, since }));
+    return;
+  }
+
+  if (url.pathname === '/blackboard/status' && req.method === 'GET') {
+    const { status, total, highwater } = state.getBlackboardStatus();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ event_status: status, total, highwater }));
+    return;
+  }
+
+  // =========================================================================
   // Proxy endpoints — forward to Brain API (read-only)
   // =========================================================================
 

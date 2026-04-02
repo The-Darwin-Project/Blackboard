@@ -98,6 +98,9 @@ function startWSClient(brainUrl) {
           state.clearPendingHuddleReply();
           console.log(`[${new Date().toISOString()}] Huddle reply delivered (${(msg.content || '').length} chars)`);
         }
+      } else if (msg.type === 'blackboard_update') {
+        state.pushBlackboardTurn(msg.turn, msg.event_status, msg.total_turns);
+        console.log(`[${new Date().toISOString()}] Blackboard update: turn ${msg.turn?.turn || '?'} (${msg.turn?.actor || '?'}.${msg.turn?.action || '?'}), total=${msg.total_turns || '?'}`);
       } else if (msg.type === 'proactive_message') {
         state.pushInboundMessage({
           from: msg.from || 'brain',

@@ -2275,9 +2275,27 @@ class Brain:
     async def _append_and_broadcast(
         self, event_id: str, turn: ConversationTurn
     ) -> None:
-        """Persist turn to Redis and broadcast to dashboard/Slack channels."""
+        """Persist turn to Redis, broadcast to dashboard/Slack, push to working agent sidecar."""
         await self.blackboard.append_turn(event_id, turn)
         await self._broadcast_turn(event_id, turn)
+        try:
+            from ..dependencies import get_registry_and_bridge
+            registry, _ = get_registry_and_bridge()
+            if registry:
+                agent_conn = await registry.get_by_event(event_id)
+                if agent_conn and agent_conn.ws and turn.actor != agent_conn.current_role:
+                    event = await self.blackboard.get_event(event_id)
+                    status = event.status.value if event else "active"
+                    total = len(event.conversation) if event else 0
+                    await agent_conn.ws.send_json({
+                        "type": "blackboard_update",
+                        "event_id": event_id,
+                        "turn": turn.model_dump(),
+                        "event_status": status,
+                        "total_turns": total,
+                    })
+        except Exception:
+            pass
 
     async def _broadcast_turn(self, event_id: str, turn: ConversationTurn) -> None:
         """Broadcast a conversation turn to all channels (WS, Slack, etc.)."""
