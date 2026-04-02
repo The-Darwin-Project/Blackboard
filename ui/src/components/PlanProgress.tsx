@@ -2,9 +2,9 @@
 // @ai-rules:
 // 1. [Pattern]: Derives plan state from conversation turns -- no separate API. Same useEventDocument data.
 // 2. [Constraint]: Last action="plan" turn = active plan. Last action="plan_step" per step_id = current status.
-// 3. [Pattern]: Collapsible. Auto-expands when any step transitions to in_progress.
+// 3. [Pattern]: Vertical side panel layout -- sits as a flex column sibling of the event chat.
 // 4. [Constraint]: Uses ACTOR_COLORS from constants/colors.ts -- single source of truth for agent colors.
-import { useState, useMemo, useEffect } from 'react';
+import { useMemo } from 'react';
 import { ACTOR_COLORS } from '../constants/colors';
 import type { ConversationTurn } from '../api/types';
 
@@ -27,8 +27,8 @@ const STATUS_ICON: Record<string, string> = {
   pending: '\u2B1C',
 };
 
-export function PlanProgress({ conversation }: PlanProgressProps) {
-  const { planTurn, steps, hasActive } = useMemo(() => {
+export function usePlanState(conversation: ConversationTurn[]) {
+  return useMemo(() => {
     let plan: ConversationTurn | null = null;
     for (let i = conversation.length - 1; i >= 0; i--) {
       const t = conversation[i];
@@ -37,7 +37,7 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
         break;
       }
     }
-    if (!plan) return { planTurn: null, steps: [] as PlanStep[], hasActive: false };
+    if (!plan) return { hasPlan: false, planTurn: null, steps: [] as PlanStep[] };
 
     const rawSteps = (plan.taskForAgent as { steps: Array<{ id: string; agent: string; summary?: string }> }).steps;
     const stepMap = new Map<string, PlanStep>();
@@ -56,114 +56,107 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
       }
     }
 
-    const merged = Array.from(stepMap.values());
-    return {
-      planTurn: plan,
-      steps: merged,
-      hasActive: merged.some(s => s.status === 'in_progress'),
-    };
+    return { hasPlan: true, planTurn: plan, steps: Array.from(stepMap.values()) };
   }, [conversation]);
+}
 
-  const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => {
-    if (hasActive) setCollapsed(false);
-  }, [hasActive]);
+export function PlanProgress({ conversation }: PlanProgressProps) {
+  const { planTurn, steps } = usePlanState(conversation);
 
   if (!planTurn || steps.length === 0) return null;
 
   const done = steps.filter(s => s.status === 'completed').length;
   const source = (planTurn.taskForAgent as { source?: string })?.source || planTurn.actor;
-  const agents = [...new Set(steps.map(s => s.agent))];
   const progressPct = steps.length > 0 ? (done / steps.length) * 100 : 0;
 
   return (
     <div style={{
-      borderBottom: '1px solid #334155',
-      background: '#1e293b',
-      flexShrink: 0,
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      background: '#0f172a',
+      borderLeft: '1px solid #334155',
+      overflow: 'hidden',
     }}>
-      <div
-        onClick={() => setCollapsed(!collapsed)}
-        style={{
-          padding: '6px 12px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          cursor: 'pointer',
-          userSelect: 'none',
-        }}
-      >
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#e2e8f0' }}>
-            Plan {done}/{steps.length}
-          </span>
-          <span style={{ fontSize: 10, color: '#64748b' }}>by {source}</span>
-          <span style={{ display: 'flex', gap: 4 }}>
-            {agents.map(a => (
-              <span key={a} style={{
-                color: ACTOR_COLORS[a] || '#94a3b8',
-                fontSize: 10,
-                fontWeight: 600,
-              }}>{a}</span>
-            ))}
-          </span>
-        </div>
-        <span style={{ color: '#64748b', fontSize: 11 }}>{collapsed ? '\u25B6' : '\u25BC'}</span>
-      </div>
-
       <div style={{
-        height: 2,
-        background: '#334155',
-        margin: '0 12px',
-        borderRadius: 1,
-        overflow: 'hidden',
+        padding: '8px 10px',
+        borderBottom: '1px solid #334155',
+        background: '#1e293b',
+        flexShrink: 0,
       }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0' }}>Plan</span>
+          <span style={{ fontSize: 10, color: '#64748b' }}>{done}/{steps.length}</span>
+        </div>
         <div style={{
-          height: '100%',
-          width: `${progressPct}%`,
-          background: done === steps.length ? '#22c55e' : '#3b82f6',
-          borderRadius: 1,
-          transition: 'width 0.3s ease',
-        }} />
+          height: 3,
+          background: '#334155',
+          borderRadius: 2,
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            height: '100%',
+            width: `${progressPct}%`,
+            background: done === steps.length ? '#22c55e' : '#3b82f6',
+            borderRadius: 2,
+            transition: 'width 0.3s ease',
+          }} />
+        </div>
+        <div style={{ fontSize: 9, color: '#475569', marginTop: 3 }}>by {source}</div>
       </div>
 
-      {!collapsed && (
-        <div style={{ padding: '6px 12px 8px' }}>
-          {steps.map(step => (
+      <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
+        {steps.map((step) => {
+          const isActive = step.status === 'in_progress';
+          const isDone = step.status === 'completed';
+          const isBlocked = step.status === 'blocked';
+          return (
             <div
               key={step.id}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '3px 0',
-                fontSize: 12,
-                color: step.status === 'completed' ? '#64748b' : '#e2e8f0',
-                textDecoration: step.status === 'completed' ? 'line-through' : 'none',
+                padding: '6px 10px',
+                borderLeft: `3px solid ${
+                  isDone ? '#22c55e' : isActive ? '#3b82f6' : isBlocked ? '#f59e0b' : '#334155'
+                }`,
+                marginLeft: 4,
+                marginBottom: 2,
+                background: isActive ? '#1e3a5f15' : 'transparent',
               }}
             >
-              <span style={{ width: 18, textAlign: 'center', flexShrink: 0 }}>
-                {STATUS_ICON[step.status] || STATUS_ICON.pending}
-              </span>
-              <span style={{
-                color: ACTOR_COLORS[step.agent] || '#94a3b8',
-                fontWeight: 600,
-                fontSize: 10,
-                minWidth: 60,
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                marginBottom: 2,
               }}>
-                {step.agent}
-              </span>
-              <span style={{ flex: 1 }}>{step.summary || `Step ${step.id}`}</span>
-              {step.timestamp && (
-                <span style={{ fontSize: 10, color: '#475569', flexShrink: 0 }}>
-                  {new Date(step.timestamp * 1000).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                <span style={{ fontSize: 12, flexShrink: 0 }}>
+                  {STATUS_ICON[step.status] || STATUS_ICON.pending}
                 </span>
+                <span style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: ACTOR_COLORS[step.agent] || '#94a3b8',
+                }}>
+                  {step.agent}
+                </span>
+              </div>
+              <div style={{
+                fontSize: 11,
+                color: isDone ? '#64748b' : '#e2e8f0',
+                textDecoration: isDone ? 'line-through' : 'none',
+                lineHeight: 1.3,
+              }}>
+                {step.summary || `Step ${step.id}`}
+              </div>
+              {step.timestamp && (
+                <div style={{ fontSize: 9, color: '#475569', marginTop: 2 }}>
+                  {new Date(step.timestamp * 1000).toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit' })}
+                </div>
               )}
             </div>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }

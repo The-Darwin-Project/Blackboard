@@ -12,7 +12,6 @@ import { closeEvent, getEventReport } from '../api/client';
 import type { ConversationTurn } from '../api/types';
 import TurnBubble, { StatusBadge } from './TurnBubble';
 import MarkdownViewer from './MarkdownViewer';
-import PlanProgress from './PlanProgress';
 
 function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: unknown; timeDate: string }; conversation: ConversationTurn[] }): string {
   const evidence = event.event.evidence;
@@ -147,8 +146,6 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose }: Conve
 
       {reportOpen && <MarkdownViewer filename={`event-${selectedEvent.id}.md`} content={reportContent} onClose={() => setReportOpen(false)} />}
       {turnViewer && <MarkdownViewer filename={turnViewer.filename} content={turnViewer.content} onClose={() => setTurnViewer(null)} />}
-
-      <PlanProgress conversation={selectedEvent.conversation} />
 
       <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
         {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {

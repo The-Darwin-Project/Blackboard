@@ -17,6 +17,7 @@ import MetricChart from './MetricChart';
 import AgentRegistryPanel from './AgentRegistryPanel';
 import HeadhunterQueuePanel from './HeadhunterQueuePanel';
 import ConversationFeed from './ConversationFeed';
+import { PlanProgress, usePlanState } from './PlanProgress';
 import AgentStreamCard from './AgentStreamCard';
 import TabPanel from './TabPanel';
 import ActivityStream from './ActivityStream';
@@ -145,6 +146,10 @@ function DashboardInner() {
   const showEphemeralSplit = !!(
     selectedEvent?.source === 'headhunter' && ephemeralAgentForEvent
   );
+
+  const { data: eventDoc } = useEventDocument(selectedEventId);
+  const { hasPlan } = usePlanState(eventDoc?.conversation || []);
+  const showPlanPanel = hasPlan && leftTab === 'event-chat' && !!selectedEventId;
 
   // -- WS + query hooks --
   const { connected, send } = useWSConnection();
@@ -362,15 +367,23 @@ function DashboardInner() {
             <div style={{ display: leftTab === 'activity' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
               <ActivityStream />
             </div>
-            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: showEphemeralSplit ? 'row' : 'column', flex: 1, overflow: 'hidden' }}>
+            <div style={{ display: leftTab === 'event-chat' ? 'flex' : 'none', flexDirection: (showPlanPanel || showEphemeralSplit) ? 'row' : 'column', flex: 1, overflow: 'hidden' }}>
               {selectedEventId ? (
                 <>
                   <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
                   </div>
+                  {showPlanPanel && eventDoc && (
+                    <>
+                      <div style={{ width: 1, flexShrink: 0, background: '#334155' }} />
+                      <div style={{ width: showEphemeralSplit ? 180 : 220, flexShrink: 0, overflow: 'hidden' }}>
+                        <PlanProgress conversation={eventDoc.conversation} />
+                      </div>
+                    </>
+                  )}
                   {showEphemeralSplit && (
                     <>
-                      <div style={{ width: 1, flexShrink: 0, background: '#334155', margin: '0 10px' }} />
+                      <div style={{ width: 1, flexShrink: 0, background: '#334155' }} />
                       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0, padding: '4px 0' }}>
                         <AgentStreamCard
                           agentName={ephemeralAgentForEvent?.current_role || 'oncall'}
