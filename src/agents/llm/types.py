@@ -363,7 +363,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent to reply to (e.g., 'developer-abc123', 'qe-def456')",
+                    "description": "Role name of the agent to reply to: 'developer', 'qe', 'sysadmin', or 'architect'. The system resolves this to the active agent working on the current event.",
                 },
                 "message": {
                     "type": "string",
@@ -376,16 +376,17 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "message_agent",
         "description": (
-            "Send a proactive message to an agent. Unlike reply_to_agent (which responds "
-            "to a huddle), this pushes a NEW message the agent sees at its next tool "
-            "boundary. Use for urgent coordination: 'QE found issues, hold off on PR'."
+            "Send a proactive message to an agent. Resolves the agent by the current event "
+            "or by role name -- just pass 'developer', 'qe', 'sysadmin', or 'architect'. "
+            "The message is delivered at the agent's next tool boundary via the PreToolUse hook. "
+            "Use for coordination: 'QE found issues, hold off on PR', or to wake an idle agent."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent to message (e.g., 'developer-abc123', 'qe-def456')",
+                    "description": "Role name of the agent to message: 'developer', 'qe', 'sysadmin', or 'architect'. The system resolves this to the correct agent connection.",
                 },
                 "message": {
                     "type": "string",
