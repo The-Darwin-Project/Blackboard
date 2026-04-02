@@ -90,6 +90,97 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // =========================================================================
+  // Claude Code HTTP hook endpoints — return 2xx ALWAYS
+  // =========================================================================
+
+  if (url.pathname === '/hooks/post-tool-use' && req.method === 'POST') {
+    try {
+      const bbTurns = state.getBlackboardTurnsSince(state.getHookHighwater());
+      const inbound = state.drainInboundMessages();
+      const teammate = state.drainTeammateMessages();
+      const parts = [];
+      if (bbTurns.length > 0) {
+        const summary = bbTurns.map(t => `[${t.actor || '?'}.${t.action || '?'}] ${(t.thoughts || t.result || '').slice(0, 120)}`).join('; ');
+        parts.push(`Blackboard: ${bbTurns.length} new turn(s) — ${summary}`);
+        const maxTurn = bbTurns.reduce((m, t) => Math.max(m, t.turn || 0), state.getHookHighwater());
+        state.setHookHighwater(maxTurn);
+      }
+      if (inbound.length > 0) {
+        parts.push(`Brain messages: ${inbound.map(m => m.content || '').join('; ')}`);
+      }
+      if (teammate.length > 0) {
+        parts.push(`Teammate: ${teammate.map(m => `(${m.from}) ${m.content || ''}`).join('; ')}`);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (parts.length > 0) {
+        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: parts.join('\n') } }));
+      } else {
+        res.end('{}');
+      }
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] PostToolUse hook error: ${err.message}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    }
+    return;
+  }
+
+  if (url.pathname === '/hooks/stop' && req.method === 'POST') {
+    try {
+      const body = await parseBody(req).catch(() => ({}));
+      if (body.stop_hook_active) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      const hasResults = !!state.getCallbackResult();
+      const pendingInbound = state.peekInboundMessages();
+      const pendingTeammate = state.peekTeammateMessages();
+      if (!hasResults) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'block', reason: 'You must call team_send_results with your final findings before finishing. Summarize your work and deliver results now.' }));
+        return;
+      }
+      if (pendingInbound.length > 0 || pendingTeammate.length > 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ decision: 'block', reason: 'You have unread messages from the Brain or your teammate. Process them before finishing.' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] Stop hook error: ${err.message}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    }
+    return;
+  }
+
+  if (url.pathname === '/hooks/session-start' && req.method === 'POST') {
+    try {
+      const task = state.getCurrentTask();
+      const eid = task?.eventId || 'unknown';
+      const role = AGENT_ROLE || 'unknown';
+      let context = `Event ${eid} — you are ${role}.`;
+      try {
+        const data = await proxyGet(`/queue/${eid}/turns?role=${role}`);
+        if (data.turns && data.turns.length > 0) {
+          const last5 = data.turns.slice(-5);
+          const summary = last5.map(t => `[${t.actor || '?'}.${t.action || '?'}] ${(t.thoughts || t.result || '').slice(0, 80)}`).join('; ');
+          context += ` Status: ${data.event_status}. Last ${last5.length} turns: ${summary}`;
+        }
+      } catch { /* Brain unavailable — return minimal context */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }));
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] SessionStart hook error: ${err.message}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{}');
+    }
+    return;
+  }
+
   // Inbound message inbox (Manager proactive messages, drained on read)
   if (url.pathname === '/messages' && req.method === 'GET') {
     const msgs = state.drainInboundMessages();
@@ -166,6 +257,18 @@ async function handleRequest(req, res) {
         state.pushTeammateMessage({ from: body.from || 'unknown', content });
         console.log(`[${new Date().toISOString()}] Teammate message stored (${content.length} chars, from: ${body.from || 'unknown'})`);
         tryWake(body.from || 'unknown', content, body.event_id || '');
+      } else if (callbackType === 'teammate_message') {
+        const task = state.getCurrentTask();
+        if (task?.ws) {
+          wsSend(task.ws, {
+            type: 'agent_teammate_message',
+            task_id: task?.taskId || '',
+            event_id: task?.eventId || '',
+            content,
+            from: AGENT_ROLE || 'unknown',
+          });
+          console.log(`[${new Date().toISOString()}] Teammate message mirrored to blackboard (${content.length} chars)`);
+        }
       } else {
         // sendMessage: forward as progress note (do NOT overwrite deliverable)
         const task2 = state.getCurrentTask();

@@ -90,6 +90,9 @@ async function handleToolCall(name, args) {
         type: 'teammate_forward', from: ROLE, content: args.message || '',
         event_id: eventId,
       });
+      httpPost(SIDECAR_PORT, '/callback', {
+        type: 'teammate_message', content: args.message || '',
+      }).catch(() => {});
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };
     }
     if (name === 'team_read_teammate_notes') {

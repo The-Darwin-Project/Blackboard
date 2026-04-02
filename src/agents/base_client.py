@@ -188,7 +188,6 @@ class AgentClient:
                         })
 
                 elif msg_type == "partial_result":
-                    # sendResults callback -- store as latest deliverable
                     content = msg.get("content", "")
                     latest_callback_result = content
                     logger.info(f"{self.agent_name} callback result [{event_id}]: {len(content)} chars")
@@ -198,6 +197,18 @@ class AgentClient:
                             "event_id": event_id,
                             "message": f"[deliverable updated: {len(content)} chars]",
                             "source": "callback",
+                        })
+
+                elif msg_type == "agent_teammate_message":
+                    from_role = msg.get("from", "unknown")
+                    content = msg.get("content", "")
+                    logger.info(f"{self.agent_name} teammate message [{event_id}]: from={from_role}, {len(content)} chars")
+                    if on_progress:
+                        await on_progress({
+                            "actor": from_role,
+                            "event_id": event_id,
+                            "message": content,
+                            "source": "teammate",
                         })
 
                 elif msg_type == "result":

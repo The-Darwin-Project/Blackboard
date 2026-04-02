@@ -2032,6 +2032,14 @@ class Brain:
                         thoughts=progress_data.get("message", ""),
                     )
                     await self._append_and_broadcast(event_id, turn)
+                elif progress_data.get("source") == "teammate":
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor=progress_data.get("actor", agent_name),
+                        action="teammate",
+                        thoughts=progress_data.get("message", ""),
+                    )
+                    await self._append_and_broadcast(event_id, turn)
 
             mode_label = f" (mode={mode})" if mode else ""
             logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
