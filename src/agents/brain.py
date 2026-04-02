@@ -1307,10 +1307,9 @@ class Brain:
         journal = await self._get_journal_cached(event.service)
         if journal:
             lines.append("")
-            lines.append(f"Service Ops Journal (last {len(journal)} actions):")
-            for entry in journal[-10:]:
-                lines.append(f"  {entry}")
-            lines.append("  (Use lookup_journal to check other services' history)")
+            last_entry = journal[-1] if journal else "none"
+            lines.append(f"Service ops journal available ({len(journal)} entries). Last: {last_entry}")
+            lines.append("  (Use lookup_journal for full history or other services)")
 
         if not event.conversation:
             lines.append("")
