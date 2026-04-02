@@ -5,7 +5,7 @@
 // 3. [Gotcha]: Staged rules from /tmp/agent-rules/GEMINI.md copied to both CLI dirs; copyFileSync only when target missing.
 // 4. [Gotcha]: trustedFolders.json uses object format (path -> trust level), not array; invalid format causes CLI warnings.
 // 5. [Pattern]: filterSkillsByRole uses .disabled rename (re-entrant). swapActiveRules copies role-specific rules for dynamic switching.
-// 6. [Pattern]: MCPs (TeamChat + Blackboard + Journal): Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool (command), Claude PostToolUse+Stop+SessionStart (HTTP to sidecar).
+// 6. [Pattern]: MCPs (TeamChat + Blackboard + Journal): Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool (command), Claude PreToolUse+Stop+SessionStart (HTTP to sidecar). PostToolUse is broken in Claude Code (github.com/anthropics/claude-code/issues/6305).
 // 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
 // 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
 
@@ -109,7 +109,7 @@ function registerMCPsAndHooks(settings, cli) {
         }
     } else {
         const hookUrl = `http://localhost:${port}`;
-        settings.hooks.PostToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/post-tool-use`, timeout: 5 }] }];
+        settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 5 }] }];
         settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
         settings.hooks.SessionStart = [{ matcher: 'compact', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
     }

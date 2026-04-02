@@ -94,7 +94,7 @@ async function handleRequest(req, res) {
   // Claude Code HTTP hook endpoints — return 2xx ALWAYS
   // =========================================================================
 
-  if (url.pathname === '/hooks/post-tool-use' && req.method === 'POST') {
+  if (url.pathname === '/hooks/pre-tool-use' && req.method === 'POST') {
     try {
       const bbTurns = state.getBlackboardTurnsSince(state.getHookHighwater());
       const inbound = state.drainInboundMessages();
@@ -115,13 +115,13 @@ async function handleRequest(req, res) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (parts.length > 0) {
         const ctx = parts.join('\n');
-        console.log(`[${new Date().toISOString()}] PostToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${teammate.length} teammate msgs`);
-        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: ctx } }));
+        console.log(`[${new Date().toISOString()}] PreToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${teammate.length} teammate msgs`);
+        res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: ctx } }));
       } else {
         res.end('{}');
       }
     } catch (err) {
-      console.error(`[${new Date().toISOString()}] PostToolUse hook error: ${err.message}`);
+      console.error(`[${new Date().toISOString()}] PreToolUse hook error: ${err.message}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{}');
     }
