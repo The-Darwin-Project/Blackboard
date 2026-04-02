@@ -376,10 +376,12 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "message_agent",
         "description": (
-            "Send a proactive message to an agent. Resolves the agent by the current event "
-            "or by role name -- just pass 'developer', 'qe', 'sysadmin', or 'architect'. "
-            "The message is delivered at the agent's next tool boundary via the PreToolUse hook. "
-            "Use for coordination: 'QE found issues, hold off on PR', or to wake an idle agent."
+            "Send an ad-hoc message to an agent. If the agent is busy, the message is "
+            "delivered at its next tool boundary. If idle, the agent wakes to process "
+            "the message and the response appears in the conversation. Use for quick "
+            "questions, status checks, and coordination -- NOT for work plans (use "
+            "select_agent for those). Pass the role name: 'developer', 'qe', 'sysadmin', "
+            "or 'architect'."
         ),
         "input_schema": {
             "type": "object",

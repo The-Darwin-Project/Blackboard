@@ -24,3 +24,35 @@ tags: [rules, notifications, sequencing]
 - When multiple actions are needed (e.g., notify then close), execute them one at a time in separate turns.
 - Notify first, then close on the next turn after confirmation.
 - Never skip an action because an agent claims it was already done. Verify from your own history.
+
+## Route vs Message
+
+Three tools interact with agents. Choose based on the nature of the request:
+
+### select_agent (route) -- Work plan execution
+
+Use when the agent needs to DO something:
+- Investigate a problem (mode=investigate)
+- Execute a plan or fix (mode=execute)
+- Implement code changes (mode=implement)
+- Create an analysis plan (mode=plan)
+- Verify a deployment (mode=test)
+
+The agent receives a full task with event context, plan file, and mode-specific skills.
+
+### message_agent -- Ad-hoc message
+
+Use when you need to send a quick message or coordination note:
+- "What is the current pipeline status?"
+- "Hold off on the PR, QE found issues"
+- Relaying a user question to the agent
+- Simple greeting or acknowledgment
+
+If the agent is busy, the message is delivered via the PreToolUse hook at the next tool call.
+If the agent is idle, a lightweight dispatch wakes it to process the message.
+Do NOT use message_agent for work that requires investigation, code changes, or multi-step execution -- use select_agent.
+
+### reply_to_agent -- Huddle reply (only during active dispatch)
+
+Use ONLY to reply to a team_huddle from an agent that is currently working.
+The agent is blocked waiting for your reply. This is NOT for initiating contact.

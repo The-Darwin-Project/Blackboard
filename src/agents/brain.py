@@ -1547,10 +1547,9 @@ class Brain:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
             return False
 
-        elif function_name in ("reply_to_agent", "message_agent"):
+        elif function_name == "reply_to_agent":
             agent_id = args.get("agent_id", "")
             message = args.get("message", "")
-            msg_type = "huddle_reply" if function_name == "reply_to_agent" else "proactive_message"
             from ..dependencies import get_registry_and_bridge
             registry, _ = get_registry_and_bridge()
             agent_conn = None
@@ -1563,22 +1562,68 @@ class Brain:
             if agent_conn and agent_conn.ws:
                 try:
                     await agent_conn.ws.send_json({
-                        "type": msg_type,
+                        "type": "huddle_reply",
                         "task_id": agent_conn.current_task_id or "",
                         "content": message,
                     })
-                    logger.info(f"Brain {function_name} -> {agent_id} ({len(message)} chars)")
+                    logger.info(f"Brain reply_to_agent -> {agent_id} ({len(message)} chars)")
                 except Exception as e:
-                    logger.warning(f"Failed to send {function_name} to {agent_id}: {e}")
+                    logger.warning(f"Failed to send reply_to_agent to {agent_id}: {e}")
             else:
-                logger.warning(f"{function_name}: agent {agent_id} not found or disconnected")
+                logger.warning(f"reply_to_agent: agent {agent_id} not found or disconnected")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="reply",
-                thoughts=f"{'Reply' if function_name == 'reply_to_agent' else 'Message'} to {agent_id}: {message}",
+                thoughts=f"Reply to {agent_id}: {message}",
             )
             await self._append_and_broadcast(event_id, turn)
+            return False
+
+        elif function_name == "message_agent":
+            agent_name = args.get("agent_id", "")
+            message = args.get("message", "")
+
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="message",
+                thoughts=f"Message to {agent_name}: {message}",
+                selectedAgents=[agent_name],
+            )
+            await self._append_and_broadcast(event_id, turn)
+
+            if event_id in self._active_tasks and not self._active_tasks[event_id].done():
+                from ..dependencies import get_registry_and_bridge
+                registry, _ = get_registry_and_bridge()
+                if registry:
+                    agent_conn = await registry.get_by_event(event_id)
+                    if not agent_conn:
+                        agent_conn = await registry.get_available(agent_name)
+                    if agent_conn and agent_conn.ws:
+                        try:
+                            await agent_conn.ws.send_json({
+                                "type": "proactive_message",
+                                "from": "brain",
+                                "content": message,
+                            })
+                            logger.info(f"Brain message_agent -> {agent_name} (busy, inbox) ({len(message)} chars)")
+                        except Exception as e:
+                            logger.warning(f"Failed to send message to {agent_name}: {e}")
+                return False
+
+            await self.write_event_to_volume(event_id, agent_name)
+            agent = self.agents.get(agent_name)
+            if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
+                event_md_path = f"./events/event-{event_id}.md"
+                task_coro = self._run_agent_task(
+                    event_id, agent_name, agent, message, event_md_path,
+                    routing_turn_num=turn.turn, mode="message",
+                )
+                self._active_tasks[event_id] = asyncio.create_task(task_coro)
+                logger.info(f"Brain message_agent -> {agent_name} (idle, dispatch) ({len(message)} chars)")
+            else:
+                logger.warning(f"message_agent: no agent available for role {agent_name}")
             return False
 
         elif function_name == "close_event":

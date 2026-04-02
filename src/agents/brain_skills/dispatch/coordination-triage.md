@@ -53,6 +53,21 @@ When a Developer completes an implementation that resulted in a code merge:
 
 Do NOT skip the SysAdmin deployment validation step. The QE cannot verify functional correctness if the new code is not deployed yet.
 
+## Message vs Route Decision
+
+Before dispatching, ask: "Does this need a work plan or just a quick answer?"
+
+| Signal | Tool | Example |
+|---|---|---|
+| User asks a question about status | message_agent | "What's the pipeline status for MR !36?" |
+| User wants something done | select_agent | "Fix the failing test in service X" |
+| You need to relay info to a working agent | message_agent | "User says: focus on the executive template" |
+| You need an agent to investigate | select_agent | "Check why cache keys are empty" |
+| Simple greeting or acknowledgment | message_agent | "User says hi" |
+| Multi-step task with verification | select_agent | "Implement fix, run tests, open PR" |
+
+When in doubt, use select_agent -- it has full task tracking. message_agent is for lightweight, single-turn interactions where a full dispatch is overkill.
+
 ## When Unclear
 
 If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.
