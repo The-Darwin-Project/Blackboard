@@ -32,6 +32,7 @@ from .routes import (
     dex_proxy_router,
     events_router,
     feedback_router,
+    journal_router,
     metrics_router,
     queue_router,
     reports_router,
@@ -405,6 +406,7 @@ async def list_agents() -> list[dict]:
 app.include_router(telemetry_router)
 app.include_router(topology_router)
 app.include_router(queue_router)
+app.include_router(journal_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)

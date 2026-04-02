@@ -76,6 +76,50 @@ async def list_active_events(
     return events
 
 
+@router.get("/{event_id}/turns")
+async def get_event_turns(
+    event_id: str,
+    role: Optional[str] = Query(None, description="Agent role for gap calculation (qe, sysadmin, developer, architect)"),
+    since: Optional[int] = Query(None, description="Return turns after this turn number (overrides role-based gap)"),
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Get conversation turns with agent-aware gap calculation.
+
+    When `role` is provided (no `since`): scans backward to find the last turn
+    where actor == role, returns all turns after that point.
+    When `since` is provided: returns turns with turn number > since (explicit polling).
+    When neither: returns the full conversation.
+    """
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    conversation = event.conversation
+    role_last_seen_turn = 0
+    gap_from_turn = 0
+
+    if since is not None:
+        gap_from_turn = since
+        turns = [t for t in conversation if t.turn > since]
+    elif role:
+        for t in reversed(conversation):
+            if t.actor == role:
+                role_last_seen_turn = t.turn
+                break
+        gap_from_turn = role_last_seen_turn
+        turns = [t for t in conversation if t.turn > role_last_seen_turn]
+    else:
+        turns = list(conversation)
+
+    return {
+        "turns": [t.model_dump() for t in turns],
+        "total": len(conversation),
+        "event_status": event.status.value,
+        "gap_from_turn": gap_from_turn,
+        "role_last_seen_turn": role_last_seen_turn,
+    }
+
+
 @router.get("/{event_id}", response_model=EventDocument)
 async def get_event_document(
     event_id: str,
