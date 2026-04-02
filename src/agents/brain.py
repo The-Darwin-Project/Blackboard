@@ -493,8 +493,7 @@ class Brain:
                         source="automated",
                         thoughts=f"Automated health check: this event has been idle for {idle_min} minutes with no progress. Evaluate the current state and take action: route an agent to check status, defer with a reason, or close if resolved.",
                     )
-                    await self.blackboard.append_turn(event_id, nudge_turn)
-                    await self._broadcast_turn(event_id, nudge_turn)
+                    await self._append_and_broadcast(event_id, nudge_turn)
                     logger.info(f"Nudge injected for {event_id} ({consecutive_nudges + 1}/{MAX_NUDGES_BEFORE_ESCALATION})")
                     return
 
@@ -700,8 +699,7 @@ class Brain:
                 action="error",
                 thoughts=f"LLM call failed after {attempt + 1} attempts: {last_error}",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return False
 
         # Normalize raw response parts for thought_signature preservation
@@ -728,8 +726,7 @@ class Brain:
                 thoughts=accumulated_text,
                 response_parts=captured_parts,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return False
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")
@@ -818,8 +815,7 @@ class Brain:
                 action="think",
                 thoughts=accumulated_text,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
 
         if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_agent"):
@@ -1518,8 +1514,7 @@ class Brain:
                 taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
                 response_parts=response_parts,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             await self.blackboard.record_event(
                 EventType.BRAIN_AGENT_ROUTED,
                 {"event_id": event_id, "agent": agent_name},
@@ -1577,8 +1572,7 @@ class Brain:
                 action="reply",
                 thoughts=f"{'Reply' if function_name == 'reply_to_agent' else 'Message'} to {agent_id}: {message}",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return False
 
         elif function_name == "close_event":
@@ -1597,8 +1591,7 @@ class Brain:
                 pendingApproval=True,
                 waitingFor="user",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             # Update event status
             event = await self.blackboard.get_event(event_id)
             if event:
@@ -1623,8 +1616,7 @@ class Brain:
                     thoughts=f"Re-triggering Aligner to check: {condition}",
                     evidence=f"target_service:{service}",
                 )
-                await self.blackboard.append_turn(event_id, verify_turn)
-                await self._broadcast_turn(event_id, verify_turn)
+                await self._append_and_broadcast(event_id, verify_turn)
                 # Immediately append the Aligner's response
                 confirm_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
@@ -1637,8 +1629,7 @@ class Brain:
                         f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
                     ),
                 )
-                await self.blackboard.append_turn(event_id, confirm_turn)
-                await self._broadcast_turn(event_id, confirm_turn)
+                await self._append_and_broadcast(event_id, confirm_turn)
             return False
 
         elif function_name == "wait_for_verification":
@@ -1655,8 +1646,7 @@ class Brain:
                     thoughts=f"Waiting for verification: {condition}",
                     evidence=f"target_service:{target_service}",
                 )
-                await self.blackboard.append_turn(event_id, verify_turn)
-                await self._broadcast_turn(event_id, verify_turn)
+                await self._append_and_broadcast(event_id, verify_turn)
                 confirm_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="aligner",
@@ -1668,8 +1658,7 @@ class Brain:
                         f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
                     ),
                 )
-                await self.blackboard.append_turn(event_id, confirm_turn)
-                await self._broadcast_turn(event_id, confirm_turn)
+                await self._append_and_broadcast(event_id, confirm_turn)
             return True  # Re-invoke LLM to evaluate the aligner evidence and decide next action
 
         elif function_name == "defer_event":
@@ -1686,8 +1675,7 @@ class Brain:
                 action="defer",
                 thoughts=f"Deferring event for {delay}s: {reason}",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             # Update event status + store defer_until timestamp
             event = await self.blackboard.get_event(event_id)
             if event:
@@ -1720,8 +1708,7 @@ class Brain:
                 thoughts=summary,
                 waitingFor="user",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return False
 
         elif function_name == "wait_for_agent":
@@ -1733,8 +1720,7 @@ class Brain:
                 thoughts=summary,
                 waitingFor="agent",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return False
 
         elif function_name == "lookup_service":
@@ -1766,8 +1752,7 @@ class Brain:
                 action="think",
                 evidence=result_text,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             # Signal caller to re-invoke LLM so it can act on the lookup result
             return True
 
@@ -1791,8 +1776,7 @@ class Brain:
                     action="think",
                     evidence=f"[Already consulted] {cached_evidence}",
                 )
-                await self.blackboard.append_turn(event_id, turn)
-                await self._broadcast_turn(event_id, turn)
+                await self._append_and_broadcast(event_id, turn)
                 return True
 
             query = args.get("query", "")
@@ -1833,8 +1817,7 @@ class Brain:
                 action="think",
                 evidence=memory_text,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return True
 
         elif function_name == "lookup_journal":
@@ -1859,8 +1842,7 @@ class Brain:
                 action="think",
                 evidence=journal_text,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return True
 
         elif function_name == "notify_user_slack":
@@ -1932,8 +1914,7 @@ class Brain:
                 thoughts=result_text,
                 response_parts=response_parts,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return True
 
         elif function_name == "notify_gitlab_result":
@@ -1963,8 +1944,7 @@ class Brain:
                 thoughts=result_text,
                 response_parts=response_parts,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             return True
 
         elif function_name == "classify_event":
@@ -1977,8 +1957,7 @@ class Brain:
                 thoughts=f"Cynefin: {domain.upper()}. {reasoning}",
                 timestamp=time.time(),
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
             return False  # Don't re-invoke immediately -- let event loop pick up with dispatch tools unlocked
 
@@ -2051,8 +2030,7 @@ class Brain:
                         action="message",
                         thoughts=progress_data.get("message", ""),
                     )
-                    await self.blackboard.append_turn(event_id, turn)
-                    await self._broadcast_turn(event_id, turn)
+                    await self._append_and_broadcast(event_id, turn)
 
             mode_label = f" (mode={mode})" if mode else ""
             logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
@@ -2086,8 +2064,7 @@ class Brain:
                             action="huddle",
                             thoughts=data.get("content", ""),
                         )
-                        await self.blackboard.append_turn(event_id, turn)
-                        await self._broadcast_turn(event_id, turn)
+                        await self._append_and_broadcast(event_id, turn)
 
                     agent_id_override = None
                     event_doc = await self.blackboard.get_event(event_id)
@@ -2187,8 +2164,7 @@ class Brain:
                             thoughts=result_data.get("message", ""),
                             requestingAgent=result_data.get("requestingAgent", ""),
                         )
-                        await self.blackboard.append_turn(event_id, turn)
-                        await self._broadcast_turn(event_id, turn)
+                        await self._append_and_broadcast(event_id, turn)
                         self._release_task_state(event_id)
                         if not await self._is_event_closed(event_id):
                             await self.process_event(event_id)
@@ -2201,8 +2177,7 @@ class Brain:
                             action="busy",
                             thoughts=result_data.get("message", f"{agent_name} is busy after retries"),
                         )
-                        await self.blackboard.append_turn(event_id, turn)
-                        await self._broadcast_turn(event_id, turn)
+                        await self._append_and_broadcast(event_id, turn)
                         logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
                         self._release_task_state(event_id)
                         if not await self._is_event_closed(event_id):
@@ -2220,8 +2195,7 @@ class Brain:
                     action="error",
                     thoughts="Agent returned empty response (Gemini CLI produced no output). May need retry.",
                 )
-                await self.blackboard.append_turn(event_id, turn)
-                await self._broadcast_turn(event_id, turn)
+                await self._append_and_broadcast(event_id, turn)
                 logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
                 self._release_task_state(event_id)
                 if not await self._is_event_closed(event_id):
@@ -2236,8 +2210,7 @@ class Brain:
                 action="cancel" if is_cancel else "execute",
                 result=result_str[:15000],  # Cap result length (raised for Dev+QE merged output)
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             logger.info(f"Agent task {'cancelled' if is_cancel else 'completed'}: {agent_name} for {event_id}")
 
             if is_cancel:
@@ -2274,8 +2247,7 @@ class Brain:
                 action="error",
                 thoughts=f"Agent execution failed: {str(e)}",
             )
-            await self.blackboard.append_turn(event_id, turn)
-            await self._broadcast_turn(event_id, turn)
+            await self._append_and_broadcast(event_id, turn)
             if routing_turn_num:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
@@ -2298,6 +2270,13 @@ class Brain:
     # =========================================================================
     # Broadcast Helpers
     # =========================================================================
+
+    async def _append_and_broadcast(
+        self, event_id: str, turn: ConversationTurn
+    ) -> None:
+        """Persist turn to Redis and broadcast to dashboard/Slack channels."""
+        await self.blackboard.append_turn(event_id, turn)
+        await self._broadcast_turn(event_id, turn)
 
     async def _broadcast_turn(self, event_id: str, turn: ConversationTurn) -> None:
         """Broadcast a conversation turn to all channels (WS, Slack, etc.)."""
@@ -2419,8 +2398,7 @@ class Brain:
             thoughts=escalation_msg,
             waitingFor="user",
         )
-        await self.blackboard.append_turn(event_id, wait_turn)
-        await self._broadcast_turn(event_id, wait_turn)
+        await self._append_and_broadcast(event_id, wait_turn)
         logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
 
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
@@ -2568,8 +2546,7 @@ class Brain:
                     action="followup",
                     result=followup_result[:15000],
                 )
-                await self.blackboard.append_turn(event_id, turn)
-                await self._broadcast_turn(event_id, turn)
+                await self._append_and_broadcast(event_id, turn)
         except asyncio.CancelledError:
             logger.info(f"Follow-up forwarding cancelled for {event_id}")
         except Exception as e:
