@@ -131,6 +131,16 @@ function DashboardInner() {
       try {
         const agents = await getAgents();
         setEphemeralAgents(agents.filter((a: AgentRegistryEntry) => a.ephemeral));
+        setAgentStreams(prev => {
+          const next = { ...prev };
+          for (const a of AGENTS) {
+            const reg = agents.find((r: AgentRegistryEntry) => r.role === a && !r.ephemeral);
+            if (reg && !reg.busy && next[a]?.isActive) {
+              next[a] = { ...next[a], isActive: false };
+            }
+          }
+          return next;
+        });
       } catch { /* fire-and-forget */ }
     };
     fetch();
