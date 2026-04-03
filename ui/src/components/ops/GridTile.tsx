@@ -73,7 +73,7 @@ export default function GridTile({
   const isActive = isEphemeral ? (ephemeralActive || false) : (agentState?.isActive || false);
 
   return (
-    <div className="relative h-full flex flex-col" onClick={(e) => {
+    <div className="relative h-full flex flex-col min-w-0 overflow-hidden" onClick={(e) => {
         if ((e.target as HTMLElement).closest('button')) return;
         onTileClick(tileId);
       }}
@@ -82,7 +82,7 @@ export default function GridTile({
         <div className="absolute inset-0 rounded-lg pointer-events-none z-10"
           style={{ boxShadow: `inset 0 0 0 2px ${color}, 0 0 12px ${color}33` }} />
       )}
-      <div className="flex-1 min-h-0 flex">
+      <div className="flex-1 min-h-0 min-w-0 flex">
         <AgentStreamCard
           agentName={name}
           eventId={isEphemeral ? tileId : (agentState?.eventId || null)}

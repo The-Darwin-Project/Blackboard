@@ -140,7 +140,7 @@ export default function StreamGrid() {
     <div className="h-full p-3 overflow-hidden">
       <div style={{
         display: 'grid',
-        gridTemplateColumns: `repeat(${cols}, 1fr)`,
+        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
         gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
         gap: 10,
         height: '100%',
