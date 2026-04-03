@@ -87,8 +87,10 @@ function LayoutInner() {
       {/* Body: Sidebar + Main Content */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
-        <main className="flex-1 overflow-hidden min-w-0">
-          <Outlet />
+        <main className="flex-1 overflow-hidden min-w-0 relative">
+          <div className="absolute inset-0">
+            <Outlet />
+          </div>
         </main>
       </div>
 
