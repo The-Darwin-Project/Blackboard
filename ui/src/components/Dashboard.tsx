@@ -32,7 +32,7 @@ import type { Tab } from './TabPanel';
 
 // Resize constraints
 const MIN_SIDEBAR_WIDTH = 280;
-const MAX_SIDEBAR_WIDTH = 600;
+const MAX_SIDEBAR_WIDTH = 900;
 const DEFAULT_SIDEBAR_WIDTH = 400;
 
 // Storage keys -- layout uses localStorage (survives refresh + tab close),
@@ -149,7 +149,8 @@ function DashboardInner() {
 
   const { data: eventDoc } = useEventDocument(selectedEventId);
   const { hasPlan } = usePlanState(eventDoc?.conversation || []);
-  const showPlanPanel = hasPlan && leftTab === 'event-chat' && !!selectedEventId;
+  const [planPanelHidden, setPlanPanelHidden] = useState(false);
+  const showPlanPanel = hasPlan && !planPanelHidden && leftTab === 'event-chat' && !!selectedEventId;
 
   // -- WS + query hooks --
   const { connected, send } = useWSConnection();
@@ -373,13 +374,19 @@ function DashboardInner() {
                   <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                     <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onClose={onEventClose} />
                   </div>
+                  {hasPlan && (
+                    <div
+                      onClick={() => setPlanPanelHidden(h => !h)}
+                      title={planPanelHidden ? 'Show plan' : 'Hide plan'}
+                      style={{ width: planPanelHidden ? 24 : 1, flexShrink: 0, background: '#334155', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'width 0.15s ease' }}
+                    >
+                      {planPanelHidden && <span style={{ fontSize: 9, color: '#64748b', writingMode: 'vertical-rl', letterSpacing: 1, userSelect: 'none' }}>PLAN</span>}
+                    </div>
+                  )}
                   {showPlanPanel && eventDoc && (
-                    <>
-                      <div style={{ width: 1, flexShrink: 0, background: '#334155' }} />
-                      <div style={{ width: showEphemeralSplit ? 180 : 220, flexShrink: 0, overflow: 'hidden' }}>
-                        <PlanProgress conversation={eventDoc.conversation} />
-                      </div>
-                    </>
+                    <div style={{ width: showEphemeralSplit ? 180 : 220, flexShrink: 0, overflow: 'hidden' }}>
+                      <PlanProgress conversation={eventDoc.conversation} />
+                    </div>
                   )}
                   {showEphemeralSplit && (
                     <>

@@ -84,9 +84,9 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
         background: '#1e293b',
         flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
           <span style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0' }}>Plan</span>
-          <span style={{ fontSize: 10, color: '#64748b' }}>{done}/{steps.length}</span>
+          <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>{done}/{steps.length}</span>
         </div>
         <div style={{
           height: 3,
