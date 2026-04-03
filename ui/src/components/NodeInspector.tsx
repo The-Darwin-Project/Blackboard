@@ -23,26 +23,26 @@ const EVENT_LABELS: Record<string, string> = {
 interface NodeInspectorProps {
   serviceName: string | null;
   onClose: () => void;
+  inline?: boolean;
 }
 
-function NodeInspector({ serviceName, onClose }: NodeInspectorProps) {
+function NodeInspector({ serviceName, onClose, inline }: NodeInspectorProps) {
   const { data: service, isLoading } = useService(serviceName);
   const { data: events } = useEvents(50, serviceName ?? undefined);
 
   if (!serviceName) return null;
 
+  const wrapperClass = inline
+    ? 'h-full flex flex-col bg-bg-secondary'
+    : 'fixed right-0 top-0 h-full w-80 bg-bg-secondary border-l border-border z-50 shadow-xl overflow-hidden flex flex-col animate-in slide-in-from-right duration-200';
+
   return (
     <>
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/50 z-40"
-        onClick={onClose}
-      />
+      {!inline && <div className="fixed inset-0 bg-black/50 z-40" onClick={onClose} />}
 
-      {/* Drawer */}
-      <div className="fixed right-0 top-0 h-full w-80 bg-bg-secondary border-l border-border z-50 shadow-xl overflow-hidden flex flex-col animate-in slide-in-from-right duration-200">
+      <div className={wrapperClass}>
         {/* Header */}
-        <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-accent" />
             <h3 className="font-semibold text-text-primary">{serviceName}</h3>

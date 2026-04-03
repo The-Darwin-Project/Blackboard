@@ -32,15 +32,15 @@ export function TreeGroup({ icon, label, count, countColor, children, nested, fo
   );
 }
 
-export function TreeNode({ icon, label, sublabel, sublabelColor, onClick, onContextMenu, style }: {
-  icon: ReactNode; label: string; sublabel?: string; sublabelColor?: string;
+export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onClick, onContextMenu, style }: {
+  icon: ReactNode; label: string; labelColor?: string; sublabel?: string; sublabelColor?: string;
   onClick?: () => void; onContextMenu?: (e: React.MouseEvent) => void; style?: React.CSSProperties;
 }) {
   return (
     <div className="flex items-center gap-2 px-3 py-1 rounded text-[14px] hover:bg-bg-tertiary cursor-pointer transition-colors group"
       onClick={onClick} onContextMenu={onContextMenu} style={style}>
       <span className="flex-shrink-0">{icon}</span>
-      <span className="text-text-secondary truncate">{label}</span>
+      <span className="truncate font-medium" style={labelColor ? { color: labelColor } : { color: 'var(--text-secondary)' }}>{label}</span>
       {sublabel && (
         <span className="ml-auto text-[12px] truncate flex-shrink-0" style={{ color: sublabelColor || '#475569' }}>{sublabel}</span>
       )}
@@ -75,10 +75,20 @@ export function EmptyLabel({ children }: { children: ReactNode }) {
 }
 
 export function AgentDot({ count, active }: { count: number; active: number }) {
+  const hasActive = active > 0;
   return (
-    <div className="flex flex-col items-center gap-0.5" title={`${count} agents, ${active} active`}>
-      <Bot size={18} className="text-text-muted" />
-      <span className="text-[11px] text-text-muted">{active}/{count}</span>
+    <div className="flex flex-col items-center gap-0.5"
+      title={`${count} connected, ${active} active`}>
+      <div className="relative">
+        <Bot size={18} className={count > 0 ? 'text-green-400/70' : 'text-text-muted'} />
+        {hasActive && (
+          <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-green-400"
+            style={{ boxShadow: '0 0 4px #4ade80' }} />
+        )}
+      </div>
+      <span className="text-[10px]" style={{ color: hasActive ? '#4ade80' : count > 0 ? '#4ade8070' : '#64748b' }}>
+        {hasActive ? `${active} busy` : `${count}`}
+      </span>
     </div>
   );
 }

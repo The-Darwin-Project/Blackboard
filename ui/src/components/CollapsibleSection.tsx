@@ -11,21 +11,30 @@ interface CollapsibleSectionProps {
   defaultOpen?: boolean;
   badge?: ReactNode;
   children: ReactNode;
+  flexContent?: boolean;
 }
 
 export default function CollapsibleSection({
-  title, defaultOpen = false, badge, children,
+  title, defaultOpen = false, badge, children, flexContent,
 }: CollapsibleSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
 
+  const rootStyle: React.CSSProperties = {
+    border: '1px solid #1e293b',
+    borderRadius: 8,
+    marginBottom: flexContent ? 0 : 8,
+    background: '#0f172a',
+    overflow: 'hidden',
+  };
+  if (flexContent && open) {
+    rootStyle.display = 'flex';
+    rootStyle.flexDirection = 'column';
+    rootStyle.flex = 1;
+    rootStyle.minHeight = 0;
+  }
+
   return (
-    <div style={{
-      border: '1px solid #1e293b',
-      borderRadius: 8,
-      marginBottom: 8,
-      background: '#0f172a',
-      overflow: 'hidden',
-    }}>
+    <div style={rootStyle}>
       <button
         onClick={() => setOpen(!open)}
         style={{
@@ -41,6 +50,7 @@ export default function CollapsibleSection({
           fontSize: 13,
           fontWeight: 600,
           textAlign: 'left',
+          flexShrink: 0,
         }}
       >
         <ChevronRight
@@ -56,7 +66,10 @@ export default function CollapsibleSection({
         {badge && <span style={{ marginLeft: 'auto' }}>{badge}</span>}
       </button>
       {open && (
-        <div style={{ padding: '0 14px 12px 38px' }}>
+        <div style={flexContent
+          ? { flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: '0 4px 4px 4px' }
+          : { padding: '0 14px 12px 38px' }
+        }>
           {children}
         </div>
       )}

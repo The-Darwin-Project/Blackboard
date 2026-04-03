@@ -5,7 +5,7 @@
 // 3. [Pattern]: Report button fetches server-side report via getEventReport(); falls back to client-side eventToMarkdown on failure.
 // 4. [Constraint]: closeEvent via REST, not WS -- ensures request completes even if WS is flaky.
 // 5. [Pattern]: TurnBubble and MarkdownViewer extracted to own files (transparency compliance refactor).
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useWSMessage } from '../contexts/WebSocketContext';
 import { closeEvent, getEventReport } from '../api/client';
@@ -57,10 +57,25 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
   const [reportOpen, setReportOpen] = useState(false);
   const [reportContent, setReportContent] = useState<string>('');
   const [turnViewer, setTurnViewer] = useState<{ content: string; filename: string } | null>(null);
+  const [userScrolled, setUserScrolled] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: selectedEvent } = useEventDocument(eventId);
   const { invalidateActive, invalidateEvent } = useQueueInvalidation();
+
+  const handleFeedScroll = useCallback(() => {
+    const el = feedRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setUserScrolled(!atBottom);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    if (feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+      setUserScrolled(false);
+    }
+  }, []);
 
   useWSMessage((msg) => {
     if (msg.type === 'brain_thinking') {
@@ -86,8 +101,10 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
   });
 
   useEffect(() => {
-    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
-  }, [selectedEvent?.conversation?.length]);
+    if (feedRef.current && !userScrolled) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
+  }, [selectedEvent?.conversation?.length, userScrolled]);
 
   if (!selectedEvent) {
     return (
@@ -183,28 +200,42 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
       {reportOpen && <MarkdownViewer filename={`event-${selectedEvent.id}.md`} content={reportContent} onClose={() => setReportOpen(false)} />}
       {turnViewer && <MarkdownViewer filename={turnViewer.filename} content={turnViewer.content} onClose={() => setTurnViewer(null)} />}
 
-      <div ref={feedRef} style={{ flex: 1, overflow: 'auto', padding: 12, minHeight: 0, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
-        {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
-          const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
-            ? attachments.find((a) => a.eventId === eventId)
-            : null;
-          return (
-            <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} onStatusChange={handleStatusChange} onViewReport={(content, filename) => {
-              if (onOpenContentTile) {
-                onOpenContentTile(filename, content);
-              } else {
-                setTurnViewer({ content, filename });
-              }
-            }} />
-          );
-        })}
-        {brainThinking && brainThinking.eventId === eventId && (
-          <div style={{ padding: '8px 12px', margin: '4px 0', borderLeft: `3px solid ${brainThinking.isThought ? '#8b5cf6' : '#3b82f6'}`, background: brainThinking.isThought ? '#7c3aed10' : '#1e3a5f15', borderRadius: 4, fontSize: 13, color: '#94a3b8', fontStyle: 'italic', animation: 'pulse 2s infinite' }}>
-            <span style={{ color: brainThinking.isThought ? '#8b5cf6' : '#3b82f6', fontWeight: 600, fontSize: 11 }}>
-              {brainThinking.isThought ? 'Brain reasoning...' : 'Brain thinking...'}
-            </span>
-            <p style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap' }}>{brainThinking.text}</p>
-          </div>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        <div ref={feedRef} onScroll={handleFeedScroll} style={{ position: 'absolute', inset: 0, overflow: 'auto', padding: 12, ...(selectedEvent.conversation.length > 3 ? { maskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px, black calc(100% - 24px), transparent 100%)' } : {}) }}>
+          {selectedEvent.conversation.map((turn: ConversationTurn, i: number) => {
+            const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
+              ? attachments.find((a) => a.eventId === eventId)
+              : null;
+            return (
+              <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} onStatusChange={handleStatusChange} onViewReport={(content, filename) => {
+                if (onOpenContentTile) {
+                  onOpenContentTile(filename, content);
+                } else {
+                  setTurnViewer({ content, filename });
+                }
+              }} />
+            );
+          })}
+          {brainThinking && brainThinking.eventId === eventId && (
+            <div style={{ padding: '8px 12px', margin: '4px 0', borderLeft: `3px solid ${brainThinking.isThought ? '#8b5cf6' : '#3b82f6'}`, background: brainThinking.isThought ? '#7c3aed10' : '#1e3a5f15', borderRadius: 4, fontSize: 13, color: '#94a3b8', fontStyle: 'italic', animation: 'pulse 2s infinite' }}>
+              <span style={{ color: brainThinking.isThought ? '#8b5cf6' : '#3b82f6', fontWeight: 600, fontSize: 11 }}>
+                {brainThinking.isThought ? 'Brain reasoning...' : 'Brain thinking...'}
+              </span>
+              <p style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap' }}>{brainThinking.text}</p>
+            </div>
+          )}
+        </div>
+        {userScrolled && (
+          <button onClick={scrollToBottom}
+            style={{
+              position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+              background: '#1e40af', color: '#93c5fd', border: '1px solid #3b82f633',
+              borderRadius: 20, padding: '4px 14px', fontSize: 11, fontWeight: 600,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)', zIndex: 5,
+            }}>
+            &#x25BC; Jump to latest
+          </button>
         )}
       </div>
     </div>

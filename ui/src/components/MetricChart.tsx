@@ -14,10 +14,11 @@ import { ServiceMetricChart } from './ServiceMetricChart';
 
 interface MetricChartProps {
   collapsed?: boolean;
-  highlightService?: string | null;
+  highlightServices?: string[];
+  onServiceClick?: (service: string) => void;
 }
 
-function MetricChart({ collapsed, highlightService }: MetricChartProps) {
+function MetricChart({ collapsed, highlightServices = [], onServiceClick }: MetricChartProps) {
   const { data, isLoading, isError } = useMetrics();
 
   if (collapsed) return null;
@@ -76,25 +77,35 @@ function MetricChart({ collapsed, highlightService }: MetricChartProps) {
         </div>
       </div>
       
-      {/* Highlighted service enlarged at top when filtered from Topology */}
-      {highlightService && services.includes(highlightService) && (
-        <div style={{ marginBottom: 12 }}>
-          <ServiceMetricChart
-            service={highlightService}
-            data={data?.series ?? []}
-            events={data?.events}
-          />
+      {/* Highlighted services enlarged at top (up to 3 from graph selection) */}
+      {highlightServices.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: `repeat(${Math.min(highlightServices.filter(s => services.includes(s)).length, 3)}, 1fr)`,
+          gap: 12,
+          marginBottom: 16,
+        }}>
+          {highlightServices.filter(s => services.includes(s)).map(svc => (
+            <ServiceMetricChart
+              key={svc}
+              service={svc}
+              data={data?.series ?? []}
+              events={data?.events}
+              enlarged
+            />
+          ))}
         </div>
       )}
 
-      {/* Service charts grid -- auto-fill with min 100px cards, adapts to panel width */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: 8 }}>
-        {services.filter(s => s !== highlightService).map(service => (
+      {/* Service charts grid -- auto-fill with min 200px cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+        {services.filter(s => !highlightServices.includes(s)).map(service => (
           <ServiceMetricChart
             key={service}
             service={service}
             data={data?.series ?? []}
             events={data?.events}
+            onClick={() => onServiceClick?.(service)}
           />
         ))}
       </div>

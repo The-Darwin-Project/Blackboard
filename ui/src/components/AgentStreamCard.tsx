@@ -298,9 +298,9 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
   return (
     <>
       <div style={{
-        flex: 1, minWidth: 0, background: '#0f172a',
+        flex: 1, minWidth: 0, minHeight: 0, background: '#0f172a',
         borderRadius: 8, border: `1px solid ${isActive ? color : '#334155'}`,
-        display: 'flex', flexDirection: 'column',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
         opacity: isActive ? 1 : 0.6, transition: 'opacity 0.3s, border-color 0.3s',
       }}>
         {/* Header */}
@@ -338,8 +338,8 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
         </div>
 
         {/* Scrollable body */}
-        <div ref={scrollRef} style={{
-          flex: 1, overflow: 'auto', padding: '6px 10px', fontFamily: 'monospace',
+        <div ref={scrollRef} onScroll={handleScroll} style={{
+          flex: 1, minHeight: 0, overflow: 'auto', padding: '6px 10px', fontFamily: 'monospace',
           fontSize: 12, lineHeight: '1.4', color: '#94a3b8',
         }}>
           <MessageCards messages={messages} color={color} />

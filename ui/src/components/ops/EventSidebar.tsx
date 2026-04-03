@@ -7,7 +7,7 @@
 // 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
 import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../../hooks/useQueue';
 import { getClosedEvents, getHeadhunterPending, type HeadhunterTodo } from '../../api/client';
@@ -146,8 +146,11 @@ export default function EventSidebar() {
           </button>
         </div>
 
-        {/* Tree + accordion scrollable area */}
-        <div className="flex-1 overflow-auto min-h-0">
+        {/* Tree + event detail area */}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+          {/* System tree - constrained when event selected so chat gets remaining space */}
+          <div className={`overflow-auto ${selectedEventId ? 'flex-shrink-0' : 'flex-1'}`}
+            style={selectedEventId ? { maxHeight: '35vh' } : undefined}>
           <CollapsibleSection title="System" defaultOpen={!selectedEventId} badge={
             <span className="text-[12px] text-text-muted">{AGENTS.length + events.length + demoHH.length + schedules.length}</span>
           }>
@@ -159,13 +162,26 @@ export default function EventSidebar() {
               {AGENTS.map(name => {
                 const reg = registeredAgents.find(r => r.role === name && !r.ephemeral);
                 const isBusy = reg?.busy || false;
+                const isRegistered = !!reg;
                 const color = ACTOR_COLORS[name] || '#6b7280';
+                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical } as Record<string, typeof Compass>)[name];
                 return (
                   <TreeNode key={name}
-                    icon={<span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: isBusy ? color : '#334155' }} />}
+                    icon={
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                          style={{
+                            background: isBusy ? '#22c55e' : isRegistered ? '#22c55e80' : '#334155',
+                            boxShadow: isBusy ? '0 0 6px #22c55e80' : 'none',
+                            transition: 'all 0.3s',
+                          }} />
+                        {AgentIcon && <AgentIcon size={14} style={{ color }} />}
+                      </span>
+                    }
                     label={name}
-                    sublabel={isBusy ? reg?.current_event_id?.slice(0, 12) : 'idle'}
-                    sublabelColor={isBusy ? color : undefined}
+                    labelColor={color}
+                    sublabel={isBusy ? reg?.current_event_id?.slice(0, 12) : isRegistered ? 'idle' : 'offline'}
+                    sublabelColor={isBusy ? '#22c55e' : undefined}
                     onClick={() => setHotspot(name)}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -264,16 +280,18 @@ export default function EventSidebar() {
             </TreeGroup>
             </div>
           </CollapsibleSection>
+          </div>
 
-          {/* Event detail accordion (when event selected) */}
+          {/* Event detail area -- takes remaining vertical space */}
           {selectedEventId && (isMockEvent || eventDoc) && (() => {
             const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
             const planTurns = doc.conversation.filter((t: { action: string }) => t.action === 'plan');
             const completedSteps = doc.conversation.filter((t: { action: string; evidence?: string }) => t.action === 'plan_step' && t.evidence === 'completed').length;
             const showPlan = planTurns.length > 0 || hasPlan;
             return (
-              <div className="border-t border-border px-1.5 py-2">
-                <div className="flex items-center gap-2.5 px-3 py-2 mb-2 rounded-lg border"
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-border">
+                <div className="flex-shrink-0 px-1.5 pt-2 pb-1">
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border"
                   style={{ background: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}08`, borderColor: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}30` }}>
                   {isDemoMode && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold flex-shrink-0">DEMO</span>}
                   <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[doc.status]?.border || '#3b82f6' }} />
@@ -287,36 +305,41 @@ export default function EventSidebar() {
                     className="flex items-center justify-center w-6 h-6 rounded border border-border hover:border-red-500/50 hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors text-sm font-bold flex-shrink-0"
                     title="Close event">&times;</button>
                 </div>
-                <CollapsibleSection title="Chat" defaultOpen badge={
+                </div>
+
+                {/* Chat -- flex-1, takes remaining vertical space with independent scroll */}
+                <CollapsibleSection title="Chat" defaultOpen flexContent badge={
                   <span className="text-[12px] text-text-muted">{doc.conversation.length}</span>
                 }>
-                  <div style={{ overflow: 'auto' }}>
-                    {isMockEvent
-                      ? <MockConversationFeed />
-                      : <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onOpenContentTile={openContentTile} />
-                    }
-                  </div>
+                  {isMockEvent
+                    ? <MockConversationFeed />
+                    : <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onOpenContentTile={openContentTile} />
+                  }
                 </CollapsibleSection>
-                {showPlan && (
-                  <CollapsibleSection title="Plan" badge={
-                    <span className="text-[12px] text-text-muted">{completedSteps}/4</span>
-                  }>
-                    <PlanProgress conversation={doc.conversation as import('../../api/types').ConversationTurn[]} />
-                  </CollapsibleSection>
-                )}
-                <CollapsibleSection title="Details">
-                  <div className="space-y-1.5 text-[13px] text-text-muted">
-                    <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} size={18} />{doc.source}</span></div>
-                    <div className="flex justify-between"><span>Service</span><span className="text-text-secondary">{doc.service}</span></div>
-                    <div className="flex justify-between"><span>Status</span>
-                      <span className="px-1.5 py-0.5 rounded text-[12px] font-medium"
-                        style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#94a3b8' }}>
-                        {doc.status}
-                      </span>
+
+                {/* Plan + Details -- fixed at bottom with constrained height */}
+                <div className="flex-shrink-0 overflow-auto px-1.5 pb-1" style={{ maxHeight: '25vh' }}>
+                  {showPlan && (
+                    <CollapsibleSection title="Plan" badge={
+                      <span className="text-[12px] text-text-muted">{completedSteps}/4</span>
+                    }>
+                      <PlanProgress conversation={doc.conversation as import('../../api/types').ConversationTurn[]} />
+                    </CollapsibleSection>
+                  )}
+                  <CollapsibleSection title="Details">
+                    <div className="space-y-1.5 text-[13px] text-text-muted">
+                      <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} size={18} />{doc.source}</span></div>
+                      <div className="flex justify-between"><span>Service</span><span className="text-text-secondary">{doc.service}</span></div>
+                      <div className="flex justify-between"><span>Status</span>
+                        <span className="px-1.5 py-0.5 rounded text-[12px] font-medium"
+                          style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#94a3b8' }}>
+                          {doc.status}
+                        </span>
+                      </div>
+                      <div className="flex justify-between"><span>Turns</span><span>{doc.conversation.length}</span></div>
                     </div>
-                    <div className="flex justify-between"><span>Turns</span><span>{doc.conversation.length}</span></div>
-                  </div>
-                </CollapsibleSection>
+                  </CollapsibleSection>
+                </div>
               </div>
             );
           })()}
