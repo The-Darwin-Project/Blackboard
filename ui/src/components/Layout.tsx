@@ -88,7 +88,7 @@ function LayoutInner() {
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
         <main className="flex-1 overflow-hidden min-w-0 relative">
-          <div className="absolute inset-0">
+          <div className="absolute inset-0 overflow-hidden">
             <Outlet />
           </div>
         </main>
