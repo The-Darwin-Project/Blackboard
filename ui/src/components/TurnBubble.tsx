@@ -188,6 +188,9 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   const isHuman = turn.actor === 'user';
   const isLongExecute = !isHuman && turn.action === 'execute' && turn.result && turn.result.length > 500;
+  const isPlanTurn = !isHuman && turn.action === 'plan' && (turn.plan || (turn.result && turn.result.length > 300));
+  const isApprovalTurn = !isHuman && turn.action === 'request_approval' && turn.thoughts;
+  const hasFloatingView = isLongExecute || isPlanTurn || isApprovalTurn;
   const isTransientError = turn.action === 'error' && turn.thoughts && (/429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|rate.limit|quota/i.test(turn.thoughts));
 
   if (isTransientError) {
@@ -210,8 +213,12 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
-        {isLongExecute && onViewReport && (
-          <button onClick={() => onViewReport(turn.result!, `${turn.actor}-report.md`)} title="Open full report in viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
+        {hasFloatingView && onViewReport && (
+          <button onClick={() => {
+            const content = isPlanTurn ? (turn.plan || turn.result || '') : isApprovalTurn ? (turn.thoughts || '') : (turn.result || '');
+            const filename = isPlanTurn ? `${turn.actor}-plan.md` : isApprovalTurn ? 'approval-summary.md' : `${turn.actor}-report.md`;
+            onViewReport(content, filename);
+          }} title="Open in floating viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
             View <span style={{ fontSize: 9 }}>↗</span>
           </button>
         )}
