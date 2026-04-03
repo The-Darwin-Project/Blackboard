@@ -35,7 +35,10 @@
   --color-border-focus: #6366f1;
 }
 
-/* Base styles */
+/* Base styles -- 124% root scales all rem-based Tailwind classes (text-xs, text-sm, etc.) */
+html {
+  font-size: 124%;
+}
 html, body {
   @apply bg-bg-primary text-text-primary antialiased;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;

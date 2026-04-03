@@ -1,158 +1,107 @@
 // BlackBoard/ui/src/components/Layout.tsx
 // @ai-rules:
-// 1. [Pattern]: Header uses useTopology, useWSConnection, useActiveEvents for status and Emergency Stop.
-// 2. [Pattern]: Emergency Stop sends { type: "emergency_stop" } via WS; handles emergency_stop_ack to show cancelled count.
-// 3. [Pattern]: Footer consumes useConfig for contactEmail/feedbackFormUrl (AI Transparency compliance).
+// 1. [Pattern]: Operations Center shell -- header (logo + tabs only), persistent sidebar, main content (Outlet), bottom bar.
+// 2. [Pattern]: OpsStateProvider wraps children. All controls (bell, status, user, STOP, auto) live in ActivityPanel bottom bar.
+// 3. [Pattern]: Header tabs are route-based (useLocation + useNavigate). Active tab highlighted.
+// 4. [Gotcha]: darwin:selectEvent custom event listener bridges WaitingBell -> OpsStateContext.selectEvent.
 /**
- * 3-pane "War Room" layout for Darwin Brain Dashboard.
- * Header with status badge, main content area with responsive grid.
+ * Darwin Operations Center layout.
+ * Header: logo + tabs only (clean, minimal).
+ * Bottom bar: activity feed + bell + status + controls (XProtect-style status strip).
  */
+import { useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { Activity, AlertCircle, BookOpen, CheckCircle2, FileText, Home, LogOut, Square, User, Wifi, WifiOff } from 'lucide-react';
-import { useTopology, useConfig } from '../hooks';
-import { useActiveEvents } from '../hooks/useQueue';
-import { useWSConnection, useWSMessage } from '../contexts/WebSocketContext';
-import { useAuth } from '../contexts/AuthContext';
-import WaitingBell from './WaitingBell';
+import { Activity } from 'lucide-react';
+import { OpsStateProvider, useOpsState } from '../contexts/OpsStateContext';
+import EventSidebar from './ops/EventSidebar';
+import ActivityPanel from './ops/ActivityPanel';
 
-function Layout() {
+const TABS = [
+  { id: '/', label: 'Streams' },
+  { id: '/topology', label: 'Topology' },
+  { id: '/reports', label: 'Reports' },
+  { id: '/timekeeper', label: 'TimeKeeper' },
+  { id: '/guide', label: 'Guide' },
+] as const;
+
+function LayoutInner() {
   const location = useLocation();
   const navigate = useNavigate();
-  const onReports = location.pathname.startsWith('/reports');
-  const onGuide = location.pathname === '/guide';
-  const onTimeKeeper = location.pathname === '/timekeeper';
-  const { isError, isFetching } = useTopology();
-  const { data: config } = useConfig();
-  const { connected, send } = useWSConnection();
-  const { data: activeEvents } = useActiveEvents();
-  const { user, isAuthenticated, logout } = useAuth();
-  const activeCount = activeEvents?.length ?? 0;
-  const canEmergencyStop = connected && activeCount > 0;
-  const userName = user?.profile?.preferred_username || user?.profile?.name || user?.profile?.email || '';
+  const { selectEvent } = useOpsState();
 
-  useWSMessage((msg) => {
-    if (msg.type === 'emergency_stop_ack') {
-      const cancelled = (msg as { cancelled?: number }).cancelled ?? 0;
-      window.alert(`Emergency stop completed. ${cancelled} task(s) cancelled.`);
-    }
-  });
+  const activeTab = TABS.find(t => t.id === location.pathname)?.id
+    || (location.pathname.startsWith('/reports') ? '/reports' : '/');
 
-  // Determine system status based on API connectivity
-  const isOnline = !isError;
-  const statusColor = isOnline ? 'text-status-healthy' : 'text-status-critical';
-  const statusText = isOnline ? 'Online' : 'Offline';
-  const StatusIcon = isOnline ? (isFetching ? Activity : CheckCircle2) : AlertCircle;
-  const ConnectionIcon = isOnline ? Wifi : WifiOff;
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const eventId = (e as CustomEvent).detail;
+      if (eventId) selectEvent(eventId);
+    };
+    window.addEventListener('darwin:selectEvent', handler);
+    return () => window.removeEventListener('darwin:selectEvent', handler);
+  }, [selectEvent]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      if (!e.altKey) return;
+      const tabIndex = parseInt(e.key);
+      if (tabIndex >= 1 && tabIndex <= TABS.length) {
+        e.preventDefault();
+        navigate(TABS[tabIndex - 1].id);
+      }
+      if (e.key === '[') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleSidebar')); }
+      if (e.key === ']') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleSidebar')); }
+      if (e.key === '`') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleActivity')); }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [navigate]);
 
   return (
     <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      {/* Header -- clean: logo + tabs only */}
+      <header className="flex-shrink-0 bg-bg-secondary border-b border-border px-4 py-1.5 flex items-center gap-4">
+        <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
-            <Activity className="w-5 h-5 text-white" />
+            <Activity className="w-4.5 h-4.5 text-white" />
           </div>
-          <div>
-            <h1 className="text-lg font-semibold text-text-primary">Darwin Brain</h1>
-            <p className="text-xs text-text-muted">Autonomous Infrastructure Control</p>
-          </div>
+          <span className="text-sm font-semibold text-text-primary hidden lg:block">Darwin</span>
         </div>
 
-        {/* Right side: Reports + Emergency Stop + Waiting Bell + Status Badge */}
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            onClick={() => navigate(onReports ? '/' : '/reports')}
-            title={onReports ? 'Back to Dashboard' : 'View Reports'}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
-          >
-            {onReports ? <Home className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
-            {onReports ? 'Dashboard' : 'Reports'}
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(onGuide ? '/' : '/guide')}
-            title={onGuide ? 'Back to Dashboard' : 'User Guide'}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
-          >
-            {onGuide ? <Home className="w-3.5 h-3.5" /> : <BookOpen className="w-3.5 h-3.5" />}
-            {onGuide ? 'Dashboard' : 'Guide'}
-          </button>
-          <button
-            type="button"
-            onClick={() => navigate(onTimeKeeper ? '/' : '/timekeeper')}
-            title={onTimeKeeper ? 'Back to Dashboard' : 'TimeKeeper'}
-            className="flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold bg-bg-tertiary text-text-secondary hover:text-text-primary transition-colors cursor-pointer"
-          >
-            {onTimeKeeper ? <Home className="w-3.5 h-3.5" /> : <Activity className="w-3.5 h-3.5" />}
-            {onTimeKeeper ? 'Dashboard' : 'TimeKeeper'}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (!window.confirm('Emergency stop will cancel all active tasks. Continue?')) return;
-              send({ type: 'emergency_stop' });
-            }}
-            disabled={!canEmergencyStop}
-            title={!canEmergencyStop ? (activeCount === 0 ? 'No active events' : 'Not connected') : 'Cancel all active tasks'}
-            className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold transition-colors ${
-              canEmergencyStop
-                ? 'bg-red-600 text-white hover:bg-red-700 cursor-pointer'
-                : 'bg-red-600/50 text-white/70 opacity-50 cursor-not-allowed'
-            }`}
-          >
-            <Square className="w-3.5 h-3.5 fill-current" />
-            STOP
-          </button>
-          <WaitingBell onEventClick={(eventId) => {
-            window.dispatchEvent(new CustomEvent('darwin:selectEvent', { detail: eventId }));
-          }} />
-
-          {/* User Identity + Logout */}
-          {isAuthenticated && userName && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10">
-              <User className="w-3.5 h-3.5 text-indigo-400" />
-              <span className="text-xs font-medium text-indigo-300">{userName}</span>
-              <button
-                type="button"
-                onClick={() => { if (window.confirm('Logout?')) logout(); }}
-                title="Logout"
-                className="ml-1 p-0.5 rounded hover:bg-indigo-500/20 transition-colors cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5 text-indigo-400 hover:text-indigo-300" />
-              </button>
-            </div>
-          )}
-
-          {/* Status Badge */}
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${
-            isOnline ? 'border-status-healthy/30 bg-status-healthy/10' : 'border-status-critical/30 bg-status-critical/10'
-          }`}>
-            <ConnectionIcon className={`w-4 h-4 ${statusColor}`} />
-            <StatusIcon className={`w-4 h-4 ${statusColor} ${isFetching ? 'animate-pulse' : ''}`} />
-            <span className={`text-sm font-medium ${statusColor}`}>{statusText}</span>
-          </div>
-        </div>
+        <nav className="flex items-center gap-0.5">
+          {TABS.map((tab) => (
+            <button key={tab.id} onClick={() => navigate(tab.id)}
+              className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                activeTab === tab.id
+                  ? 'bg-accent/20 text-accent'
+                  : 'text-text-muted hover:text-text-secondary hover:bg-bg-tertiary'
+              }`}>
+              {tab.label}
+            </button>
+          ))}
+        </nav>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-hidden">
-        <Outlet />
-      </main>
+      {/* Body: Sidebar + Main Content */}
+      <div className="flex flex-1 overflow-hidden min-h-0">
+        <EventSidebar />
+        <main className="flex-1 overflow-hidden min-w-0">
+          <Outlet />
+        </main>
+      </div>
 
-      {/* Footer */}
-      <footer className="flex-shrink-0 bg-bg-secondary border-t border-border px-6 py-2">
-        <p className="text-xs text-text-muted text-center">
-          AI-powered system — review responses for accuracy •{' '}
-          <button type="button" onClick={() => navigate('/guide')} className="underline hover:text-text-secondary cursor-pointer">User Guide</button>
-          {config?.feedbackFormUrl && (
-            <> • <a href={config.feedbackFormUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-text-secondary">Submit Feedback</a></>
-          )}
-          {' '}• Darwin Brain v{config?.appVersion || '1.0.0'}
-        </p>
-      </footer>
+      {/* Bottom bar: Activity feed + Status strip + Controls */}
+      <ActivityPanel />
     </div>
   );
 }
 
-export default Layout;
+export default function Layout() {
+  return (
+    <OpsStateProvider>
+      <LayoutInner />
+    </OpsStateProvider>
+  );
+}

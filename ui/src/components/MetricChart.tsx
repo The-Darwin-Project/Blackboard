@@ -1,4 +1,8 @@
 // BlackBoard/ui/src/components/MetricChart.tsx
+// @ai-rules:
+// 1. [Pattern]: Grid of ServiceMetricChart cards, one per monitored service. Excludes Brain self-monitoring.
+// 2. [Pattern]: highlightService prop promotes a filtered service to enlarged view at top (Topology integration).
+// 3. [Constraint]: Data from useMetrics hook. No direct API calls.
 /**
  * Grid container for service metric charts.
  * Displays separate charts per service in a responsive 1-4 column grid.
@@ -10,9 +14,10 @@ import { ServiceMetricChart } from './ServiceMetricChart';
 
 interface MetricChartProps {
   collapsed?: boolean;
+  highlightService?: string | null;
 }
 
-function MetricChart({ collapsed }: MetricChartProps) {
+function MetricChart({ collapsed, highlightService }: MetricChartProps) {
   const { data, isLoading, isError } = useMetrics();
 
   if (collapsed) return null;
@@ -71,9 +76,20 @@ function MetricChart({ collapsed }: MetricChartProps) {
         </div>
       </div>
       
+      {/* Highlighted service enlarged at top when filtered from Topology */}
+      {highlightService && services.includes(highlightService) && (
+        <div style={{ marginBottom: 12 }}>
+          <ServiceMetricChart
+            service={highlightService}
+            data={data?.series ?? []}
+            events={data?.events}
+          />
+        </div>
+      )}
+
       {/* Service charts grid -- auto-fill with min 100px cards, adapts to panel width */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: 8 }}>
-        {services.map(service => (
+        {services.filter(s => s !== highlightService).map(service => (
           <ServiceMetricChart
             key={service}
             service={service}

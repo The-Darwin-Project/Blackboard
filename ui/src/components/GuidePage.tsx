@@ -24,7 +24,7 @@ export default function GuidePage() {
   const { data: config, isLoading } = useConfig();
 
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto', padding: '24px 16px', overflow: 'auto', height: '100%' }}>
+    <div style={{ maxWidth: 1200, margin: '0 auto', padding: '32px 40px', overflow: 'auto', height: '100%' }}>
       <h1 style={{ fontSize: 22, fontWeight: 700, color: '#e2e8f0', marginBottom: 24 }}>Darwin Brain User Guide</h1>
 
       <Section title="1. Overview">

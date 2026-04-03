@@ -215,8 +215,12 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
         {!isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
         {hasFloatingView && onViewReport && (
           <button onClick={() => {
-            const content = isPlanTurn ? (turn.plan || turn.result || '') : isApprovalTurn ? (turn.thoughts || '') : (turn.result || '');
-            const filename = isPlanTurn ? `${turn.actor}-plan.md` : isApprovalTurn ? 'approval-summary.md' : `${turn.actor}-report.md`;
+            const content = isPlanTurn
+              ? `# Plan by ${turn.actor}\n\n${turn.thoughts ? `> ${turn.thoughts}\n\n---\n\n` : ''}${turn.plan || turn.result || ''}${turn.selectedAgents ? `\n\n---\n\n**Assigned agents:** ${turn.selectedAgents.join(', ')}` : ''}`
+              : isApprovalTurn
+              ? `# Approval Request\n\n**${turn.actor}** — turn ${turn.turn}\n\n---\n\n${turn.thoughts || ''}\n\n---\n\n> **Action required:** Review the plan and approve or reject.`
+              : `# ${turn.actor} — ${turn.action}\n\n**Turn ${turn.turn}**\n\n---\n\n${turn.thoughts ? `## Analysis\n\n${turn.thoughts}\n\n` : ''}## Result\n\n${turn.result || ''}`;
+            const filename = isPlanTurn ? `${turn.actor} — Plan (turn ${turn.turn})` : isApprovalTurn ? `brain — Approval Request (turn ${turn.turn})` : `${turn.actor} — ${turn.action} (turn ${turn.turn})`;
             onViewReport(content, filename);
           }} title="Open in floating viewer" style={{ background: '#334155', border: '1px solid #47556966', borderRadius: 6, color: '#94a3b8', fontSize: 10, padding: '2px 8px', cursor: 'pointer', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 'auto' }}>
             View <span style={{ fontSize: 9 }}>↗</span>

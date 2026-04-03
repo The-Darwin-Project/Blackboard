@@ -1,4 +1,9 @@
 // BlackBoard/ui/src/App.tsx
+// @ai-rules:
+// 1. [Pattern]: Route structure: Layout wraps all authenticated routes. OpsStateProvider inside Layout.
+// 2. [Pattern]: /callback route handles OIDC redirect outside the main layout.
+// 3. [Constraint]: WebSocketProvider must wrap Layout (OpsStateContext uses useWSMessage).
+// 4. [Pattern]: AuthGate shows LoginPage when auth enabled + not authenticated. Otherwise renders routes.
 /**
  * Darwin Brain Dashboard - Main App component.
  * Sets up TanStack Query, Auth, WebSocket providers and routing.
@@ -13,6 +18,7 @@ import GuidePage from './components/GuidePage';
 import ReportsPage from './components/ReportsPage';
 import LoginPage from './components/LoginPage';
 import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
+import TopologyView from './components/ops/TopologyView';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -46,6 +52,7 @@ function AuthGate() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
+          <Route path="topology" element={<TopologyView />} />
           <Route path="reports" element={<ReportsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="timekeeper" element={<TimeKeeperPage />} />

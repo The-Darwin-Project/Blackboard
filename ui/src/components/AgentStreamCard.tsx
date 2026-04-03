@@ -1,59 +1,22 @@
 // BlackBoard/ui/src/components/AgentStreamCard.tsx
 // @ai-rules:
-// 1. [Pattern]: All agents use bubble/card layout. Developer card has multi-actor bubbles (dev/qe/manager).
-// 2. [Pattern]: Three bubble styles: dev (left green), qe (right purple), manager (left orange).
-// 3. [Pattern]: Architect and SysAdmin render single-actor message cards with their agent color.
-// 4. [Pattern]: FloatingWindow also supports chat mode via huddleMessages prop.
+// 1. [Pattern]: All agents use message card layout with agent-colored left border.
+// 2. [Pattern]: Ephemeral (oncall) agents use terminal-style renderer.
+// 3. [Pattern]: FloatingWindow provides pop-out view for any agent stream.
+// 4. [Constraint]: QE is a first-class agent with its own card (no huddle/pair-programming mode).
 /**
  * Real-time streaming card for agent CLI output.
- * Developer card transforms into a pair programming chat when QE is active.
+ * Each agent (architect, sysadmin, developer, qe) gets its own independent card.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ACTOR_COLORS } from '../constants/colors';
-import type { HuddleMessage } from './Dashboard';
 
 interface AgentStreamCardProps {
   agentName: string;
   eventId: string | null;
   messages: string[];
-  huddleMessages?: HuddleMessage[];
   isActive: boolean;
   ephemeral?: boolean;
-}
-
-/** Render a single chat bubble (used by both inline card and FloatingWindow). */
-function ChatBubble({ msg }: { msg: HuddleMessage }) {
-  const isManager = msg.actor === 'flash';
-  const isQe = msg.actor === 'qe';
-  return (
-    <div style={{
-      display: 'flex',
-      justifyContent: isQe ? 'flex-end' : 'flex-start',
-      marginBottom: 4,
-    }}>
-      <div style={{
-        maxWidth: '80%',
-        padding: '4px 10px',
-        borderRadius: 8,
-        fontSize: 12,
-        fontFamily: 'monospace',
-        lineHeight: '1.4',
-        wordBreak: 'break-word' as const,
-        whiteSpace: 'pre-wrap' as const,
-        background: isManager ? 'rgba(6, 182, 212, 0.12)'
-                  : isQe ? 'rgba(251, 113, 133, 0.12)'
-                  : 'rgba(16, 185, 129, 0.12)',
-        borderLeft: isManager ? '3px solid #06b6d4'
-                  : isQe ? 'none'
-                  : '3px solid #22c55e',
-        borderRight: isQe ? '3px solid #fb7185' : 'none',
-        color: '#94a3b8',
-      }}>
-        {isManager && <span style={{ fontSize: 10, color: '#06b6d4', fontWeight: 600 }}>manager: </span>}
-        {msg.text}
-      </div>
-    </div>
-  );
 }
 
 /** Render agent messages as individual bubbles (matching brain turn style). */
@@ -131,12 +94,11 @@ function TerminalView({ messages, isActive }: { messages: string[]; isActive: bo
 }
 
 function FloatingWindow({
-  agentName, eventId, messages, huddleMessages, onClose,
+  agentName, eventId, messages, onClose,
 }: {
   agentName: string;
   eventId: string | null;
   messages: string[];
-  huddleMessages: HuddleMessage[];
   onClose: () => void;
 }) {
   const color = ACTOR_COLORS[agentName] || '#6b7280';
@@ -145,11 +107,10 @@ function FloatingWindow({
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; origW: number; origH: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const isChatMode = agentName === 'developer' && huddleMessages.length > 0;
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages.length, huddleMessages.length]);
+  }, [messages.length]);
 
   return (
     <div style={{
@@ -178,11 +139,6 @@ function FloatingWindow({
           <span style={{ background: color, color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
             {agentName}
           </span>
-          {agentName === 'developer' && (
-            <span style={{ background: ACTOR_COLORS['qe'] || '#fb7185', color: '#fff', padding: '2px 10px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>
-              qe
-            </span>
-          )}
           {eventId && <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>[{eventId}]</span>}
         </div>
         <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 18, cursor: 'pointer', lineHeight: 1, padding: '0 4px' }}>×</button>
@@ -190,11 +146,7 @@ function FloatingWindow({
 
       {/* Scrollable content */}
       <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: 12, fontFamily: 'monospace', fontSize: 13, lineHeight: '1.5', color: '#94a3b8' }}>
-        {isChatMode ? (
-          huddleMessages.map((msg, i) => <ChatBubble key={i} msg={msg} />)
-        ) : (
-          <MessageCards messages={messages} color={color} />
-        )}
+        <MessageCards messages={messages} color={color} />
       </div>
 
       {/* Resize handle */}
@@ -216,18 +168,17 @@ function FloatingWindow({
   );
 }
 
-export default function AgentStreamCard({ agentName, eventId, messages, huddleMessages = [], isActive, ephemeral }: AgentStreamCardProps) {
+export default function AgentStreamCard({ agentName, eventId, messages, isActive, ephemeral }: AgentStreamCardProps) {
   const color = ephemeral ? '#4ade80' : (ACTOR_COLORS[agentName] || '#6b7280');
   const scrollRef = useRef<HTMLDivElement>(null);
   const [poppedOut, setPoppedOut] = useState(false);
   const [userScrolled, setUserScrolled] = useState(false);
-  const isChatMode = !ephemeral && agentName === 'developer' && huddleMessages.length > 0;
 
   useEffect(() => {
     if (scrollRef.current && !userScrolled) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages.length, huddleMessages.length, userScrolled]);
+  }, [messages.length, userScrolled]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -338,7 +289,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
         </div>
 
         {poppedOut && (
-          <FloatingWindow agentName={agentName} eventId={eventId} messages={messages} huddleMessages={[]} onClose={() => setPoppedOut(false)} />
+          <FloatingWindow agentName={agentName} eventId={eventId} messages={messages} onClose={() => setPoppedOut(false)} />
         )}
       </>
     );
@@ -365,20 +316,10 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
               {eventId && <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>[{eventId.slice(0, 12)}]</span>}
               {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}
             </span>
-            {agentName === 'developer' && (
-              <span style={{ background: ACTOR_COLORS['qe'] || '#fb7185', color: '#fff', padding: '1px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 }}>
-                qe
-              </span>
-            )}
           </div>
           <div style={{ display: 'flex', gap: 4 }}>
             <button
-              onClick={() => {
-                const text = isChatMode
-                  ? huddleMessages.map(m => `[${m.actor}] ${m.text}`).join('\n')
-                  : messages.join('\n');
-                navigator.clipboard.writeText(text);
-              }}
+              onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
               title="Copy stream"
               aria-label="Copy stream"
               style={{
@@ -401,11 +342,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
           flex: 1, overflow: 'auto', padding: '6px 10px', fontFamily: 'monospace',
           fontSize: 12, lineHeight: '1.4', color: '#94a3b8',
         }}>
-          {isChatMode ? (
-            huddleMessages.slice(-50).map((msg, i) => <ChatBubble key={i} msg={msg} />)
-          ) : (
-            <MessageCards messages={messages} color={color} />
-          )}
+          <MessageCards messages={messages} color={color} />
         </div>
       </div>
 
@@ -413,7 +350,7 @@ export default function AgentStreamCard({ agentName, eventId, messages, huddleMe
       {poppedOut && (
         <FloatingWindow
           agentName={agentName} eventId={eventId}
-          messages={messages} huddleMessages={huddleMessages}
+          messages={messages}
           onClose={() => setPoppedOut(false)}
         />
       )}
