@@ -4,7 +4,7 @@
 // 2. [Constraint]: Pure presentational. No data fetching, no context access.
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
 import { useState, type ReactNode } from 'react';
-import { ChevronRight, Bot, Radio } from 'lucide-react';
+import { ChevronRight, Bot, Radio, Bell } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 
@@ -53,15 +53,24 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const sc = STATUS_COLORS[evt.status];
+  const isWaiting = evt.status === 'waiting_approval';
   return (
     <div className={`flex items-center gap-2 px-3 py-1 rounded text-[14px] cursor-pointer transition-colors ${
-      isSelected ? 'bg-accent/15 border border-accent/30' : 'hover:bg-bg-tertiary border border-transparent'
-    }`} onClick={onClick} onContextMenu={onContextMenu}>
-      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: sc?.border || '#64748b' }} />
+      isSelected ? 'bg-accent/15 border border-accent/30'
+        : isWaiting ? 'border border-amber-500/25 hover:border-amber-500/40'
+        : 'hover:bg-bg-tertiary border border-transparent'
+    }`}
+      style={isWaiting && !isSelected ? { background: '#f59e0b08' } : undefined}
+      onClick={onClick} onContextMenu={onContextMenu}>
+      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
+        style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
       <SourceIcon source={evt.source} size={18} />
-      <span className="text-text-secondary truncate">{evt.id.slice(4, 12)}</span>
+      <span className={`truncate ${isWaiting ? 'text-amber-300' : 'text-text-secondary'}`}>{evt.id.slice(4, 12)}</span>
+      {isWaiting && (
+        <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
+      )}
       {evt.current_agent && (
-        <span className="ml-auto text-[12px] px-1 rounded"
+        <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"
           style={{ color: ACTOR_COLORS[evt.current_agent] || '#64748b', background: `${ACTOR_COLORS[evt.current_agent] || '#64748b'}15` }}>
           {evt.current_agent}
         </span>
