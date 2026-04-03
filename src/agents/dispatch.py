@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_SENTINEL = "__RETRYABLE__"
 
+_TOOL_MARKER_RE = re.compile(r'\[tool\]\s*\S+', re.IGNORECASE)
+
+
+def _sanitize_stdout(raw: str) -> str:
+    """Strip CLI tool markers from raw stdout used as fallback agent result.
+
+    When an agent exits without calling team_send_results, the raw stdout
+    contains interleaved [tool] markers that confuse the Brain's LLM.
+    """
+    cleaned = _TOOL_MARKER_RE.sub('', raw)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+    if not cleaned or len(cleaned) < 20:
+        return "(Agent completed but did not send a structured report. Raw output was tool execution logs.)"
+    return cleaned
+
 AGENT_VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
     "sysadmin": "/data/gitops-sysadmin",
@@ -133,6 +148,8 @@ async def dispatch_to_agent(
                     output = json.dumps(output, indent=2)
                 if latest_callback_result and source == "stdout":
                     output = latest_callback_result
+                elif source == "stdout" and not latest_callback_result:
+                    output = _sanitize_stdout(str(output))
                 returned_session_id = msg.get("session_id") or returned_session_id
                 return str(output), returned_session_id
 

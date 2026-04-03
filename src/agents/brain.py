@@ -994,6 +994,16 @@ class Brain:
         flags["is_defer_wakeup"] = consecutive_defers > 0
         flags["consecutive_defers"] = consecutive_defers
 
+        consecutive_waits = 0
+        for t in reversed(event.conversation):
+            if t.actor == "brain" and t.action == "wait" and t.waitingFor == "agent":
+                consecutive_waits += 1
+            elif t.actor == "brain" and t.action == "think":
+                continue
+            else:
+                break
+        flags["consecutive_agent_waits"] = consecutive_waits
+
         from ..models import EventEvidence
         evidence = event.event.evidence
         if isinstance(evidence, EventEvidence):
@@ -1073,6 +1083,18 @@ class Brain:
                 f"**DEFER WAKE-UP ({consecutive}x):** {last_reason}\n"
                 f"{elapsed_str}\n"
                 f"The defer_event tool is not available. You must take action: route an agent to verify current state, close, or escalate."
+            )
+
+        if context_flags and context_flags.get("consecutive_agent_waits", 0) >= 2:
+            waits = context_flags["consecutive_agent_waits"]
+            resolved_contents.append(
+                f"**WAIT LOOP DETECTED ({waits}x consecutive wait_for_agent):** "
+                f"No agent has responded since your last {waits} waits. "
+                f"The agent may have finished but returned an unclear result. "
+                f"Use message_agent or ask_agent_for_state to check on the agent's status, "
+                f"or use get_plan_progress to check the plan, "
+                f"or close_event if the task appears complete, "
+                f"or wait_for_user to ask the user what to do."
             )
 
         prompt = "\n\n---\n\n".join(resolved_contents)
