@@ -19,13 +19,13 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', width: 82 },
-  { key: 'platform' as keyof Incident, label: 'Platform', width: 0 },
-  { key: 'summary' as keyof Incident, label: 'Summary', width: 0 },
-  { key: 'status' as keyof Incident, label: 'Status', width: 56 },
-  { key: 'priority' as keyof Incident, label: 'Priority', width: 62 },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 0 },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 55 },
+  { key: 'date' as keyof Incident, label: 'Date', css: 'w-[82px]' },
+  { key: 'platform' as keyof Incident, label: 'Platform', css: 'w-[10%]' },
+  { key: 'summary' as keyof Incident, label: 'Summary', css: '' },
+  { key: 'status' as keyof Incident, label: 'Status', css: 'w-[52px]' },
+  { key: 'priority' as keyof Incident, label: 'Priority', css: 'w-[60px]' },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', css: 'w-[10%]' },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', css: 'w-[50px]' },
 ];
 
 export default function IncidentsPage() {
@@ -65,12 +65,16 @@ export default function IncidentsPage() {
       </div>
 
       <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-xs">
+        <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+          <colgroup>
+            {COLUMNS.map(col => (
+              <col key={col.key} className={col.css} />
+            ))}
+          </colgroup>
           <thead>
             <tr className="bg-bg-secondary border-b border-border">
               {COLUMNS.map(col => (
-                <th key={col.key} className="px-3 py-2 text-left font-medium text-text-muted whitespace-nowrap"
-                  style={col.width ? { width: col.width, minWidth: col.width } : undefined}>
+                <th key={col.key} className="px-3 py-2 text-left font-medium text-text-muted whitespace-nowrap">
                   {col.label}
                 </th>
               ))}
