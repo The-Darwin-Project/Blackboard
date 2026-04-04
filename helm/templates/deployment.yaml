@@ -333,6 +333,10 @@ spec:
             - name: SMARTSHEET_INCIDENT_REPORTER
               value: {{ .Values.smartsheet.incident.reporter | quote }}
             {{- end }}
+            {{- if .Values.smartsheet.incident.reporterName }}
+            - name: SMARTSHEET_INCIDENT_REPORTER_NAME
+              value: {{ .Values.smartsheet.incident.reporterName | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
