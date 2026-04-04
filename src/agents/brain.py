@@ -463,6 +463,11 @@ class Brain:
             )
             return
 
+        # Lifecycle: transition NEW -> ACTIVE on first processing
+        if event.status == EventStatus.NEW:
+            if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
+                logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
+
         # Health check: nudge idle events, escalate to human after max nudges.
         # Guards: skip if deferred (intentional wait), waiting for user, or last real turn is brain.defer (just woke).
         if event.conversation and event_id not in self._waiting_for_user:
@@ -780,6 +785,20 @@ class Brain:
             "type": "brain_thinking", "event_id": event_id,
             "text": "", "accumulated": "", "is_thought": True,
         })
+        if huddle_turns:
+            from ..dependencies import get_registry_and_bridge
+            registry, _ = get_registry_and_bridge()
+            if registry:
+                agent_conn = await registry.get_by_event(event_id)
+                if agent_conn and agent_conn.ws:
+                    try:
+                        await agent_conn.ws.send_json({
+                            "type": "proactive_message",
+                            "from": "brain",
+                            "content": "Brain received your huddle and is evaluating. Stand by.",
+                        })
+                    except Exception as e:
+                        logger.debug("Huddle ack send failed for %s: %s", event_id, e)
         accumulated_text = ""
         function_call = None
         try:
