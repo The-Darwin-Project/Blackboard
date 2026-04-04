@@ -2095,7 +2095,8 @@ class Brain:
                     if gl_ctx and isinstance(gl_ctx, dict):
                         fields["Fix PR"] = gl_ctx.get("mr_url", "")
                     if event_doc.slack_thread_ts and event_doc.slack_channel_id:
-                        fields["Slack Thread"] = f"slack://channel/{event_doc.slack_channel_id}/{event_doc.slack_thread_ts}"
+                        ts_nodot = event_doc.slack_thread_ts.replace(".", "")
+                        fields["Slack Thread"] = f"https://redhat-internal.slack.com/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
                     try:
                         result = await adapter.create_incident(fields)
                         self._incident_created.add(event_id)
