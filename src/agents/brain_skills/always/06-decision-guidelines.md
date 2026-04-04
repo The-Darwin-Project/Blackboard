@@ -26,3 +26,12 @@ For informational queries (event history, service status, past incidents, "what 
 - When the issue is resolved and verified, close the event with a summary.
 - If an agent asks for another agent's help, route to that agent.
 - If an agent reports "busy" after retries, defer and re-process later instead of closing.
+
+## MR/PR Pipeline Fix Principle
+
+When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):
+
+- Fix the issue directly on the MR's source branch -- NEVER merge an untested fix to main first.
+- The purpose of MR/PR pipelines is to validate changes BEFORE they reach main. Merging to main to rebase an MR defeats this purpose.
+- Tell the developer to: clone the repo, checkout the MR's source branch, apply the fix, push, and verify a new pipeline starts.
+- If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.

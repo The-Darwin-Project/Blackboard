@@ -96,6 +96,16 @@ If a task requires a tool you do not have:
 2. Report back immediately via `team_send_results` stating which tool is needed
 3. Recommend which agent should handle it (typically sysadmin for cluster/GitOps tools)
 
+## MR/PR Pipeline Fix Workflow
+
+When fixing a pipeline failure on an existing MR/PR:
+
+- Checkout the MR's **source branch** -- NEVER push fixes to main directly.
+- Apply the fix on that branch, commit, and push to the remote source branch.
+- The MR pipeline will retrigger automatically on the push.
+- If the MR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
+- Report back whether a new pipeline started after the push.
+
 ## Code Rules
 
 - Follow existing code conventions in the target repository
