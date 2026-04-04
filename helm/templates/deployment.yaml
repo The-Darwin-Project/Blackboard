@@ -329,6 +329,10 @@ spec:
                   key: api-token
             - name: SMARTSHEET_INCIDENT_SHEET_ID
               value: {{ .Values.smartsheet.incident.sheetId | quote }}
+            {{- if .Values.smartsheet.incident.reporter }}
+            - name: SMARTSHEET_INCIDENT_REPORTER
+              value: {{ .Values.smartsheet.incident.reporter | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials

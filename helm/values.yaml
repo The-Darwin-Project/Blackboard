@@ -350,7 +350,8 @@ smartsheet:
   incident:
     enabled: false
     existingSecret: "" # e.g., "darwin-smartsheet-incident" (key: api-token)
-    sheetId: "" # Incident report sheet ID
+    sheetId: ""        # Incident report sheet ID
+    reporter: ""       # Jira-valid email for incident reporter (e.g., team DL)
 # =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================
