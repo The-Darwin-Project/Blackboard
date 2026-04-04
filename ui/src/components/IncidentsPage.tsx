@@ -19,13 +19,13 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', css: 'w-[82px]' },
-  { key: 'platform' as keyof Incident, label: 'Platform', css: 'w-[10%]' },
-  { key: 'summary' as keyof Incident, label: 'Summary', css: '' },
-  { key: 'status' as keyof Incident, label: 'Status', css: 'w-[52px]' },
-  { key: 'priority' as keyof Incident, label: 'Priority', css: 'w-[60px]' },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', css: 'w-[10%]' },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', css: 'w-[50px]' },
+  { key: 'date' as keyof Incident, label: 'Date', css: 'w-[82px]', wrap: false },
+  { key: 'platform' as keyof Incident, label: 'Platform', css: 'w-[10%]', wrap: true },
+  { key: 'summary' as keyof Incident, label: 'Summary', css: '', wrap: true },
+  { key: 'status' as keyof Incident, label: 'Status', css: 'w-[52px]', wrap: false },
+  { key: 'priority' as keyof Incident, label: 'Priority', css: 'w-[60px]', wrap: false },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', css: 'w-[10%]', wrap: true },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', css: 'w-[50px]', wrap: false },
 ];
 
 export default function IncidentsPage() {
@@ -87,10 +87,12 @@ export default function IncidentsPage() {
                 onClick={() => row.sheet_url && window.open(row.sheet_url, '_blank')}>
                 {COLUMNS.map(col => {
                   const val = row[col.key] ?? '';
-                  const clip = "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis";
+                  const td = col.wrap
+                    ? "px-3 py-2 break-words text-text-secondary"
+                    : "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis";
                   if (col.key === 'priority') {
                     return (
-                      <td key={col.key} className={clip}>
+                      <td key={col.key} className={td}>
                         <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
                           style={{
                             color: PRIORITY_COLORS[val] || '#94a3b8',
@@ -105,7 +107,7 @@ export default function IncidentsPage() {
                     const mrMatch = val.match(/merge_requests\/(\d+)/);
                     const label = mrMatch ? `!${mrMatch[1]}` : 'MR';
                     return (
-                      <td key={col.key} className={clip}>
+                      <td key={col.key} className={td}>
                         <a href={val} target="_blank" rel="noopener noreferrer"
                           className="text-accent hover:underline inline-flex items-center gap-1"
                           title={val}
@@ -116,7 +118,7 @@ export default function IncidentsPage() {
                     );
                   }
                   return (
-                    <td key={col.key} className={`${clip} text-text-secondary`}>
+                    <td key={col.key} className={td}>
                       {val}
                     </td>
                   );
