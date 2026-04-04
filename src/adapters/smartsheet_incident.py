@@ -30,6 +30,7 @@ class SmartsheetIncidentAdapter:
         self._sheet_id = sheet_id
         self._col_by_title: dict[str, int] = {}
         self._col_by_id: dict[int, str] = {}
+        self._multi_picklist_cols: set[int] = set()
         self._rows_cache: list[dict] = []
         self._rows_cache_ts: float = 0.0
 
@@ -46,7 +47,10 @@ class SmartsheetIncidentAdapter:
         for col in resp.json().get("data", []):
             self._col_by_title[col["title"]] = col["id"]
             self._col_by_id[col["id"]] = col["title"]
-        logger.info("Smartsheet column cache loaded: %d columns for sheet %s", len(self._col_by_title), self._sheet_id)
+            if col.get("options") and col.get("validation"):
+                self._multi_picklist_cols.add(col["id"])
+        logger.info("Smartsheet column cache loaded: %d columns (%d multi-picklist) for sheet %s",
+                     len(self._col_by_title), len(self._multi_picklist_cols), self._sheet_id)
 
     async def create_incident(self, fields: dict) -> dict:
         """Add an incident row. Returns {"row_id": ..., "sheet_url": ...}."""
@@ -55,13 +59,19 @@ class SmartsheetIncidentAdapter:
         for title, value in fields.items():
             col_id = self._col_by_title.get(title)
             if col_id and value:
-                cells.append({"columnId": col_id, "value": value})
+                if col_id in self._multi_picklist_cols:
+                    values = [v.strip() for v in str(value).split(",")]
+                    cells.append({"columnId": col_id, "objectValue": {"objectType": "MULTI_PICKLIST", "values": values}})
+                else:
+                    cells.append({"columnId": col_id, "value": value})
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{BASE_URL}/sheets/{self._sheet_id}/rows",
                 headers=self._headers(),
                 json=[{"toBottom": True, "cells": cells}],
             )
+            if resp.status_code >= 400:
+                logger.error("Smartsheet API error %d: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
         result = resp.json().get("result", [{}])
         row_id = result[0].get("id", "") if result else ""
