@@ -2093,7 +2093,7 @@ class Brain:
                     if event_doc.event and event_doc.event.evidence:
                         gl_ctx = getattr(event_doc.event.evidence, "gitlab_context", None)
                     if gl_ctx and isinstance(gl_ctx, dict):
-                        fields["Fix PR"] = gl_ctx.get("mr_url", "")
+                        fields["Fix PR"] = gl_ctx.get("target_url", "") or gl_ctx.get("mr_url", "")
                     if event_doc.slack_thread_ts and event_doc.slack_channel_id:
                         ts_nodot = event_doc.slack_thread_ts.replace(".", "")
                         workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
