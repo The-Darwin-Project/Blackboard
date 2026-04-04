@@ -83,9 +83,10 @@ export default function IncidentsPage() {
                 onClick={() => row.sheet_url && window.open(row.sheet_url, '_blank')}>
                 {COLUMNS.map(col => {
                   const val = row[col.key] ?? '';
+                  const clip = "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis";
                   if (col.key === 'priority') {
                     return (
-                      <td key={col.key} className="px-3 py-2">
+                      <td key={col.key} className={clip}>
                         <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium"
                           style={{
                             color: PRIORITY_COLORS[val] || '#94a3b8',
@@ -98,7 +99,7 @@ export default function IncidentsPage() {
                   }
                   if (col.key === 'fix_pr' && val) {
                     return (
-                      <td key={col.key} className="px-3 py-2">
+                      <td key={col.key} className={clip}>
                         <a href={val} target="_blank" rel="noopener noreferrer"
                           className="text-accent hover:underline inline-flex items-center gap-1"
                           onClick={e => e.stopPropagation()}>
@@ -108,7 +109,7 @@ export default function IncidentsPage() {
                     );
                   }
                   return (
-                    <td key={col.key} className="px-3 py-2 text-text-secondary truncate overflow-hidden">
+                    <td key={col.key} className={`${clip} text-text-secondary`}>
                       {val}
                     </td>
                   );
