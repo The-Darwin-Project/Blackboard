@@ -315,6 +315,10 @@ spec:
               value: {{ .Values.slack.channels.infrastructure | quote }}
             - name: SLACK_MR_CHANNEL
               value: {{ .Values.slack.channels.mrFallback | quote }}
+            {{- if .Values.slack.workspaceDomain }}
+            - name: SLACK_WORKSPACE_DOMAIN
+              value: {{ .Values.slack.workspaceDomain | quote }}
+            {{- end }}
             {{- end }}
             {{- if and .Values.smartsheet.incident.enabled .Values.smartsheet.incident.existingSecret }}
             # Smartsheet Incident Tracking

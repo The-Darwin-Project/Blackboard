@@ -2096,7 +2096,8 @@ class Brain:
                         fields["Fix PR"] = gl_ctx.get("mr_url", "")
                     if event_doc.slack_thread_ts and event_doc.slack_channel_id:
                         ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                        fields["Slack Thread"] = f"https://redhat-internal.slack.com/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                        workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
+                        fields["Slack Thread"] = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
                     try:
                         result = await adapter.create_incident(fields)
                         self._incident_created.add(event_id)
