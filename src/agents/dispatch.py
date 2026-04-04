@@ -4,7 +4,8 @@
 # 2. [Pattern]: Queue loop reads progress/partial_result/huddle_message/result/error/_error_sentinel from TaskBridge.
 # 3. [Pattern]: agent_id parameter enables session affinity (follow-up rounds route to same agent).
 # 4. [Pattern]: Retryable errors return ("__RETRYABLE__", None) sentinel. Caller (Brain) defers the event.
-# 5. [Constraint]: mark_idle + delete_queue in finally block -- always cleans up regardless of exit path.
+# 5. [Constraint]: finally block: mark_idle only if sidecar accepted the task (accepted flag).
+#    If rejected, restore previous agent state. delete_queue always runs.
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
@@ -84,6 +85,11 @@ async def dispatch_to_agent(
     # --- Resolve agent (session affinity or role-based) ---
     if agent_id:
         agent_conn = await registry.get_by_id(agent_id)
+        if agent_conn and agent_conn.busy:
+            logger.warning(
+                "dispatch_to_agent: agent %s is busy (task=%s) but dispatching via agent_id override",
+                agent_id, agent_conn.current_task_id,
+            )
     else:
         agent_conn = await registry.get_available(role)
 
@@ -92,6 +98,12 @@ async def dispatch_to_agent(
 
     task_id = str(uuid.uuid4())
     queue = bridge.create_queue(task_id)
+
+    prev_busy = agent_conn.busy
+    prev_event_id = agent_conn.current_event_id
+    prev_task_id = agent_conn.current_task_id
+    prev_role = agent_conn.current_role
+    accepted = False
 
     try:
         await agent_conn.ws.send_json({
@@ -114,6 +126,7 @@ async def dispatch_to_agent(
             msg_type = msg.get("type", "")
 
             if msg_type == "progress":
+                accepted = True
                 if on_progress:
                     await on_progress({
                         "actor": role,
@@ -123,6 +136,7 @@ async def dispatch_to_agent(
                     })
 
             elif msg_type == "partial_result":
+                accepted = True
                 latest_callback_result = msg.get("content", "")
                 if on_progress:
                     await on_progress({
@@ -133,6 +147,7 @@ async def dispatch_to_agent(
                     })
 
             elif msg_type == "huddle_message":
+                accepted = True
                 if on_huddle:
                     await on_huddle({
                         "agent_id": agent_conn.agent_id,
@@ -142,6 +157,7 @@ async def dispatch_to_agent(
                     })
 
             elif msg_type == "result":
+                accepted = True
                 output = msg.get("output", "")
                 source = msg.get("source", "stdout")
                 if isinstance(output, dict):
@@ -164,7 +180,18 @@ async def dispatch_to_agent(
                 return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
 
     finally:
-        await registry.mark_idle(agent_conn.agent_id)
+        if accepted:
+            await registry.mark_idle(agent_conn.agent_id)
+        elif prev_busy:
+            await registry.mark_busy(
+                agent_conn.agent_id, prev_event_id, prev_task_id, role=prev_role
+            )
+            logger.debug(
+                "Dispatch rejected, restored previous state for %s (task=%s)",
+                agent_conn.agent_id, prev_task_id,
+            )
+        else:
+            await registry.mark_idle(agent_conn.agent_id)
         bridge.delete_queue(task_id)
 
 

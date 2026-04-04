@@ -121,6 +121,14 @@ class AgentRegistry:
             logger.debug("No idle agent for role=%s", role)
             return None
 
+    async def get_by_role(self, role: str) -> AgentConnection | None:
+        """Find any agent matching a role, regardless of busy state."""
+        async with self._lock:
+            for conn in self._agents.values():
+                if conn.role == role:
+                    return conn
+            return None
+
     async def get_by_id(self, agent_id: str) -> AgentConnection | None:
         """Look up an agent by exact agent_id. For session affinity (follow-up rounds)."""
         async with self._lock:

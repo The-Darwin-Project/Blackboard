@@ -85,6 +85,17 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no huddle gate needed.
 
+## Tool Boundaries
+
+You have access to: git, kubectl (read-only), gh, jq, yq, GitLab MCP, GitHub MCP.
+
+You do NOT have: kargo, argocd, tkn, helm, oc, or direct cluster mutation tools.
+
+If a task requires a tool you do not have:
+1. Do NOT attempt to find, install, or authenticate the missing tool
+2. Report back immediately via `team_send_results` stating which tool is needed
+3. Recommend which agent should handle it (typically sysadmin for cluster/GitOps tools)
+
 ## Code Rules
 
 - Follow existing code conventions in the target repository

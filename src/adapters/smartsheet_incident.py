@@ -60,7 +60,7 @@ class SmartsheetIncidentAdapter:
             resp = await client.post(
                 f"{BASE_URL}/sheets/{self._sheet_id}/rows",
                 headers=self._headers(),
-                json={"toBottom": True, "cells": cells},
+                json=[{"toBottom": True, "cells": cells}],
             )
             resp.raise_for_status()
         result = resp.json().get("result", [{}])

@@ -1619,9 +1619,10 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
 
+            from ..dependencies import get_registry_and_bridge
+            registry, _ = get_registry_and_bridge()
+
             if event_id in self._active_tasks and not self._active_tasks[event_id].done():
-                from ..dependencies import get_registry_and_bridge
-                registry, _ = get_registry_and_bridge()
                 if registry:
                     agent_conn = await registry.get_by_event(event_id)
                     if not agent_conn:
@@ -1638,18 +1639,38 @@ class Brain:
                             logger.warning(f"Failed to send message to {agent_name}: {e}")
                 return False
 
-            await self.write_event_to_volume(event_id, agent_name)
-            agent = self.agents.get(agent_name)
-            if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
-                event_md_path = f"./events/event-{event_id}.md"
-                task_coro = self._run_agent_task(
-                    event_id, agent_name, agent, message, event_md_path,
-                    routing_turn_num=turn.turn, mode="message",
-                )
-                self._active_tasks[event_id] = asyncio.create_task(task_coro)
-                logger.info(f"Brain message_agent -> {agent_name} (idle, dispatch) ({len(message)} chars)")
+            agent_conn = await registry.get_available(agent_name) if registry else None
+
+            if agent_conn:
+                await self.write_event_to_volume(event_id, agent_name)
+                agent = self.agents.get(agent_name)
+                if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
+                    event_md_path = f"./events/event-{event_id}.md"
+                    task_coro = self._run_agent_task(
+                        event_id, agent_name, agent, message, event_md_path,
+                        routing_turn_num=turn.turn, mode="message",
+                    )
+                    self._active_tasks[event_id] = asyncio.create_task(task_coro)
+                    logger.info(f"Brain message_agent -> {agent_name} (idle, dispatch) ({len(message)} chars)")
+                else:
+                    logger.warning(f"message_agent: no agent class for role {agent_name}")
             else:
-                logger.warning(f"message_agent: no agent available for role {agent_name}")
+                if registry:
+                    busy_conn = await registry.get_by_role(agent_name)
+                    if not busy_conn:
+                        busy_conn = await registry.get_by_event(event_id)
+                    if busy_conn and busy_conn.ws:
+                        try:
+                            await busy_conn.ws.send_json({
+                                "type": "proactive_message",
+                                "from": "brain",
+                                "content": message,
+                            })
+                            logger.info(f"Brain message_agent -> {agent_name} (busy fallback, inbox) ({len(message)} chars)")
+                        except Exception as e:
+                            logger.warning(f"Failed to send message to {agent_name}: {e}")
+                    else:
+                        logger.warning(f"message_agent: no WS connection for {agent_name}, message dropped")
             return False
 
         elif function_name == "close_event":
@@ -2272,6 +2293,8 @@ class Brain:
             resume_session_id = self._agent_sessions.get(event_id, {}).get(agent_name) if reuse_session else None
             if not reuse_session and prior_mode and prior_mode != mode:
                 logger.info(f"Skipping session resume for {agent_name} on {event_id}: mode changed {prior_mode}->{mode}")
+                self._agent_sessions.get(event_id, {}).pop(agent_name, None)
+                self._agent_session_modes.get(event_id, {}).pop(agent_name, None)
             # Immediate progress so UI shows activity during CLI cold start
             await self._broadcast({
                 "type": "progress",
@@ -3113,9 +3136,27 @@ class Brain:
                                     self._active_tasks[eid] = fwd_task
                                     continue
                                 else:
-                                    # No session -- fall back to Phase 1 cancel behavior
-                                    await self.cancel_active_task(eid, "User message received")
-                                    # Fall through to process_event (don't continue)
+                                    # No session -- forward user message via proactive_message WS
+                                    if agent_name:
+                                        from ..dependencies import get_registry_and_bridge
+                                        registry, _ = get_registry_and_bridge()
+                                        if registry:
+                                            agent_conn = await registry.get_by_event(eid)
+                                            if not agent_conn:
+                                                agent_conn = await registry.get_available(agent_name)
+                                            if agent_conn and agent_conn.ws:
+                                                user_text = " ".join(t.thoughts for t in user_turns if t.thoughts)
+                                                if user_text:
+                                                    try:
+                                                        await agent_conn.ws.send_json({
+                                                            "type": "proactive_message",
+                                                            "from": "user",
+                                                            "content": user_text,
+                                                        })
+                                                        logger.info("Forwarded user message to %s via proactive_message for %s", agent_name, eid)
+                                                    except Exception as e:
+                                                        logger.warning("Failed to forward user message to %s: %s", agent_name, e)
+                                    continue
                             else:
                                 intermediate = [
                                     t for t in unseen
