@@ -124,9 +124,9 @@ export default function StreamGrid() {
 
         {/* Thumbnail strip -- tiles fill available width and remaining height */}
         {stripTiles.length > 0 && (
-          <div className="flex gap-3 overflow-x-auto overflow-y-hidden" style={{ flex: '1 1 0%', minHeight: 0 }}>
+          <div className="flex gap-3 overflow-x-auto overflow-y-hidden min-w-0" style={{ flex: '1 1 0%', minHeight: 0 }}>
             {stripTiles.map(t => (
-              <div key={t.id} className="h-full overflow-hidden flex-shrink-0" style={{ minWidth: 200, width: `${100 / Math.min(stripTiles.length, 6)}%` }}>
+              <div key={t.id} className="h-full overflow-hidden min-w-0" style={{ flex: '1 1 0%', minWidth: 200 }}>
                 {renderTile(t)}
               </div>
             ))}
