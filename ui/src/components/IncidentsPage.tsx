@@ -20,7 +20,7 @@ const PRIORITY_COLORS: Record<string, string> = {
 
 const COLUMNS = [
   { key: 'date' as keyof Incident, label: 'Date', width: 82 },
-  { key: 'platform' as keyof Incident, label: 'Platform', width: 80 },
+  { key: 'platform' as keyof Incident, label: 'Platform', width: 0 },
   { key: 'summary' as keyof Incident, label: 'Summary', width: 0 },
   { key: 'status' as keyof Incident, label: 'Status', width: 56 },
   { key: 'priority' as keyof Incident, label: 'Priority', width: 62 },
