@@ -47,7 +47,7 @@ class SmartsheetIncidentAdapter:
         for col in resp.json().get("data", []):
             self._col_by_title[col["title"]] = col["id"]
             self._col_by_id[col["id"]] = col["title"]
-            if col.get("options"):
+            if col.get("options") and col.get("validation"):
                 self._multi_picklist_cols.add(col["id"])
         logger.info("Smartsheet column cache loaded: %d columns (%d multi-picklist) for sheet %s",
                      len(self._col_by_title), len(self._multi_picklist_cols), self._sheet_id)
