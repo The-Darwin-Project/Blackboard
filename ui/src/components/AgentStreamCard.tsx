@@ -9,6 +9,7 @@
  * Each agent (architect, sysadmin, developer, qe) gets its own independent card.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Copy, ExternalLink } from 'lucide-react';
 import { ACTOR_COLORS } from '../constants/colors';
 
 interface AgentStreamCardProps {
@@ -234,21 +235,27 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
                 }}>LIVE</span>
               )}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
               <button
                 onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
                 title="Copy stream" aria-label="Copy stream"
+                className="hover:bg-white/10 hover:border-white/20 transition-colors"
                 style={{
-                  background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12,
-                  cursor: 'pointer', padding: '2px 4px', lineHeight: 1, borderRadius: 3,
+                  background: '#4ade8008', border: '1px solid #4ade8025', color: '#64748b',
+                  cursor: 'pointer', padding: 0, borderRadius: 5,
+                  width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 }}
-              >&#x2398;</button>
-              <button onClick={() => setPoppedOut(true)} title="Pop out" aria-label="Pop out"
+              ><Copy size={11} /></button>
+              <button
+                onClick={() => setPoppedOut(true)}
+                title="Pop out" aria-label="Pop out"
+                className="hover:bg-white/10 hover:border-white/20 transition-colors"
                 style={{
-                  background: 'transparent', border: 'none', color: '#4b5563', fontSize: 12,
-                  cursor: 'pointer', padding: '2px 4px', lineHeight: 1, borderRadius: 3,
+                  background: '#4ade8008', border: '1px solid #4ade8025', color: '#64748b',
+                  cursor: 'pointer', padding: 0, borderRadius: 5,
+                  width: 24, height: 24, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 }}
-              >&#x29c9;</button>
+              ><ExternalLink size={11} /></button>
             </div>
           </div>
 
@@ -317,23 +324,33 @@ export default function AgentStreamCard({ agentName, eventId, messages, isActive
               {isActive && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginLeft: 4 }} />}
             </span>
           </div>
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 3 }}>
             <button
               onClick={() => { navigator.clipboard.writeText(messages.join('\n')); }}
               title="Copy stream"
               aria-label="Copy stream"
+              className="hover:bg-white/10 hover:border-white/20 transition-colors"
               style={{
-                background: 'transparent', border: 'none', color: '#64748b',
-                fontSize: 14, cursor: 'pointer', padding: 0, lineHeight: 1,
-                width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                background: `${color}08`, border: `1px solid ${color}25`, color: '#94a3b8',
+                cursor: 'pointer', padding: 0, borderRadius: 5,
+                width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               }}
             >
-              &#x2398;
+              <Copy size={13} />
             </button>
-            <button onClick={() => setPoppedOut(true)} title="Pop out" aria-label="Pop out" style={{
-              background: 'transparent', border: 'none', color: '#64748b', fontSize: 14, cursor: 'pointer', padding: 0, lineHeight: 1,
-              width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-            }}>⧉</button>
+            <button
+              onClick={() => setPoppedOut(true)}
+              title="Pop out"
+              aria-label="Pop out"
+              className="hover:bg-white/10 hover:border-white/20 transition-colors"
+              style={{
+                background: `${color}08`, border: `1px solid ${color}25`, color: '#94a3b8',
+                cursor: 'pointer', padding: 0, borderRadius: 5,
+                width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              }}
+            >
+              <ExternalLink size={13} />
+            </button>
           </div>
         </div>
 
