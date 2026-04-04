@@ -241,6 +241,30 @@ export async function getReport(eventId: string): Promise<ReportFull> {
 }
 
 // =============================================================================
+// Incidents API (Smartsheet)
+// =============================================================================
+
+export interface Incident {
+  date: string;
+  platform: string;
+  summary: string;
+  reason: string;
+  status: string;
+  priority: string;
+  affected_versions: string;
+  labels: string;
+  fix_pr: string;
+  slack_thread: string;
+  issue_key: string;
+  sheet_url: string;
+  [key: string]: string;
+}
+
+export async function getIncidents(): Promise<Incident[]> {
+  return fetchApi<Incident[]>('/incidents/list');
+}
+
+// =============================================================================
 // Agent Registry API (connected sidecars)
 // =============================================================================
 

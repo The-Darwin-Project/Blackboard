@@ -77,6 +77,10 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/incidents': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

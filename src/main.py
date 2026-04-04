@@ -32,6 +32,7 @@ from .routes import (
     dex_proxy_router,
     events_router,
     feedback_router,
+    incidents_router,
     journal_router,
     metrics_router,
     queue_router,
@@ -412,6 +413,7 @@ app.include_router(chat_router)
 app.include_router(events_router)
 app.include_router(feedback_router)
 app.include_router(reports_router)
+app.include_router(incidents_router)
 if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)

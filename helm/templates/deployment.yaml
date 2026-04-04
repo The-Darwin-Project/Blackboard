@@ -316,6 +316,16 @@ spec:
             - name: SLACK_MR_CHANNEL
               value: {{ .Values.slack.channels.mrFallback | quote }}
             {{- end }}
+            {{- if and .Values.smartsheet.incident.enabled .Values.smartsheet.incident.existingSecret }}
+            # Smartsheet Incident Tracking
+            - name: SMARTSHEET_INCIDENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.smartsheet.incident.existingSecret }}
+                  key: api-token
+            - name: SMARTSHEET_INCIDENT_SHEET_ID
+              value: {{ .Values.smartsheet.incident.sheetId | quote }}
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS

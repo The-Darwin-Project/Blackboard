@@ -343,6 +343,14 @@ headhunter:
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
 # =============================================================================
+# Smartsheet Integration (Incident Tracking)
+# =============================================================================
+smartsheet:
+  incident:
+    enabled: false
+    existingSecret: "" # e.g., "darwin-smartsheet-incident" (key: api-token)
+    sheetId: ""        # Incident report sheet ID
+# =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================
 timekeeper:

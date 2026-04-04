@@ -17,6 +17,7 @@ import Dashboard from './components/Dashboard';
 import GuidePage from './components/GuidePage';
 import ReportsPage from './components/ReportsPage';
 import LoginPage from './components/LoginPage';
+import IncidentsPage from './components/IncidentsPage';
 import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
 import TopologyView from './components/ops/TopologyView';
 
@@ -54,6 +55,7 @@ function AuthGate() {
           <Route index element={<Dashboard />} />
           <Route path="topology" element={<TopologyView />} />
           <Route path="reports" element={<ReportsPage />} />
+          <Route path="incidents" element={<IncidentsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

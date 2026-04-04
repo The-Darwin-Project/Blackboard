@@ -475,6 +475,50 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {},
         },
     },
+    {
+        "name": "create_incident",
+        "description": (
+            "Create an incident report in the CNV Release Incident tracking sheet. "
+            "Use when an automated event (headhunter, timekeeper) results in a persistent "
+            "failure requiring team investigation -- e.g., pipeline fails after retest, "
+            "infrastructure outage, or repeated CI failures. Systemic fields (reporter, "
+            "date, status, labels, issue type, components) are auto-populated. You only "
+            "provide event-specific details."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": [
+                        "CPaaS", "Konflux", "Kargo", "CNV2 Cluster",
+                        "QE-Smoke tests", "QE-Gating", "CVP", "GitLab CEE",
+                        "Quay", "Brew", "Errata", "Candidate-releases",
+                        "Downstream-Sync", "Jira",
+                    ],
+                    "description": "Affected platform (infer from event evidence)",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One-line incident summary",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description: what failed, timeline, actions taken",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["Normal", "Minor", "Major", "Critical", "Blocker"],
+                    "description": "Normal for transient retests, Major for persistent failures, Critical/Blocker for outages",
+                },
+                "affected_versions": {
+                    "type": "string",
+                    "description": "Affected versions, e.g. 'v4.22' or 'v4.22, v5.99'",
+                },
+            },
+            "required": ["platform", "summary", "description", "priority"],
+        },
+    },
 ]
 
 

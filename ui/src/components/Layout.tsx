@@ -20,6 +20,7 @@ const TABS = [
   { id: '/', label: 'Streams' },
   { id: '/topology', label: 'Topology' },
   { id: '/reports', label: 'Reports' },
+  { id: '/incidents', label: 'Incidents' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/guide', label: 'Guide' },
 ] as const;

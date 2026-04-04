@@ -303,6 +303,7 @@ class Brain:
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Wait-for-user state: events where LLM called wait_for_user
         self._waiting_for_user: set[str] = set()
+        self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
         self._last_processed: dict[str, float] = {}
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
@@ -623,7 +624,7 @@ class Brain:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
                     logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
             elif domain == "chaotic":
-                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress"}
+                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "create_incident"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
@@ -2023,6 +2024,77 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return True
 
+        elif function_name == "create_incident":
+            event_doc = await self.blackboard.get_event(event_id)
+            if not event_doc:
+                result_text = f"Event {event_id} not found. Cannot create incident."
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return False
+            if event_id in self._incident_created:
+                result_text = f"Incident already created for event {event_id}. Skipping duplicate."
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            automated_sources = ("headhunter", "timekeeper", "aligner")
+            if event_doc.source not in automated_sources:
+                result_text = (
+                    f"create_incident is only available for automated events "
+                    f"(source={event_doc.source} is not eligible)."
+                )
+            else:
+                adapter = self._get_smartsheet_incident_adapter()
+                if not adapter:
+                    result_text = "Smartsheet incident tracking not configured (SMARTSHEET_INCIDENT_* env vars missing)."
+                else:
+                    from datetime import datetime, timezone
+                    fields = {
+                        "Reporter e-mail": "cnv-downstream-bot@redhat.com",
+                        "Reporter Display Name": "Darwin Brain",
+                        "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        "Status": "New",
+                        "Issue Type": "Task",
+                        "Labels": "darwin-auto, release-incident",
+                        "Components": "CNV CI and Release",
+                        "Platform": args.get("platform", ""),
+                        "Summary": args.get("summary", "")[:200],
+                        "Reason": args.get("description", ""),
+                        "Priority": args.get("priority", "Normal"),
+                        "Affected Versions": args.get("affected_versions", ""),
+                    }
+                    gl_ctx = None
+                    if event_doc.event and event_doc.event.evidence:
+                        gl_ctx = getattr(event_doc.event.evidence, "gitlab_context", None)
+                    if gl_ctx and isinstance(gl_ctx, dict):
+                        fields["Fix PR"] = gl_ctx.get("mr_url", "")
+                    if event_doc.slack_thread_ts and event_doc.slack_channel_id:
+                        fields["Slack Thread"] = f"slack://channel/{event_doc.slack_channel_id}/{event_doc.slack_thread_ts}"
+                    try:
+                        result = await adapter.create_incident(fields)
+                        self._incident_created.add(event_id)
+                        result_text = (
+                            f"Incident created in Smartsheet (row {result['row_id']}). "
+                            f"Sheet: {result['sheet_url']}"
+                        )
+                    except Exception as e:
+                        result_text = f"Failed to create incident: {e}"
+                        logger.warning(f"create_incident failed for {event_id}: {e}")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="notify",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
         elif function_name == "create_plan":
             steps = args.get("steps", [])
             reasoning = args.get("reasoning", "")
@@ -2109,6 +2181,18 @@ class Brain:
             if hasattr(target, '__self__') and hasattr(target.__self__, '_app'):
                 return target.__self__
         return None
+
+    def _get_smartsheet_incident_adapter(self):
+        """Lazy-init Smartsheet incident adapter from env vars."""
+        if not hasattr(self, '_smartsheet_incident'):
+            token = os.environ.get("SMARTSHEET_INCIDENT_TOKEN", "")
+            sheet_id = os.environ.get("SMARTSHEET_INCIDENT_SHEET_ID", "")
+            if token and sheet_id:
+                from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
+                self._smartsheet_incident = SmartsheetIncidentAdapter(token, sheet_id)
+            else:
+                self._smartsheet_incident = None
+        return self._smartsheet_incident
 
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)
