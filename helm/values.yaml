@@ -99,7 +99,7 @@ sidecars:
   # Shared image for all sidecars
   image:
     repository: ghcr.io/the-darwin-project/gemini-sidecar
-    tag: "997f3f5" # Reverted: 0c17603 sidecars crashing
+    tag: "adffbc9" # Reverted: 0c17603 sidecars crashing
   resources:
     requests:
       memory: 256Mi

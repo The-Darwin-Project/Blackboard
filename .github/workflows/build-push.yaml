@@ -122,28 +122,34 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.sha.outputs.short }}"
 
-          # Check if there are changes to commit
-          if git diff --quiet helm/values.yaml; then
-            echo "No changes to helm/values.yaml"
-            exit 0
-          fi
-
-          git add helm/values.yaml
-          git commit -m "ci: update image tag to ${{ steps.sha.outputs.short }} [skip ci]"
-
-          # Retry push with pull-rebase to handle concurrent workflow updates
           MAX_RETRIES=5
           for i in $(seq 1 $MAX_RETRIES); do
-            echo "Push attempt $i/$MAX_RETRIES"
-            if git push; then
-              echo "Pushed helm/values.yaml update"
+            echo "Attempt $i/$MAX_RETRIES"
+
+            if [ "$i" -gt 1 ]; then
+              git rebase --abort 2>/dev/null || true
+              git fetch origin main
+              git reset --hard origin/main
+              yq -i ".image.tag = \"$TAG\"" helm/values.yaml
+            fi
+
+            if git diff --quiet helm/values.yaml; then
+              echo "Tag already set to $TAG -- nothing to push"
               exit 0
             fi
-            echo "Push failed, pulling and rebasing..."
-            git pull --rebase origin main
+
+            git add helm/values.yaml
+            git commit -m "ci: update image tag to $TAG [skip ci]"
+
+            if git push; then
+              echo "Pushed image tag update ($TAG)"
+              exit 0
+            fi
+            echo "Push failed, will retry from fresh main..."
           done
-          echo "Failed to push after $MAX_RETRIES attempts"
+          echo "Failed after $MAX_RETRIES attempts"
           exit 1
 
       - name: Output image info
