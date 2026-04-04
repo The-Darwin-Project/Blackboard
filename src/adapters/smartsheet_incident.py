@@ -47,7 +47,7 @@ class SmartsheetIncidentAdapter:
         for col in resp.json().get("data", []):
             self._col_by_title[col["title"]] = col["id"]
             self._col_by_id[col["id"]] = col["title"]
-            if col.get("options") and col.get("validation"):
+            if col.get("options"):
                 self._multi_picklist_cols.add(col["id"])
         logger.info("Smartsheet column cache loaded: %d columns (%d multi-picklist) for sheet %s",
                      len(self._col_by_title), len(self._multi_picklist_cols), self._sheet_id)
@@ -98,9 +98,9 @@ class SmartsheetIncidentAdapter:
             record: dict[str, str] = {}
             for cell in row.get("cells", []):
                 title = self._col_by_id.get(cell.get("columnId", 0), "")
-                record[title] = str(cell.get("displayValue") or cell.get("value") or "")
+                record[title] = str(cell.get("displayValue") or cell.get("value") or "").strip('"')
             if label_filter:
-                row_labels = {l.strip() for l in record.get("Labels", "").split(",")}
+                row_labels = {l.strip().strip('"') for l in record.get("Labels", "").split(",")}
                 if label_filter not in row_labels:
                     continue
             record["sheet_url"] = f"https://app.smartsheet.com/sheets/{self._sheet_id}"
