@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "2ab945b" # Updated by CI to commit SHA
+  tag: "fa3e7e8" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -350,8 +350,8 @@ smartsheet:
   incident:
     enabled: false
     existingSecret: "" # e.g., "darwin-smartsheet-incident" (key: api-token)
-    sheetId: ""        # Incident report sheet ID
-    reporter: ""       # Jira-valid email for incident reporter (e.g., team DL)
+    sheetId: "" # Incident report sheet ID
+    reporter: "" # Jira-valid email for incident reporter (e.g., team DL)
 # =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================
