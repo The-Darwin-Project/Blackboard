@@ -25,7 +25,7 @@ const COLUMNS = [
   { key: 'status' as keyof Incident, label: 'Status', width: 56 },
   { key: 'priority' as keyof Incident, label: 'Priority', width: 62 },
   { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 0 },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 48 },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 0 },
 ];
 
 export default function IncidentsPage() {
@@ -98,12 +98,15 @@ export default function IncidentsPage() {
                     );
                   }
                   if (col.key === 'fix_pr' && val) {
+                    const label = val.replace(/^https?:\/\/[^/]+\//, '');
                     return (
                       <td key={col.key} className={clip}>
                         <a href={val} target="_blank" rel="noopener noreferrer"
-                          className="text-accent hover:underline inline-flex items-center gap-1"
+                          className="text-accent hover:underline inline-flex items-center gap-1 max-w-full"
+                          title={val}
                           onClick={e => e.stopPropagation()}>
-                          <ExternalLink size={10} /> MR
+                          <ExternalLink size={10} className="shrink-0" />
+                          <span className="truncate">{label}</span>
                         </a>
                       </td>
                     );
