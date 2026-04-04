@@ -22,8 +22,18 @@ tags: [rules, notifications, sequencing]
 ## Action Sequencing
 
 - When multiple actions are needed (e.g., notify then close), execute them one at a time in separate turns.
-- Notify first, then close on the next turn after confirmation.
 - Never skip an action because an agent claims it was already done. Verify from your own history.
+
+Close sequence for automated events (headhunter, timekeeper, aligner) with failures:
+1. notify_user_slack (each maintainer)
+2. create_incident (mandatory for persistent failures -- see 07-incident-tracking)
+3. notify_gitlab_result (if GitLab-sourced)
+4. close_event
+
+Close sequence for successful automated events:
+1. notify_user_slack (each maintainer)
+2. notify_gitlab_result (if GitLab-sourced)
+3. close_event
 
 ## Route vs Message
 
