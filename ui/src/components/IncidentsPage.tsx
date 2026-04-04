@@ -22,9 +22,9 @@ const COLUMNS = [
   { key: 'date' as keyof Incident, label: 'Date', width: 82 },
   { key: 'platform' as keyof Incident, label: 'Platform', width: 80 },
   { key: 'summary' as keyof Incident, label: 'Summary', width: 0 },
-  { key: 'status' as keyof Incident, label: 'Status', width: 70 },
+  { key: 'status' as keyof Incident, label: 'Status', width: 56 },
   { key: 'priority' as keyof Incident, label: 'Priority', width: 62 },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 60 },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 0 },
   { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 48 },
 ];
 
