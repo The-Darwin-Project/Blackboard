@@ -19,13 +19,13 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', pct: '8%' },
-  { key: 'platform' as keyof Incident, label: 'Platform', pct: '8%' },
-  { key: 'summary' as keyof Incident, label: 'Summary', pct: '' },
-  { key: 'status' as keyof Incident, label: 'Status', pct: '7%' },
-  { key: 'priority' as keyof Incident, label: 'Priority', pct: '7%' },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', pct: '7%' },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', pct: '5%' },
+  { key: 'date' as keyof Incident, label: 'Date', width: 82 },
+  { key: 'platform' as keyof Incident, label: 'Platform', width: 80 },
+  { key: 'summary' as keyof Incident, label: 'Summary', width: 0 },
+  { key: 'status' as keyof Incident, label: 'Status', width: 70 },
+  { key: 'priority' as keyof Incident, label: 'Priority', width: 62 },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 60 },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 48 },
 ];
 
 export default function IncidentsPage() {
@@ -65,12 +65,12 @@ export default function IncidentsPage() {
       </div>
 
       <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+        <table className="w-full text-xs">
           <thead>
             <tr className="bg-bg-secondary border-b border-border">
               {COLUMNS.map(col => (
-                <th key={col.key} className="px-3 py-2 text-left font-medium text-text-muted"
-                  style={col.pct ? { width: col.pct } : undefined}>
+                <th key={col.key} className="px-3 py-2 text-left font-medium text-text-muted whitespace-nowrap"
+                  style={col.width ? { width: col.width, minWidth: col.width } : undefined}>
                   {col.label}
                 </th>
               ))}
