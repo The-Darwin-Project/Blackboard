@@ -2076,7 +2076,6 @@ class Brain:
                 else:
                     from datetime import datetime, timezone
                     fields = {
-                        "Reporter e-mail": "cnv-downstream-bot@redhat.com",
                         "Reporter Display Name": "Darwin Brain",
                         "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                         "Status": "New",
