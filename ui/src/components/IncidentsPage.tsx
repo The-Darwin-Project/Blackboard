@@ -19,13 +19,13 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', width: 100 },
-  { key: 'platform' as keyof Incident, label: 'Platform', width: 120 },
-  { key: 'summary' as keyof Incident, label: 'Summary', width: 0 },
-  { key: 'status' as keyof Incident, label: 'Status', width: 100 },
-  { key: 'priority' as keyof Incident, label: 'Priority', width: 90 },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: 100 },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: 60 },
+  { key: 'date' as keyof Incident, label: 'Date', pct: '8%' },
+  { key: 'platform' as keyof Incident, label: 'Platform', pct: '8%' },
+  { key: 'summary' as keyof Incident, label: 'Summary', pct: '' },
+  { key: 'status' as keyof Incident, label: 'Status', pct: '7%' },
+  { key: 'priority' as keyof Incident, label: 'Priority', pct: '7%' },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', pct: '7%' },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', pct: '5%' },
 ];
 
 export default function IncidentsPage() {
@@ -65,12 +65,12 @@ export default function IncidentsPage() {
       </div>
 
       <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-xs">
+        <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
           <thead>
             <tr className="bg-bg-secondary border-b border-border">
               {COLUMNS.map(col => (
                 <th key={col.key} className="px-3 py-2 text-left font-medium text-text-muted"
-                  style={col.width ? { width: col.width } : undefined}>
+                  style={col.pct ? { width: col.pct } : undefined}>
                   {col.label}
                 </th>
               ))}
@@ -108,8 +108,7 @@ export default function IncidentsPage() {
                     );
                   }
                   return (
-                    <td key={col.key} className="px-3 py-2 text-text-secondary truncate"
-                      style={col.width ? { maxWidth: col.width } : undefined}>
+                    <td key={col.key} className="px-3 py-2 text-text-secondary truncate overflow-hidden">
                       {val}
                     </td>
                   );
