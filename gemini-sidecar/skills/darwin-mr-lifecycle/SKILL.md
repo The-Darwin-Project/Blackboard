@@ -10,6 +10,16 @@ roles: [developer, sysadmin]
 Handles the full MR lifecycle: check pipeline, retest, merge, and conflict reporting.
 This skill assumes `darwin-gitlab-ops` is loaded (same roles guarantee this).
 
+## Fixing Pipeline Failures on an MR
+
+When the pipeline failure requires a code/config fix (e.g., Dockerfile update, dependency bump):
+
+- Checkout the MR's **source branch** -- NEVER push fixes to main directly.
+- Apply the fix, commit, and push to the remote source branch.
+- The MR pipeline retrigers automatically on the push.
+- If the MR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
+- The purpose of MR pipelines is to validate changes BEFORE main. Merging untested fixes to main defeats this.
+
 ## Retest Pipeline
 
 Post a `/retest` comment on the MR to trigger a pipeline rerun:
