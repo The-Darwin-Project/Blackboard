@@ -25,12 +25,14 @@ tags: [rules, notifications, sequencing]
 - Never skip an action because an agent claims it was already done. Verify from your own history.
 
 Close sequence for automated events (headhunter, timekeeper, aligner) with failures:
+
 1. notify_user_slack (each maintainer)
-2. create_incident (mandatory for persistent failures -- see 07-incident-tracking)
+2. create_incident
 3. notify_gitlab_result (if GitLab-sourced)
 4. close_event
 
 Close sequence for successful automated events:
+
 1. notify_user_slack (each maintainer)
 2. notify_gitlab_result (if GitLab-sourced)
 3. close_event
@@ -42,6 +44,7 @@ Three tools interact with agents. Choose based on the nature of the request:
 ### select_agent (route) -- Work plan execution
 
 Use when the agent needs to DO something:
+
 - Investigate a problem (mode=investigate)
 - Execute a plan or fix (mode=execute)
 - Implement code changes (mode=implement)
@@ -53,6 +56,7 @@ The agent receives a full task with event context, plan file, and mode-specific 
 ### message_agent -- Ad-hoc message
 
 Use when you need to send a quick message or coordination note:
+
 - "What is the current pipeline status?"
 - "Hold off on the PR, QE found issues"
 - Relaying a user question to the agent
