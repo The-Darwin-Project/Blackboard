@@ -98,7 +98,7 @@ export default function EventSidebar() {
     return () => clearInterval(id);
   }, []);
 
-  const { data: eventDoc } = useEventDocument(selectedEventId);
+  const { data: eventDoc, isLoading: docLoading, isError: docError } = useEventDocument(selectedEventId);
   const { hasPlan } = usePlanState(eventDoc?.conversation || []);
 
   if (collapsed) {
@@ -283,7 +283,26 @@ export default function EventSidebar() {
           </div>
 
           {/* Event detail area -- takes remaining vertical space */}
-          {selectedEventId && (isMockEvent || eventDoc) && (() => {
+          {selectedEventId && (() => {
+            if (isMockEvent) { /* fall through to render with MOCK_EVENT_DOC */ }
+            else if (docLoading) {
+              return (
+                <div className="flex-1 min-h-0 flex items-center justify-center border-t border-border">
+                  <div className="text-center text-text-muted text-sm animate-pulse">Loading event...</div>
+                </div>
+              );
+            } else if (docError || !eventDoc) {
+              return (
+                <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 border-t border-border px-4">
+                  <span className="text-text-muted text-sm">Event conversation unavailable</span>
+                  <span className="text-text-muted text-xs">Document may have been archived or cleaned up.</span>
+                  <button onClick={deselectEvent}
+                    className="mt-2 text-xs px-3 py-1 rounded border border-border hover:bg-bg-tertiary text-text-secondary transition-colors">
+                    Close
+                  </button>
+                </div>
+              );
+            }
             const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
             const planTurns = doc.conversation.filter((t: { action: string }) => t.action === 'plan');
             const completedSteps = doc.conversation.filter((t: { action: string; evidence?: string }) => t.action === 'plan_step' && t.evidence === 'completed').length;

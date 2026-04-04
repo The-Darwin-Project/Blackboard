@@ -193,12 +193,10 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       selectEvent(msg.event_id as string);
       invalidateActive();
     } else if (msg.type === 'event_closed') {
-      if (msg.event_id && msg.event_id === selectedEventIdRef.current) {
-        deselectEvent();
-      }
       if (msg.event_id) {
         optimisticRemoveEvent(msg.event_id as string);
         invalidateEvent(msg.event_id as string);
+        invalidateActive();
         invalidateClosed();
       }
     }
