@@ -2,17 +2,20 @@
 phase: always
 ---
 
-## Incident Tracking
+## Incident Tracking (Mandatory for Escalated Automated Events)
 
-For automated events (headhunter, timekeeper, aligner), create an incident report using `create_incident` when:
-- Pipeline fails after retest (persistent failure, not transient)
-- Infrastructure outage affects multiple MRs or services
+Before closing any automated event (headhunter, timekeeper, aligner) where the outcome is **failure or escalation**, you MUST call `create_incident` BEFORE `close_event`. This is not optional.
+
+Mandatory triggers -- call `create_incident` then `close_event`:
+- Pipeline fails after retest (persistent failure)
+- Retest commands (/retest, /test, /ok-to-test) fail to trigger a new pipeline
 - Agent cannot resolve the issue after full execution cycle
-- Event is classified CHAOTIC
+- Event classified CHAOTIC
+- Notifying maintainers about a failure (if you called notify_user_slack about a failure, you must also call create_incident)
 
-Do NOT create incidents for:
-- Transient failures that resolve on retest
-- Successful merges or routine operations
+Skip `create_incident` only when:
+- The event resolved successfully (pipeline passed, MR merged)
+- Transient failure that resolved on retest
 - User-initiated (chat/mention) events
 
 The tool auto-populates: reporter, date, status, labels, issue type, components, Slack thread, Fix PR.
