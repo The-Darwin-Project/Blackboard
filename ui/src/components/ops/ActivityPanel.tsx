@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronDown, ChevronUp, Wifi, WifiOff, Activity, CheckCircle2, AlertCircle, User, LogOut, Square } from 'lucide-react';
 import ActivityStream from '../ActivityStream';
+import FlowHealthWidget from './FlowHealthWidget';
 import WaitingBell from '../WaitingBell';
 import { useConfig } from '../../hooks/useConfig';
 import { useTopology } from '../../hooks';
@@ -176,9 +177,14 @@ export default function ActivityPanel() {
           <div className="flex-1 overflow-auto border-r border-border">
             <ActivityStream />
           </div>
-          {/* Right: reserved for future controls / quick actions */}
-          <div className="flex-1 overflow-auto p-3 text-[12px] text-text-muted flex items-center justify-center">
-            <span className="italic">System logs and quick actions</span>
+          {/* Right: Flow health + system logs */}
+          <div className="flex-1 overflow-auto flex flex-col">
+            <div className="flex-shrink-0 border-b border-border">
+              <FlowHealthWidget />
+            </div>
+            <div className="flex-1 overflow-auto p-3 text-[12px] text-text-muted flex items-center justify-center">
+              <span className="italic">System logs and quick actions</span>
+            </div>
           </div>
         </div>
       )}

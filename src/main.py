@@ -26,7 +26,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_registry_and_bridge
-from .models import HealthResponse
+from .models import FlowMetricsResponse, HealthResponse
 from .routes import (
     chat_router,
     dex_proxy_router,
@@ -331,6 +331,97 @@ async def health_check() -> HealthResponse:
         )
     
     return HealthResponse(status="brain_online")
+
+
+# =============================================================================
+# Flow Observability (Lewis's "camera on the tills")
+# =============================================================================
+
+@app.get("/flow", response_model=FlowMetricsResponse, tags=["flow"])
+async def get_flow_metrics() -> FlowMetricsResponse:
+    """
+    Flow health metrics -- leading indicators for system throughput.
+    
+    Separate from /health (which stays zero-Redis for K8s probes).
+    Returns queue depth, active events, and per-role agent utilization.
+    """
+    from .dependencies import _blackboard, get_registry_and_bridge
+
+    flow = {"queue_depth": 0, "active_events": 0}
+    if _blackboard is not None:
+        flow = await _blackboard.get_flow_metrics()
+
+    busy = 0
+    idle = 0
+    by_role: dict[str, dict[str, int]] = {}
+    try:
+        registry, _ = get_registry_and_bridge()
+        if registry:
+            agents = await registry.list_agents()
+            for a in agents:
+                role = a.get("role", "unknown")
+                if role not in by_role:
+                    by_role[role] = {"busy": 0, "idle": 0}
+                if a.get("busy"):
+                    busy += 1
+                    by_role[role]["busy"] += 1
+                else:
+                    idle += 1
+                    by_role[role]["idle"] += 1
+    except Exception:
+        pass
+
+    return FlowMetricsResponse(
+        queue_depth=flow["queue_depth"],
+        active_events=flow["active_events"],
+        busy_agents=busy,
+        idle_agents=idle,
+        agents_by_role=by_role,
+    )
+
+
+@app.get("/flow/{event_id}", tags=["flow"])
+async def get_event_flow(event_id: str) -> dict:
+    """Value stream breakdown for a single event."""
+    from .dependencies import _blackboard
+
+    if _blackboard is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="Blackboard not initialized")
+
+    event = await _blackboard.get_event(event_id)
+    if not event:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+    t = {
+        "queued_at": event.queued_at,
+        "processing_started_at": event.processing_started_at,
+        "last_dispatched_at": event.last_dispatched_at,
+        "last_completed_at": event.last_completed_at,
+        "closed_at": event.closed_at,
+    }
+
+    def delta(a: str, b: str) -> float | None:
+        va, vb = t.get(a), t.get(b)
+        return round(vb - va, 3) if va is not None and vb is not None else None
+
+    agent_turns = sum(
+        1 for turn in event.conversation
+        if turn.actor in ("architect", "sysadmin", "developer", "qe")
+    )
+
+    return {
+        "event_id": event_id,
+        "timestamps": t,
+        "intervals": {
+            "queue_wait_s": delta("queued_at", "processing_started_at"),
+            "routing_s": delta("processing_started_at", "last_dispatched_at"),
+            "execution_s": delta("last_dispatched_at", "last_completed_at"),
+            "total_lead_time_s": delta("queued_at", "closed_at"),
+        },
+        "agent_turns": agent_turns,
+    }
 
 
 # =============================================================================

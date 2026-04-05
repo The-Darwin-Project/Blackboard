@@ -342,6 +342,12 @@ class EventDocument(BaseModel):
     slack_channel_id: Optional[str] = Field(None, description="DM channel or public channel ID")
     slack_user_id: Optional[str] = Field(None, description="Slack user who initiated (for DM events)")
     slack_thread_title: Optional[str] = Field(None, description="Assistant thread title (informational)")
+    # Value stream timestamps (epoch seconds) -- flow observability
+    queued_at: Optional[float] = Field(None, description="When create_event() pushed to darwin:queue")
+    processing_started_at: Optional[float] = Field(None, description="When Brain first processed this event")
+    last_dispatched_at: Optional[float] = Field(None, description="Last select_agent call (multi-agent: tracks most recent)")
+    last_completed_at: Optional[float] = Field(None, description="Last agent task completion")
+    closed_at: Optional[float] = Field(None, description="When close_event() persisted the closure")
 
 
 # =============================================================================
@@ -484,6 +490,15 @@ class RefineResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str = "brain_online"
+
+
+class FlowMetricsResponse(BaseModel):
+    """Flow observability metrics -- leading indicators for system health."""
+    queue_depth: int = 0
+    active_events: int = 0
+    busy_agents: int = 0
+    idle_agents: int = 0
+    agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):

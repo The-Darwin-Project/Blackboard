@@ -202,7 +202,7 @@ export interface ConversationTurn {
 
 export interface EventDocument {
   id: string;
-  source: 'aligner' | 'chat' | 'slack' | 'headhunter';
+  source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper';
   status: EventStatus;
   service: string;
   event: EventInput;
@@ -264,6 +264,18 @@ export interface ChatEventResponse {
 
 export interface HealthResponse {
   status: string;
+}
+
+// =============================================================================
+// Flow Observability
+// =============================================================================
+
+export interface FlowMetrics {
+  queue_depth: number;
+  active_events: number;
+  busy_agents: number;
+  idle_agents: number;
+  agents_by_role: Record<string, { busy: number; idle: number }>;
 }
 
 // =============================================================================

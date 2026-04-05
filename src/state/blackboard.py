@@ -1310,6 +1310,7 @@ class BlackboardState:
                 evidence=evidence,
                 timeDate=datetime.now(timezone.utc).isoformat(),
             ),
+            queued_at=time.time(),
         )
         # Store event document
         await self.redis.set(
@@ -1552,6 +1553,43 @@ class BlackboardState:
         """Get all active event IDs."""
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
 
+    async def get_flow_metrics(self) -> dict:
+        """Flow observability: queue depth + active event count. Both O(1) Redis ops."""
+        queue_depth = await self.redis.llen(self.EVENT_QUEUE)
+        active_count = await self.redis.scard(self.EVENT_ACTIVE)
+        return {"queue_depth": queue_depth, "active_events": active_count}
+
+    _event_fields: set[str] = set(EventDocument.model_fields.keys())
+
+    async def stamp_event(self, event_id: str, **fields) -> None:
+        """Atomically set fields on an event document (WATCH/MULTI/EXEC).
+
+        Used for mid-lifecycle value stream timestamps that cannot be set inline
+        at creation or closure. append_turn() loads a fresh event copy, so
+        in-memory mutations on event objects in brain.py are NOT persisted by it.
+        """
+        invalid = set(fields) - self._event_fields
+        if invalid:
+            logger.warning(f"stamp_event: unknown fields {invalid} for event {event_id}, skipping")
+            return
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return
+                    event = EventDocument(**json.loads(data))
+                    for field, value in fields.items():
+                        setattr(event, field, value)
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+
     async def _get_ticket_nodes(self) -> list[TicketNode]:
         """Batch-load active general/headhunter events as ticket nodes.
 
@@ -1739,6 +1777,7 @@ class BlackboardState:
                     if not data:
                         break
                     event = EventDocument(**json.loads(data))
+                    event.closed_at = time.time()
                     event.status = EventStatus.CLOSED
                     close_turn = ConversationTurn(
                         turn=len(event.conversation) + 1,

@@ -24,6 +24,7 @@
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
+# 25. [Pattern]: WIP cap: _execute_function_call("select_agent") may recursively call _execute_function_call("defer_event") when dispatch semaphore is locked. This is safe -- defer_event does not recurse back into select_agent. Do NOT add agent-dispatching logic to the defer_event handler.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -329,8 +330,13 @@ class Brain:
             except Exception as e:
                 logger.warning(f"Failed to load brain skills: {e}. Falling back to monolith.")
                 self._skill_loader = None
+        # Global dispatch WIP cap (flow engineering: Peak Throughput Principle)
+        max_dispatches = int(os.getenv("BRAIN_MAX_CONCURRENT_DISPATCHES", "0"))
+        self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
+
         skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, agents={list(self.agents.keys())})")
+        wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, agents={list(self.agents.keys())})")
 
     JOURNAL_CACHE_TTL = 60  # seconds
 
@@ -408,7 +414,9 @@ class Brain:
 
         # Dedup: if this is a new event (no turns yet), check for existing active events
         # on the same service + same MR (if headhunter). Close as duplicate if found.
-        if not event.conversation:
+        # Skip for user-initiated sources (chat/slack) -- "general" service is a catch-all,
+        # not a meaningful dedup key. Users intentionally start new conversations.
+        if not event.conversation and event.source not in ("chat", "slack"):
             active_ids = await self.blackboard.get_active_events()
             new_ctx = (getattr(event.event.evidence, "gitlab_context", None) or {}) if (event.event and event.event.evidence) else {}
             new_mr = new_ctx.get("mr_iid")
@@ -441,6 +449,10 @@ class Brain:
                     close_reason="duplicate",
                 )
                 return
+
+        # Value stream: stamp first processing time (after dedup gate, skip re-entry after defer)
+        if event.processing_started_at is None:
+            await self.blackboard.stamp_event(event_id, processing_started_at=time.time())
 
         if not event.conversation:
             await self.blackboard.record_event(
@@ -1537,6 +1549,20 @@ class Brain:
                 logger.info(f"Task already active for {event_id}, skipping dispatch")
                 return False
 
+            # WIP cap: try-acquire, defer if at capacity (Peak Throughput Principle)
+            if self._dispatch_semaphore and self._dispatch_semaphore.locked():
+                flow = await self.blackboard.get_flow_metrics()
+                logger.warning(
+                    f"Dispatch WIP cap reached for {event_id}, deferring "
+                    f"(queue_depth={flow['queue_depth']}, active={len(self._active_tasks)})"
+                )
+                await self._execute_function_call(
+                    event_id, "defer_event",
+                    {"delay_seconds": 30, "reason": "Dispatch WIP cap reached"},
+                    response_parts=None,
+                )
+                return False
+
             # Recursion guard (resets on user interaction via clear_waiting)
             depth = self._routing_depth.get(event_id, 0) + 1
             if depth > 30:
@@ -1544,6 +1570,9 @@ class Brain:
                 await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.", close_reason="force_closed")
                 return False
             self._routing_depth[event_id] = depth
+
+            # Value stream: stamp dispatch time (overwrites on multi-agent events)
+            await self.blackboard.stamp_event(event_id, last_dispatched_at=time.time())
 
             # Write event MD to agent volume
             await self.write_event_to_volume(event_id, agent_name)
@@ -2263,7 +2292,12 @@ class Brain:
         Tracks bidirectional message status for the brain.route turn.
         """
         current_task = asyncio.current_task()
+        sema_acquired = False
         try:
+            if self._dispatch_semaphore:
+                await self._dispatch_semaphore.acquire()
+                sema_acquired = True
+
             agent_acked = False  # Track first progress (= agent received task)
             evt = await self.blackboard.get_event(event_id)
             event_source = evt.source if evt else ""
@@ -2516,6 +2550,9 @@ class Brain:
                     event_id, "evaluated", turns=[routing_turn_num],
                 )
 
+            # Value stream: stamp agent completion time
+            await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
+
             self._release_task_state(event_id)
             self._last_processed[event_id] = time.time()
 
@@ -2546,6 +2583,8 @@ class Brain:
                 await self.process_event(event_id)
 
         finally:
+            if sema_acquired and self._dispatch_semaphore:
+                self._dispatch_semaphore.release()
             # Safety net -- only clean up if _active_tasks still holds OUR task.
             # Re-entry (process_event) may have created a NEW task; don't clobber it.
             if self._active_tasks.get(event_id) is current_task:

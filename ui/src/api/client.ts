@@ -15,6 +15,7 @@ import type {
   ChatEventResponse,
   ChartData,
   EventDocument,
+  FlowMetrics,
   GraphResponse,
   ReportFull,
   ReportMeta,
@@ -270,6 +271,14 @@ export async function getIncidents(): Promise<Incident[]> {
 
 export async function getAgents(): Promise<AgentRegistryEntry[]> {
   return fetchApi<AgentRegistryEntry[]>('/api/agents');
+}
+
+// =============================================================================
+// Flow Observability API
+// =============================================================================
+
+export async function getFlowMetrics(): Promise<FlowMetrics> {
+  return fetchApi<FlowMetrics>('/flow');
 }
 
 // =============================================================================

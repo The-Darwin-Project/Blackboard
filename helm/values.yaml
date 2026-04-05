@@ -201,6 +201,7 @@ app:
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
   agentWsMode: "reverse" # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
   agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
+  maxConcurrentDispatches: 0 # Global WIP cap for local sidecar dispatches: 0=disabled, N=max concurrent. Does NOT affect ephemeral agents (separate {SOURCE}_MAX_ACTIVE caps).
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================

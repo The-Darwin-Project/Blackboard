@@ -157,6 +157,8 @@ spec:
               value: "{{ .Values.app.gitRepoPath }}"
             - name: AGENT_WS_MODE
               value: {{ .Values.app.agentWsMode | quote }}
+            - name: BRAIN_MAX_CONCURRENT_DISPATCHES
+              value: {{ .Values.app.maxConcurrentDispatches | default 0 | quote }}
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs
             - name: ARCHITECT_SIDECAR_URL

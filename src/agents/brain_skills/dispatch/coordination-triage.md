@@ -4,6 +4,10 @@ tags: [dispatch, coordination, developer, qe]
 ---
 # Coordination Triage -- Dispatch Rules
 
+## Task Decomposition (before dispatching)
+
+Before dispatching a multi-step task, ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next. This avoids congestion collapse when agents are loaded and reduces cycle time without adding capacity.
+
 When dispatching work to Developer or QE, use these rules.
 
 ## Developer only
