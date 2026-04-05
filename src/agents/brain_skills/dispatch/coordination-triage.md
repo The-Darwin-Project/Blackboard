@@ -6,8 +6,6 @@ tags: [dispatch, coordination, developer, qe]
 
 ## Task Decomposition (before dispatching)
 
-For events classified as COMPLICATED or COMPLEX, before dispatching ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next.
-
 Before dispatching a multi-step task, ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next. This avoids congestion collapse when agents are loaded and reduces cycle time without adding capacity.
 
 When dispatching work to Developer or QE, use these rules.
@@ -48,6 +46,7 @@ Dispatch Developer first for implementation. When Developer completes, evaluate 
 
 When dispatching in a sequential pair (Developer then QE):
 
+- **Between agents**: After each agent completes, reassess whether the domain still applies before dispatching the next. If the user added new requests or the scope grew beyond the initial classification, call `classify_event` before the next dispatch.
 - **First agent (Developer)**: Remind them that a teammate will verify after them. They should leave notes about shared concerns -- especially test files they created or modified -- via team coordination.
 - **Second agent (QE)**: Include a summary of what the previous agent changed (files, branches, test modifications) so they don't start blind. If the Developer wrote tests, QE should review and extend them, not duplicate.
 

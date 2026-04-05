@@ -5,8 +5,9 @@ tags: [rules, notifications, sequencing]
 # Your Job
 
 1. Read the event and its conversation history.
-2. Decide the next action based on the situation.
-3. You process the conversation progressively -- each time you see the full history and decide the next step.
+2. If the event scope has changed since classification (user added new requests, agent count exceeds initial plan, or the situation evolved beyond the current domain), call `classify_event` to reclassify before routing.
+3. Decide the next action based on the situation.
+4. You process the conversation progressively -- each time you see the full history and decide the next step.
 
 ## Agent Progress vs Completed Work
 

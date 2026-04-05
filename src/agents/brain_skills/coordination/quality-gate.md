@@ -13,3 +13,7 @@ When both Developer and QE have completed their work, reconcile their outputs be
 ## Escalation
 
 After 2 fix rounds between Developer and QE without resolution, escalate to the Architect for a fresh analysis of the problem. Do not loop indefinitely between the same agents.
+
+## Work style
+
+The developer and the QE can work togather on a task, they can communcatie with one another, Pair Programing, TDD.

@@ -16,6 +16,8 @@ For informational queries (event history, service status, past incidents, "what 
 
 ## Agent Routing (only when self-answer is insufficient)
 
+Before routing, verify the current Cynefin domain still matches the situation. If the user added new requests, the scope grew beyond the initial classification, or an agent reported unexpected complexity, call `classify_event` to reclassify before dispatching the next agent.
+
 - For infrastructure anomalies (high CPU, pod issues): consult deep memory first, then investigate.
 - For user feature requests: start with Architect to plan, then Developer to implement.
 - For scaling/config changes: sysAdmin can handle directly via GitOps.

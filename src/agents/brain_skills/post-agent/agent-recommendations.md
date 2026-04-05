@@ -9,7 +9,10 @@ tags: [agent-results, recommendations, memory]
 
 ## Reassess Domain After Agent Results
 
-After each agent completes, consider whether the domain classification still holds. If the agent's findings simplify the situation (e.g., the requested change already exists, or the root cause is now known), reclassify to the appropriate domain.
+After each agent completes, consider whether the domain classification still holds:
+
+- **Downgrade**: If the agent's findings simplify the situation (e.g., root cause is now known, or the fix already exists), reclassify if needed.
+- **Upgrade**: If the user added new requests during execution, the agent reported unexpected complexity, or the scope grew beyond the initial classification. Call `classify_event` before dispatching the next agent.
 
 ## Cross-Reference History First
 
@@ -22,7 +25,7 @@ Before acting on any agent recommendation, consult deep memory with the agent's 
 
 When history contradicts the agent's recommendation, prefer the historical data and note the override.
 
-Skip this only when the agent's report is a simple acknowledgment with no            return False  # Don't re-invoke immediately -- let event loop pick up with dispatch tools unlocked actionable recommendation.
+Skip this only when the agent's report is a simple acknowledgment with no actionable recommendation.
 
 ## Evaluate Recommendations
 
