@@ -246,6 +246,14 @@ spec:
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
+            {{- if and .Values.ephemeralAgents.overflow (gt (int (.Values.ephemeralAgents.overflow.chat | default 0)) 0) }}
+            - name: CHAT_MAX_ACTIVE
+              value: {{ .Values.ephemeralAgents.overflow.chat | quote }}
+            {{- end }}
+            {{- if and .Values.ephemeralAgents.overflow (gt (int (.Values.ephemeralAgents.overflow.slack | default 0)) 0) }}
+            - name: SLACK_MAX_ACTIVE
+              value: {{ .Values.ephemeralAgents.overflow.slack | quote }}
+            {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
             - name: TEKTON_EVENTLISTENER_URL
               value: "http://el-{{ .Release.Name }}-ephemeral-agent:8080"

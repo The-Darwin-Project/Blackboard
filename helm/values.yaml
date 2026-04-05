@@ -354,6 +354,16 @@ ephemeralAgents:
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
     keep: 5 # Number of TaskRuns to retain (when strategy=keep)
     schedule: "0 */6 * * *" # Cron schedule for the Tekton Operator pruner
+  # MMC overflow: when local sidecars are full (role-locked, 1 per role = MM1),
+  # scale C with ephemeral agents (shape-shifting, any role per event).
+  # Set per-source limits to enable overflow. 0 = disabled, no overflow for that source.
+  # IMPORTANT: maxConcurrentDispatches (WIP cap) fires BEFORE overflow in the dispatch
+  # pipeline. When using overflow, keep maxConcurrentDispatches at 0 (disabled, recommended)
+  # or set it to local_sidecars + overflow_cap (e.g., 4 + 2 = 6). Setting it to the local
+  # sidecar count (4) defeats overflow -- events defer at the WIP gate before reaching overflow.
+  overflow:
+    chat: 1      # Max ephemeral agents for chat overflow (0 = disabled)
+    slack: 1     # Max ephemeral agents for slack overflow (0 = disabled)
 # =============================================================================
 # Headhunter (GitLab Todo Poller)
 # =============================================================================

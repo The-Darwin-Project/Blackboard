@@ -6,6 +6,8 @@ tags: [dispatch, coordination, developer, qe]
 
 ## Task Decomposition (before dispatching)
 
+For events classified as COMPLICATED or COMPLEX, before dispatching ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next.
+
 Before dispatching a multi-step task, ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next. This avoids congestion collapse when agents are loaded and reduces cycle time without adding capacity.
 
 When dispatching work to Developer or QE, use these rules.
@@ -28,7 +30,7 @@ Use when the task is:
 - Verifying a deployment via browser
 - Running existing test suites against a branch
 
-## Developer then QE (sequential dispatch)
+## Developer And QE (sequential dispatch)
 
 Use when the task requires:
 
@@ -38,6 +40,7 @@ Use when the task requires:
 - Tasks mentioning crashes, errors, TypeErrors, or stack traces
 - Multiple distinct issues (2+ problems)
 - User-reported UI bugs or behavioral regressions
+- The Agents needs to coordinate the works (test + code), pair programming and TDD
 
 Dispatch Developer first for implementation. When Developer completes, evaluate the result. Then dispatch QE to verify.
 

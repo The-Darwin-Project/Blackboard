@@ -25,6 +25,11 @@
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
 # 25. [Pattern]: WIP cap: _execute_function_call("select_agent") may recursively call _execute_function_call("defer_event") when dispatch semaphore is locked. This is safe -- defer_event does not recurse back into select_agent. Do NOT add agent-dispatching logic to the defer_event handler.
+# 26. [Pattern]: Ephemeral dispatch is two-tier: (a) primary -- headhunter/timekeeper always use ephemeral,
+#     (b) overflow -- chat/slack scale to ephemeral when local sidecars are full, gated by {SOURCE}_MAX_ACTIVE env var.
+#     Circuit breaker for overflow defers (local was already full); circuit breaker for primary falls back to local.
+#     The overflow availability check (get_available) is best-effort, not a reservation -- a race between check
+#     and dispatch is tolerable (false positive = unnecessary ephemeral, not a failure).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -2376,17 +2381,49 @@ class Brain:
 
                     agent_id_override = None
                     event_doc = await self.blackboard.get_event(event_id)
+
+                    # Tier 1: Primary ephemeral sources (never fall back to local)
                     use_ephemeral = (
                         self._ephemeral_provisioner
                         and event_doc
                         and event_doc.source in ("headhunter", "timekeeper")
                     )
+                    ephemeral_is_overflow = False
+
+                    # Tier 2: MMC overflow -- scale C when local sidecars are full
+                    # Local sidecars are role-locked (1 per role = MM1). Ephemeral agents
+                    # shape-shift via WS msg.role, breaking the per-role bottleneck.
+                    if not use_ephemeral and self._ephemeral_provisioner and event_doc and registry:
+                        local_available = await registry.get_available(agent_name)
+                        if local_available is None:
+                            source_env_key = f"{event_doc.source.upper().replace('-', '_')}_MAX_ACTIVE"
+                            if os.environ.get(source_env_key):
+                                logger.info(
+                                    "MMC overflow: no local sidecar for %s, scaling to ephemeral "
+                                    "(source=%s, event=%s)",
+                                    agent_name, event_doc.source, event_id,
+                                )
+                                use_ephemeral = True
+                                ephemeral_is_overflow = True
+
                     if use_ephemeral:
                         provision_result = await self._ephemeral_provisioner.ensure_agent(
                             event_id, source=event_doc.source,
                         )
                         if provision_result is None:
-                            logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
+                            if ephemeral_is_overflow:
+                                logger.info(
+                                    "Ephemeral circuit breaker + local full for %s -- deferring",
+                                    event_id,
+                                )
+                                await self._execute_function_call(
+                                    event_id, "defer_event",
+                                    {"delay_seconds": 30, "reason": "All agents busy (local full + ephemeral circuit breaker)"},
+                                    response_parts=None,
+                                )
+                                return
+                            else:
+                                logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
                         elif isinstance(provision_result, str):
                             defer_seconds = 120 if provision_result == CAPACITY_SENTINEL else 60
                             reason = (
