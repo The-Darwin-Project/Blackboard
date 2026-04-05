@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "6a1b98c" # Updated by CI to commit SHA
+  tag: "447144a" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -250,19 +250,19 @@ kargo:
 # Secret must contain a key named "kubeconfig" with a valid kubeconfig file.
 # =============================================================================
 remoteClusters: {}
-  # konflux:
-  #   enabled: true
-  #   displayName: "Konflux Build Cluster"
-  #   existingSecret: "darwin-konflux-kubeconfig"  # Secret with key "kubeconfig"
-  #   secretKey: "kubeconfig"                       # Override if key name differs
-  #   # Multi-tenant: agents can't namespaces_list -- list accessible namespaces here
-  #   namespacePattern: "v{major}-{minor}-openshift-virtualization-tenant"
-  #   namespaces:
-  #     - "v4-18-openshift-virtualization-tenant"
-  #     - "v4-19-openshift-virtualization-tenant"
-  #     - "v4-20-openshift-virtualization-tenant"
-  #     - "v4-21-openshift-virtualization-tenant"
-  #     - "v4-22-openshift-virtualization-tenant"
+# konflux:
+#   enabled: true
+#   displayName: "Konflux Build Cluster"
+#   existingSecret: "darwin-konflux-kubeconfig"  # Secret with key "kubeconfig"
+#   secretKey: "kubeconfig"                       # Override if key name differs
+#   # Multi-tenant: agents can't namespaces_list -- list accessible namespaces here
+#   namespacePattern: "v{major}-{minor}-openshift-virtualization-tenant"
+#   namespaces:
+#     - "v4-18-openshift-virtualization-tenant"
+#     - "v4-19-openshift-virtualization-tenant"
+#     - "v4-20-openshift-virtualization-tenant"
+#     - "v4-21-openshift-virtualization-tenant"
+#     - "v4-22-openshift-virtualization-tenant"
 # =============================================================================
 # Resource Limits (Brain container -- singleton, handles event loop + LLM calls)
 # =============================================================================
