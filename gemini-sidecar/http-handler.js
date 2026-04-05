@@ -21,6 +21,7 @@ const {
   setupGitLabTooling,
   setupArgoCDMCP,
   setupCLILogins,
+  getRemoteClustersMeta,
   GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
@@ -108,6 +109,10 @@ async function handleRequest(req, res) {
       hasGitHubMCP: !!process.env.GH_TOKEN,
       hasGitLabMCP: !!process.env.GITLAB_TOKEN,
       gitlabHost: GITLAB_HOST,
+      remoteK8sClusters: fs.existsSync('/secrets/remote-clusters')
+        ? fs.readdirSync('/secrets/remote-clusters').filter(d =>
+            fs.statSync(`/secrets/remote-clusters/${d}`).isDirectory())
+        : [],
     }));
     return;
   }
@@ -195,6 +200,17 @@ async function handleRequest(req, res) {
           context += ` Status: ${data.event_status}. Last ${last5.length} turns: ${summary}`;
         }
       } catch { /* Brain unavailable — return minimal context */ }
+      const clustersMeta = getRemoteClustersMeta();
+      if (clustersMeta.length > 0) {
+        const clusterLines = clustersMeta.map(c => {
+          let line = `- K8s_${c.name}: ${c.displayName || c.name} (read-only MCP)`;
+          if (c.namespacePattern) line += `\n  Namespace pattern: ${c.namespacePattern}`;
+          if (c.namespaces?.length) line += `\n  Accessible namespaces: ${c.namespaces.join(', ')}`;
+          return line;
+        }).join('\n');
+        context += `\n\nRemote K8s Clusters:\n${clusterLines}`;
+        context += `\nUse resources_list with namespace param for PipelineRun queries. namespaces_list and events_list may not work on multi-tenant clusters.`;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } }));
     } catch (err) {

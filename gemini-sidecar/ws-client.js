@@ -16,7 +16,7 @@ const { executeCLIStreaming, prepareResultsDir, is429Error } = require('./cli-ex
 const {
   hasGitHubCredentials, generateInstallationToken, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
-  setupArgoCDMCP, setupCLILogins, GITLAB_HOST,
+  setupArgoCDMCP, setupCLILogins, setupRemoteK8sMCPs, GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
 const {
@@ -197,6 +197,7 @@ async function handleTask(ws, msg) {
   await setupArgoCDMCP();
   sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'ArgoCD MCP configured' });
   await setupCLILogins();
+  setupRemoteK8sMCPs();
 
   const mode = msg.mode || '';
   const timeoutSec = mode.includes('implement')

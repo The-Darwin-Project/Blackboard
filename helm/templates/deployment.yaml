@@ -28,6 +28,9 @@ spec:
         {{- if .Values.kargo.enabled }}
         checksum/kargo: {{ include (print $.Template.BasePath "/secret-kargo.yaml") . | sha256sum }}
         {{- end }}
+        {{- if .Values.remoteClusters }}
+        checksum/remote-clusters: {{ include (print $.Template.BasePath "/configmap-remote-clusters.yaml") . | sha256sum }}
+        {{- end }}
       labels:
         app: darwin-brain
         app.kubernetes.io/instance: {{ .Release.Name }}
@@ -561,6 +564,18 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              mountPath: /secrets/remote-clusters/{{ $name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              mountPath: /config/remote-clusters
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /health
@@ -712,6 +727,18 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              mountPath: /secrets/remote-clusters/{{ $name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              mountPath: /config/remote-clusters
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /health
@@ -840,6 +867,18 @@ spec:
             {{- if .Values.gitlab.enabled }}
             - name: gitlab-token-secret
               mountPath: /secrets/gitlab
+              readOnly: true
+            {{- end }}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              mountPath: /secrets/remote-clusters/{{ $name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              mountPath: /config/remote-clusters
               readOnly: true
             {{- end }}
           startupProbe:
@@ -973,6 +1012,18 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              mountPath: /secrets/remote-clusters/{{ $name }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              mountPath: /config/remote-clusters
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /health
@@ -1071,6 +1122,21 @@ spec:
         - name: gitlab-token-secret
           secret:
             secretName: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+        {{- end }}
+        {{- range $name, $cluster := .Values.remoteClusters }}
+        {{- if $cluster.enabled }}
+        - name: remote-cluster-{{ $name }}
+          secret:
+            secretName: {{ $cluster.existingSecret }}
+            items:
+              - key: {{ $cluster.secretKey | default "kubeconfig" }}
+                path: kubeconfig
+        {{- end }}
+        {{- end }}
+        {{- if .Values.remoteClusters }}
+        - name: remote-clusters-meta
+          configMap:
+            name: {{ .Release.Name }}-remote-clusters
         {{- end }}
       
       {{- with .Values.nodeSelector }}

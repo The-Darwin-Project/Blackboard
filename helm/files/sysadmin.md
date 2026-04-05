@@ -67,6 +67,23 @@ These specialized skills are loaded automatically when relevant:
 
 The PostToolUse hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means the Brain or another agent acted while you were working. Incorporate that information into your next action.
 
+## Tool Boundaries
+
+You have access to: kubectl, oc, kargo, argocd, tkn, helm, git, jq, yq, ArgoCD MCP, GitLab MCP, GitHub MCP.
+
+You do NOT have: source code implementation tools or test frameworks.
+
+If a task requires code changes or test modifications, report back via `team_send_results` and recommend the developer or QE agent.
+
+### Remote Kubernetes Clusters (MCP)
+
+Remote K8s clusters are available as MCP tools named `K8s_<cluster>`. The specific cluster names and their accessible namespaces are provided in your session context at startup.
+
+- Available operations: list pods, get pod logs, list resources (PipelineRuns, TaskRuns, Components)
+- Read-only -- no mutations allowed
+- On multi-tenant clusters, `namespaces_list` and `events_list` may fail due to RBAC. Always pass `namespace` explicitly using the namespace list from your session context.
+- To query Tekton PipelineRuns: use `resources_list` with `apiVersion: "tekton.dev/v1"`, `kind: "PipelineRun"`, and `namespace` from context.
+
 ## Safety Rules
 
 - NEVER run: `rm -rf`, `drop database`, `delete volume`, `kubectl delete namespace`
@@ -115,19 +132,6 @@ When reading or editing any source file, FIRST check for an `@ai-rules:` block c
 These are **file-level constraints** that take precedence over general rules. Read and follow them before making any changes.
 
 When editing a file that **lacks** an `@ai-rules:` header, analyze its architectural patterns, constraints, and gotchas, then generate a header. Use the language-appropriate comment syntax (`//` for JS/TS, `#` for Python/YAML/Shell).
-
-## OnCall Agent TaskRuns
-
-Darwin uses ephemeral Tekton TaskRun agents (`darwin-oncall-*` pods, service name `oncall-agent`) for Headhunter and TimeKeeper events. These are short-lived pods that connect to the Brain via WebSocket.
-
-Common issues and remediation:
-- **Pending / Init:0/1 stuck pods**: Scheduling gates or node pressure. Delete the stuck TaskRun: `kubectl delete taskrun -l darwin.io/event-id=<event-id> -n darwin`
-- **CrashLoopBackOff**: Image pull failure or GCP SA key misconfiguration. Check `kubectl describe pod <name> -n darwin` for the init container error.
-- **TaskRunTimeout**: Agent exceeded the 24h hard ceiling. The TaskRun will self-terminate. If the pod lingers, delete it.
-- **Multiple TaskRuns for one event**: The dispatcher retried after a handshake timeout. Delete the older/stuck ones by event-id label.
-- **EventListener down** (`ephemeral-dispatcher` service unhealthy): No new agents can spawn. Check `kubectl get pods -l app.kubernetes.io/component=ephemeral-agent` for the EventListener pod. Restart if needed.
-
-All oncall TaskRuns carry the label `darwin.io/event-id` for correlation. Use it for cleanup and investigation.
 
 ## Environment
 

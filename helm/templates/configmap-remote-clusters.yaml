@@ -1,0 +1,26 @@
+# BlackBoard/helm/templates/configmap-remote-clusters.yaml
+# Cluster metadata for remote K8s MCP integration (display names, namespace patterns)
+# Mounted at /config/remote-clusters/<name>.json in sidecar containers
+# Consumed by SessionStart hooks to inject env-specific context into agent sessions
+{{- if .Values.remoteClusters }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-remote-clusters
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  {{- range $name, $cluster := .Values.remoteClusters }}
+  {{- if $cluster.enabled }}
+  {{ $name }}.json: |
+    {
+      "name": {{ $name | quote }},
+      "displayName": {{ $cluster.displayName | default $name | quote }},
+      "namespacePattern": {{ $cluster.namespacePattern | default "" | quote }},
+      "namespaces": {{ $cluster.namespaces | default list | toJson }}
+    }
+  {{- end }}
+  {{- end }}
+{{- end }}

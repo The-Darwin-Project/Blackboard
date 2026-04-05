@@ -5,6 +5,7 @@
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
 // 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
+// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -425,6 +426,80 @@ async function setupCLILogins() {
   }
 }
 
+// --- Remote K8s Clusters ---
+const REMOTE_CLUSTERS_PATH = '/secrets/remote-clusters';
+
+/**
+ * Scan mounted remote cluster kubeconfigs and register a kubernetes-mcp-server
+ * instance for each one. Each cluster appears as K8s_<name> in the CLI's MCP
+ * tool list. All instances run in --read-only --toolsets core,config mode.
+ */
+function setupRemoteK8sMCPs() {
+  if (!fs.existsSync(REMOTE_CLUSTERS_PATH)) return;
+
+  let clusterDirs;
+  try { clusterDirs = fs.readdirSync(REMOTE_CLUSTERS_PATH, { withFileTypes: true }); }
+  catch { return; }
+
+  const mcpBin = resolveCommand('kubernetes-mcp-server');
+  const geminiSettingsPath = `${process.env.HOME}/.gemini/settings.json`;
+
+  for (const entry of clusterDirs) {
+    if (!entry.isDirectory()) continue;
+    const name = entry.name;
+    const kubeconfigPath = `${REMOTE_CLUSTERS_PATH}/${name}/kubeconfig`;
+    if (!fs.existsSync(kubeconfigPath)) continue;
+
+    const mcpName = `K8s_${name}`;
+    const mcpConfig = {
+      command: mcpBin,
+      args: ['--kubeconfig', kubeconfigPath, '--read-only', '--toolsets', 'core,config'],
+    };
+
+    try {
+      fs.mkdirSync(`${process.env.HOME}/.gemini`, { recursive: true });
+      let settings = {};
+      if (fs.existsSync(geminiSettingsPath)) {
+        try { settings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { }
+      }
+      settings.mcpServers = settings.mcpServers || {};
+      settings.mcpServers[mcpName] = mcpConfig;
+      fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] ${mcpName} MCP config (Gemini) failed: ${err.message}`);
+    }
+
+    try {
+      writeClaudeMcpServer(mcpName, mcpConfig);
+    } catch (err) {
+      console.error(`[${new Date().toISOString()}] ${mcpName} MCP config (Claude) failed: ${err.message}`);
+    }
+
+    const metaPath = `/config/remote-clusters/${name}.json`;
+    let meta = {};
+    try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { }
+
+    console.log(`[${new Date().toISOString()}] ${mcpName} MCP configured (read-only, kubeconfig=${kubeconfigPath}, namespaces=${(meta.namespaces || []).length})`);
+  }
+}
+
+/**
+ * Read cluster metadata from ConfigMap mount. Returns array of
+ * { name, displayName, namespacePattern, namespaces } objects.
+ */
+function getRemoteClustersMeta() {
+  const metaDir = '/config/remote-clusters';
+  if (!fs.existsSync(metaDir)) return [];
+  const result = [];
+  try {
+    for (const f of fs.readdirSync(metaDir)) {
+      if (!f.endsWith('.json')) continue;
+      try { result.push(JSON.parse(fs.readFileSync(`${metaDir}/${f}`, 'utf8'))); } catch { }
+    }
+  } catch { }
+  return result;
+}
+
 module.exports = {
   hasGitHubCredentials,
   generateInstallationToken,
@@ -436,6 +511,8 @@ module.exports = {
   setupGitLabTooling,
   setupArgoCDMCP,
   setupCLILogins,
+  setupRemoteK8sMCPs,
+  getRemoteClustersMeta,
   GITLAB_HOST,
   CLI_LOGIN_INTERVAL_MS,
 };

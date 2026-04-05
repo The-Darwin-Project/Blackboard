@@ -106,6 +106,15 @@ These are **file-level constraints** that take precedence over general rules. Re
 
 When editing a file that **lacks** an `@ai-rules:` header, analyze its architectural patterns, constraints, and gotchas, then generate a header. Use the language-appropriate comment syntax (`//` for JS/TS, `#` for Python/YAML/Shell).
 
+## Remote Kubernetes Clusters (MCP)
+
+Remote K8s clusters are available as MCP tools named `K8s_<cluster>`. The specific cluster names and their accessible namespaces are provided in your session context at startup.
+
+- Available operations: list pods, get pod logs, list resources (PipelineRuns, TaskRuns, Components)
+- Read-only -- no mutations allowed
+- On multi-tenant clusters, `namespaces_list` and `events_list` may fail due to RBAC. Always pass `namespace` explicitly using the namespace list from your session context.
+- To query Tekton PipelineRuns: use `resources_list` with `apiVersion: "tekton.dev/v1"`, `kind: "PipelineRun"`, and `namespace` from context.
+
 ## Environment
 
 - Kubernetes namespace: `darwin`

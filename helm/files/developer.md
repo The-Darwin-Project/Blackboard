@@ -96,6 +96,15 @@ If a task requires a tool you do not have:
 2. Report back immediately via `team_send_results` stating which tool is needed
 3. Recommend which agent should handle it (typically sysadmin for cluster/GitOps tools)
 
+### Remote Kubernetes Clusters (MCP)
+
+Remote K8s clusters are available as MCP tools named `K8s_<cluster>`. The specific cluster names and their accessible namespaces are provided in your session context at startup.
+
+- Available operations: list pods, get pod logs, list resources (PipelineRuns, TaskRuns, Components)
+- Read-only -- no mutations allowed
+- On multi-tenant clusters, `namespaces_list` and `events_list` may fail due to RBAC. Always pass `namespace` explicitly using the namespace list from your session context.
+- To query Tekton PipelineRuns: use `resources_list` with `apiVersion: "tekton.dev/v1"`, `kind: "PipelineRun"`, and `namespace` from context.
+
 ## MR/PR Pipeline Fix Workflow
 
 When fixing a pipeline failure on an existing MR/PR:

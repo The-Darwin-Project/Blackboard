@@ -107,6 +107,13 @@ function registerMCPsAndHooks(settings, cli) {
                            command: '/app/hooks/check-inbox.sh', timeout: 2000 }],
             });
         }
+        if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.name === 'cluster-context'))) {
+            settings.hooks.SessionStart.push({
+                matcher: '*',
+                hooks: [{ name: 'cluster-context', type: 'command',
+                           command: '/app/hooks/cluster-context.sh', timeout: 2000 }],
+            });
+        }
     } else {
         const hookUrl = `http://localhost:${port}`;
         settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 5 }] }];

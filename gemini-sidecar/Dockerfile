@@ -84,6 +84,12 @@ RUN npm install -g argocd-mcp@latest && \
     ln -sf "$(npm prefix -g)/bin/argocd-mcp" /usr/local/bin/argocd-mcp && \
     /usr/local/bin/argocd-mcp --help 2>&1 | head -1 || echo "argocd-mcp installed"
 
+# K8s MCP server (read-only remote cluster inspection: PipelineRuns, pod logs, events)
+# Native Go binary via npm wrapper -- direct K8s API interaction, no kubectl dependency
+RUN npm install -g kubernetes-mcp-server@latest && \
+    ln -sf "$(npm prefix -g)/bin/kubernetes-mcp-server" /usr/local/bin/kubernetes-mcp-server && \
+    kubernetes-mcp-server --help 2>&1 | head -1 || echo "kubernetes-mcp-server installed"
+
 # Install skopeo (container image inspection -- no daemon required)
 RUN dnf install -y skopeo && dnf clean all && skopeo --version
 
@@ -125,9 +131,10 @@ RUN chmod +x /usr/local/bin/sendResults && \
 COPY huddleSendMessage.sh /usr/local/bin/huddleSendMessage
 RUN chmod +x /usr/local/bin/huddleSendMessage
 
-# Install inbox check hook (team message delivery via CLI hooks)
+# Install CLI hooks (team inbox + remote cluster context)
 COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
-RUN chmod +x /app/hooks/check-inbox.sh
+COPY hooks/cluster-context.sh /app/hooks/cluster-context.sh
+RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh
 
 # Create CLI config directories (rules come from ConfigMap mount)
 RUN mkdir -p /home/default/.gemini && \
