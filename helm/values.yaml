@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "feaed06" # Updated by CI to commit SHA
+  tag: "17d44ca" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -362,8 +362,8 @@ ephemeralAgents:
   # or set it to local_sidecars + overflow_cap (e.g., 4 + 2 = 6). Setting it to the local
   # sidecar count (4) defeats overflow -- events defer at the WIP gate before reaching overflow.
   overflow:
-    chat: 1      # Max ephemeral agents for chat overflow (0 = disabled)
-    slack: 1     # Max ephemeral agents for slack overflow (0 = disabled)
+    chat: 1 # Max ephemeral agents for chat overflow (0 = disabled)
+    slack: 1 # Max ephemeral agents for slack overflow (0 = disabled)
 # =============================================================================
 # Headhunter (GitLab Todo Poller)
 # =============================================================================
