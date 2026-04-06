@@ -30,7 +30,7 @@ export default function ReportsPage() {
   const [sortBy, setSortBy] = useState<'date' | 'service' | 'domain' | 'severity'>('date');
 
   // Fetch report list
-  const { data: reports = [] } = useQuery({
+  const { data: reports = [], isError: reportsError } = useQuery({
     queryKey: ['reports'],
     queryFn: () => getReports(200),
     refetchOnWindowFocus: true,
@@ -79,6 +79,13 @@ export default function ReportsPage() {
 
   // ========== State 1: Grid ==========
   if (!selectedReportId) {
+    if (reportsError) {
+      return (
+        <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ef4444', fontSize: 13 }}>
+          Failed to load reports.
+        </div>
+      );
+    }
     return (
       <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
         <ReportGrid

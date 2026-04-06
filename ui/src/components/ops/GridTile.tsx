@@ -73,10 +73,13 @@ export default function GridTile({
   const isActive = isEphemeral ? (ephemeralActive || false) : (agentState?.isActive || false);
 
   return (
-    <div className="relative h-full flex flex-col min-w-0 overflow-hidden" onClick={(e) => {
+    <div className="relative h-full flex flex-col min-w-0 overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/50 focus-visible:outline-offset-[-2px]"
+      role="button" tabIndex={0}
+      onClick={(e) => {
         if ((e.target as HTMLElement).closest('button')) return;
         onTileClick(tileId);
       }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onTileClick(tileId); } }}
       style={{ cursor: 'pointer' }}>
       {isHotspot && (
         <div className="absolute inset-0 rounded-lg pointer-events-none z-10"

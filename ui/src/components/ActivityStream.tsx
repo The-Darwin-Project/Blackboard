@@ -10,11 +10,15 @@
 import { useEvents } from '../hooks/useEvents';
 
 export default function ActivityStream() {
-  const { data: archEvents, isLoading } = useEvents();
+  const { data: archEvents, isLoading, isError } = useEvents();
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 12 }}>
-      {isLoading && !archEvents ? (
+      {isError ? (
+        <p style={{ color: '#ef4444', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>
+          Failed to load activity stream.
+        </p>
+      ) : isLoading && !archEvents ? (
         <p style={{ color: '#94a3b8', fontSize: 13, padding: '24px 0', textAlign: 'center' }}>
           Loading activity...
         </p>

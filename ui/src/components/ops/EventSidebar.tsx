@@ -86,12 +86,14 @@ export default function EventSidebar() {
     refetchInterval: 10_000,
   });
   const [hhTodos, setHhTodos] = useState<HeadhunterTodo[]>([]);
+  const [hhError, setHhError] = useState(false);
   const { data: schedules = [] } = useSchedules();
   const { invalidateActive } = useQueueInvalidation();
 
   useEffect(() => {
     const fetchHH = async () => {
-      try { setHhTodos(await getHeadhunterPending()); } catch { /* noop */ }
+      try { setHhTodos(await getHeadhunterPending()); setHhError(false); }
+      catch { setHhError(true); }
     };
     fetchHH();
     const id = setInterval(fetchHH, 30_000);
@@ -247,7 +249,8 @@ export default function EventSidebar() {
             <TreeGroup icon={<GitMerge size={16} />} label="Headhunter Queue" count={demoHH.length}
               countColor={demoHH.length > 0 ? '#f59e0b' : '#64748b'}
               forceCollapsed={!!selectedEventId}>
-              {demoHH.length === 0 && <EmptyLabel>No pending todos</EmptyLabel>}
+              {hhError && <EmptyLabel>Failed to load queue</EmptyLabel>}
+              {!hhError && demoHH.length === 0 && <EmptyLabel>No pending todos</EmptyLabel>}
               {demoHH.map(todo => (
                 <TreeNode key={todo.todo_id}
                   icon={<SourceIcon source="headhunter" size={18} />}

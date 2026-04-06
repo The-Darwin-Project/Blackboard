@@ -3,7 +3,7 @@
 // 1. [Pattern]: Fetches /config to discover auth settings. No hardcoded Dex URLs.
 // 2. [Pattern]: When auth.enabled=false, isLoading resolves immediately, no login gate.
 // 3. [Constraint]: Tokens stored in sessionStorage via oidc-client-ts (survives refresh, cleared on tab close).
-import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useMemo, type ReactNode } from 'react';
 import { UserManager, User, WebStorageStateStore } from 'oidc-client-ts';
 import { getConfig, setTokenGetter } from '../api/client';
 import type { AuthConfig } from '../api/types';
@@ -109,16 +109,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTokenGetter(getAccessToken);
   }, [getAccessToken]);
 
+  const value = useMemo(() => ({
+    user,
+    isAuthenticated: !!user && !user.expired,
+    isLoading,
+    authConfig,
+    login,
+    logout,
+    getAccessToken,
+  }), [user, isLoading, authConfig, login, logout, getAccessToken]);
+
   return (
-    <AuthContext.Provider value={{
-      user,
-      isAuthenticated: !!user && !user.expired,
-      isLoading,
-      authConfig,
-      login,
-      logout,
-      getAccessToken,
-    }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

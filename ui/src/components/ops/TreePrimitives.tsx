@@ -37,8 +37,10 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
   onClick?: () => void; onContextMenu?: (e: React.MouseEvent) => void; style?: React.CSSProperties;
 }) {
   return (
-    <div className="flex items-center gap-2 px-3 py-1 rounded text-[14px] hover:bg-bg-tertiary cursor-pointer transition-colors group"
-      onClick={onClick} onContextMenu={onContextMenu} style={style}>
+    <div className="flex items-center gap-2 px-3 py-1 rounded text-[14px] hover:bg-bg-tertiary cursor-pointer transition-colors group focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/50 focus-visible:outline-offset-[-2px]"
+      role="button" tabIndex={onClick ? 0 : undefined}
+      onClick={onClick} onContextMenu={onContextMenu} style={style}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}>
       <span className="flex-shrink-0">{icon}</span>
       <span className="truncate font-medium" style={labelColor ? { color: labelColor } : { color: 'var(--text-secondary)' }}>{label}</span>
       {sublabel && (
@@ -60,8 +62,10 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
         : isWaiting ? 'border border-amber-500/25 hover:border-amber-500/40'
         : 'hover:bg-bg-tertiary border border-transparent'
     }`}
+      role="button" tabIndex={0}
       style={isWaiting && !isSelected ? { background: '#f59e0b08' } : undefined}
-      onClick={onClick} onContextMenu={onContextMenu}>
+      onClick={onClick} onContextMenu={onContextMenu}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}>
       <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
         style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
       <SourceIcon source={evt.source} size={18} />

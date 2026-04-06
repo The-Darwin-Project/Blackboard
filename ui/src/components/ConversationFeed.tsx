@@ -60,7 +60,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
   const [userScrolled, setUserScrolled] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
-  const { data: selectedEvent } = useEventDocument(eventId);
+  const { data: selectedEvent, isError: eventError } = useEventDocument(eventId);
   const { invalidateActive, invalidateEvent } = useQueueInvalidation();
 
   const handleFeedScroll = useCallback(() => {
@@ -106,6 +106,13 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
     }
   }, [selectedEvent?.conversation?.length, userScrolled]);
 
+  if (eventError) {
+    return (
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ef4444', fontSize: 13 }}>
+        Failed to load event conversation.
+      </div>
+    );
+  }
   if (!selectedEvent) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 13 }}>

@@ -18,7 +18,7 @@
  *   useWSMessage((msg) => { ... }); // subscribe to messages
  *   useWSReconnect(() => { ... });  // called once per reconnect (not initial connect)
  */
-import { createContext, useContext, useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react';
 import type { WSMessage } from '../hooks/useWebSocket';
 import { useAuth } from './AuthContext';
 
@@ -54,11 +54,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
   const { getAccessToken } = useAuth();
+  const getAccessTokenRef = useRef(getAccessToken);
+  getAccessTokenRef.current = getAccessToken;
 
   const connect = useCallback(() => {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${protocol}//${location.host}/ws`;
-    const token = getAccessToken();
+    const token = getAccessTokenRef.current();
     if (token) {
       url += `?token=${encodeURIComponent(token)}`;
     }
@@ -155,9 +157,12 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const connectionValue = useMemo(() => ({ connected, reconnecting, send }), [connected, reconnecting, send]);
+  const subscriberValue = useMemo(() => ({ subscribe, subscribeReconnect }), [subscribe, subscribeReconnect]);
+
   return (
-    <WSConnectionContext.Provider value={{ connected, reconnecting, send }}>
-      <WSSubscribersContext.Provider value={{ subscribe, subscribeReconnect }}>
+    <WSConnectionContext.Provider value={connectionValue}>
+      <WSSubscribersContext.Provider value={subscriberValue}>
         {children}
       </WSSubscribersContext.Provider>
     </WSConnectionContext.Provider>

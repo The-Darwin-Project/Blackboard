@@ -7,7 +7,7 @@
  * Notification bell for events waiting on user action (approval or feedback).
  * Shows badge count, color-coded urgency, and shakes after 1 hour.
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useActiveEvents } from '../hooks/useQueue';
 import { getEventDocument } from '../api/client';
 
@@ -95,6 +95,18 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
     return `${hrs}h ${min % 60}m ago`;
   };
 
+  const bellContainerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (bellContainerRef.current && !bellContainerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [isOpen]);
+
   return (
     <>
       {/* Inject shake keyframes */}
@@ -106,10 +118,13 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
         }
       `}</style>
 
-      <div style={{ position: 'relative', display: 'inline-block' }}>
+      <div ref={bellContainerRef} style={{ position: 'relative', display: 'inline-block' }}>
         {/* Bell icon */}
         <button
           onClick={() => count > 0 && setIsOpen(!isOpen)}
+          aria-label={count > 0 ? `${count} event${count > 1 ? 's' : ''} waiting for approval` : 'No events waiting'}
+          aria-expanded={isOpen}
+          aria-haspopup="true"
           style={{
             background: 'transparent',
             border: 'none',
