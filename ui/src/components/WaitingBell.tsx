@@ -123,8 +123,9 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
         <button
           onClick={() => count > 0 && setIsOpen(!isOpen)}
           aria-label={count > 0 ? `${count} event${count > 1 ? 's' : ''} waiting for approval` : 'No events waiting'}
-          aria-expanded={isOpen}
-          aria-haspopup="true"
+          aria-expanded={count > 0 ? isOpen : undefined}
+          aria-haspopup={count > 0 ? 'true' : undefined}
+          aria-disabled={count === 0 || undefined}
           style={{
             background: 'transparent',
             border: 'none',
