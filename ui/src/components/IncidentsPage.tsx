@@ -19,13 +19,13 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', css: 'w-[82px]', wrap: false },
-  { key: 'platform' as keyof Incident, label: 'Platform', css: 'w-[10%]', wrap: true },
-  { key: 'summary' as keyof Incident, label: 'Summary', css: '', wrap: true },
-  { key: 'status' as keyof Incident, label: 'Status', css: 'w-[52px]', wrap: false },
-  { key: 'priority' as keyof Incident, label: 'Priority', css: 'w-[60px]', wrap: false },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', css: 'w-[10%]', wrap: true },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', css: 'w-[50px]', wrap: false },
+  { key: 'date' as keyof Incident, label: 'Date', width: '9%', wrap: false },
+  { key: 'platform' as keyof Incident, label: 'Platform', width: '10%', wrap: true },
+  { key: 'summary' as keyof Incident, label: 'Summary', width: '40%', wrap: true },
+  { key: 'status' as keyof Incident, label: 'Status', width: '8%', wrap: false },
+  { key: 'priority' as keyof Incident, label: 'Priority', width: '10%', wrap: false },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: '12%', wrap: true },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: '8%', wrap: false },
 ];
 
 export default function IncidentsPage() {
@@ -68,7 +68,7 @@ export default function IncidentsPage() {
         <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
           <colgroup>
             {COLUMNS.map(col => (
-              <col key={col.key} className={col.css} />
+              <col key={col.key} style={{ width: col.width }} />
             ))}
           </colgroup>
           <thead>
@@ -89,7 +89,7 @@ export default function IncidentsPage() {
                   const val = row[col.key] ?? '';
                   const td = col.wrap
                     ? "px-3 py-2 break-words text-text-secondary"
-                    : "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis";
+                    : "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis text-text-secondary";
                   if (col.key === 'priority') {
                     return (
                       <td key={col.key} className={td}>
