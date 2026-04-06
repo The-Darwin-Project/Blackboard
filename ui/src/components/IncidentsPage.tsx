@@ -19,9 +19,9 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', width: '9%', wrap: false },
+  { key: 'date' as keyof Incident, label: 'Date', width: '12%', wrap: false },
   { key: 'platform' as keyof Incident, label: 'Platform', width: '10%', wrap: true },
-  { key: 'summary' as keyof Incident, label: 'Summary', width: '40%', wrap: true },
+  { key: 'summary' as keyof Incident, label: 'Summary', width: '37%', wrap: true },
   { key: 'status' as keyof Incident, label: 'Status', width: '8%', wrap: false },
   { key: 'priority' as keyof Incident, label: 'Priority', width: '10%', wrap: false },
   { key: 'affected_versions' as keyof Incident, label: 'Versions', width: '12%', wrap: true },
