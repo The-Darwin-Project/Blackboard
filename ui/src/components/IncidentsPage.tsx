@@ -19,14 +19,14 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 const COLUMNS = [
-  { key: 'date' as keyof Incident, label: 'Date', width: '12%', wrap: false },
-  { key: 'platform' as keyof Incident, label: 'Platform', width: '10%', wrap: true },
-  { key: 'summary' as keyof Incident, label: 'Summary', width: '37%', wrap: true },
-  { key: 'status' as keyof Incident, label: 'Status', width: '8%', wrap: false },
-  { key: 'priority' as keyof Incident, label: 'Priority', width: '10%', wrap: false },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', width: '12%', wrap: true },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', width: '8%', wrap: false },
-];
+  { key: 'date' as keyof Incident, label: 'Date', wrap: false },
+  { key: 'platform' as keyof Incident, label: 'Platform', wrap: true },
+  { key: 'summary' as keyof Incident, label: 'Summary', wrap: true, flex: true },
+  { key: 'status' as keyof Incident, label: 'Status', wrap: false },
+  { key: 'priority' as keyof Incident, label: 'Priority', wrap: false },
+  { key: 'affected_versions' as keyof Incident, label: 'Versions', wrap: true },
+  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', wrap: false },
+] as const;
 
 export default function IncidentsPage() {
   const { data: incidents, isLoading, isError } = useIncidents();
@@ -65,12 +65,7 @@ export default function IncidentsPage() {
       </div>
 
       <div className="border border-border rounded-lg overflow-hidden">
-        <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
-          <colgroup>
-            {COLUMNS.map(col => (
-              <col key={col.key} style={{ width: col.width }} />
-            ))}
-          </colgroup>
+        <table className="w-full text-xs" style={{ tableLayout: 'auto' }}>
           <thead>
             <tr className="bg-bg-secondary border-b border-border">
               {COLUMNS.map(col => (
@@ -89,7 +84,7 @@ export default function IncidentsPage() {
                   const val = row[col.key] ?? '';
                   const td = col.wrap
                     ? "px-3 py-2 break-words text-text-secondary"
-                    : "px-3 py-2 overflow-hidden whitespace-nowrap text-ellipsis text-text-secondary";
+                    : "px-3 py-2 whitespace-nowrap text-text-secondary";
                   if (col.key === 'priority') {
                     return (
                       <td key={col.key} className={td}>
