@@ -137,6 +137,18 @@ spec:
                   mountPath: /secrets/kargo
                   readOnly: true
                 {{- end }}
+                {{- range $name, $cluster := .Values.remoteClusters }}
+                {{- if $cluster.enabled }}
+                - name: remote-cluster-{{ $name }}
+                  mountPath: /secrets/remote-clusters/{{ $name }}
+                  readOnly: true
+                {{- end }}
+                {{- end }}
+                {{- if .Values.remoteClusters }}
+                - name: remote-clusters-meta
+                  mountPath: /config/remote-clusters
+                  readOnly: true
+                {{- end }}
                 - name: gemini-rules
                   mountPath: /tmp/agent-rules
                   readOnly: true
@@ -168,6 +180,21 @@ spec:
                 name: {{ .Release.Name }}-gemini-rules
             - name: workspace
               emptyDir: {}
+            {{- range $name, $cluster := .Values.remoteClusters }}
+            {{- if $cluster.enabled }}
+            - name: remote-cluster-{{ $name }}
+              secret:
+                secretName: {{ $cluster.existingSecret }}
+                items:
+                  - key: {{ $cluster.secretKey | default "kubeconfig" }}
+                    path: kubeconfig
+            {{- end }}
+            {{- end }}
+            {{- if .Values.remoteClusters }}
+            - name: remote-clusters-meta
+              configMap:
+                name: {{ $.Release.Name }}-remote-clusters
+            {{- end }}
 ---
 # Prune TriggerTemplate -- deletes stuck TaskRuns by event_id label.
 # Triggered by POST {"event_id": "evt-xxx", "action": "cancel"}.
