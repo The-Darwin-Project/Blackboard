@@ -122,7 +122,7 @@ export default function StreamGrid() {
         agentState={tile.type === 'agent-stream' ? agentStreams[tile.agentName!] : undefined}
         contentTile={ct}
         onCloseContent={closeContentTile}
-        ephemeralMessages={ea ? ephemeralStream[ea.bound_event_id || ''] : undefined}
+        ephemeralMessages={ea ? ephemeralStream[ea.agent_id] : undefined}
         ephemeralActive={ea?.busy}
       />
     );
