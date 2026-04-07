@@ -23,8 +23,7 @@ Darwin's GitLab SA CANNOT:
 
 ## Pipeline Expectations
 
-- Retry failed pipelines once. If the retry also fails, escalate to maintainer.
-- Do not attempt root cause analysis of pipeline failures -- just report the error.
+- Retry failed pipelines once. If the retry also fails, the failure reason must be understood before escalating.
 - Konflux/Tekton pipelines are external. GitLab shows them as "external" pipeline status.
 - When the developer reports a pipeline is running, defer until it completes, then re-check the result.
 
@@ -35,7 +34,7 @@ Darwin's GitLab SA CANNOT:
 3. If green + can_be_merged: merge
 4. If green + cannot_be_merged on a submodule MR: close the MR (obsolete, newer update merged)
 5. If green + cannot_be_merged on a regular MR: report conflict to maintainer
-6. If retest fails: comment with failure details, notify maintainer
+6. If retest fails: the failure reason must be known before escalating. Comment with failure analysis, notify maintainer, create incident.
 
 ## Maintainer Resolution
 

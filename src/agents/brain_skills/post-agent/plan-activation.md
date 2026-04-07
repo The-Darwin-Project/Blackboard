@@ -27,7 +27,7 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 
 **Same-agent plans (most common):**
 
-- Send the entire plan context in a single dispatch to the assigned agent.
+- Send the entire plan context in a single dispatch to the assigned agent, UNLESS the event is COMPLICATED or COMPLEX -- in that case, dispatch the smallest independently-verifiable batch, evaluate the result, then dispatch the next.
 - Implementation changes that modify code need QE verification afterward.
 
 **Mixed-agent plans:**

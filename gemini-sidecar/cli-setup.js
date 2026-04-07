@@ -77,15 +77,23 @@ function registerMCPsAndHooks(settings, cli) {
         env: { SIDECAR_PORT: port },
     };
 
+    const playwrightCmd = resolveCommand('npx');
+    const playwrightConfig = {
+        command: playwrightCmd,
+        args: ['@playwright/mcp@latest', '--headless'],
+    };
+
     if (cli === 'gemini') {
         settings.mcpServers = settings.mcpServers || {};
         settings.mcpServers.TeamChat = teamChatConfig;
         settings.mcpServers.DarwinBlackboard = blackboardConfig;
         settings.mcpServers.DarwinJournal = journalConfig;
+        settings.mcpServers.Playwright = playwrightConfig;
     } else {
         writeClaudeMcpServer('TeamChat', teamChatConfig);
         writeClaudeMcpServer('DarwinBlackboard', blackboardConfig);
         writeClaudeMcpServer('DarwinJournal', journalConfig);
+        writeClaudeMcpServer('Playwright', playwrightConfig);
     }
 
     settings.hooks = settings.hooks || {};

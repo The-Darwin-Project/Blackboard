@@ -9,20 +9,19 @@ modes: [investigate]
 
 ## Time-Boxed Investigation (5-7 steps MAX)
 
-Use **ArgoCD MCP tools first** -- the sidecar may not have direct RBAC to workload namespaces.
+Your goal: determine the **root cause** and **trigger** of the issue. You have ArgoCD MCP, K8s MCP (remote clusters), Playwright MCP (browser), and CLI tools available. Choose what's appropriate.
 
-1. Get application state: ArgoCD MCP `get_application` (shows sync status, health, conditions, current revision)
-2. Get resource tree: ArgoCD MCP `get_application_resource_tree` (shows all pods, ReplicaSets, ConfigMaps with their hashes and health status)
-3. Get crash logs: ArgoCD MCP `get_application_workload_logs` (pod logs without needing namespace RBAC)
-4. **Change Attribution** (for crash/unhealthy events): From the resource tree, determine WHAT changed:
-   - If old and new ReplicaSets both exist, check if image tags differ or only ConfigMap/Secret hashes differ
-   - Same image + different ConfigMap hash = **config-triggered rollout** (fix the config)
-   - Different image = **image-triggered rollout** (rollback the image)
-   - Check `get_application` sync history for what resources changed in the latest revision
-5. **Fallback** (only if ArgoCD MCP is unavailable): `oc get pods`, `oc describe pod`, `oc logs`
-6. **STOP. Report your findings.**
+Key questions to answer:
+1. What is the current application state? (sync status, health, conditions)
+2. What resources are affected? (pods, ReplicaSets, ConfigMaps)
+3. What do the logs say? (crash logs, error output)
+4. **Change Attribution** (for crash/unhealthy events): determine WHAT changed:
+   - Same image + different ConfigMap hash = **config-triggered rollout**
+   - Different image = **image-triggered rollout**
+   - Neither = **infrastructure issue**
+5. **STOP when you have enough evidence.** The Brain decides the next step.
 
-Do NOT keep investigating after you have enough evidence. The Brain decides the next step.
+Do NOT keep investigating after you have enough evidence. Report and let the Brain decide.
 
 ## What to Report
 
@@ -41,4 +40,4 @@ Structure your findings as:
 - Focus on the specific service and namespace provided.
 - If you cannot determine the root cause in 5 commands, report what you found and what you could NOT determine.
 - NEVER investigate the Brain pod itself (`darwin-brain`, `darwin-blackboard-brain`).
-- **Stay in your lane**: Use `oc`, `kubectl`, `kargo`, `tkn`, `git`, `helm`, and **ArgoCD MCP tools** (list_applications, get_application, get_resource_events) to inspect the CLUSTER and GIT REPOS. ArgoCD MCP is preferred over the `argocd` CLI. Do NOT read application source code (`*.py`, `*.js`, `*.ts`, `Dockerfile`) -- that is the Architect's job.
+- **Stay in your lane**: Inspect the CLUSTER and GIT REPOS using your available tools (MCP and CLI). Do NOT read application source code (`*.py`, `*.js`, `*.ts`, `Dockerfile`) -- that is the Architect's job.

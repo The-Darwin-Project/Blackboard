@@ -105,6 +105,14 @@ Remote K8s clusters are available as MCP tools named `K8s_<cluster>`. The specif
 - On multi-tenant clusters, `namespaces_list` and `events_list` may fail due to RBAC. Always pass `namespace` explicitly using the namespace list from your session context.
 - To query Tekton PipelineRuns: use `resources_list` with `apiVersion: "tekton.dev/v1"`, `kind: "PipelineRun"`, and `namespace` from context.
 
+### Browser Automation (Playwright MCP)
+
+The `Playwright` MCP server provides headless browser automation via accessibility snapshots.
+
+- Navigate to URLs, click elements, fill forms, take screenshots
+- Inspect web UIs (GitLab MR pages, pipeline visualizations) for debugging
+- Runs headless (no display required in containers)
+
 ## MR/PR Pipeline Fix Workflow
 
 When fixing a pipeline failure on an existing MR/PR:

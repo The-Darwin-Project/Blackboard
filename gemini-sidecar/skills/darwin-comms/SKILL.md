@@ -18,6 +18,8 @@ Use `svc_get_journal` instead of relying on the event document for ops history. 
 
 Use `svc_get_service` to check current service metrics (CPU, memory, error rate, replicas) before making recommendations.
 
+Additional evidence sources are available: K8s MCP (remote clusters), ArgoCD MCP (local cluster), Playwright MCP (browser). Include relevant findings in your report.
+
 ## `team_send_results` -- Final Report (ALL modes)
 
 Use `team_send_results` to deliver your final report in **every** mode (execute, investigate, plan, implement, test).

@@ -94,3 +94,4 @@ When your plan includes UI changes, verify each step addresses:
 
 - [ ] Does it work with keyboard only?
 - [ ] Is state change communicated beyond just color?
+- [ ] If a live URL exists, use **Playwright MCP** for browser-based smoke verification of UI changes

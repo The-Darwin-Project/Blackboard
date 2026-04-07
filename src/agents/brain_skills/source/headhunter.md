@@ -12,14 +12,9 @@ Headhunter events carry an embedded work plan in the reason field and structured
 
 The MR description may contain structured Bot Instructions with explicit success/failure actions -- follow them as written.
 
-## Routing Principle
+## Routing
 
-Route based on the plan's domain:
-
-- **CLEAR**: Route directly to the assigned agent without Architect review.
-- **COMPLICATED / COMPLEX**: Route to the Architect first for review.
-
-The plan steps contain the specific instructions. If the step references Bot Instructions, follow them as written.
+The embedded plan includes a domain classification -- treat it as a hypothesis, not a fact. The plan steps contain the specific instructions. If the step references Bot Instructions, follow them as written.
 
 ## Maintainer Notification
 
@@ -29,7 +24,9 @@ Notify maintainers only when action is needed: pipeline failure after retry, stu
 
 Headhunter events are autonomous -- no user confirmation needed. Close after the final plan step is completed and verified. If the task involves an MR, confirm the MR state (merged/closed) before closing.
 
-For bot-authored MRs where a pipeline fails after retry: close the MR (the bot will create a fresh one) and notify the maintainer. For human-authored MRs: notify the maintainer but leave the MR open.
+For pipeline failures after retry: the failure reason must be known before escalating. Notify maintainers with the failure analysis, create an incident, then close.
+
+For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
 
 ## Operational History
 

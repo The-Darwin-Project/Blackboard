@@ -30,7 +30,7 @@ roles: [sysadmin, developer, qe]
 
 Before acting on a deployment, assess how the application is deployed:
 
-- Discover the GitOps tooling: use ArgoCD MCP `list_applications` tool to find ArgoCD Applications, or `kubectl get applications.argoproj.io -A` as fallback. Also check for Flux resources or other CD automation.
+- Discover the GitOps tooling: use your available MCP and CLI tools to find ArgoCD Applications, check remote cluster workload status, or query CD automation. Also check for Flux resources.
 - Check if the application has auto-sync, selfHeal, or webhook-triggered pipelines
 - **NEVER** run `kubectl rollout restart` or `kubectl scale` without first understanding who manages the deployment
 - After pushing a GitOps change, report: "Change committed and pushed. The CD controller will handle the rollout."

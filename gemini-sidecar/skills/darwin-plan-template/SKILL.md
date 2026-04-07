@@ -63,7 +63,7 @@ The Markdown body below the frontmatter contains the full human-readable details
 Assign each step in the frontmatter `steps:` array to an agent and mode:
 
 - **sysAdmin** -- Kubernetes and GitOps operations
-  - `investigate` -- Read-only: kubectl get, logs, describe
+  - `investigate` -- Read-only: kubectl get, logs, describe, K8s MCP for remote clusters
   - `execute` -- GitOps: clone repo, modify values.yaml, commit, push
   - `rollback` -- Git revert, verify ArgoCD sync
 
@@ -73,7 +73,7 @@ Assign each step in the frontmatter `steps:` array to an agent and mode:
   - `implement` -- Code changes. Brain dispatches Developer first, then QE for verification.
 
 - **qe** -- Quality verification agent
-  - `test` -- Run tests, verify deployments via browser (Playwright)
+  - `test` -- Run tests, verify deployments via browser (Playwright MCP or repo Playwright tests)
   - `investigate` -- Read-only test status checks
 
 - **architect** -- Planning and review (use sparingly, avoid self-referential loops)

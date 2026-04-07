@@ -90,6 +90,11 @@ RUN npm install -g kubernetes-mcp-server@latest && \
     ln -sf "$(npm prefix -g)/bin/kubernetes-mcp-server" /usr/local/bin/kubernetes-mcp-server && \
     kubernetes-mcp-server --help 2>&1 | head -1 || echo "kubernetes-mcp-server installed"
 
+# Playwright MCP server (headless browser automation via accessibility snapshots)
+# Agents can navigate, click, fill forms, take screenshots, monitor network -- no vision model needed
+RUN npm install -g @playwright/mcp@latest && \
+    npx @playwright/mcp@latest --help 2>&1 | head -1 || echo "playwright-mcp installed"
+
 # Install skopeo (container image inspection -- no daemon required)
 RUN dnf install -y skopeo && dnf clean all && skopeo --version
 

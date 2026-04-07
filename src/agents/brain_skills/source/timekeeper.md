@@ -31,3 +31,4 @@ If the user specified people to notify on completion or failure, notify them and
 - If the user requested confirmation: notify, then wait for their response before closing.
 - If the user specified notification recipients: notify them, then let the user review before closing.
 - If autonomous with no notification recipients: close after task completion and verification.
+- On failure or escalation: the failure reason must be known before closing. Notify -> `create_incident` -> `close_event`.

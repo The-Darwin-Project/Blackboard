@@ -17,7 +17,7 @@ You are in test-only mode. The Brain wants you to write and/or run tests, NOT im
 2. **Clone/pull the target repo**: Always `git pull --rebase` first
 3. **Write tests** for the expected behavior:
    - Python projects: use `pytest` with the project's existing test patterns
-   - Frontend changes: use Playwright for UI verification
+   - Frontend changes: use repo Playwright tests for scripted assertions, or **Playwright MCP** for ad-hoc browser inspection (navigate, click, screenshot) without writing test code
    - API changes: use `httpx` or `curl` for endpoint verification
 4. **Run the tests**: Execute and capture results
 5. **Report**: Use `team_send_results` to deliver the test report

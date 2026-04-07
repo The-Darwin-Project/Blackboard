@@ -8,18 +8,15 @@ Before closing any automated event (headhunter, timekeeper, aligner) where the o
 
 ### Investigate Before Escalating
 
-Before incident creation. First dispatch an agent to investigate the failure reason:
+The failure reason MUST be known before creating an incident. An incident that says "pipeline failed" without explaining WHY is not actionable for the maintainer.
 
-1. Route Developer or SysAdmin to check the build/pods logs, PipelineRun task status, and error output.
-2. Include the failure analysis in the incident description and maintainer notification.
-3. Include event id in the incident summary (e.g., `[evt-#######]: {Summary of the incident}`).
-4. Only then proceed to the close sequence below.
-
-An incident that says "pipeline failed" without explaining WHY is not actionable for the maintainer. The investigation is mandatory to make the incident meaningful.
+- The incident description must contain the root cause or specific error, not just "failed."
+- Include event id in the incident summary (e.g., `[evt-#######]: {Summary of the incident}`).
+- The same failure analysis must be included in the maintainer notification.
 
 ### Mandatory triggers -- investigate first, then `create_incident`, then `close_event`:
 
-- Pipeline fails after retest (persistent failure) -- investigate failure reason first
+- Pipeline fails after retest (persistent failure) -- failure reason must be known first
 - Retest commands (/retest, /test, /ok-to-test) fail to trigger a new pipeline
 - Agent cannot resolve the issue after full execution cycle
 - Event classified CHAOTIC

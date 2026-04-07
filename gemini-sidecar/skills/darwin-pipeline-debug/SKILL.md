@@ -39,12 +39,16 @@ After retesting:
 
 Do NOT poll in a loop -- report the current state and let the Brain handle the timing.
 
-## v1 Scope
+## Extended Investigation
+
+When GitLab job logs are insufficient (e.g., external pipelines showing only "external" status), the failure reason must still be determined. You have K8s MCP, Playwright MCP, and CLI tools available -- choose the appropriate one based on where the pipeline executed.
+
+## Scope
 
 - Read failed job log and report error type
 - Retry pipeline once via `/retest` comment
 - Check result after retry -- if still running, report and let Brain defer
-- Do NOT attempt root cause analysis
+- When retry fails: the failure reason must be determined before reporting
 - Do NOT modify code or config to fix the pipeline
 
 ## Critical: No @mentions
