@@ -42,11 +42,12 @@ export default function StreamGrid() {
   for (const a of agents) {
     tiles.push({ id: a, type: 'agent-stream', agentName: a });
   }
-  const seenEphemeral = new Set<string>();
+  const seenBoundEvents = new Set<string>();
   for (const ea of ephemeralAgents) {
-    if (seenEphemeral.has(ea.agent_id)) continue;
-    seenEphemeral.add(ea.agent_id);
-    tiles.push({ id: ea.agent_id, type: 'oncall-stream', agentName: ea.current_role || 'oncall' });
+    const key = ea.bound_event_id || ea.agent_id;
+    if (seenBoundEvents.has(key)) continue;
+    seenBoundEvents.add(key);
+    tiles.push({ id: key, type: 'oncall-stream', agentName: ea.current_role || 'oncall' });
   }
   for (const ct of contentTiles) {
     tiles.push({ id: ct.id, type: 'content-viewer' });
@@ -106,14 +107,14 @@ export default function StreamGrid() {
     if (activeAgent && hotspotTileId !== activeAgent) {
       setHotspot(activeAgent);
     } else if (!activeAgent && hotspotTileId) {
-      const isContentOrEphemeral = hotspotTileId.startsWith('content-') || ephemeralAgents.some(e => e.agent_id === hotspotTileId);
+      const isContentOrEphemeral = hotspotTileId.startsWith('content-') || ephemeralAgents.some(e => (e.bound_event_id || e.agent_id) === hotspotTileId);
       if (!isContentOrEphemeral) setHotspot(null);
     }
   }, [autoHotspot, agents, agentStreams, hotspotTileId, setHotspot, ephemeralAgents]);
 
   const renderTile = (tile: TileDescriptor) => {
     const ct = contentTiles.find(c => c.id === tile.id);
-    const ea = ephemeralAgents.find(e => e.agent_id === tile.id);
+    const ea = ephemeralAgents.find(e => (e.bound_event_id || e.agent_id) === tile.id);
     return (
       <GridTile
         key={tile.id}
