@@ -3,7 +3,7 @@
 // 1. [Pattern]: Replaces Dashboard.tsx as the single owner of shared operational state.
 // 2. [Pattern]: WS ownership: owns progress, turn, event_created, event_closed. ConversationFeed keeps brain_thinking, attachment, message_status.
 // 3. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
-// 4. [Pattern]: Agent registry polling (10s) and ephemeral stream (keyed by agent_id) sessionStorage sync live here.
+// 4. [Pattern]: Agent registry polling (10s) and ephemeral stream (keyed by event_id) sessionStorage sync live here.
 // 5. [Gotcha]: Context value uses stable references (useCallback) to minimize re-renders of consumers.
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
@@ -172,11 +172,10 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
           return { ...prev, [actor]: { ...current, messages, eventId: evtId || current.eventId, isActive: true } };
         });
       }
-      if (isEphemeralEvent && actor) {
-        const streamKey = actor;
+      if (isEphemeralEvent && evtId) {
         setEphemeralStream((prev) => ({
           ...prev,
-          [streamKey]: [...(prev[streamKey] || []), msg.message as string].slice(-MAX_BUFFER),
+          [evtId]: [...(prev[evtId] || []), msg.message as string].slice(-MAX_BUFFER),
         }));
       }
     } else if (msg.type === 'turn') {

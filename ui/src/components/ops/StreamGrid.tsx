@@ -42,7 +42,10 @@ export default function StreamGrid() {
   for (const a of agents) {
     tiles.push({ id: a, type: 'agent-stream', agentName: a });
   }
+  const seenEphemeral = new Set<string>();
   for (const ea of ephemeralAgents) {
+    if (seenEphemeral.has(ea.agent_id)) continue;
+    seenEphemeral.add(ea.agent_id);
     tiles.push({ id: ea.agent_id, type: 'oncall-stream', agentName: ea.current_role || 'oncall' });
   }
   for (const ct of contentTiles) {
@@ -122,7 +125,7 @@ export default function StreamGrid() {
         agentState={tile.type === 'agent-stream' ? agentStreams[tile.agentName!] : undefined}
         contentTile={ct}
         onCloseContent={closeContentTile}
-        ephemeralMessages={ea ? ephemeralStream[ea.agent_id] : undefined}
+        ephemeralMessages={ea ? ephemeralStream[ea.bound_event_id || ''] : undefined}
         ephemeralActive={ea?.busy}
       />
     );
