@@ -190,7 +190,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "mode": {
                     "type": "string",
                     "enum": ["investigate", "execute", "rollback", "plan", "review", "analyze", "implement", "test"],
-                    "description": "Behavioral mode for the agent. Determines scope of actions (e.g., investigate=read-only, execute=GitOps write, implement=code changes, test=QE verification).",
+                    "description": (
+                        "Mode controls which skills and tools load on the agent. "
+                        "investigate=cluster inspection, logs, K8s MCP, ArgoCD MCP (read-only). "
+                        "execute=git actions, MR comments, merge, retest (no cluster investigation). "
+                        "implement=code changes, feature development. "
+                        "test=QE verification, browser testing. "
+                        "If the task needs both action AND investigation, split into separate dispatches with different modes."
+                    ),
                 },
             },
             "required": ["agent_name", "task_instruction"],
