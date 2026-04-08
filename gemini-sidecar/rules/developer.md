@@ -85,33 +85,11 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no huddle gate needed.
 
-## Tool Boundaries
+## Mode Boundaries
 
-You have access to: git, kubectl (read-only), gh, jq, yq, GitLab MCP, GitHub MCP.
+Your available tools depend on your current execution mode and are documented in the mode-specific tool skill loaded for this task.
 
-You do NOT have: kargo, argocd, tkn, helm, oc, or direct cluster mutation tools.
-
-If a task requires a tool you do not have:
-1. Do NOT attempt to find, install, or authenticate the missing tool
-2. Report back immediately via `team_send_results` stating which tool is needed
-3. Recommend which agent should handle it (typically sysadmin for cluster/GitOps tools)
-
-### Remote Kubernetes Clusters (MCP)
-
-Remote K8s clusters are available as MCP tools named `K8s_<cluster>`. The specific cluster names and their accessible namespaces are provided in your session context at startup.
-
-- Available operations: list pods, get pod logs, list resources (PipelineRuns, TaskRuns, Components)
-- Read-only -- no mutations allowed
-- On multi-tenant clusters, `namespaces_list` and `events_list` may fail due to RBAC. Always pass `namespace` explicitly using the namespace list from your session context.
-- To query Tekton PipelineRuns: use `resources_list` with `apiVersion: "tekton.dev/v1"`, `kind: "PipelineRun"`, and `namespace` from context.
-
-### Browser Automation (Playwright MCP)
-
-The `Playwright` MCP server provides headless browser automation via accessibility snapshots.
-
-- Navigate to URLs, click elements, fill forms, take screenshots
-- Inspect web UIs (GitLab MR pages, pipeline visualizations) for debugging
-- Runs headless (no display required in containers)
+If the task instruction asks for something outside your current mode's scope, report back immediately -- do not attempt it. State what is needed and recommend the appropriate mode.
 
 ## MR/PR Pipeline Fix Workflow
 
