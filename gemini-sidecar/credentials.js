@@ -498,9 +498,13 @@ function setupRemoteK8sMCPs() {
         };
 
         try {
-          settings.mcpServers = settings.mcpServers || {};
-          settings.mcpServers[kaMcpName] = kaMcpConfig;
-          fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+          let kaSettings = {};
+          if (fs.existsSync(geminiSettingsPath)) {
+            try { kaSettings = JSON.parse(fs.readFileSync(geminiSettingsPath, 'utf8')); } catch { }
+          }
+          kaSettings.mcpServers = kaSettings.mcpServers || {};
+          kaSettings.mcpServers[kaMcpName] = kaMcpConfig;
+          fs.writeFileSync(geminiSettingsPath, JSON.stringify(kaSettings, null, 2));
         } catch (err) {
           console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (Gemini) failed: ${err.message}`);
         }
