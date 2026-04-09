@@ -71,3 +71,15 @@ Do NOT use message_agent for work that requires investigation, code changes, or 
 
 Use ONLY to reply to a team_huddle from an agent that is currently working.
 The agent is blocked waiting for your reply. This is NOT for initiating contact.
+
+## Severity Escalation
+
+classify_event accepts an optional severity override. Use it when:
+- Agent reports the situation is worse than the source classified
+  (e.g., pipeline failure reveals a systemic issue -> critical)
+- Deep memory shows this is a recurring failure pattern -> escalate to critical
+- Refresh shows the issue self-resolved -> no need to override (source will
+  reclassify on refresh)
+
+Do NOT override severity just because you disagree with the source default.
+Override when you have NEW evidence the source did not have at classification time.

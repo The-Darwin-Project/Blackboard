@@ -20,7 +20,8 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 | `domain` | Yes | Initial Cynefin state. `"disorder"` for unclassified sources (chat, slack, timekeeper). Real domain for assessed sources (headhunter, aligner). |
 | `domain_confidence` | Yes | `"assessed"` when source did real LLM triage (headhunter, aligner). `"default"` for unclassified sources. |
 | `brain_domain` | No | Set by Brain's `classify_event` function call. Overrides `domain` once set. Starts `None`. |
-| `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. |
+| `severity` | Yes | `"info"` for user requests, `"warning"`/`"critical"` for anomalies. Headhunter uses `_classify_severity(action, pipeline)`. |
+| `brain_severity` | No | Set by Brain's `classify_event` (optional severity param). Overrides `severity` once set. Starts `None`. |
 | `metrics` | Conditional | Required for aligner events (`EventMetrics` with cpu/memory/error_rate/replicas). `None` for user-initiated events. |
 
 ## Cynefin Domain Classification Pipeline
@@ -33,7 +34,17 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 ## Source-Specific Patterns
 
 * **Aligner**: Full evidence with LLM-classified domain/severity + metrics. `domain_confidence="assessed"`.
-* **Headhunter**: Bot Instructions or LLM-triaged domain. `domain_confidence="assessed"`.
+* **Headhunter**: `source_type="headhunter"`, severity classified from `(action_name, pipeline_status)` via `_classify_severity()`. `display_text` = GitLab action description. `gitlab_context` includes real `pipeline_status` from GitLab API + `todo_created_at` for temporal reasoning. `domain_confidence="assessed"`. No metrics.
+
+  Severity mapping:
+  - `build_failed` -> `warning`
+  - `unmergeable` -> `warning`
+  - any action + `pipeline_status == "failed"` -> `warning`
+  - all other actions (review_requested, approval_required, assigned) -> `info`
+
+  Brain can override via `classify_event(severity=...)` -> stored in `brain_severity`.
+  Resolution order: `brain_severity` > `evidence.severity` > `"warning"` fallback.
+
 * **Chat/Slack**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`, `display_text` = user message.
 * **TimeKeeper**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`.
 

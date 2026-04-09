@@ -59,6 +59,33 @@ Chain: `HEADHUNTER_MAINTAINERS` (static CSV) -> GitLab user email lookup -> MR m
 | Flow gate (`max_active`) | Concurrent events | Yes |
 | GitLab auto-resolve | `review_requested` cleared on bot interaction | Yes |
 
+## Brain Tool: `refresh_gitlab_context`
+
+The Headhunter equivalent of `re_trigger_aligner`. Closes the observe-and-react loop.
+
+* **Mechanism:** Brain calls `refresh_gitlab_context` -> handler calls `headhunter.refresh_mr_state(event_id)` -> Headhunter fetches current MR + pipeline state from GitLab API -> updates `evidence.gitlab_context` + reclassifies `evidence.severity` -> returns snapshot to Brain conversation.
+* **Two patterns:**
+  * **Pre-dispatch triage:** Brain refreshes before `select_agent` to give agents precise instructions based on current state.
+  * **Post-defer verification:** After deferring for a running pipeline, Brain refreshes to check outcome.
+* **Error handling:** GitLab 5xx/429/404 return error dicts; evidence is NOT mutated on error.
+* **Headhunter disabled:** Handler returns graceful fallback message; Brain can use `select_agent` to check MR state manually.
+* **Registration:** `brain.agents["_headhunter"] = headhunter` in `main.py` (post-construction, follows `_aligner` pattern).
+
+## Severity Classification
+
+`_classify_severity(action_name, pipeline_status)` maps MR context to event severity at creation time and on refresh:
+
+| Action | Pipeline | Severity |
+|---|---|---|
+| `build_failed` | any | `warning` |
+| `unmergeable` | any | `warning` |
+| any | `failed` | `warning` |
+| `review_requested` | success/unknown | `info` |
+| `approval_required` | success/unknown | `info` |
+| `assigned` | success/unknown | `info` |
+
+Brain can override via `classify_event(severity=...)` -> stored in `brain_severity` (separate from source classification).
+
 ## Key Invariants
 
 * Sidecar skills NEVER include GitLab usernames in Slack recommendations.

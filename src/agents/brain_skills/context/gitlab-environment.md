@@ -25,7 +25,8 @@ Darwin's GitLab SA CANNOT:
 
 - Retry failed pipelines once. If the retry also fails, the failure reason must be understood before escalating.
 - Konflux/Tekton pipelines are external. GitLab shows them as "external" pipeline status.
-- When the developer reports a pipeline is running, defer until it completes, then re-check the result.
+- When the developer reports a pipeline is running, defer until it completes, then use refresh_gitlab_context to check the result.
+- After an agent retests a pipeline, defer then use refresh_gitlab_context to verify the retest result before closing.
 
 ## MR Lifecycle
 
