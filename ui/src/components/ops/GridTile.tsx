@@ -91,7 +91,6 @@ export default function GridTile({
           eventId={isEphemeral ? tileId : (agentState?.eventId || null)}
           messages={isEphemeral ? (ephemeralMessages || []) : (agentState?.messages || [])}
           isActive={isActive}
-          ephemeral={isEphemeral}
         />
       </div>
     </div>
