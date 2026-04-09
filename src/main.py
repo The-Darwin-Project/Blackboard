@@ -207,6 +207,7 @@ async def lifespan(app: FastAPI):
             close_signal = asyncio.Event()
             brain._headhunter_close_signal = close_signal
             headhunter = Headhunter(blackboard, close_signal=close_signal)
+            brain.agents["_headhunter"] = headhunter
             headhunter_task = asyncio.create_task(headhunter.run())
             logger.info("Headhunter started (GitLab todo poller)")
         else:

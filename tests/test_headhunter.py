@@ -343,3 +343,150 @@ class TestSeverityClassification:
 
     def test_unknown_pipeline_defaults_to_info(self):
         assert Headhunter._classify_severity("assigned", "unknown") == "info"
+
+
+# =========================================================================
+# Refresh MR State Tests
+# =========================================================================
+
+def _make_event_with_gitlab_context(**overrides):
+    """Build a minimal EventDocument-like object for refresh_mr_state tests."""
+    gl_ctx = {
+        "project_id": 100, "mr_iid": 42, "source_branch": "fix/flaky",
+        "action_name": "build_failed", "pipeline_status": "failed",
+        "mr_state": "opened", "merge_status": "can_be_merged",
+    }
+    gl_ctx.update(overrides)
+    evidence = EventEvidence(
+        display_text="GitLab: build_failed on !42",
+        source_type="headhunter",
+        severity="warning",
+        gitlab_context=gl_ctx,
+    )
+    mock_event = MagicMock()
+    mock_event.event.evidence = evidence
+    mock_event.event.evidence.gitlab_context = gl_ctx
+    return mock_event
+
+
+class TestRefreshMrState:
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_fresh_state(self):
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context(action_name="assigned")
+        bb.get_event = AsyncMock(return_value=event)
+        bb.update_event_gitlab_context = AsyncMock()
+        hh = _make_headhunter(blackboard=bb)
+
+        mr_json = {"state": "merged", "merge_status": "merged"}
+        pipeline_json = [{"status": "success"}]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.is_success = True; mr_resp.status_code = 200; mr_resp.json.return_value = mr_json
+            pipe_resp = MagicMock(); pipe_resp.is_success = True; pipe_resp.json.return_value = pipeline_json
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[mr_resp, pipe_resp])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-001")
+
+        assert result["pipeline_status"] == "success"
+        assert result["mr_state"] == "merged"
+        assert result["severity"] == "info"
+        bb.update_event_gitlab_context.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_event_not_found(self):
+        bb = StubBlackboard()
+        bb.get_event = AsyncMock(return_value=None)
+        hh = _make_headhunter(blackboard=bb)
+
+        result = await hh.refresh_mr_state("evt-missing")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_no_gitlab_context(self):
+        bb = StubBlackboard()
+        mock_event = MagicMock()
+        mock_event.event.evidence = EventEvidence(display_text="Chat msg", source_type="chat")
+        mock_event.event.evidence.gitlab_context = None
+        bb.get_event = AsyncMock(return_value=mock_event)
+        hh = _make_headhunter(blackboard=bb)
+
+        result = await hh.refresh_mr_state("evt-chat-001")
+        assert "error" in result
+        assert "gitlab_context" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_mr_deleted_404(self):
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context()
+        bb.get_event = AsyncMock(return_value=event)
+        hh = _make_headhunter(blackboard=bb)
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.status_code = 404; mr_resp.is_success = False
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mr_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-002")
+
+        assert result["mr_state"] == "closed"
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_severity_reclassified_on_refresh(self):
+        """assigned + failed pipeline (warning) -> pipeline now success -> severity should be info."""
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context(action_name="assigned", pipeline_status="failed")
+        bb.get_event = AsyncMock(return_value=event)
+        bb.update_event_gitlab_context = AsyncMock()
+        hh = _make_headhunter(blackboard=bb)
+
+        mr_json = {"state": "opened", "merge_status": "can_be_merged"}
+        pipeline_json = [{"status": "success"}]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.is_success = True; mr_resp.status_code = 200; mr_resp.json.return_value = mr_json
+            pipe_resp = MagicMock(); pipe_resp.is_success = True; pipe_resp.json.return_value = pipeline_json
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[mr_resp, pipe_resp])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-003")
+
+        assert result["severity"] == "info"
+        update_args = bb.update_event_gitlab_context.call_args[0]
+        assert update_args[1]["severity"] == "info"
+
+    @pytest.mark.asyncio
+    async def test_build_failed_stays_warning_even_on_success(self):
+        """build_failed action always maps to warning -- the action itself is the signal."""
+        bb = StubBlackboard()
+        event = _make_event_with_gitlab_context(action_name="build_failed")
+        bb.get_event = AsyncMock(return_value=event)
+        bb.update_event_gitlab_context = AsyncMock()
+        hh = _make_headhunter(blackboard=bb)
+
+        mr_json = {"state": "opened", "merge_status": "can_be_merged"}
+        pipeline_json = [{"status": "success"}]
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mr_resp = MagicMock(); mr_resp.is_success = True; mr_resp.status_code = 200; mr_resp.json.return_value = mr_json
+            pipe_resp = MagicMock(); pipe_resp.is_success = True; pipe_resp.json.return_value = pipeline_json
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(side_effect=[mr_resp, pipe_resp])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            result = await hh.refresh_mr_state("evt-test-004")
+
+        assert result["severity"] == "warning"

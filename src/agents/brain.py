@@ -1271,7 +1271,8 @@ class Brain:
                 lines.append(f"Domain: {evidence.domain} (source-assessed)")
             else:
                 lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
-            lines.append(f"Severity: {evidence.severity}")
+            eff_severity = evidence.brain_severity or evidence.severity
+            lines.append(f"Severity: {eff_severity}")
             now = time.time()
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context
@@ -2253,16 +2254,59 @@ class Brain:
         elif function_name == "classify_event":
             domain = args.get("domain", "complicated")
             reasoning = args.get("reasoning", "")
+            severity = args.get("severity")
             await self.blackboard.update_event_domain(event_id, domain)
+            thoughts = f"Cynefin: {domain.upper()}."
+            if severity:
+                await self.blackboard.update_event_severity(event_id, severity)
+                thoughts += f" Severity: {severity}."
+                await self._broadcast({"type": "severity_updated", "event_id": event_id, "severity": severity})
+            thoughts += f" {reasoning}"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="triage",
-                thoughts=f"Cynefin: {domain.upper()}. {reasoning}",
+                thoughts=thoughts,
                 timestamp=time.time(),
             )
             await self._append_and_broadcast(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
-            return False  # Don't re-invoke immediately -- let event loop pick up with dispatch tools unlocked
+            return False
+
+        elif function_name == "refresh_gitlab_context":
+            condition = args.get("check_condition", "")
+            headhunter = self.agents.get("_headhunter")
+            if not headhunter:
+                result_text = "Headhunter not available (GITLAB_HOST not configured). Use select_agent to check MR state manually."
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="verify",
+                    thoughts=result_text,
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+
+            state = await headhunter.refresh_mr_state(event_id)
+            if "error" in state:
+                result_text = (
+                    f"GitLab refresh ({condition}): {state['error']}. "
+                    f"Pipeline: {state.get('pipeline_status', '?')}, MR: {state.get('mr_state', '?')}, "
+                    f"Merge: {state.get('merge_status', '?')}"
+                )
+            else:
+                result_text = (
+                    f"GitLab refresh ({condition}): "
+                    f"Pipeline: {state['pipeline_status']}, MR: {state['mr_state']}, "
+                    f"Merge: {state['merge_status']}, Severity: {state['severity']}"
+                )
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain", action="verify",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return False
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
@@ -3034,7 +3078,7 @@ class Brain:
         if isinstance(evidence, EventEvidence):
             lines.append(f"- **Evidence:** {evidence.display_text}")
             lines.append(f"- **Domain:** {evidence.brain_domain or evidence.domain}")
-            lines.append(f"- **Severity:** {evidence.severity}")
+            lines.append(f"- **Severity:** {evidence.brain_severity or evidence.severity}")
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context
                 lines.append(f"")

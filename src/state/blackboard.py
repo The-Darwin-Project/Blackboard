@@ -1977,7 +1977,7 @@ class BlackboardState:
             severity = "warning"
             if isinstance(evidence, EventEvidence):
                 domain = evidence.brain_domain or evidence.domain
-                severity = evidence.severity
+                severity = evidence.brain_severity or evidence.severity
 
             report_data = {
                 "event_id": event_id,

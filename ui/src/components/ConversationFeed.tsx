@@ -192,7 +192,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             if (!ev || typeof ev === 'string') return null;
             const domain = ev.brain_domain || ev.domain || 'disorder';
             const dc = DOMAIN_COLORS[domain as keyof typeof DOMAIN_COLORS] || DOMAIN_COLORS.disorder;
-            const severity = ev.severity || 'info';
+            const severity = ev.brain_severity || ev.severity || 'info';
             const sc = SEVERITY_COLORS[severity] || SEVERITY_COLORS.info;
             return (
               <>

@@ -151,6 +151,7 @@ export interface EventEvidence {
   triggered_by?: string | null;
   domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
   brain_domain?: string;
+  brain_severity?: 'info' | 'warning' | 'critical';
   domain_confidence?: 'assessed' | 'default';
   severity: 'info' | 'warning' | 'critical';
   metrics?: EventMetrics;

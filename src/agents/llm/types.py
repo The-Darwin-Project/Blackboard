@@ -163,6 +163,15 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "One sentence explaining why this domain (not the source's suggestion)",
                 },
+                "severity": {
+                    "type": "string",
+                    "enum": ["info", "warning", "critical"],
+                    "description": (
+                        "Optional severity override. Use when evidence warrants escalation "
+                        "(e.g., third consecutive pipeline failure -> critical). "
+                        "Omit to keep the source classification."
+                    ),
+                },
             },
             "required": ["domain", "reasoning"],
         },
@@ -524,6 +533,28 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
             },
             "required": ["platform", "summary", "description", "priority"],
+        },
+    },
+    {
+        "name": "refresh_gitlab_context",
+        "description": (
+            "Quick-check: ask the Headhunter to re-fetch current MR and pipeline "
+            "state from GitLab WITHOUT dispatching an agent. Returns a snapshot of "
+            "the current state. Use in two patterns: "
+            "(1) Pre-dispatch triage: refresh before selecting an agent so you can "
+            "give precise instructions (e.g., 'pipeline failed' vs 'pipeline passed, merge'). "
+            "(2) Post-defer check: after deferring for a running pipeline, refresh to "
+            "see the outcome before deciding next action."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "check_condition": {
+                    "type": "string",
+                    "description": "What to verify (e.g., 'pipeline passed after retest', 'MR merged', 'pipeline completed after defer')",
+                },
+            },
+            "required": ["check_condition"],
         },
     },
 ]
