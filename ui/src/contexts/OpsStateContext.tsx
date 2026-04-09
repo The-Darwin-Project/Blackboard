@@ -94,7 +94,13 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       try {
         const agents = await getAgents();
         setRegisteredAgents(agents);
-        setEphemeralAgents(agents.filter((a: AgentRegistryEntry) => a.ephemeral));
+        const ephemeral = agents.filter((a: AgentRegistryEntry) => a.ephemeral);
+        const activeIds = activeEventsRef.current?.map(e => e.id);
+        setEphemeralAgents(
+          activeIds && activeIds.length > 0
+            ? ephemeral.filter(a => !a.bound_event_id || activeIds.includes(a.bound_event_id))
+            : ephemeral
+        );
         setAgentStreams(prev => {
           const next = { ...prev };
           for (const a of AGENTS) {
