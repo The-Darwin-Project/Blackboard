@@ -248,6 +248,7 @@ kargo:
 # Remote Kubernetes Clusters (read-only MCP access for agents)
 # Each entry mounts a kubeconfig Secret and registers a K8s MCP server.
 # Agents see each cluster as a separate MCP tool namespace (K8s_<name>).
+# If kubearchiveUrl is set, also registers KubeArchive_<name> MCP for archived data.
 # Secret must contain a key named "kubeconfig" with a valid kubeconfig file.
 # =============================================================================
 remoteClusters: {}
@@ -257,6 +258,7 @@ remoteClusters: {}
 #   existingSecret: "darwin-konflux-kubeconfig"  # Secret with key "kubeconfig"
 #   secretKey: "kubeconfig"                       # Override if key name differs
 #   # Multi-tenant: agents can't namespaces_list -- list accessible namespaces here
+#   kubearchiveUrl: ""  # KubeArchive API URL (archived PipelineRuns/TaskRuns/logs)
 #   namespacePattern: "v{major}-{minor}-openshift-virtualization-tenant"
 #   namespaces:
 #     - "v4-18-openshift-virtualization-tenant"

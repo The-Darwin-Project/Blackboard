@@ -5,7 +5,7 @@
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
 // 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
-// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
+// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config). If meta.kubearchiveUrl is set, also registers KubeArchive_<name> MCP (kubearchive-mcp.js with SA token from kubeconfig). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -480,6 +480,40 @@ function setupRemoteK8sMCPs() {
     try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { }
 
     console.log(`[${new Date().toISOString()}] ${mcpName} MCP configured (read-only, kubeconfig=${kubeconfigPath}, namespaces=${(meta.namespaces || []).length})`);
+
+    if (meta.kubearchiveUrl) {
+      let token = '';
+      try {
+        const kc = fs.readFileSync(kubeconfigPath, 'utf8');
+        const match = kc.match(/token:\s*(.+)/);
+        if (match) token = match[1].trim();
+      } catch { }
+
+      if (token) {
+        const kaMcpName = `KubeArchive_${name}`;
+        const kaMcpConfig = {
+          command: resolveCommand('node'),
+          args: ['/app/kubearchive-mcp.js'],
+          env: { KUBEARCHIVE_URL: meta.kubearchiveUrl, KUBEARCHIVE_TOKEN: token },
+        };
+
+        try {
+          settings.mcpServers = settings.mcpServers || {};
+          settings.mcpServers[kaMcpName] = kaMcpConfig;
+          fs.writeFileSync(geminiSettingsPath, JSON.stringify(settings, null, 2));
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (Gemini) failed: ${err.message}`);
+        }
+
+        try {
+          writeClaudeMcpServer(kaMcpName, kaMcpConfig);
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] ${kaMcpName} MCP config (Claude) failed: ${err.message}`);
+        }
+
+        console.log(`[${new Date().toISOString()}] ${kaMcpName} MCP configured (${meta.kubearchiveUrl})`);
+      }
+    }
   }
 }
 

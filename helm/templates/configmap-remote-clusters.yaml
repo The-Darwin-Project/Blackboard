@@ -19,6 +19,7 @@ data:
       "name": {{ $name | quote }},
       "displayName": {{ $cluster.displayName | default $name | quote }},
       "namespacePattern": {{ $cluster.namespacePattern | default "" | quote }},
+      "kubearchiveUrl": {{ $cluster.kubearchiveUrl | default "" | quote }},
       "namespaces": {{ $cluster.namespaces | default list | toJson }}
     }
   {{- end }}
