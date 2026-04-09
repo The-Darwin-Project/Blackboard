@@ -125,7 +125,7 @@ async def run(args: argparse.Namespace) -> None:
             logger.error(f"  EventEvidence: INVALID -- {e}")
             continue
 
-        event_id = await hh.create_headhunter_event(todo, plan_text, domain)
+        event_id = await hh.create_headhunter_event(todo, plan_text, domain, context)
         logger.info(f"  Event created: {event_id}")
         print(f"\n--- Event {event_id} ---")
         print(f"Plan:\n{plan_text[:500]}")
