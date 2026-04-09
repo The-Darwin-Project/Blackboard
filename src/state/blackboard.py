@@ -1850,6 +1850,59 @@ class BlackboardState:
                     continue
         logger.debug(f"Brain domain set on event {event_id}: {brain_domain}")
 
+    async def update_event_gitlab_context(self, event_id: str, updates: dict) -> None:
+        """Patch gitlab_context fields on an active event's evidence (WATCH/MULTI).
+
+        Merges `updates` into the existing gitlab_context dict. Also updates
+        evidence.severity if 'severity' key is present in updates (source
+        reclassification on refresh -- does NOT touch brain_severity).
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for gitlab_context update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    if isinstance(event.event.evidence, EventEvidence):
+                        gl = event.event.evidence.gitlab_context or {}
+                        gl.update(updates)
+                        event.event.evidence.gitlab_context = gl
+                        if "severity" in updates:
+                            event.event.evidence.severity = updates["severity"]
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"GitLab context updated on event {event_id}: {list(updates.keys())}")
+
+    async def update_event_severity(self, event_id: str, brain_severity: str) -> None:
+        """Set Brain-assessed severity override on event evidence (WATCH/MULTI)."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for severity update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    if isinstance(event.event.evidence, EventEvidence):
+                        event.event.evidence.brain_severity = brain_severity
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"Brain severity set on event {event_id}: {brain_severity}")
+
     SLACK_MAPPING_TTL = 86400  # 24h safety net (cleaned explicitly on event close)
 
     async def set_slack_mapping(

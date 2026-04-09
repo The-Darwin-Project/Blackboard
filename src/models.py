@@ -275,6 +275,7 @@ class EventEvidence(BaseModel):
         None, description="GitLab todo context: todo_id, action_name, project_id, mr_iid, pipeline_status, maintainer"
     )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
+    brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
 
 

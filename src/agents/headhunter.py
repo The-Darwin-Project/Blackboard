@@ -9,6 +9,9 @@
 # 7. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
 # 8. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
 # 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
+# 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
+# 11. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
+# 12. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
 
@@ -405,28 +408,48 @@ class Headhunter:
                     return val
         return "complicated"
 
+    @staticmethod
+    def _classify_severity(action_name: str, pipeline_status: str) -> str:
+        """Map MR action + pipeline status to event severity.
+
+        build_failed / unmergeable -> warning (operational concern).
+        Any action with a failed pipeline -> warning.
+        Routine requests (review, approval, assigned) -> info.
+        """
+        if action_name == "build_failed":
+            return "warning"
+        if action_name == "unmergeable":
+            return "warning"
+        if pipeline_status == "failed":
+            return "warning"
+        return "info"
+
     # =========================================================================
     # Event Creation
     # =========================================================================
 
-    async def create_headhunter_event(self, todo: dict, plan_text: str, domain: str) -> str:
-        """Push event to Brain queue with embedded plan."""
+    async def create_headhunter_event(self, todo: dict, plan_text: str, domain: str, context: dict) -> str:
+        """Push event to Brain queue with embedded plan and classified evidence."""
         from ..models import EventEvidence
 
         target = todo["target"]
         project = todo["project"]
         project_path = project.get("path_with_namespace", "")
+        action_name = todo["action_name"]
+        pipeline_status = context.get("pipeline_status", "unknown")
+        severity = self._classify_severity(action_name, pipeline_status)
         maintainer = await self.resolve_maintainer(project_path, todo)
+        logger.info(f"Headhunter severity: {severity} for {action_name}/{pipeline_status}")
         evidence = EventEvidence(
-            display_text=f"GitLab: {todo['action_name']} on !{target['iid']} in {project_path}",
+            display_text=f"GitLab: {action_name} on !{target['iid']} in {project_path}",
             source_type="headhunter",
             triggered_by="gitlab-bot",
             domain=domain,
             domain_confidence="assessed",
-            severity="info",
+            severity=severity,
             gitlab_context={
                 "todo_id": todo["id"],
-                "action_name": todo["action_name"],
+                "action_name": action_name,
                 "project_id": project["id"],
                 "project_path": project_path,
                 "mr_iid": target["iid"],
@@ -437,7 +460,8 @@ class Headhunter:
                 "target_branch": target.get("target_branch", ""),
                 "author": target.get("author", {}).get("username", ""),
                 "target_url": todo.get("target_url", "").split("#")[0],
-                "pipeline_status": "unknown",
+                "pipeline_status": pipeline_status,
+                "todo_created_at": todo.get("created_at", ""),
                 "mr_description": (target.get("description") or "")[:2000],
                 "maintainer": maintainer,
             },
@@ -452,6 +476,85 @@ class Headhunter:
         self._processed_todos.add((project["id"], target["iid"]))
         logger.info(f"Headhunter event created: {event_id} for {todo['action_name']} on !{target['iid']}")
         return event_id
+
+    async def refresh_mr_state(self, event_id: str) -> dict:
+        """Re-fetch current MR/pipeline state from GitLab and update event evidence.
+
+        Called by Brain's refresh_gitlab_context tool. Returns a summary dict
+        for the Brain conversation turn. On error, returns {error: str} and
+        leaves evidence unchanged.
+        """
+        event = await self.blackboard.get_event(event_id)
+        if not event:
+            return {"error": f"Event {event_id} not found"}
+
+        gl_ctx = None
+        if event.event.evidence and hasattr(event.event.evidence, "gitlab_context"):
+            gl_ctx = event.event.evidence.gitlab_context
+        if not gl_ctx:
+            return {"error": "Not a headhunter event (no gitlab_context)"}
+
+        project_id = gl_ctx.get("project_id")
+        mr_iid = gl_ctx.get("mr_iid")
+        source_branch = gl_ctx.get("source_branch", "")
+        if not project_id or not mr_iid:
+            return {"error": "Missing project_id or mr_iid in gitlab_context"}
+
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=30) as client:
+                headers = self._headers()
+
+                mr_resp = await client.get(
+                    self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
+                    headers=headers,
+                )
+                if mr_resp.status_code == 404:
+                    logger.info(f"refresh_mr_state: MR !{mr_iid} not found (deleted?)")
+                    return {"error": "MR not found (deleted?)", "pipeline_status": "unknown",
+                            "mr_state": "closed", "merge_status": "unknown", "severity": "info"}
+                if mr_resp.status_code == 429:
+                    logger.warning("refresh_mr_state: GitLab rate limited")
+                    return {"error": "GitLab rate limited", "pipeline_status": gl_ctx.get("pipeline_status", "unknown"),
+                            "mr_state": gl_ctx.get("mr_state", "unknown"), "merge_status": gl_ctx.get("merge_status", "unknown"),
+                            "severity": event.event.evidence.severity if event.event.evidence else "warning"}
+
+                mr_state = "unknown"
+                merge_status = "unknown"
+                if mr_resp.is_success:
+                    mr_data = mr_resp.json()
+                    mr_state = mr_data.get("state", "unknown")
+                    merge_status = mr_data.get("merge_status", "unknown")
+
+                pipe_resp = await client.get(
+                    self._api_url(f"/projects/{project_id}/pipelines"),
+                    headers=headers,
+                    params={"ref": source_branch, "order_by": "updated_at", "per_page": "1"},
+                )
+                pipeline_status = "unknown"
+                if pipe_resp.is_success:
+                    pipelines = pipe_resp.json()
+                    if pipelines:
+                        pipeline_status = pipelines[0].get("status", "unknown")
+
+        except Exception as e:
+            logger.warning(f"refresh_mr_state: GitLab API error for {event_id}: {e}")
+            return {"error": f"GitLab API unavailable: {e}", "pipeline_status": "unknown",
+                    "mr_state": "unknown", "merge_status": "unknown", "severity": "warning"}
+
+        action_name = gl_ctx.get("action_name", "assigned")
+        severity = self._classify_severity(action_name, pipeline_status)
+
+        updates = {
+            "pipeline_status": pipeline_status,
+            "mr_state": mr_state,
+            "merge_status": merge_status,
+            "severity": severity,
+        }
+        await self.blackboard.update_event_gitlab_context(event_id, updates)
+        logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}, severity={severity}")
+
+        return {"pipeline_status": pipeline_status, "mr_state": mr_state,
+                "merge_status": merge_status, "severity": severity}
 
     async def _resolve_service(self, project_path: str) -> str:
         """Map GitLab project path to a Darwin service name via service registry.
@@ -603,7 +706,7 @@ class Headhunter:
                 continue
             context = await self.fetch_context(todo)
             plan_text, domain = await self.analyze_and_plan(context)
-            await self.create_headhunter_event(todo, plan_text, domain)
+            await self.create_headhunter_event(todo, plan_text, domain, context)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid -- Phase 2)

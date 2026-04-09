@@ -53,6 +53,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
@@ -1271,6 +1272,7 @@ class Brain:
             else:
                 lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
             lines.append(f"Severity: {evidence.severity}")
+            now = time.time()
             if evidence.gitlab_context:
                 gl = evidence.gitlab_context
                 lines.append("")
@@ -1282,17 +1284,32 @@ class Brain:
                 lines.append(f"  Merge Status: {gl.get('merge_status', '')}")
                 lines.append(f"  Source Branch: {gl.get('source_branch', '')}")
                 lines.append(f"  Author: {gl.get('author', '')}")
+                todo_ts = gl.get("todo_created_at", "")
+                if todo_ts:
+                    try:
+                        dt = datetime.fromisoformat(todo_ts.replace("Z", "+00:00"))
+                        gl_age = int(now - dt.timestamp())
+                        gl_min, gl_sec = divmod(gl_age, 60)
+                        lines.append(f"  GitLab Event Age: {gl_min}m {gl_sec}s ago")
+                    except (ValueError, TypeError):
+                        pass
                 maintainer = gl.get("maintainer", {})
                 if maintainer:
                     emails = maintainer.get("emails", [])
                     if emails:
                         lines.append(f"  Maintainer Emails: {', '.join(emails)}")
                 logger.debug("Brain prompt includes gitlab_context for event %s", event.id)
+        else:
+            now = time.time()
 
-        event_created = event.conversation[0].timestamp if event.conversation else time.time()
-        age_seconds = int(time.time() - event_created)
-        age_min, age_sec = divmod(age_seconds, 60)
-        lines.append(f"Event Age: {age_min}m {age_sec}s")
+        if event.queued_at:
+            queue_age = int(now - event.queued_at)
+            q_min, q_sec = divmod(queue_age, 60)
+            lines.append(f"Event Created: {q_min}m {q_sec}s ago")
+        if event.queued_at and event.processing_started_at:
+            wait = int(event.processing_started_at - event.queued_at)
+            w_min, w_sec = divmod(wait, 60)
+            lines.append(f"Queue Wait: {w_min}m {w_sec}s")
 
         svc = await self.blackboard.get_service(event.service)
         if svc:

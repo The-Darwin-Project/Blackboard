@@ -201,9 +201,10 @@ class TestEventCreation:
         bb = StubBlackboard()
         hh = _make_headhunter(blackboard=bb)
         todo = _make_todo()
+        context = {"action_name": "assigned", "pipeline_status": "success"}
         plan = "---\nplan: test\nservice: general\ndomain: CLEAR\n---"
 
-        event_id = await hh.create_headhunter_event(todo, plan, "clear")
+        event_id = await hh.create_headhunter_event(todo, plan, "clear", context)
 
         assert event_id.startswith("evt-test-")
         assert len(bb.events) == 1
@@ -214,10 +215,50 @@ class TestEventCreation:
         bb = StubBlackboard()
         hh = _make_headhunter(blackboard=bb)
         todo = _make_todo(project_id=200, mr_iid=55)
+        context = {"action_name": "assigned", "pipeline_status": "success"}
 
-        await hh.create_headhunter_event(todo, "plan", "clear")
+        await hh.create_headhunter_event(todo, "plan", "clear", context)
 
         assert (200, 55) in hh._processed_todos
+
+    @pytest.mark.asyncio
+    async def test_pipeline_status_flows_from_context_to_evidence(self):
+        bb = StubBlackboard()
+        captured_evidence = []
+        original_create = bb.create_event
+        async def capture_create(source, service, reason, evidence):
+            captured_evidence.append(evidence)
+            return await original_create(source, service, reason, evidence)
+        bb.create_event = capture_create
+
+        hh = _make_headhunter(blackboard=bb)
+        todo = _make_todo(action_name="build_failed")
+        context = {"action_name": "build_failed", "pipeline_status": "failed"}
+
+        await hh.create_headhunter_event(todo, "plan", "clear", context)
+
+        ev = captured_evidence[0]
+        assert ev.gitlab_context["pipeline_status"] == "failed"
+        assert ev.severity == "warning"
+
+    @pytest.mark.asyncio
+    async def test_todo_created_at_flows_to_evidence(self):
+        bb = StubBlackboard()
+        captured_evidence = []
+        async def capture_create(source, service, reason, evidence):
+            captured_evidence.append(evidence)
+            return "evt-test-0001"
+        bb.create_event = capture_create
+
+        hh = _make_headhunter(blackboard=bb)
+        todo = _make_todo()
+        todo["created_at"] = "2026-04-09T10:00:00Z"
+        context = {"action_name": "assigned", "pipeline_status": "success"}
+
+        await hh.create_headhunter_event(todo, "plan", "clear", context)
+
+        ev = captured_evidence[0]
+        assert ev.gitlab_context["todo_created_at"] == "2026-04-09T10:00:00Z"
 
 
 # =========================================================================
@@ -273,3 +314,32 @@ class TestAnalysisFallback:
     def test_extract_domain_defaults_to_complicated(self):
         plan = "---\nplan: test\n---"
         assert Headhunter._extract_domain(plan) == "complicated"
+
+
+# =========================================================================
+# Severity Classification Tests
+# =========================================================================
+
+class TestSeverityClassification:
+    def test_build_failed_is_warning(self):
+        assert Headhunter._classify_severity("build_failed", "failed") == "warning"
+
+    def test_build_failed_any_pipeline_is_warning(self):
+        assert Headhunter._classify_severity("build_failed", "success") == "warning"
+        assert Headhunter._classify_severity("build_failed", "unknown") == "warning"
+
+    def test_unmergeable_is_warning(self):
+        assert Headhunter._classify_severity("unmergeable", "success") == "warning"
+
+    def test_any_action_with_failed_pipeline_is_warning(self):
+        assert Headhunter._classify_severity("assigned", "failed") == "warning"
+        assert Headhunter._classify_severity("review_requested", "failed") == "warning"
+
+    def test_routine_actions_are_info(self):
+        assert Headhunter._classify_severity("assigned", "success") == "info"
+        assert Headhunter._classify_severity("review_requested", "success") == "info"
+        assert Headhunter._classify_severity("approval_required", "success") == "info"
+        assert Headhunter._classify_severity("directly_addressed", "unknown") == "info"
+
+    def test_unknown_pipeline_defaults_to_info(self):
+        assert Headhunter._classify_severity("assigned", "unknown") == "info"
