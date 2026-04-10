@@ -145,11 +145,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "classify_event",
         "description": (
-            "Classify or reclassify this event's Cynefin domain based on YOUR OWN analysis. "
-            "MANDATORY before first agent dispatch -- select_agent is unavailable until you classify. "
-            "Also call mid-event when evidence changes the domain (e.g., CLEAR -> COMPLEX after agent "
-            "reports unknown root cause). Each call is recorded as a brain.triage turn and the "
-            "pipeline adapts immediately."
+            "Classify this event's Cynefin domain. Called once during initial triage -- "
+            "select_agent requires a prior classification. Reclassify only when NEW evidence "
+            "changes the domain (e.g., agent reports unexpected complexity). "
+            "Do NOT reclassify just because a new processing cycle started."
         ),
         "input_schema": {
             "type": "object",

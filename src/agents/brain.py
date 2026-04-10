@@ -996,10 +996,10 @@ class Brain:
             "is_waiting": event.id in self._waiting_for_user,
         }
 
-        recent = event.conversation[-3:] if event.conversation else []
         flags["has_agent_result"] = any(
-            t.actor not in ("brain", "user", "aligner") for t in recent
+            t.actor not in ("brain", "user", "aligner") for t in event.conversation
         )
+        recent = event.conversation[-3:] if event.conversation else []
         flags["last_is_user"] = bool(recent and recent[-1].actor == "user")
 
         active_ids = await self.blackboard.get_active_events()
@@ -2289,7 +2289,7 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
-            return False
+            return True
 
         elif function_name == "refresh_gitlab_context":
             condition = args.get("check_condition", "")
