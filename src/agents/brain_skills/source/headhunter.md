@@ -28,29 +28,29 @@ For pipeline failures after retry: the failure reason must be known before escal
 
 For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
 
-## Triage Pattern: Refresh Before Dispatch
+## Triage Pattern: Refresh Once, Then Act
 
-Before dispatching an agent for a headhunter event, use refresh_gitlab_context
-to get the current MR/pipeline state. This lets you give precise instructions:
+Call refresh_gitlab_context ONCE when you first process a headhunter event.
+Then IMMEDIATELY act on the result -- do NOT call refresh_gitlab_context again
+in the same processing cycle:
 
 - Pipeline failed -> select_agent with "pipeline failed, investigate root cause"
 - Pipeline success + MR open -> select_agent with "pipeline green, merge the MR"
 - Pipeline success + MR merged -> close_event (self-resolved, no agent needed)
-- Pipeline running -> defer_event, then refresh again after deferral
+- Pipeline running -> defer_event (refresh again ONLY after the defer wakes you)
 
-Never dispatch an agent with stale evidence. Refresh first, then dispatch
-with the current state in the instructions.
+CRITICAL: One refresh per cycle. After you see the result, your next call MUST
+be select_agent, close_event, or defer_event -- never another refresh.
 
 ## Post-Defer Verification
 
-After deferring for a running pipeline or pending action, use
-refresh_gitlab_context to check the outcome. This is the same pattern as
-re_trigger_aligner for metric-observable changes:
+After a defer wakes you, call refresh_gitlab_context ONCE to check the outcome:
 
 1. defer_event (wait for pipeline / external action)
-2. refresh_gitlab_context (check what happened)
+2. [wake] refresh_gitlab_context (check what happened)
 3. If resolved -> close_event
 4. If failed -> select_agent with failure context
+5. Do NOT refresh again -- act on the result
 
 ## Temporal Reasoning
 
@@ -60,8 +60,7 @@ it), and Queue Wait (how long it sat before you processed it).
 
 Use temporal context with deep memory to inform your triage. If a pipeline
 failed 30 minutes ago and deep memory shows this pipeline typically completes
-in 25 minutes, the state may have changed during queue wait. Always
-refresh_gitlab_context before acting on potentially stale evidence.
+in 25 minutes, the state has likely changed. Refresh once to check, then act.
 
 ## Operational History
 

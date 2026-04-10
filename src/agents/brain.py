@@ -2287,17 +2287,18 @@ class Brain:
                 return True
 
             state = await headhunter.refresh_mr_state(event_id)
+            next_action = "Now act: select_agent, close_event, or defer_event. Do NOT call refresh_gitlab_context again."
             if "error" in state:
                 result_text = (
                     f"GitLab refresh ({condition}): {state['error']}. "
                     f"Pipeline: {state.get('pipeline_status', '?')}, MR: {state.get('mr_state', '?')}, "
-                    f"Merge: {state.get('merge_status', '?')}"
+                    f"Merge: {state.get('merge_status', '?')}. {next_action}"
                 )
             else:
                 result_text = (
                     f"GitLab refresh ({condition}): "
                     f"Pipeline: {state['pipeline_status']}, MR: {state['mr_state']}, "
-                    f"Merge: {state['merge_status']}, Severity: {state['severity']}"
+                    f"Merge: {state['merge_status']}, Severity: {state['severity']}. {next_action}"
                 )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
