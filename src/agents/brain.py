@@ -631,14 +631,24 @@ class Brain:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
             logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
 
-        # Strip refresh_gitlab_context if already used in recent conversation -- prevents re-processing loops
-        recent_refresh = any(
-            t.actor == "brain" and t.action == "verify" and "GitLab refresh" in (t.thoughts or "")
-            for t in (event.conversation[-3:] if event.conversation else [])
+        # refresh_gitlab_context: only available during triage (post-classify, pre-agent) and defer-wake.
+        # Stripped after first use as defense-in-depth against loops.
+        is_triage = (
+            context_flags
+            and context_flags.get("brain_has_classified", False)
+            and not context_flags.get("has_agent_result", False)
         )
-        if recent_refresh:
+        refresh_allowed = is_triage or is_defer_wake
+        if not refresh_allowed:
             active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
-            logger.info(f"Refresh already done: stripped refresh_gitlab_context for {event_id}")
+        else:
+            recent_refresh = any(
+                t.actor == "brain" and t.action == "verify" and "GitLab refresh" in (t.thoughts or "")
+                for t in (event.conversation[-3:] if event.conversation else [])
+            )
+            if recent_refresh:
+                active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
+                logger.info(f"Refresh already done: stripped refresh_gitlab_context for {event_id}")
 
         # Domain classification gate: mandatory classify_event before any agent dispatch
         if context_flags and not context_flags.get("brain_has_classified", False):
@@ -2296,18 +2306,17 @@ class Brain:
                 return True
 
             state = await headhunter.refresh_mr_state(event_id)
-            next_action = "Now act: select_agent, close_event, or defer_event. Do NOT call refresh_gitlab_context again."
             if "error" in state:
                 result_text = (
                     f"GitLab refresh ({condition}): {state['error']}. "
                     f"Pipeline: {state.get('pipeline_status', '?')}, MR: {state.get('mr_state', '?')}, "
-                    f"Merge: {state.get('merge_status', '?')}. {next_action}"
+                    f"Merge: {state.get('merge_status', '?')}"
                 )
             else:
                 result_text = (
                     f"GitLab refresh ({condition}): "
                     f"Pipeline: {state['pipeline_status']}, MR: {state['mr_state']}, "
-                    f"Merge: {state['merge_status']}, Severity: {state['severity']}. {next_action}"
+                    f"Merge: {state['merge_status']}, Severity: {state['severity']}"
                 )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
