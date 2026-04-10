@@ -11,8 +11,9 @@ Handles the full MR lifecycle: check pipeline, retest, merge, and conflict repor
 This skill assumes `darwin-gitlab-ops` is loaded (same roles guarantee this).
 
 CRITICAL: For the project path and MR URL, always use the values from the event
-document's GitLab Context section. Never discover the project via svc_get_service --
-it returns the downstream repo which is often a different project than the MR's repo.
+document's GitLab Context section.
+
+**Use the service tools only for aligner events or when a user asked**
 
 ## Fixing Pipeline Failures on an MR
 
