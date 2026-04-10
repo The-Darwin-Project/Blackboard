@@ -631,6 +631,15 @@ class Brain:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
             logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
 
+        # Strip refresh_gitlab_context if already used in recent conversation -- prevents re-processing loops
+        recent_refresh = any(
+            t.actor == "brain" and t.action == "verify" and "GitLab refresh" in (t.thoughts or "")
+            for t in (event.conversation[-3:] if event.conversation else [])
+        )
+        if recent_refresh:
+            active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
+            logger.info(f"Refresh already done: stripped refresh_gitlab_context for {event_id}")
+
         # Domain classification gate: mandatory classify_event before any agent dispatch
         if context_flags and not context_flags.get("brain_has_classified", False):
             pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event"}
