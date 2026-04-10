@@ -22,7 +22,7 @@ The failure reason MUST be known before creating an incident. An incident that s
 - Event classified CHAOTIC
 - Notifying maintainers about a failure (if you called notify_user_slack about a failure, you must also call create_incident)
 
-When calling `create_incident`, always include the MR/PR URL and the failure analysis in the `description` field.
+When calling `create_incident`, always include the MR/PR URL and the failure analysis in the `description` field, include Logs or other evidance from the agents report.
 
 Skip `create_incident` only when:
 
