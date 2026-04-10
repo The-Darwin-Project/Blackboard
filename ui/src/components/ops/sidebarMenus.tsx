@@ -29,15 +29,26 @@ export function agentMenuItems(
 }
 
 export function eventMenuItems(
-  evt: { id: string; status: string },
+  evt: { id: string; status: string; source: string; evidence?: unknown },
   selectEvent: (id: string) => void,
   send: (data: Record<string, unknown>) => void,
   connected: boolean,
 ): ContextMenuItem[] {
+  const ev = evt.evidence as Record<string, unknown> | undefined;
+  const gc = ev?.gitlab_context as Record<string, unknown> | undefined;
+  const mrUrl = evt.source === 'headhunter'
+    ? (gc?.target_url as string || ev?.target_url as string || null)
+    : null;
+
   return [
     { id: 'chat', label: 'Open Chat', icon: <MessageSquare size={18} />, color: '#3b82f6', onClick: () => selectEvent(evt.id) },
     { id: 'plan', label: 'Open Plan', icon: <ListChecks size={18} />, color: '#8b5cf6', onClick: () => selectEvent(evt.id) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
+    ...(mrUrl ? [
+      { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => window.open(mrUrl, '_blank') },
+      { id: 'copy-mr', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(mrUrl) },
+      { id: 'sep-mr', label: '', icon: null, separator: true, onClick: () => {} },
+    ] : []),
     ...(evt.status === 'waiting_approval' ? [{
       id: 'approve', label: 'Approve Plan', icon: <Check size={18} />, color: '#22c55e',
       onClick: () => { if (connected) send({ type: 'approve', event_id: evt.id }); },
