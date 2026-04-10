@@ -2334,7 +2334,7 @@ class Brain:
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
-            return False
+            return True
 
         else:
             logger.warning(f"Unknown function call: {function_name}")
