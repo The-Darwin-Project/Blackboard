@@ -10,6 +10,10 @@ roles: [developer, sysadmin]
 Handles the full MR lifecycle: check pipeline, retest, merge, and conflict reporting.
 This skill assumes `darwin-gitlab-ops` is loaded (same roles guarantee this).
 
+CRITICAL: For the project path and MR URL, always use the values from the event
+document's GitLab Context section. Never discover the project via svc_get_service --
+it returns the downstream repo which is often a different project than the MR's repo.
+
 ## Fixing Pipeline Failures on an MR
 
 When the pipeline failure requires a code/config fix (e.g., Dockerfile update, dependency bump):

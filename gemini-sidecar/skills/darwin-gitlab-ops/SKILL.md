@@ -6,6 +6,21 @@ roles: [architect, sysadmin, developer]
 
 # GitLab Operations
 
+## Project Resolution (CRITICAL)
+
+When working with a GitLab MR from a Headhunter event, the event document
+contains the authoritative project path and MR URL in the GitLab Context
+section. Use THAT project path and MR URL for all API calls.
+
+Do NOT look up the project via svc_get_service or the Darwin journal -- the
+service registry maps to the downstream/source repo, which is often a different
+project than the Konflux builds repo where the MR lives. Using the wrong
+project path means your comments, retests, and merges hit the WRONG MR.
+
+Extract from the event document:
+- `MR URL` -- use this for the target MR
+- `Project` -- use this as the project path for API calls
+
 ## Pre-Configured Environment
 
 `glab` CLI and GitLab MCP tools are pre-configured via `$GITLAB_HOST`. TLS behavior is controlled by the deployment environment. You do not need to handle authentication setup.
