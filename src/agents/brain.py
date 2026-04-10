@@ -1444,9 +1444,21 @@ class Brain:
         """Convert a single ConversationTurn to provider-agnostic parts.
 
         Brain turns use response_parts (thought_signature preserved) when available.
+        tool_result turns get markdown-formatted evidence with thought_signature extracted.
         User/agent turns use text from thoughts/result/evidence fields.
         Image turns embed the image bytes inline in the parts array.
         """
+        if turn.actor == "brain" and turn.action == "tool_result":
+            tool_name = turn.waitingFor or "tool"
+            text = f"## Tool Result: {tool_name}\n\n{turn.evidence or turn.thoughts or ''}"
+            parts: list[dict] = [{"text": text}]
+            if turn.response_parts:
+                for rp in turn.response_parts:
+                    if rp.get("thought_signature"):
+                        parts[0]["thought_signature"] = rp["thought_signature"]
+                        break
+            return parts
+
         if turn.actor == "brain" and turn.response_parts:
             return list(turn.response_parts)
 
@@ -1915,30 +1927,29 @@ class Brain:
             service_name = args.get("service_name", "")
             svc = await self.blackboard.get_service(service_name)
             if svc:
-                info_parts = [f"Service '{service_name}' metadata:"]
-                info_parts.append(f"  Version: {svc.version}")
+                rows = [f"| Version | {svc.version} |"]
                 if svc.gitops_repo:
-                    info_parts.append(f"  GitOps Repo: {svc.gitops_repo}")
+                    rows.append(f"| GitOps Repo | {svc.gitops_repo} |")
                 if svc.gitops_repo_url:
-                    info_parts.append(f"  Repo URL: {svc.gitops_repo_url}")
+                    rows.append(f"| Repo URL | {svc.gitops_repo_url} |")
                 if svc.gitops_config_path:
-                    info_parts.append(f"  Config Path: {svc.gitops_config_path}")
+                    rows.append(f"| Config Path | {svc.gitops_config_path} |")
                 if svc.replicas_ready is not None:
-                    info_parts.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
-                info_parts.append(f"  CPU: {svc.metrics.cpu:.1f}%")
-                info_parts.append(f"  Memory: {svc.metrics.memory:.1f}%")
-                result_text = "\n".join(info_parts)
+                    rows.append(f"| Replicas | {svc.replicas_ready}/{svc.replicas_desired} |")
+                rows.append(f"| CPU | {svc.metrics.cpu:.1f}% |")
+                rows.append(f"| Memory | {svc.metrics.memory:.1f}% |")
+                result_text = f"## Service: {service_name}\n\n| Field | Value |\n|---|---|\n" + "\n".join(rows)
             else:
-                # List available services to help the LLM find the right name
                 known = await self.blackboard.get_services()
-                result_text = f"Service '{service_name}' not found. Known services: {', '.join(sorted(known)) if known else 'none'}"
+                result_text = f"## Service: {service_name}\n\nNot found. Known services: {', '.join(sorted(known)) if known else 'none'}"
 
-            # Append as a brain turn so the LLM sees the result in the next prompt
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="think",
+                action="tool_result",
+                waitingFor="lookup_service",
                 evidence=result_text,
+                response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
             # Signal caller to re-invoke LLM so it can act on the lookup result
@@ -1948,21 +1959,23 @@ class Brain:
             # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
             ev = await self.blackboard.get_event(event_id)
             already_consulted = any(
-                t.action == "think" and t.evidence and "Deep memory" in (t.evidence or "")
+                t.action in ("think", "tool_result") and t.evidence and "Deep memory" in (t.evidence or "")
                 for t in (ev.conversation if ev else [])
             )
             if already_consulted:
                 logger.info(f"Deep memory already consulted for {event_id} -- returning cached results")
                 cached_evidence = next(
                     (t.evidence for t in (ev.conversation if ev else [])
-                     if t.action == "think" and t.evidence and "Deep memory" in t.evidence),
+                     if t.action in ("think", "tool_result") and t.evidence and "Deep memory" in t.evidence),
                     "Deep memory was already consulted (no cached results).",
                 )
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
-                    action="think",
+                    action="tool_result",
+                    waitingFor="consult_deep_memory",
                     evidence=f"[Already consulted] {cached_evidence}",
+                    response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return True
@@ -1973,7 +1986,7 @@ class Brain:
             if archivist and hasattr(archivist, "search"):
                 results = await archivist.search(query, limit=5)
             if results:
-                memory_text = f"Deep memory results for '{query}':\n"
+                memory_text = f"## Deep Memory: \"{query}\"\n\n"
                 for i, r in enumerate(results, 1):
                     p = r.get("payload", {})
                     dur = p.get("duration_seconds", 0)
@@ -1988,22 +2001,21 @@ class Brain:
                     ) or "none"
                     domain_str = p.get("brain_domain", p.get("domain", "?"))
                     memory_text += (
-                        f"  {i}. [{p.get('service', '?')}] "
-                        f"domain: {domain_str} | "
-                        f"Symptom: {p.get('symptom', '?')} | "
-                        f"Root cause: {p.get('root_cause', '?')} | "
-                        f"Fix: {p.get('fix_action', '?')} | "
-                        f"Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], "
-                        f"outcome: {p.get('outcome', '?')} "
-                        f"(score: {r.get('score', 0):.2f})\n"
+                        f"{i}. **[{p.get('service', '?')}]** domain: {domain_str} | score: {r.get('score', 0):.2f}\n"
+                        f"   - Symptom: {p.get('symptom', '?')}\n"
+                        f"   - Root cause: {p.get('root_cause', '?')}\n"
+                        f"   - Fix: {p.get('fix_action', '?')}\n"
+                        f"   - Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
                     )
             else:
-                memory_text = f"No deep memory results for '{query}'."
+                memory_text = f"## Deep Memory: \"{query}\"\n\nNo results found."
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="think",
+                action="tool_result",
+                waitingFor="consult_deep_memory",
                 evidence=memory_text,
+                response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
             return True
@@ -2013,22 +2025,24 @@ class Brain:
             if service_name:
                 entries = await self._get_journal_cached(service_name)
                 if entries:
-                    journal_text = f"Ops journal for {service_name} (last {len(entries)} entries):\n"
-                    journal_text += "\n".join(f"  {e}" for e in entries)
+                    header = f"## Ops Journal: {service_name}\n\n{len(entries)} entries:\n\n"
+                    journal_text = header + "\n".join(f"- {e}" for e in entries)
                 else:
-                    journal_text = f"No ops journal entries for {service_name}."
+                    journal_text = f"## Ops Journal: {service_name}\n\nNo entries found."
             else:
                 entries = await self.blackboard.get_recent_journal_entries()
                 if entries:
-                    journal_text = f"Cross-service ops journal (last {len(entries)} entries):\n"
-                    journal_text += "\n".join(f"  {e}" for e in entries)
+                    header = f"## Ops Journal: all services\n\n{len(entries)} entries:\n\n"
+                    journal_text = header + "\n".join(f"- {e}" for e in entries)
                 else:
-                    journal_text = "No ops journal entries found across any service."
+                    journal_text = "## Ops Journal\n\nNo entries found across any service."
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="think",
+                action="tool_result",
+                waitingFor="lookup_journal",
                 evidence=journal_text,
+                response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
             return True
@@ -2244,8 +2258,10 @@ class Brain:
             if not plan_turn:
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="think",
-                    thoughts="No plan exists for this event.",
+                    actor="brain", action="tool_result",
+                    waitingFor="get_plan_progress",
+                    evidence="## Plan Progress\n\nNo plan exists for this event.",
+                    response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return True
@@ -2257,14 +2273,15 @@ class Brain:
                         steps[sid]["status"] = t.taskForAgent.get("status", "completed")
             progress = list(steps.values())
             done = sum(1 for s in progress if s["status"] == "completed")
-            summary = f"Plan progress: {done}/{len(progress)} steps completed.\n"
+            summary = f"## Plan Progress\n\n{done}/{len(progress)} steps completed:\n\n"
             for s in progress:
-                icon = {"completed": "[x]", "in_progress": "[~]", "blocked": "[!]"}.get(s["status"], "[ ]")
-                summary += f"  {icon} Step {s['id']}: {s.get('summary', '')} ({s.get('agent', '?')}) - {s['status']}\n"
+                icon = {"completed": "- [x]", "in_progress": "- [~]", "blocked": "- [!]"}.get(s["status"], "- [ ]")
+                summary += f"{icon} Step {s['id']}: {s.get('summary', '')} ({s.get('agent', '?')}) -- {s['status']}\n"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="think",
-                thoughts=summary.strip(),
+                actor="brain", action="tool_result",
+                waitingFor="get_plan_progress",
+                evidence=summary.strip(),
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -2321,10 +2338,20 @@ class Brain:
                     f"Severity: {state['severity']}"
                 )
             else:
+                merge_status = state['merge_status']
+                merge_line = f"Merge Readiness: {merge_status}"
+                if merge_status == "need_rebase":
+                    merge_line = "Merge Blocked: needs rebase (new commits on target branch)"
+                elif merge_status == "conflict":
+                    merge_line = "Merge Blocked: merge conflicts (requires human resolution)"
+                elif merge_status in ("ci_must_pass", "ci_still_running"):
+                    merge_line = f"Merge Blocked: {merge_status} (wait for pipeline)"
+                elif merge_status == "not_approved":
+                    merge_line = "Merge Blocked: not approved (requires human approval)"
                 result_text = (
                     f"MR State: {mr_state}\n"
                     f"Pipeline: {state['pipeline_status']}\n"
-                    f"Merge Status: {state['merge_status']}\n"
+                    f"{merge_line}\n"
                     f"Severity: {state['severity']}"
                 )
             turn = ConversationTurn(

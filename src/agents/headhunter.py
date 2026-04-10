@@ -523,7 +523,7 @@ class Headhunter:
                 if mr_resp.is_success:
                     mr_data = mr_resp.json()
                     mr_state = mr_data.get("state", "unknown")
-                    merge_status = mr_data.get("merge_status", "unknown")
+                    merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
 
                 pipe_resp = await client.get(
                     self._api_url(f"/projects/{project_id}/pipelines"),
