@@ -29,6 +29,19 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - If an agent asks for another agent's help, route to that agent.
 - If an agent reports "busy" after retries, defer and re-process later instead of closing.
 
+## Headhunter Triage: Refresh Once, Then Act
+
+For headhunter-sourced events, call refresh_gitlab_context ONCE during initial
+triage to get the current MR/pipeline state. Then act on the result:
+
+- Pipeline failed -> select_agent with "pipeline failed, investigate root cause"
+- Pipeline success + MR open -> select_agent with "pipeline green, merge the MR"
+- Pipeline success + MR merged -> close_event (self-resolved, no agent needed)
+- Pipeline running -> defer_event (check again only after the defer wakes you)
+
+One refresh per triage. Your next call after refresh MUST be select_agent,
+close_event, or defer_event.
+
 ## MR/PR Pipeline Fix Principle
 
 When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):

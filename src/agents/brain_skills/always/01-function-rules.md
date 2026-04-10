@@ -72,6 +72,19 @@ Do NOT use message_agent for work that requires investigation, code changes, or 
 Use ONLY to reply to a team_huddle from an agent that is currently working.
 The agent is blocked waiting for your reply. This is NOT for initiating contact.
 
+## refresh_gitlab_context -- GitLab State Check
+
+Available only during triage (before first agent dispatch) and post-defer wake.
+Calls the Headhunter to re-fetch current MR + pipeline state from GitLab.
+Returns pipeline status, MR state, merge status, and reclassified severity.
+
+Rules:
+- One call per processing cycle. The tool is structurally gated -- it will not
+  appear in your tool list after it has been used or outside triage/defer-wake.
+- After receiving the result, your next call must be select_agent, close_event,
+  or defer_event.
+- Only works on headhunter-sourced events (events with gitlab_context in evidence).
+
 ## Severity Escalation
 
 classify_event accepts an optional severity override. Use it when:
