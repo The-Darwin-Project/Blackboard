@@ -200,12 +200,17 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         blocks.append(_section(f":double_vertical_bar: *Event paused:* {reason}"))
 
     elif key == "brain.think":
-        # brain.think turns populate either thoughts (intermediate observation)
-        # or evidence (tool lookup result), never both today.
         if turn.thoughts:
             blocks.append(_section(f":brain: _{turn.thoughts}_"))
         elif turn.evidence:
             blocks.append(_section(f":brain: {turn.evidence}"))
+
+    elif key == "brain.tool_result":
+        tool_name = turn.waitingFor or "tool"
+        text = turn.evidence or turn.thoughts or ""
+        if len(text) > 2500:
+            text = text[:2500] + "..."
+        blocks.append(_section(f":mag: *{tool_name}*\n{text}"))
 
     elif key == "brain.close":
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))

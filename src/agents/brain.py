@@ -1044,7 +1044,7 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "defer":
                 consecutive_defers += 1
-            elif t.actor == "brain" and t.action in ("think", "wait"):
+            elif t.actor == "brain" and t.action in ("think", "tool_result", "wait"):
                 continue
             else:
                 break
@@ -1055,7 +1055,7 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "wait" and t.waitingFor == "agent":
                 consecutive_waits += 1
-            elif t.actor == "brain" and t.action == "think":
+            elif t.actor == "brain" and t.action in ("think", "tool_result"):
                 continue
             else:
                 break
