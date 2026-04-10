@@ -543,6 +543,8 @@ class Headhunter:
 
         action_name = gl_ctx.get("action_name", "assigned")
         severity = self._classify_severity(action_name, pipeline_status)
+        if mr_state in ("merged", "closed"):
+            merge_status = mr_state
 
         updates = {
             "pipeline_status": pipeline_status,

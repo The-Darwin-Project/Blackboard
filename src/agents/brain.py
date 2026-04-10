@@ -643,7 +643,7 @@ class Brain:
             active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
         else:
             recent_refresh = any(
-                t.actor == "brain" and t.action == "verify" and "GitLab refresh" in (t.thoughts or "")
+                t.actor == "brain" and t.action == "verify" and "MR State:" in (t.thoughts or "")
                 for t in (event.conversation[-3:] if event.conversation else [])
             )
             if recent_refresh:
@@ -2306,17 +2306,26 @@ class Brain:
                 return True
 
             state = await headhunter.refresh_mr_state(event_id)
+            mr_state = state.get("mr_state", "unknown")
             if "error" in state:
                 result_text = (
-                    f"GitLab refresh ({condition}): {state['error']}. "
-                    f"Pipeline: {state.get('pipeline_status', '?')}, MR: {state.get('mr_state', '?')}, "
-                    f"Merge: {state.get('merge_status', '?')}"
+                    f"MR State: {mr_state}\n"
+                    f"Pipeline: {state.get('pipeline_status', '?')}\n"
+                    f"Severity: {state.get('severity', '?')}\n"
+                    f"Error: {state['error']}"
+                )
+            elif mr_state in ("merged", "closed"):
+                result_text = (
+                    f"MR State: {mr_state} (self-resolved)\n"
+                    f"Pipeline: {state['pipeline_status']}\n"
+                    f"Severity: {state['severity']}"
                 )
             else:
                 result_text = (
-                    f"GitLab refresh ({condition}): "
-                    f"Pipeline: {state['pipeline_status']}, MR: {state['mr_state']}, "
-                    f"Merge: {state['merge_status']}, Severity: {state['severity']}"
+                    f"MR State: {mr_state}\n"
+                    f"Pipeline: {state['pipeline_status']}\n"
+                    f"Merge Status: {state['merge_status']}\n"
+                    f"Severity: {state['severity']}"
                 )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
