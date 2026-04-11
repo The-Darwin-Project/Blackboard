@@ -524,6 +524,8 @@ class Headhunter:
                     mr_data = mr_resp.json()
                     mr_state = mr_data.get("state", "unknown")
                     merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
+                    if mr_state in ("merged", "closed"):
+                        state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
 
                 pipe_resp = await client.get(
                     self._api_url(f"/projects/{project_id}/pipelines"),
@@ -543,20 +545,20 @@ class Headhunter:
 
         action_name = gl_ctx.get("action_name", "assigned")
         severity = self._classify_severity(action_name, pipeline_status)
-        if mr_state in ("merged", "closed"):
-            merge_status = mr_state
-
-        updates = {
+        result = {
             "pipeline_status": pipeline_status,
             "mr_state": mr_state,
             "merge_status": merge_status,
             "severity": severity,
         }
-        await self.blackboard.update_event_gitlab_context(event_id, updates)
-        logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}, severity={severity}")
+        if mr_state in ("merged", "closed"):
+            result["merge_status"] = mr_state
+            if state_changed_at:
+                result["state_changed_at"] = state_changed_at
 
-        return {"pipeline_status": pipeline_status, "mr_state": mr_state,
-                "merge_status": merge_status, "severity": severity}
+        await self.blackboard.update_event_gitlab_context(event_id, result)
+        logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}, severity={severity}")
+        return result
 
     async def _resolve_service(self, project_path: str) -> str:
         """Map GitLab project path to a Darwin service name via service registry.

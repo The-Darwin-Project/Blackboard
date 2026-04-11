@@ -2332,11 +2332,21 @@ class Brain:
                     f"Error: {state['error']}"
                 )
             elif mr_state in ("merged", "closed"):
-                result_text = (
-                    f"MR State: {mr_state} (self-resolved)\n"
-                    f"Pipeline: {state['pipeline_status']}\n"
-                    f"Severity: {state['severity']}"
-                )
+                lines = [
+                    f"MR State: {mr_state}",
+                    f"Pipeline: {state['pipeline_status']}",
+                    f"Severity: {state['severity']}",
+                ]
+                changed_at = state.get("state_changed_at", "")
+                if changed_at:
+                    try:
+                        dt = datetime.fromisoformat(changed_at.replace("Z", "+00:00"))
+                        age = int(time.time() - dt.timestamp())
+                        m, s = divmod(age, 60)
+                        lines.append(f"{mr_state.title()} {m}m {s}s ago")
+                    except (ValueError, TypeError):
+                        pass
+                result_text = "\n".join(lines)
             else:
                 merge_status = state['merge_status']
                 merge_line = f"Merge Readiness: {merge_status}"
@@ -2354,10 +2364,11 @@ class Brain:
                     f"{merge_line}\n"
                     f"Severity: {state['severity']}"
                 )
+            thoughts = f"Checking: {condition}\n{result_text}" if condition else result_text
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="verify",
-                thoughts=result_text,
+                thoughts=thoughts,
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)

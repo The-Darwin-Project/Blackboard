@@ -29,18 +29,22 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - If an agent asks for another agent's help, route to that agent.
 - If an agent reports "busy" after retries, defer and re-process later instead of closing.
 
-## Headhunter Triage: Refresh Once, Then Act
+## Headhunter Events: MR Lifecycle Awareness
 
-For headhunter-sourced events, call refresh_gitlab_context ONCE during initial
-triage to get the current MR/pipeline state. Then act on the result:
+Headhunter events track GitLab MR lifecycles. The MR may have progressed since
+the event was created -- it could already be merged, the pipeline may have
+passed, or conflicts may have appeared. The refresh result tells you the
+CURRENT state, which supersedes the original event evidence.
 
-- Pipeline failed -> select_agent with "pipeline failed, investigate root cause"
-- Pipeline success + MR open -> select_agent with "pipeline green, merge the MR"
-- Pipeline success + MR merged -> close_event (self-resolved, no agent needed)
-- Pipeline running -> defer_event (check again only after the defer wakes you)
+MR terminal states (merged, closed) mean the issue is resolved or abandoned.
+There is nothing for an agent to do on a terminal MR -- no merge, no retest,
+no investigation. The event is self-resolved.
 
-One refresh per triage. Your next call after refresh MUST be select_agent,
-close_event, or defer_event.
+MR open + pipeline running means the pipeline is still in progress. Wait for
+it to finish before acting.
+
+MR open + pipeline failed means the pipeline needs attention. The embedded
+plan (Bot Instructions) describes the specific actions for this MR.
 
 ## MR/PR Pipeline Fix Principle
 
