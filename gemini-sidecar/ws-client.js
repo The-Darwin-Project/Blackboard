@@ -222,8 +222,9 @@ async function handleTask(ws, msg) {
   }
 
   const wsProxy = {
-    get readyState() { return ws.readyState; },
+    get readyState() { return ws ? ws.readyState : 3; },
     send(raw) {
+      if (!ws) return;
       try {
         const obj = JSON.parse(raw);
         obj.task_id = taskId;
