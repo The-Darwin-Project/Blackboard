@@ -7,7 +7,7 @@
 const WebSocket = require('ws');
 
 function wsSend(ws, data) {
-  if (ws.readyState === WebSocket.OPEN) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(data));
   }
 }
