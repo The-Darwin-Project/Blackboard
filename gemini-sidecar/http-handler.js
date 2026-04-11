@@ -1,6 +1,6 @@
 // gemini-sidecar/http-handler.js
 // @ai-rules:
-// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute, /proxy/*. All state via state.js.
+// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute, /current-event, /proxy/*. All state via state.js.
 // 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message/teammate_forward — task_id and event_id from state.getCurrentTask().
 // 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 90s timeout.
 // 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set.
@@ -436,6 +436,13 @@ async function handleRequest(req, res) {
     const { status, total, highwater } = state.getBlackboardStatus();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ event_status: status, total, highwater }));
+    return;
+  }
+
+  if (url.pathname === '/current-event' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ eventId: task?.eventId || '' }));
     return;
   }
 

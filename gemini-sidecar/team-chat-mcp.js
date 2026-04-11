@@ -84,8 +84,8 @@ async function handleToolCall(name, args) {
     }
     if (name === 'team_send_to_teammate') {
       if (!PEER_PORT) return { error: 'No peer sidecar configured (PEER_PORT not set)' };
-      const task = state.getCurrentTask();
-      const eventId = task?.eventId || '';
+      let eventId = '';
+      try { const info = await httpGet(SIDECAR_PORT, '/current-event'); eventId = info?.eventId || ''; } catch { /* non-critical */ }
       const r = await httpPost(PEER_PORT, '/callback', {
         type: 'teammate_forward', from: ROLE, content: args.message || '',
         event_id: eventId,
