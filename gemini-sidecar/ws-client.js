@@ -7,7 +7,7 @@
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId (fixes pre-existing bug from legacy mode).
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
-// 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate/proactive messages via handleTask with saved session context.
+// 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(null, ...) — Brain-silent. Peer-to-peer flow never leaks into Brain WS.
 // 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
 
 const WebSocket = require('ws');
@@ -351,7 +351,7 @@ function tryWake(from, content, eventId) {
     mode: 'implement',
   };
   console.log(`[${new Date().toISOString()}] Wake triggered: event ${resolvedEventId} (from: ${from}, session: ${ctx?.sessionId || 'new'})`);
-  handleTask(_activeWs, syntheticMsg)
+  handleTask(null, syntheticMsg)
     .catch(err => console.error(`[${new Date().toISOString()}] Wake failed:`, err.message))
     .finally(() => { _isWaking = false; });
 }

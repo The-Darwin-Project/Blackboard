@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _ROUTED_TYPES = frozenset({
     "progress", "result", "error", "partial_result", "huddle_message",
+    "agent_teammate_message",
 })
 
 
