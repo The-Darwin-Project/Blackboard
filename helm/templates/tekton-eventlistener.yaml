@@ -229,10 +229,10 @@ spec:
               image: "{{ .Values.ephemeralAgents.pruneImage }}"
               computeResources:
                 requests:
-                  memory: "32Mi"
+                  memory: "64Mi"
                   cpu: "50m"
                 limits:
-                  memory: "64Mi"
+                  memory: "256Mi"
                   cpu: "100m"
               script: |
                 #!/bin/sh
