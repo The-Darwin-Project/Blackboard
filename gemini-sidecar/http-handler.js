@@ -125,7 +125,7 @@ async function handleRequest(req, res) {
     try {
       const bbTurns = state.getBlackboardTurnsSince(state.getHookHighwater());
       const inbound = state.drainInboundMessages();
-      const teammate = state.drainTeammateMessages();
+      const tmCount = state.peekTeammateMessages().length;
       const parts = [];
       if (bbTurns.length > 0) {
         const summary = bbTurns.map(t => `[${t.actor || '?'}.${t.action || '?'}] ${(t.thoughts || t.result || '').slice(0, 120)}`).join('; ');
@@ -136,13 +136,13 @@ async function handleRequest(req, res) {
       if (inbound.length > 0) {
         parts.push(`Brain messages: ${inbound.map(m => m.content || '').join('; ')}`);
       }
-      if (teammate.length > 0) {
-        parts.push(`Teammate: ${teammate.map(m => `(${m.from}) ${m.content || ''}`).join('; ')}`);
+      if (tmCount > 0) {
+        parts.push(`You have ${tmCount} unread teammate message(s). Use team_read_teammate_notes to read them.`);
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (parts.length > 0) {
         const ctx = parts.join('\n');
-        console.log(`[${new Date().toISOString()}] PreToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${teammate.length} teammate msgs`);
+        console.log(`[${new Date().toISOString()}] PreToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${tmCount} teammate hint(s)`);
         res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: ctx } }));
       } else {
         res.end('{}');
