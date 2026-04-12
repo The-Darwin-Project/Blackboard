@@ -1,6 +1,6 @@
 ---
 name: darwin-comms
-description: Report findings and status updates to the Darwin Brain. Use team_send_results for final reports in ALL modes.
+description: Report findings and status updates to the Darwin Brain. Use team_send_results for final reports (task modes). In message mode, use team_send_message instead.
 roles: [architect, sysadmin, developer, qe]
 ---
 
@@ -20,9 +20,9 @@ Use `svc_get_service` to check current service metrics (CPU, memory, error rate,
 
 Additional evidence sources are available: K8s MCP (remote clusters), ArgoCD MCP (local cluster), Playwright MCP (browser). Include relevant findings in your report.
 
-## `team_send_results` -- Final Report (ALL modes)
+## `team_send_results` -- Final Report (task modes)
 
-Use `team_send_results` to deliver your final report in **every** mode (execute, investigate, plan, implement, test).
+Use `team_send_results` to deliver your final report in task modes (execute, investigate, plan, implement, test). In **message** mode, `team_send_results` is not available -- use `team_send_message` to update the Brain instead.
 
 The Brain uses your last `team_send_results` call as your final deliverable.
 
@@ -35,7 +35,7 @@ The Brain uses your last `team_send_results` call as your final deliverable.
 
 Progress notes appear in the Brain's UI. They do **not** replace your deliverable.
 
-Use for status updates, phase transitions, or interim observations during long-running tasks. Available in ALL modes including implement.
+Use for status updates, phase transitions, or interim observations during long-running tasks. Available in all modes including message mode (where it is the primary Brain communication tool).
 
 ### `team_check_messages` -- Poll for incoming messages
 
@@ -43,18 +43,7 @@ Messages from the Brain and teammates are delivered automatically via CLI hooks.
 
 ## Shell Fallback
 
-If MCP tools are unavailable, use shell scripts: `sendResults`, `sendMessage`.
-
-When using `-m` with shell scripts, only pass short single-line strings. For multiline content, write to a file and pass the file path:
-
-```bash
-cat > ./results/report.md << 'EOF'
-## My Report
-Status: success
-Files changed: 3
-EOF
-sendResults ./results/report.md
-```
+Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail.
 
 ## Long-Running Operations -- NEVER Poll
 
