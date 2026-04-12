@@ -1,6 +1,6 @@
 ---
 name: darwin-gitlab-ops
-description: GitLab API interaction patterns for GitLab instances. Use when working with GitLab merge requests, pipelines, projects, or any GitLab API call.
+description: "GitLab environment context: project resolution, authentication, and API conventions for GitLab instances."
 roles: [architect, sysadmin, developer]
 ---
 
@@ -10,10 +10,10 @@ roles: [architect, sysadmin, developer]
 
 When working on an Event from the Headhunter, the event document
 contains the authoritative project path and MR URL in the GitLab Context
-section. 
+section.
 **Use THAT project path and MR URL for all API calls.**
 
-Use the Service Lookup only for chack Aligner events or When a user asks.
+Use the Service Lookup only for check Aligner events or when a user asks.
 
 Extract from the event document:
 - `MR URL` -- use this for the target MR
@@ -21,47 +21,19 @@ Extract from the event document:
 
 ## Pre-Configured Environment
 
-`glab` CLI and GitLab MCP tools are pre-configured via `$GITLAB_HOST`. TLS behavior is controlled by the deployment environment. You do not need to handle authentication setup.
+GitLab CLI tools and MCP tools are pre-configured via `$GITLAB_HOST`. TLS behavior is controlled by the deployment environment. You do not need to handle authentication setup.
 
 Available environment variables:
 
 - `GITLAB_TOKEN` -- Personal Access Token for API calls
 - `GITLAB_HOST` -- The GitLab hostname
 
-Git operations (`clone`, `push`, `pull`) to `$GITLAB_HOST` use the pre-configured TLS settings -- you can use standard git commands.
+Git operations to `$GITLAB_HOST` use the pre-configured TLS settings.
 
-## Preferred: GitLab MCP Tools
+## Tool Preference
 
-GitLab MCP tools are available in your tool list. Prefer them for structured API interactions -- they handle authentication and pagination automatically.
+GitLab MCP tools are available in your tool list. Prefer them for structured API interactions -- they handle authentication and pagination automatically. CLI and direct API access are available as fallback.
 
-## glab CLI
+## URL-Encoding for Nested Project Paths
 
-Use `glab` for direct CLI operations. Authentication and TLS are pre-configured.
-
-Useful patterns:
-
-- List projects: `glab api /projects --per-page 20`
-- Get MR details: `glab api /projects/:id/merge_requests/:iid`
-- List pipelines: `glab api /projects/:id/pipelines --per-page 10`
-- Post MR note: `glab api /projects/:id/merge_requests/:iid/notes -f body="comment text"`
-- Get MR changes: `glab api /projects/:id/merge_requests/:iid/changes`
-
-## URL-Encoding Nested Project Paths
-
-GitLab API requires URL-encoded project paths for nested groups:
-
-- `org/group/subgroup/project`
-- Encoded: `org%2Fgroup%2Fsubgroup%2Fproject`
-
-Use `glab api "/projects/$(python3 -c 'import urllib.parse; print(urllib.parse.quote("group/subgroup/repo", safe=""))')"` for dynamic encoding.
-
-## Fallback: curl
-
-When MCP tools or `glab` are unavailable, use `curl` directly:
-
-```bash
-curl -k -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-  "https://$GITLAB_HOST/api/v4/projects?per_page=20"
-```
-
-The `-k` flag skips TLS verification when required by the target instance.
+GitLab API requires URL-encoded project paths for nested groups. For example, `org/group/subgroup/project` must be encoded as `org%2Fgroup%2Fsubgroup%2Fproject`. Ensure project paths are properly encoded when constructing API requests.

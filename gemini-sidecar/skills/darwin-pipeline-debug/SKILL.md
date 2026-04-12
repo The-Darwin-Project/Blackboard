@@ -1,7 +1,7 @@
 ---
 name: darwin-pipeline-debug
 description: Pipeline failure investigation -- read failed job logs, identify error type, retry and check. Extends darwin-gitlab-ops.
-requires: [darwin-gitlab-ops]
+requires: [darwin-gitlab-ops, darwin-pipelines-as-code]
 roles: [developer]
 ---
 
@@ -11,21 +11,13 @@ Investigate failed pipelines: read job logs, classify the error, retry if transi
 
 ## Read Failed Job Log
 
-Get the last 50 lines of the most recent failed job:
-
-```bash
-# Get failed jobs for pipeline
-glab api "/projects/:id/pipelines/:pipeline_id/jobs" | jq '.[] | select(.status == "failed") | {id, name, stage}'
-
-# Get job trace (last 50 lines)
-glab api "/projects/:id/jobs/:job_id/trace" | tail -50
-```
+Retrieve the failed job log for the most recent failed job in the pipeline. Identify the job ID, name, and stage, then read the job trace (last 50 lines) to determine the failure reason.
 
 ## Error Classification (v1)
 
 After reading the log, classify:
 
-- **Transient**: network timeout, registry pull failure, flaky test -> retest via `/retest`
+- **Transient**: network timeout, registry pull failure, flaky test -> retest using the appropriate pipeline trigger command
 - **Real failure**: compilation error, missing dependency, test assertion -> report to maintainer
 
 ## Pipeline Timing
@@ -46,7 +38,7 @@ When GitLab job logs are insufficient (e.g., external pipelines showing only "ex
 ## Scope
 
 - Read failed job log and report error type
-- Retry pipeline once via `/retest` comment
+- Retry pipeline once using the appropriate trigger command
 - Check result after retry -- if still running, report and let Brain defer
 - When retry fails: the failure reason must be determined before reporting
 - Do NOT modify code or config to fix the pipeline

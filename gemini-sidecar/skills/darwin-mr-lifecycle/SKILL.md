@@ -1,14 +1,13 @@
 ---
 name: darwin-mr-lifecycle
 description: MR lifecycle operations -- pipeline check, retest, merge, conflict reporting. Extends darwin-gitlab-ops.
-requires: [darwin-gitlab-ops]
+requires: [darwin-gitlab-ops, darwin-pipelines-as-code]
 roles: [developer, sysadmin]
 ---
 
 # MR Lifecycle Operations
 
 Handles the full MR lifecycle: check pipeline, retest, merge, and conflict reporting.
-This skill assumes `darwin-gitlab-ops` is loaded (same roles guarantee this).
 
 CRITICAL: For the project path and MR URL, always use the values from the event
 document's GitLab Context section.
@@ -21,23 +20,15 @@ When the pipeline failure requires a code/config fix (e.g., Dockerfile update, d
 
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
 - Apply the fix, commit, and push to the remote source branch.
-- The MR pipeline retrigers automatically on the push.
+- The MR pipeline retriggers automatically on the push.
 - If the MR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
 - The purpose of MR pipelines is to validate changes BEFORE main. Merging untested fixes to main defeats this.
 
 ## Retest Pipeline
 
-Post a `/retest` comment on the MR to trigger a pipeline rerun:
+To trigger a pipeline retest, post the appropriate PaC GitOps command as an MR comment. See the `darwin-pipelines-as-code` skill for command selection (e.g., `/retest` for transient failures, `/test` for full re-trigger).
 
-```bash
-glab api /projects/:id/merge_requests/:iid/notes -f body="/retest"
-```
-
-After posting, check pipeline status:
-
-```bash
-glab api "/projects/:id/pipelines?ref=:source_branch&order_by=updated_at&per_page=1"
-```
+After posting, check pipeline status to confirm the retest was accepted.
 
 ## Pipeline Timing
 
@@ -52,11 +43,7 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 
 ## Merge MR
 
-Only merge when pipeline is green AND merge_status is `can_be_merged`:
-
-```bash
-glab api -X PUT /projects/:id/merge_requests/:iid/merge
-```
+Only merge when pipeline is green AND merge_status is `can_be_merged`. Merge the MR via the GitLab API.
 
 ## Safety Rules
 
@@ -72,21 +59,11 @@ If merge_status is `cannot_be_merged`:
 **For automated submodule MRs** (branch starts with `submodule-`, author is a bot):
 
 - This means a newer submodule update already merged to main. The MR is obsolete.
-- Close the MR with a comment explaining why:
-
-```bash
-glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Closing this MR -- a newer submodule update has already been merged to main, making this one obsolete."
-glab api -X PUT /projects/:id/merge_requests/:iid --field state_event=close
-```
+- Close the MR with a comment explaining why (a newer submodule update has already been merged).
 
 **For all other MRs:**
 
-- Post an MR comment describing the conflict:
-
-```bash
-glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: Merge conflicts detected. Manual rebase required. Notifying maintainer."
-```
-
+- Post an MR comment describing the conflict (merge conflicts detected, manual rebase required).
 - In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
 ## Critical: No @mentions

@@ -13,7 +13,7 @@ You are in review mode. The Brain wants a code review, NOT an implementation pla
 
 ## Review Process
 
-1. **Fetch the diff**: Use `glab mr diff <id>` or `gh pr diff <id>` to get the changes
+1. **Fetch the diff**: Obtain the MR/PR diff for the changes under review
 2. **Read the context**: Check related files to understand the impact
 3. **Assess each change** against the criteria below
 

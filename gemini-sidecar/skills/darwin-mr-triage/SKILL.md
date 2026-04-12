@@ -11,9 +11,7 @@ Read MR changes, summarize for human review, and ask the designated approver wha
 
 ## Read MR Changes
 
-```bash
-glab api /projects/:id/merge_requests/:iid/changes | jq '.changes[] | {new_path, diff}'
-```
+Retrieve the MR diff to understand what changed -- files modified, lines added/removed, and the scope of the change.
 
 ## Summarize for Human
 
@@ -28,8 +26,8 @@ Post a structured summary as an MR comment:
 - Darwin does NOT auto-approve MRs
 - Darwin does NOT approve on behalf of humans
 - Always ask the designated approver via MR comment
-- Use `evidence.gitlab_context.maintainer` for who to tag
-- If no approver found, tag the release-maintainer fallback
+- Use `evidence.gitlab_context.maintainer` for who to notify
+- If no approver found, use the release-maintainer fallback
 
 ## Reporting Results
 

@@ -1,25 +1,21 @@
 ---
 name: darwin-mr-conversation
-description: MR comment thread interaction -- read threads, respond, tag users. Extends darwin-gitlab-ops.
+description: MR comment thread interaction -- read threads, respond concisely. Extends darwin-gitlab-ops.
 requires: [darwin-gitlab-ops]
 roles: [developer, sysadmin]
 ---
 
 # MR Conversation
 
-Read MR comment threads, understand context, respond concisely, and tag users.
+Read MR comment threads, understand context, and respond concisely.
 
 ## Read MR Discussions
 
-```bash
-glab api /projects/:id/merge_requests/:iid/discussions
-```
+Retrieve the MR discussion threads to understand the context and history of the conversation.
 
 ## Post a Comment
 
-```bash
-glab api /projects/:id/merge_requests/:iid/notes -f body="Darwin: your response here"
-```
+Post a concise, actionable response as an MR comment. Prefix with "Darwin:" to identify automated responses.
 
 ## Guidelines
 
