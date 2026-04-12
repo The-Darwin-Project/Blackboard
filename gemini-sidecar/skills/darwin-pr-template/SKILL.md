@@ -7,7 +7,7 @@ modes: [implement]
 
 # PR Template
 
-When creating a pull request with `gh pr create`, use this structure:
+When creating a pull request, use this structure:
 
 ## Title Format
 

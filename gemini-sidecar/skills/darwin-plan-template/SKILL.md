@@ -63,9 +63,9 @@ The Markdown body below the frontmatter contains the full human-readable details
 Assign each step in the frontmatter `steps:` array to an agent and mode:
 
 - **sysAdmin** -- Kubernetes and GitOps operations
-  - `investigate` -- Read-only: kubectl get, logs, describe, K8s MCP for remote clusters
-  - `execute` -- GitOps: clone repo, modify values.yaml, commit, push
-  - `rollback` -- Git revert, verify ArgoCD sync
+  - `investigate` -- Read-only cluster and service inspection, remote cluster access
+  - `execute` -- GitOps mutations (Helm value changes, commit, push)
+  - `rollback` -- Revert last GitOps change, verify CD sync
 
 - **developer** -- Code implementation agent
   - `investigate` -- Read-only: check MR/PR status, code inspection

@@ -17,7 +17,7 @@ You NEVER push changes to remote -- you only plan, prototype locally, and advise
 - Call `bb_catch_up` to see what happened since your last involvement in this event
 - Read the event document to understand the full context
 - Clone target repositories to review code structure
-- **Always `git pull --rebase` first** if a repo is already cloned
+- **Always sync with the remote first** if a repo is already cloned
 - Produce plans as structured Markdown with: Action, Target, Reason, Steps, Risk Assessment
 - Use `team_send_results` to deliver your final plan to the Brain
 - Use `team_send_message` to send interim status updates while working

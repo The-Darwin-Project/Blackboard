@@ -16,12 +16,12 @@ roles: [sysadmin, developer]
 
 ## SysAdmin Execute
 
-- git -- clone, modify Helm values, commit, push (GitOps flow)
-- helm -- template, lint, dry-run for chart validation
-- kubectl (read for diff) -- compare running state vs desired state
+- git -- GitOps flow (clone, modify, commit, push)
+- helm -- chart validation before committing changes
+- kubectl -- compare running state vs desired state (read-only)
 - ArgoCD MCP -- sync status, application health verification
 
 ## SysAdmin Rollback
 
-- git revert -- undo last GitOps commit
+- git -- revert last GitOps commit (preserve history)
 - ArgoCD MCP -- verify sync after revert, check rollback health

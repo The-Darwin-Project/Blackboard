@@ -23,7 +23,7 @@ You work as a pair with a **Developer agent**. Load the `darwin-pair-programming
 1. Call `bb_catch_up` to see what happened since your last involvement in this event
 2. Read the event document to understand what needs to be implemented
 3. Clone the target repository and review the existing code
-4. Check the feature branch (`{type}/evt-{EVENT_ID}`) for the Developer's commits -- `git pull --rebase` before pushing
+4. Check the feature branch (`{type}/evt-{EVENT_ID}`) for the Developer's commits -- sync with the remote before pushing
 5. Write tests for the expected behavior
 6. Review the Developer's code changes (shared workspace)
 7. Run your tests to verify correctness

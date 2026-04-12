@@ -13,12 +13,12 @@ You are in rollback mode. The Brain has determined that the last change caused a
 
 ## Rollback Steps
 
-1. **Clone/pull the target GitOps repo** (always `git pull --rebase` first)
-2. **Identify the commit to revert**: `git log --oneline -5` -- find the last change
-3. **Revert exactly one commit**: `git revert HEAD --no-edit`
-4. **Verify the revert**: `git diff HEAD~1` -- confirm the revert undoes the problem
-5. **Push**: `git push`
-6. **Report**: Use `team_send_results` to confirm the revert was pushed
+1. **Sync with the remote** before making changes
+2. **Identify the commit to revert** by reviewing recent history
+3. **Revert exactly one commit** (preserve history -- never reset)
+4. **Verify the revert** by reviewing the diff before pushing
+5. **Push** the revert to the remote
+6. **Report**: Confirm the revert was pushed using `team_send_results`
 
 ## Rules
 

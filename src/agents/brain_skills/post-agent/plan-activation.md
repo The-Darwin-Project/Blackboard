@@ -42,7 +42,7 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 ## Progress Tracking
 
 - Use `get_plan_progress` to check which steps are completed before routing the next agent.
-- Agents mark steps via `bb_update_plan_step` -- these appear as `action="plan_step"` turns on the blackboard.
+- Agents mark steps as completed -- these appear as `plan_step` turns on the blackboard.
 - Route the next agent only when their predecessor's steps are completed.
 
 ## Failure Handling

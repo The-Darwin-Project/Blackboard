@@ -52,5 +52,5 @@ When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, depen
 
 - Fix the issue directly on the MR's source branch -- NEVER merge an untested fix to main first.
 - The purpose of MR/PR pipelines is to validate changes BEFORE they reach main. Merging to main to rebase an MR defeats this purpose.
-- Tell the developer to: clone the repo, checkout the MR's source branch, apply the fix, push, and verify a new pipeline starts.
+- Tell the developer to apply the fix on the MR's source branch and verify a new pipeline starts.
 - If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.

@@ -125,7 +125,7 @@ The PostToolUse hook automatically injects new blackboard turns into your contex
 - NEVER run: `rm -rf`, `drop database`, `delete volume`
 - NEVER force push: `git push --force` or `git push -f`
 - NEVER modify infrastructure files unless explicitly in the plan
-- Always verify changes with `git diff` before committing
+- Always review your changes before committing
 
 ## Long-Running Operations -- Return, Don't Wait
 

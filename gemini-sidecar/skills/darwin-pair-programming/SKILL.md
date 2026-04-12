@@ -21,7 +21,7 @@ Both agents share the same filesystem(Volume). Each agent has its own working di
 1. **Same branch**: Both agents MUST commit to `{type}/evt-{EVENT_ID}`. Read the event ID from `events/event-{id}.md`.
 2. **No PR without Brain approval**: Neither agent opens a PR. The Brain tells the Developer when to open it.
 3. **Communicate via MCP**: Use `team_send_to_teammate` to send messages and `team_read_teammate_notes` to check for partner messages.
-4. **Git pull before push**: Always `git pull --rebase` before pushing to avoid conflicts with your partner's commits.
+4. **Sync before push**: Always sync with the remote before pushing to avoid conflicts with your partner's commits.
 5. **Test ownership**: The QE owns all test-related concerns -- test files, test configuration, test infrastructure (Dockerfiles for test images, test runner scripts, Playwright config), and test discovery. For ad-hoc UI verification, QE can use **Playwright MCP** (headless browser) without writing test scripts.
    - If your task involves test failures, test infrastructure, or test configuration: use `team_send_to_teammate` to consult the QE before implementing. The QE may be idle -- your message will wake it.
    - During PR gate (after PR is open): if CI fails on test-related files, the Developer

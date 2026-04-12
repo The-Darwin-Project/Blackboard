@@ -11,7 +11,7 @@ roles: [sysadmin, developer, architect]
 
 - K8s MCP (`K8s_<cluster>`) -- remote cluster read-only access. Pass `namespace` explicitly from session context.
 - KubeArchive MCP (`KubeArchive_<cluster>`) -- archived PipelineRuns, TaskRuns, and pod logs. Konflux retains only 3 latest runs; use KubeArchive when live cluster data is pruned.
-  Diagnostic workflow: `ka_list_pipelineruns` -> `ka_get_pipelinerun` (childReferences) -> `ka_get_taskrun` (failed step + podName) -> `ka_get_log` (step execution log).
+  Drill from pipeline run to task run to step log for failure diagnosis.
 - ArgoCD MCP -- application state, resource tree, workload logs, sync history
 - kubectl / oc -- local cluster pods, logs, events, resource status
 - Tekton CLI (tkn) -- PipelineRun, TaskRun status and logs

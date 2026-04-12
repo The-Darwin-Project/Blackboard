@@ -180,7 +180,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "select_agent",
         "description": (
             "Route work to an agent. Use ONLY when the task requires agent capabilities "
-            "(kubectl, git, code changes, ArgoCD). Do NOT use for questions answerable from "
+            "(infrastructure operations, code changes, cluster inspection). Do NOT use for questions answerable from "
             "lookup_journal, consult_deep_memory, or lookup_service."
         ),
         "input_schema": {
@@ -200,7 +200,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "enum": ["investigate", "execute", "rollback", "plan", "review", "analyze", "implement", "test"],
                     "description": (
                         "Mode controls which skills and tools load on the agent. "
-                        "investigate=cluster inspection, logs, K8s MCP, ArgoCD MCP (read-only). "
+                        "investigate=read-only cluster and service inspection. "
                         "execute=git actions, MR comments, merge, retest (no cluster investigation). "
                         "implement=code changes, feature development. "
                         "test=QE verification, browser testing. "
@@ -259,7 +259,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "ask_agent_for_state",
-        "description": "Ask an agent for information (e.g., ask sysAdmin for kubectl logs, ask QE for test status).",
+        "description": "Ask an agent for information (e.g., ask sysAdmin for cluster status, ask QE for test results).",
         "input_schema": {
             "type": "object",
             "properties": {

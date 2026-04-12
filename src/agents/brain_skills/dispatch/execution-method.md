@@ -7,7 +7,7 @@ tags: [gitops, infrastructure, mutations]
 ---
 # Execution Method
 
-- ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
-- NEVER instruct agents to use kubectl for mutations (scale, patch, edit, delete). kubectl is for investigation ONLY (get, list, describe, logs).
-- When asking sysAdmin to scale, say: "modify replicaCount in helm/values.yaml via GitOps" not "scale the deployment."
+- ALL infrastructure changes MUST go through GitOps: apply the change to the target Helm chart via GitOps. ArgoCD syncs the change.
+- NEVER instruct agents to mutate cluster state directly. All infrastructure mutations go through GitOps. Direct cluster access is for investigation only.
+- When asking sysAdmin to scale, instruct agents to change the value via GitOps, not to scale the cluster resource directly.
 - Agents should ONLY modify EXISTING values in Helm charts. If a new feature is needed (HPA, PDB, etc.), route to Architect for planning first.

@@ -12,19 +12,19 @@ roles: [sysadmin, developer, qe]
 - `replicaCount` is what you change for scaling operations
 - Helm values files are YAML -- preserve formatting and comments
 - Commit messages follow: `ops(service): description` (sysadmin) or `feat(service): description` / `fix(service): description` (developer)
-- ALL mutations (scaling, config changes) MUST go through GitOps (clone repo, modify values.yaml, push). NEVER use `kubectl scale`, `kubectl patch`, or `kubectl edit`.
+- ALL mutations (scaling, config changes) MUST go through GitOps. NEVER use `kubectl scale`, `kubectl patch`, or `kubectl edit`.
 - ONLY modify EXISTING values in values.yaml. Do NOT add new sections or keys unless the corresponding template already exists in the chart's `templates/` directory.
 - If a change requires a new template, stop and report that it needs Architect review.
 
 ## Git Hygiene
 
-- **Always `git pull --rebase` before making any changes** -- the repo may have been modified by CI or other agents
-- Check `git log --oneline -5` before making changes to understand recent history
-- If your push fails, `git pull --rebase` and retry
+- **Always sync with the remote before making changes** -- the repo may have been modified by CI or other agents
+- Review recent commit history before making changes
+- If your push fails, sync with the remote and retry
 - NEVER force push: `git push --force` or `git push -f`
 - One change per commit. Never bundle unrelated changes.
 - Each commit must leave the system in a deployable state.
-- Verify with `git diff` before every commit -- review your own change.
+- Review your changes before every commit.
 
 ## Deployment Awareness
 

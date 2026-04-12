@@ -33,20 +33,7 @@ After `git clone` or `git pull`, check for these directories in the repo root:
 
 ## What to Do
 
-```bash
-# After cloning, check for context files
-ls -la .gemini/ .claude/ .cursor/ 2>/dev/null
-
-# Read the main context file if it exists (check all three)
-for f in .gemini/GEMINI.md .claude/CLAUDE.md; do
-  [ -f "$f" ] && echo "=== Found: $f ===" && cat "$f"
-done
-
-# Check for project rules
-for d in .cursor/rules .gemini/rules .claude/rules; do
-  [ -d "$d" ] && echo "=== Found rules in: $d ===" && ls "$d"
-done
-```
+After cloning, check for context directories (.gemini/, .claude/, .cursor/) and read their main context files (GEMINI.md, CLAUDE.md) and any rules directories.
 
 ## How to Use What You Find
 

@@ -95,6 +95,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Brain System Prompt - THIS IS THE DECISION ENGINE
 # =============================================================================
+# DEPRECATED: Monolith fallback. Active path uses brain_skills/*.md via BrainSkillLoader.
+# Set BRAIN_PROGRESSIVE_SKILLS=false for emergency rollback only.
 
 BRAIN_SYSTEM_PROMPT = """You are the Brain orchestrator of Project Darwin, an autonomous cloud operations system.
 
@@ -329,7 +331,7 @@ class Brain:
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
         # Progressive skill loading (feature flag)
-        self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "false").lower() == "true"
+        self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
         self._skill_loader = None
         if self._progressive_skills:
             try:

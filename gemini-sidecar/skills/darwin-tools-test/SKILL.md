@@ -23,4 +23,4 @@ roles: [qe]
 
 ## Cluster (Read-Only)
 
-- kubectl (read-only) -- verify deployment status, pod health, service endpoints
+- kubectl -- deployment status, pod health, service endpoints (read-only)

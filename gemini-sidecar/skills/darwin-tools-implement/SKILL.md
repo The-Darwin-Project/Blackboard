@@ -16,7 +16,7 @@ roles: [developer, qe]
 
 ## Verification
 
-- kubectl (read-only) -- check deployment status, pod health
+- kubectl -- deployment status, pod health (read-only)
 - Playwright MCP -- headless browser for UI verification during development
 
 ## Testing
