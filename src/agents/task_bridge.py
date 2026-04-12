@@ -38,10 +38,10 @@ class TaskBridge:
         """Enqueue *message* for *task_id*. No-crash on unknown task_id."""
         queue = self._queues.get(task_id)
         if queue is None:
-            if task_id.startswith("wake-"):
-                logger.debug("TaskBridge: wake task message dropped (task_id=%s, type=%s)", task_id, message.get("type"))
-            else:
-                logger.warning("TaskBridge: message for unknown task_id=%s (race after cleanup?)", task_id)
+            logger.warning(
+                "TaskBridge: message for unknown task_id=%s (race after cleanup?)",
+                task_id,
+            )
             return
         queue.put_nowait(message)
         logger.debug("TaskBridge: put message type=%s for task_id=%s", message.get("type"), task_id)

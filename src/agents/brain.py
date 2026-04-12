@@ -2407,6 +2407,146 @@ class Brain:
         self._active_agent_for_event.pop(event_id, None)
         self._routing_turn_for_event.pop(event_id, None)
 
+    async def handle_wake_task(self, data: dict, agent_id: str) -> None:
+        """Process a self-initiated wake task (teammate message woke an idle agent).
+
+        Mirrors _run_agent_task's result processing but skips dispatch (sidecar
+        already started). Queue was pre-created by the WS handler.
+        """
+        from ..dependencies import get_registry_and_bridge
+        from .dispatch import consume_wake_task, RETRYABLE_SENTINEL
+
+        event_id = data.get("event_id", "")
+        role = data.get("role", "")
+        task_id = data.get("task_id", "")
+
+        if not event_id or not role or not task_id:
+            logger.warning("handle_wake_task: missing fields in data: %s", data)
+            return
+
+        registry, bridge = get_registry_and_bridge()
+        if not registry or not bridge:
+            logger.warning("handle_wake_task: registry/bridge unavailable")
+            return
+
+        evt = await self.blackboard.get_event(event_id)
+        if not evt or evt.status.value == "closed":
+            logger.info("handle_wake_task: event %s is %s, skipping", event_id, evt.status.value if evt else "missing")
+            bridge.delete_queue(task_id)
+            await registry.mark_idle(agent_id)
+            return
+
+        event_source = evt.source if evt else ""
+
+        async def on_progress(progress_data: dict) -> None:
+            await self._broadcast({
+                "type": "progress",
+                "event_id": event_id,
+                "actor": progress_data.get("actor", role),
+                "message": progress_data.get("message", ""),
+                "event_source": event_source,
+            })
+            if progress_data.get("source") == "agent_message":
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=progress_data.get("actor", role),
+                    action="message",
+                    thoughts=progress_data.get("message", ""),
+                )
+                await self._append_and_broadcast(event_id, turn)
+            elif progress_data.get("source") == "teammate":
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=progress_data.get("actor", role),
+                    action="teammate",
+                    thoughts=progress_data.get("message", ""),
+                )
+                await self._append_and_broadcast(event_id, turn)
+
+        async def on_huddle(huddle_data: dict) -> None:
+            r = huddle_data.get("agent_id", agent_id).split("-")[0]
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor=r,
+                action="huddle",
+                thoughts=huddle_data.get("content", ""),
+            )
+            await self._append_and_broadcast(event_id, turn)
+
+        self._active_tasks[event_id] = asyncio.current_task()
+        self._active_agent_for_event[event_id] = role
+
+        await self._broadcast({
+            "type": "progress",
+            "event_id": event_id,
+            "actor": role,
+            "message": f"{role} waking (teammate message)...",
+            "event_source": event_source,
+        })
+
+        try:
+            result, session_id = await consume_wake_task(
+                bridge=bridge, registry=registry,
+                agent_id=agent_id, task_id=task_id,
+                event_id=event_id, role=role,
+                on_progress=on_progress, on_huddle=on_huddle,
+            )
+
+            if result == RETRYABLE_SENTINEL:
+                logger.info("Wake task retryable error for %s, skipping re-entry", event_id)
+                self._release_task_state(event_id)
+                return
+
+            if session_id:
+                self._agent_sessions.setdefault(event_id, {})[role] = session_id
+                self._agent_session_modes.setdefault(event_id, {})[role] = "implement"
+
+            result_str = str(result).strip() if result else ""
+
+            try:
+                result_data = json.loads(result)
+                if isinstance(result_data, dict) and result_data.get("type") == "agent_busy":
+                    logger.warning("Wake task: agent %s busy for %s", role, event_id)
+                    self._release_task_state(event_id)
+                    return
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            if not result_str:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=role, action="error",
+                    thoughts="Wake task returned empty response.",
+                )
+                await self._append_and_broadcast(event_id, turn)
+                self._release_task_state(event_id)
+                return
+
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor=role, action="execute",
+                result=result_str[:15000],
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info("Wake task completed: %s for %s", role, event_id)
+
+            await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
+            self._release_task_state(event_id)
+            self._last_processed[event_id] = time.time()
+
+            if not await self._is_event_closed(event_id):
+                await self.process_event(event_id)
+
+        except Exception as e:
+            logger.error("Wake task failed: %s for %s: %s", role, event_id, e, exc_info=True)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor=role, action="error",
+                thoughts=f"Wake task failed: {str(e)}",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            self._release_task_state(event_id)
+
     async def _run_agent_task(
         self,
         event_id: str,

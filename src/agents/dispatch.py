@@ -6,6 +6,7 @@
 # 4. [Pattern]: Retryable errors return ("__RETRYABLE__", None) sentinel. Caller (Brain) defers the event.
 # 5. [Constraint]: finally block: mark_idle only if sidecar accepted the task (accepted flag).
 #    If rejected, restore previous agent state. delete_queue always runs.
+# 6. [Pattern]: consume_wake_task mirrors the receive loop but skips queue creation + task send. Queue pre-created by WS handler.
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
@@ -192,6 +193,93 @@ async def dispatch_to_agent(
             )
         else:
             await registry.mark_idle(agent_conn.agent_id)
+        bridge.delete_queue(task_id)
+
+
+async def consume_wake_task(
+    bridge: TaskBridge,
+    registry: AgentRegistry,
+    agent_id: str,
+    task_id: str,
+    event_id: str,
+    role: str,
+    on_progress: Callable | None = None,
+    on_huddle: Callable | None = None,
+) -> tuple[str, str | None]:
+    """Consume a self-initiated wake task's messages from a pre-created TaskBridge queue.
+
+    Unlike dispatch_to_agent, this does NOT create the queue (WS handler did it
+    synchronously) and does NOT send a task message (sidecar already started).
+    """
+    queue = bridge.get_queue(task_id)
+    if not queue:
+        return "Error: Wake task queue not found", None
+
+    try:
+        latest_callback_result: str | None = None
+        returned_session_id: str | None = None
+
+        while True:
+            msg = await queue.get()
+            msg_type = msg.get("type", "")
+
+            if msg_type == "progress":
+                if on_progress:
+                    await on_progress({
+                        "actor": role, "event_id": event_id,
+                        "message": msg.get("message", ""),
+                        "source": msg.get("source", ""),
+                    })
+
+            elif msg_type == "partial_result":
+                latest_callback_result = msg.get("content", "")
+                if on_progress:
+                    await on_progress({
+                        "actor": role, "event_id": event_id,
+                        "message": f"[deliverable updated: {len(latest_callback_result)} chars]",
+                        "source": "callback",
+                    })
+
+            elif msg_type == "huddle_message":
+                if on_huddle:
+                    await on_huddle({
+                        "agent_id": agent_id, "task_id": task_id,
+                        "event_id": event_id,
+                        "content": msg.get("content", ""),
+                    })
+
+            elif msg_type == "agent_teammate_message":
+                if on_progress:
+                    await on_progress({
+                        "actor": msg.get("from", role), "event_id": event_id,
+                        "message": msg.get("content", ""),
+                        "source": "teammate",
+                    })
+
+            elif msg_type == "result":
+                output = msg.get("output", "")
+                source = msg.get("source", "stdout")
+                if isinstance(output, dict):
+                    output = json.dumps(output, indent=2)
+                if latest_callback_result and source == "stdout":
+                    output = latest_callback_result
+                elif source == "stdout" and not latest_callback_result:
+                    output = _sanitize_stdout(str(output))
+                returned_session_id = msg.get("session_id") or returned_session_id
+                return str(output), returned_session_id
+
+            elif msg_type == "error":
+                error_msg = msg.get("error", msg.get("message", "Unknown error"))
+                if msg.get("retryable"):
+                    logger.warning("Retryable wake error from %s [%s]: %s", role, event_id, error_msg)
+                    return RETRYABLE_SENTINEL, None
+                return f"Error: {error_msg}", returned_session_id
+
+            elif msg_type == ERROR_SENTINEL_TYPE:
+                return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
+
+    finally:
+        await registry.mark_idle(agent_id)
         bridge.delete_queue(task_id)
 
 

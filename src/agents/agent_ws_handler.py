@@ -5,12 +5,13 @@
 # 3. [Constraint]: Must be registered before entering message loop. 10s timeout on register message.
 # 4. [Constraint]: This file handles transport only. No LLM logic, no dispatch decisions.
 # 5. [Pattern]: Ephemeral agents registering for a closed/missing event are terminated immediately (orphan cleanup).
+# 6. [Pattern]: wake_register creates queue SYNC (before next receive), then spawns Brain handler via on_wake callback.
 """WebSocket handler for agent sidecar connections (reversed WS direction)."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -43,6 +44,7 @@ async def agent_websocket_handler(
     registry: AgentRegistry,
     bridge: TaskBridge,
     blackboard: "BlackboardState | None" = None,
+    on_wake: Callable | None = None,
 ) -> None:
     """Handle a single agent sidecar WebSocket lifecycle."""
     await websocket.accept()
@@ -84,6 +86,22 @@ async def agent_websocket_handler(
                 bridge.put(data.get("task_id", ""), data)
             elif msg_type == "pong":
                 logger.debug("Heartbeat pong from %s", agent_id)
+            elif msg_type == "wake_register":
+                wake_task_id = data.get("task_id", "")
+                bridge.create_queue(wake_task_id)
+                await registry.mark_busy(
+                    agent_id, data.get("event_id", ""), wake_task_id,
+                    role=data.get("role", ""),
+                )
+                if on_wake:
+                    t = asyncio.create_task(on_wake(data, agent_id))
+                    t.add_done_callback(
+                        lambda fut: logger.exception(
+                            "Wake handler failed", exc_info=fut.exception(),
+                        ) if fut.exception() else None
+                    )
+                logger.info("Wake registered: task=%s event=%s agent=%s",
+                            wake_task_id, data.get("event_id", ""), agent_id)
             else:
                 logger.warning("Unknown message type '%s' from %s", msg_type, agent_id)
 

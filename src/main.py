@@ -476,7 +476,9 @@ async def agent_ws_endpoint(websocket: WebSocket):
         await websocket.close(code=1013, reason="Registry not initialized")
         return
     from .dependencies import _blackboard
-    await agent_websocket_handler(websocket, registry, bridge, blackboard=_blackboard)
+    brain = getattr(app.state, 'brain', None)
+    on_wake = brain.handle_wake_task if brain else None
+    await agent_websocket_handler(websocket, registry, bridge, blackboard=_blackboard, on_wake=on_wake)
 
 
 # =============================================================================

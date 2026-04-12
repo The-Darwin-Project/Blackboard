@@ -352,6 +352,12 @@ function tryWake(from, content, eventId) {
     mode: 'implement',
   };
   console.log(`[${new Date().toISOString()}] Wake triggered: event ${resolvedEventId} (from: ${from}, session: ${ctx?.sessionId || 'new'})`);
+  wsSend(_activeWs, {
+    type: 'wake_register',
+    task_id: syntheticMsg.task_id,
+    event_id: resolvedEventId,
+    role: AGENT_ROLE,
+  });
   handleTask(_activeWs, syntheticMsg)
     .catch(err => console.error(`[${new Date().toISOString()}] Wake failed:`, err.message))
     .finally(() => { _isWaking = false; });
