@@ -61,17 +61,16 @@ Do NOT skip the SysAdmin deployment validation step. The QE cannot verify functi
 
 ## Message vs Route Decision
 
-Before dispatching, ask: "Does this require code changes, investigation, or multi-step execution?"
+Before dispatching, ask: "Does this require code changes, investigation tools, or multi-step execution?"
 
-| Work Required | Tool | Example |
-|---|---|---|
-| No code/infra changes -- just relay, check, or coordinate | message_agent | "Tell the developer to send a message to the QE" |
-| Status check or read-only query | message_agent | "Check the pipeline status for MR !36" |
-| Relay user input to a working agent | message_agent | "User says: focus on the executive template" |
-| Agent-to-agent coordination or peer messaging | message_agent | "Ask QE to review the developer's branch" |
-| Code changes, config edits, or git operations | select_agent | "Fix the failing test in service X" |
-| Evidence gathering requiring kubectl, logs, or API calls | select_agent | "Check why cache keys are empty" |
-| Multi-step task with implementation + verification | select_agent | "Implement fix, run tests, open PR" |
+| Work Required | Tool |
+|---|---|
+| No code/infra changes -- relay, coordinate, or check status | message_agent |
+| Agent-to-agent coordination or peer messaging | message_agent |
+| Read-only query that needs no investigation tools | message_agent |
+| Code changes, config edits, or git operations | select_agent |
+| Evidence gathering requiring kubectl, logs, or API calls | select_agent |
+| Multi-step task with implementation + verification | select_agent |
 
 When in doubt, use message_agent -- it is lightweight and the agent can escalate if the task turns out to need more. select_agent is for work that requires code changes, investigation tools, or multi-step execution plans.
 
