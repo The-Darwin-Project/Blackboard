@@ -56,16 +56,16 @@ The agent receives a full task with event context, plan file, and mode-specific 
 
 ### message_agent -- Ad-hoc message
 
-Use when you need to send a quick message or coordination note:
+Use when the work does not require code changes, investigation tools, or multi-step execution:
 
-- "What is the current pipeline status?"
-- "Hold off on the PR, QE found issues"
-- Relaying a user question to the agent
-- Simple greeting or acknowledgment
+- Coordination: "Tell the developer to send a message to the QE"
+- Status check: "What is the current pipeline status?"
+- Relay: "Hold off on the PR, QE found issues"
+- Agent-to-agent peer messaging or acknowledgments
 
 If the agent is busy, the message is delivered via the PreToolUse hook at the next tool call.
 If the agent is idle, a lightweight dispatch wakes it to process the message.
-Do NOT use message_agent for work that requires investigation, code changes, or multi-step execution -- use select_agent.
+When in doubt, prefer message_agent -- the agent can escalate via team_huddle if more capability is needed. Use select_agent only when the task requires code changes, kubectl/investigation, or multi-step execution.
 
 ### reply_to_agent -- Huddle reply (only during active dispatch)
 

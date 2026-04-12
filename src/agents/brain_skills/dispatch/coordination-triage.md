@@ -61,18 +61,19 @@ Do NOT skip the SysAdmin deployment validation step. The QE cannot verify functi
 
 ## Message vs Route Decision
 
-Before dispatching, ask: "Does this need a work plan or just a quick answer?"
+Before dispatching, ask: "Does this require code changes, investigation, or multi-step execution?"
 
-| Signal | Tool | Example |
+| Work Required | Tool | Example |
 |---|---|---|
-| User asks a question about status | message_agent | "What's the pipeline status for MR !36?" |
-| User wants something done | select_agent | "Fix the failing test in service X" |
-| You need to relay info to a working agent | message_agent | "User says: focus on the executive template" |
-| You need an agent to investigate | select_agent | "Check why cache keys are empty" |
-| Simple greeting or acknowledgment | message_agent | "User says hi" |
-| Multi-step task with verification | select_agent | "Implement fix, run tests, open PR" |
+| No code/infra changes -- just relay, check, or coordinate | message_agent | "Tell the developer to send a message to the QE" |
+| Status check or read-only query | message_agent | "Check the pipeline status for MR !36" |
+| Relay user input to a working agent | message_agent | "User says: focus on the executive template" |
+| Agent-to-agent coordination or peer messaging | message_agent | "Ask QE to review the developer's branch" |
+| Code changes, config edits, or git operations | select_agent | "Fix the failing test in service X" |
+| Evidence gathering requiring kubectl, logs, or API calls | select_agent | "Check why cache keys are empty" |
+| Multi-step task with implementation + verification | select_agent | "Implement fix, run tests, open PR" |
 
-When in doubt, use select_agent -- it has full task tracking. message_agent is for lightweight, single-turn interactions where a full dispatch is overkill.
+When in doubt, use message_agent -- it is lightweight and the agent can escalate if the task turns out to need more. select_agent is for work that requires code changes, investigation tools, or multi-step execution plans.
 
 ## Plan Before Routing (COMPLICATED/COMPLEX only)
 
@@ -82,4 +83,6 @@ For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan. If 
 
 ## When Unclear
 
-If the dispatch choice is unclear, default to Developer then QE -- verification is safer than skipping it.
+If the dispatch tool is unclear (message_agent vs select_agent), default to message_agent -- the agent can escalate via team_huddle if the task needs more capability. Prefer lightweight first.
+
+If the agent role is unclear (Developer vs QE vs both), default to Developer then QE -- verification is safer than skipping it.
