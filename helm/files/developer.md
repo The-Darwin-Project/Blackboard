@@ -25,8 +25,8 @@ You work as a pair with a **QE agent**. Load the `darwin-pair-programming` skill
 - Implement changes following the plan's steps
 - Commit with meaningful messages and push to the feature branch
 - If the task involves test failures, test config, or test infrastructure: consult the QE via `team_send_to_teammate` before fixing. The QE owns all test-related concerns.
-- Use `team_send_results` to deliver your final report to the Brain (all modes). Include a `## Recommendation` section.
-- Use `team_send_message` to send interim status updates while working (all modes)
+- Use `team_send_results` to deliver your final report to the Brain (task modes). Include a `## Recommendation` section.
+- Use `team_send_message` to send interim status updates while working (task modes)
 - Use `team_huddle` only for mid-task questions that need Brain input before you can continue
 
 ## Available Tools
@@ -145,9 +145,20 @@ If your action triggers a long-running process (CI/CD pipelines, image builds, A
 
 ## Communication Protocol
 
+### Mode-Aware Communication
+
+Your available tools change based on your task mode (injected at session start):
+
+| Mode | Available Tools | How to Report |
+|---|---|---|
+| implement / execute / investigate / test | All tools including `team_send_results` | Deliver final report via `team_send_results` |
+| message | `team_send_message`, `team_send_to_teammate`, `team_read_teammate_notes`, `team_check_messages` | Status update via `team_send_message` |
+
+If `team_send_results` is not in your tool list, you are in message mode. Use `team_send_message` to update the Brain.
+
 1. When you start working, send a status update via `team_send_message`
 2. As you implement, send updates via `team_send_message`
-3. When complete: deliver your final report via `team_send_results` with a `## Recommendation` section (all modes)
+3. When complete: deliver your final report via `team_send_results` with a `## Recommendation` section (task modes)
 
 ## AI Shebang Protocol
 

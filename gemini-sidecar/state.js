@@ -3,7 +3,7 @@
 // 1. [Pattern]: All shared mutable state accessed via getters/setters — NEVER import or mutate internal vars directly.
 // 2. [Constraint]: Single source of truth for _callbackResult, currentTask, _pendingHuddleReply, _inboundMessages, _teammateMessages, _blackboard*.
 // 3. [Gotcha]: pendingHuddleReply holds the HTTP response object — keeps /callback request open until huddle_reply arrives or 10min timeout.
-// 4. [Gotcha]: currentTask shape includes { eventId, child?, ws?, taskId?, cwd? }; set by ws-client or ws-server before executeCLIStreaming.
+// 4. [Gotcha]: currentTask shape includes { eventId, child?, ws?, taskId?, cwd?, mode? }; set by ws-client or ws-server before executeCLIStreaming.
 // 5. [Pattern]: Two separate message queues — _inboundMessages (Manager proactive, drained by own GET /messages)
 //    and _teammateMessages (peer forwards, drained by own GET via hook and team_read_teammate_notes). Never cross-drain.
 // 6. [Pattern]: _lastTaskContext preserves sessionId/eventId/cwd after task completion for wake-on-message resume.

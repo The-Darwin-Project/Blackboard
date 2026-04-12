@@ -3,8 +3,9 @@
 // 1. [Pattern]: MCP stdio server -- JSON-RPC 2.0 over stdin/stdout. Console.error for all logging (stdout reserved).
 // 2. [Constraint]: No SDK. readline + process.stdout.write + http.request only. Zero npm deps.
 // 3. [Pattern]: Role-filtered tools via AGENT_ROLE env. dev/qe get all 6, architect/sysadmin get 3.
-// 4. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
-// 5. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for sending to teammate. team_read_teammate_notes reads from SIDECAR_PORT (own inbox).
+// 4. [Pattern]: tools/list queries GET /current-mode; tools with notInModes omit when task mode matches (railway for message mode).
+// 5. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
+// 6. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for sending to teammate. team_read_teammate_notes reads from SIDECAR_PORT (own inbox).
 'use strict';
 
 const readline = require('readline');
@@ -17,15 +18,26 @@ const IS_TEAM = ROLE === 'developer' || ROLE === 'qe';
 
 const ALL_TOOLS = [
   { name: 'team_send_message', description: 'Send a progress update to the Brain (shown in event chat, does NOT overwrite deliverable)', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Status update text' } }, required: ['message'] } },
-  { name: 'team_send_results', description: 'Deliver your final report/findings to the Brain (overwrites previous deliverable)', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report or findings' } }, required: ['content'] } },
+  { name: 'team_send_results', description: 'Deliver your final report/findings to the Brain (overwrites previous deliverable)', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report or findings' } }, required: ['content'] }, notInModes: ['message'] },
   { name: 'team_check_messages', description: 'Check your inbox for pending messages from Manager or Brain. Returns and clears the queue.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'team_huddle', description: 'Send a message to the Brain and BLOCK until the Brain replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for Brain' } }, required: ['message'] }, teamOnly: true },
+  { name: 'team_huddle', description: 'Send a message to the Brain and BLOCK until the Brain replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for Brain' } }, required: ['message'] }, teamOnly: true, notInModes: ['message'] },
   { name: 'team_send_to_teammate', description: 'Send a direct message to your dev/QE teammate via their sidecar. Message is stored in their teammate queue.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Message for teammate' } }, required: ['message'] }, teamOnly: true },
   { name: 'team_read_teammate_notes', description: "Read and clear messages your teammate sent you. Drains the teammate's outbound queue for you.", inputSchema: { type: 'object', properties: {} }, teamOnly: true },
 ];
 
-function getTools() {
-  return ALL_TOOLS.filter(t => !t.teamOnly || IS_TEAM).map(({ teamOnly, ...t }) => t);
+async function getTools() {
+  let mode = '';
+  try {
+    const info = await httpGet(SIDECAR_PORT, '/current-mode');
+    mode = (info && typeof info === 'object' && info.mode) ? info.mode : '';
+  } catch { /* non-critical — fail-open full tool surface */ }
+  const afterRole = ALL_TOOLS.filter(t => !t.teamOnly || IS_TEAM);
+  const beforeMode = afterRole.length;
+  const filtered = afterRole.filter(t => !t.notInModes || !t.notInModes.includes(mode));
+  if (filtered.length < beforeMode) {
+    console.error(`[TeamChat] Mode '${mode}' filtered ${beforeMode - filtered.length} tool(s)`);
+  }
+  return filtered.map(({ teamOnly, notInModes, ...t }) => t);
 }
 
 function httpPost(port, path, body, timeoutMs = 10000) {
@@ -119,7 +131,8 @@ rl.on('line', async (line) => {
   if (req.method === 'initialize') {
     send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'TeamChat', version: '1.0.0' } } });
   } else if (req.method === 'tools/list') {
-    send({ jsonrpc: '2.0', id, result: { tools: getTools() } });
+    const tools = await getTools();
+    send({ jsonrpc: '2.0', id, result: { tools } });
   } else if (req.method === 'tools/call') {
     const { name, arguments: args } = req.params || {};
     const result = await handleToolCall(name, args || {});

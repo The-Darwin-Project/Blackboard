@@ -7,6 +7,7 @@
 # 5. [Constraint]: finally block: mark_idle only if sidecar accepted the task (accepted flag).
 #    If rejected, restore previous agent state. delete_queue always runs.
 # 6. [Pattern]: consume_wake_task mirrors the receive loop but skips queue creation + task send. Queue pre-created by WS handler.
+# 7. [Pattern]: `mode` is forwarded on the task WS JSON for sidecar MCP/stop-hook (e.g. message vs implement).
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
@@ -78,6 +79,7 @@ async def dispatch_to_agent(
     session_id: str | None = None,
     event_md_path: str = "",
     cwd: str = "",
+    mode: str = "",
 ) -> tuple[str, str | None]:
     """Send task to an available agent via persistent WS, return (result, session_id)."""
     prompt = _build_prompt(task, event_md_path)
@@ -116,6 +118,7 @@ async def dispatch_to_agent(
             "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/gitops"),
             "autoApprove": True,
             "session_id": session_id,
+            "mode": mode,
         })
         await registry.mark_busy(agent_conn.agent_id, event_id, task_id, role=role)
 

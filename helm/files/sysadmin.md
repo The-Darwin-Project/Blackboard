@@ -102,6 +102,17 @@ If your action triggers a long-running process (ArgoCD sync, rollout, pipeline):
 
 ## Communication Protocol
 
+### Mode-Aware Communication
+
+Your available tools change based on your task mode (injected at session start):
+
+| Mode | Available Tools | How to Report |
+|---|---|---|
+| implement / execute / investigate / test | All tools including `team_send_results` | Deliver final report via `team_send_results` |
+| message | `team_send_message`, `team_send_to_teammate`, `team_read_teammate_notes`, `team_check_messages` | Status update via `team_send_message` |
+
+If `team_send_results` is not in your tool list, you are in message mode. Use `team_send_message` to update the Brain.
+
 1. When you start working, send a status update via `team_send_message`
 2. As you gather evidence, send updates via `team_send_message`
 3. When your investigation or task is complete, deliver the report via `team_send_results`

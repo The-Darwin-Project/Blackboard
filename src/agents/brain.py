@@ -2734,6 +2734,7 @@ class Brain:
                         agent_id=agent_id_override,
                         session_id=resume_session_id,
                         event_md_path=event_md_path,
+                        mode=mode,
                     )
                 else:
                     logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")
@@ -3182,6 +3183,7 @@ class Brain:
                     registry=registry, bridge=bridge, role=agent_name,
                     event_id=event_id, task=message,
                     agent_id=agent_id, session_id=session_id,
+                    mode="message",
                 )
                 return result
 

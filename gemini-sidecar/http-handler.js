@@ -1,12 +1,13 @@
 // gemini-sidecar/http-handler.js
 // @ai-rules:
-// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute, /current-event, /proxy/*. All state via state.js.
+// 1. [Pattern]: HTTP routing for /health, /messages, /teammate-notes, /callback, /execute, /current-event, /current-mode, /proxy/*. All state via state.js.
 // 2. [Pattern]: /callback forwards sendResults/sendMessage/huddle_message/teammate_forward — task_id and event_id from state.getCurrentTask().
 // 3. [Gotcha]: huddle_message holds HTTP response in pendingHuddleReply until huddle_reply WS message or 90s timeout.
 // 4. [Gotcha]: /execute concurrency guard — rejects with 429 if state.getCurrentTask() already set.
 // 5. [Pattern]: GET /messages drains _inboundMessages (Manager proactive). GET /teammate-notes drains _teammateMessages (peer reads).
 // 6. [Pattern]: /proxy/* endpoints forward GET requests to Brain API at BRAIN_HTTP_URL || localhost:8000. Read-only, no auth.
 // 7. [Gotcha]: /proxy/turns returns empty response if no active task (eventId is null).
+// 8. [Pattern]: POST /hooks/stop — if currentTask.mode === 'message', allow exit without team_send_results (skips hasResults + pending queue gates).
 
 const { executeCLI } = require('./cli-executor');
 const { tryWake } = require('./ws-client');
@@ -159,6 +160,13 @@ async function handleRequest(req, res) {
     try {
       const body = await parseBody(req).catch(() => ({}));
       if (body.stop_hook_active) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      const task = state.getCurrentTask();
+      const taskMode = task?.mode || '';
+      if (taskMode === 'message') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{}');
         return;
@@ -443,6 +451,13 @@ async function handleRequest(req, res) {
     const task = state.getCurrentTask();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ eventId: task?.eventId || '' }));
+    return;
+  }
+
+  if (url.pathname === '/current-mode' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ mode: task?.mode || '' }));
     return;
   }
 

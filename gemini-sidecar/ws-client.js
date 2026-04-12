@@ -4,7 +4,7 @@
 // 2. [Pattern]: All outgoing messages include task_id for Queue correlation on Brain side.
 // 3. [Pattern]: Per-task timeout timer resets on progress. SIGTERM/SIGKILL on expiry.
 // 4. [Pattern]: Reconnect backoff: 1s, 2s, 4s, 8s, max 30s. Re-register after reconnect.
-// 5. [Constraint]: state.setCurrentTask includes ws + taskId (fixes pre-existing bug from legacy mode).
+// 5. [Constraint]: state.setCurrentTask includes ws + taskId + mode (fixes pre-existing bug from legacy mode).
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 // 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work).
@@ -237,7 +237,7 @@ async function handleTask(ws, msg) {
   try {
     // Set full task state BEFORE execution so callbacks (sendResults, sendMessage)
     // can access ws + taskId immediately. executeCLIStreaming will overwrite the child field.
-    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null });
+    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null, mode });
     resetTimer();
 
     restoreAllSkills();
