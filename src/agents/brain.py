@@ -11,6 +11,8 @@
 # 9. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
 # 11. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
+# 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
+# 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
@@ -499,28 +501,37 @@ class Brain:
             elif last_real_turn:
                 inactivity = time.time() - last_real_turn.timestamp
                 if inactivity > NUDGE_INTERVAL_SECONDS:
-                    consecutive_nudges = 0
-                    for t in reversed(event.conversation):
-                        if t.actor == "user" and t.source == "automated":
-                            consecutive_nudges += 1
-                        else:
-                            break
-
-                    if consecutive_nudges >= MAX_NUDGES_BEFORE_ESCALATION:
-                        await self._escalate_to_human(event_id, event, consecutive_nudges, inactivity)
-                        return
-
-                    idle_min = int(inactivity // 60)
-                    nudge_turn = ConversationTurn(
-                        turn=len(event.conversation) + 1,
-                        actor="user",
-                        action="message",
-                        source="automated",
-                        thoughts=f"Automated health check: this event has been idle for {idle_min} minutes with no progress. Evaluate the current state and take action: route an agent to check status, defer with a reason, or close if resolved.",
+                    has_pending_nudge = any(
+                        t.actor == "user" and t.source == "automated"
+                        and t.status.value in ("sent", "delivered")
+                        for t in event.conversation
                     )
-                    await self._append_and_broadcast(event_id, nudge_turn)
-                    logger.info(f"Nudge injected for {event_id} ({consecutive_nudges + 1}/{MAX_NUDGES_BEFORE_ESCALATION})")
-                    return
+                    if has_pending_nudge:
+                        pass  # Let LLM evaluate the existing nudge before injecting more
+
+                    else:
+                        consecutive_nudges = 0
+                        for t in reversed(event.conversation):
+                            if t.actor == "user" and t.source == "automated":
+                                consecutive_nudges += 1
+                            else:
+                                break
+
+                        if consecutive_nudges >= MAX_NUDGES_BEFORE_ESCALATION:
+                            await self._escalate_to_human(event_id, event, consecutive_nudges, inactivity)
+                            return
+
+                        idle_min = int(inactivity // 60)
+                        nudge_turn = ConversationTurn(
+                            turn=len(event.conversation) + 1,
+                            actor="user",
+                            action="message",
+                            source="automated",
+                            thoughts=f"Automated health check: this event has been idle for {idle_min} minutes with no progress. Evaluate the current state and take action: route an agent to check status, defer with a reason, or close if resolved.",
+                        )
+                        await self._append_and_broadcast(event_id, nudge_turn)
+                        logger.info(f"Nudge injected for {event_id} ({consecutive_nudges + 1}/{MAX_NUDGES_BEFORE_ESCALATION})")
+                        return
 
         # Snapshot turn count BEFORE LLM call -- any turns appended during processing
         # (e.g., Aligner confirm arriving mid-evaluation) will have index > turn_snapshot
@@ -642,9 +653,17 @@ class Brain:
         if not refresh_allowed:
             active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
         else:
+            # Anchor to the last defer turn -- any verify after it means we already refreshed.
+            # Prevents the 3-turn sliding window from re-enabling refresh across reprocessing cycles.
+            last_defer_ts = next(
+                (t.timestamp for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.action == "defer"),
+                0,
+            )
             recent_refresh = any(
                 t.actor == "brain" and t.action == "verify" and "MR State:" in (t.thoughts or "")
-                for t in (event.conversation[-3:] if event.conversation else [])
+                and t.timestamp >= last_defer_ts
+                for t in event.conversation
             )
             if recent_refresh:
                 active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
@@ -2178,7 +2197,6 @@ class Brain:
                 if not adapter:
                     result_text = "Smartsheet incident tracking not configured (SMARTSHEET_INCIDENT_* env vars missing)."
                 else:
-                    from datetime import datetime, timezone
                     fields = {
                         "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
                         "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Brain"),
