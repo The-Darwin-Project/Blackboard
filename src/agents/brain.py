@@ -1224,7 +1224,6 @@ class Brain:
                 "You MUST dispatch QE (mode: test) to verify before any PR, merge, or close action."
             )
             base_rec = rec or ""
-            from datetime import datetime, timezone
             ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
                 f"## LATEST AGENT RESULT (from {last_agent_turn.actor}, "
@@ -1233,7 +1232,6 @@ class Brain:
             )
 
         if rec:
-            from datetime import datetime, timezone
             ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
                 f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor}, "
@@ -3357,7 +3355,6 @@ class Brain:
             f"## Conversation",
             f"",
         ])
-        from datetime import datetime, timezone
         prev_ts = event.conversation[0].timestamp if event.conversation else 0
         for turn in event.conversation:
             ts_str = datetime.fromtimestamp(turn.timestamp, tz=timezone.utc).strftime('%H:%M:%S')
