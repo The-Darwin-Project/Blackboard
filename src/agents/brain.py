@@ -2552,7 +2552,7 @@ class Brain:
             self._release_task_state(event_id)
             self._last_processed[event_id] = time.time()
 
-            if not await self._is_event_closed(event_id):
+            if not await self._is_event_closed(event_id) and event_id not in self._waiting_for_user:
                 await self.process_event(event_id)
 
         except Exception as e:
