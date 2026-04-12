@@ -8,6 +8,11 @@
 // 6. [Pattern]: MCPs (TeamChat + Blackboard + Journal): Gemini -> settings.json, Claude -> ~/.claude.json (via writeClaudeMcpServer). Hooks: Gemini AfterTool (command), Claude PreToolUse+Stop+SessionStart (HTTP to sidecar). PostToolUse is broken in Claude Code (github.com/anthropics/claude-code/issues/6305).
 // 7. [Pattern]: filterSkillsByMode renames non-matching skill dirs to .disabled per task; restoreAllSkills re-enables. Both ~/.gemini/skills and ~/.claude/skills updated in lockstep (Gemini first — Claude entries are symlinks).
 // 8. [Constraint]: Empty mode ('') skips filtering entirely (backward compatible with legacy dispatches).
+// 9. [Doc]: Skill vs MCP mode filtering (independent layers, same Brain `mode` on WS task):
+//    - Skills: filterSkillsByMode — SKILL.md `modes:` frontmatter; skills without `modes:` stay enabled.
+//    - MCP: team-chat-mcp.js notInModes on tools/list — e.g. message mode drops team_send_results + team_huddle.
+//    - Stop hook: http-handler.js allows exit without team_send_results when task.mode === message.
+//    Wake tryWake uses mode implement so pair-programming skills + full MCP apply.
 
 const fs = require('fs');
 const path = require('path');
@@ -292,6 +297,8 @@ function safeRename(src, dest) {
  * Skills WITHOUT a `modes:` field load in all modes (backward compatible).
  * Empty mode ('') skips filtering entirely.
  * Renames in both Gemini and Claude skill dirs (Claude entries are symlinks).
+ *
+ * See @ai-rules item 9 (Skill vs MCP matrix). MCP filtering is separate in team-chat-mcp.js.
  */
 function filterSkillsByMode(mode) {
     if (!mode) return;

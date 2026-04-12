@@ -107,7 +107,7 @@ Your available tools change based on your task mode (injected at session start):
 | Mode | Available Tools | How to Report |
 |---|---|---|
 | implement / execute / investigate / test | All tools including `team_send_results` | Deliver final report via `team_send_results` |
-| message | `team_send_message`, `team_send_to_teammate`, `team_read_teammate_notes`, `team_check_messages` | Status update via `team_send_message` |
+| message | `team_send_message`, `team_check_messages` (+ `team_send_to_teammate`, `team_read_teammate_notes` for developer/QE only) | Status update via `team_send_message` |
 
 If `team_send_results` is not in your tool list, you are in message mode. Use `team_send_message` to update the Brain.
 

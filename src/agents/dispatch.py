@@ -8,6 +8,8 @@
 #    If rejected, restore previous agent state. delete_queue always runs.
 # 6. [Pattern]: consume_wake_task mirrors the receive loop but skips queue creation + task send. Queue pre-created by WS handler.
 # 7. [Pattern]: `mode` is forwarded on the task WS JSON for sidecar MCP/stop-hook (e.g. message vs implement).
+# 8. [Pattern]: Unknown non-empty mode values log a warning; dispatch still proceeds (fail-open).
+# 9. [Pattern]: WAKE_REGISTER_MODES — allowed `mode` on wake_register WS from sidecar (see handle_wake_task).
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
@@ -40,6 +42,13 @@ def _sanitize_stdout(raw: str) -> str:
     if not cleaned or len(cleaned) < 20:
         return "(Agent completed but did not send a structured report. Raw output was tool execution logs.)"
     return cleaned
+
+KNOWN_AGENT_MODES = frozenset({
+    "message", "implement", "execute", "investigate", "test", "plan", "review", "rollback",
+})
+
+# Modes the sidecar may send on wake_register (subset of task modes; extend if tryWake diversifies).
+WAKE_REGISTER_MODES = frozenset({"implement"})
 
 AGENT_VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
@@ -82,6 +91,11 @@ async def dispatch_to_agent(
     mode: str = "",
 ) -> tuple[str, str | None]:
     """Send task to an available agent via persistent WS, return (result, session_id)."""
+    if mode and mode not in KNOWN_AGENT_MODES:
+        logger.warning(
+            "dispatch_to_agent: unknown mode %r for role=%s event=%s",
+            mode, role, event_id,
+        )
     prompt = _build_prompt(task, event_md_path)
     _check_security(prompt)
 

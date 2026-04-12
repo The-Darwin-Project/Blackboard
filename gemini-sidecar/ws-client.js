@@ -7,7 +7,7 @@
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId + mode (fixes pre-existing bug from legacy mode).
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
-// 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work).
+// 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work). wake_register WS includes same `mode` as synthetic task (Brain handle_wake_task / WAKE_REGISTER_MODES).
 // 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
 
 const WebSocket = require('ws');
@@ -341,6 +341,7 @@ function tryWake(from, content, eventId) {
   if (!resolvedEventId) return;
 
   _isWaking = true;
+  const wakeTaskMode = 'implement';
   const syntheticMsg = {
     type: 'task',
     task_id: `wake-${Date.now()}`,
@@ -349,7 +350,7 @@ function tryWake(from, content, eventId) {
     prompt: `You have a pending message from your teammate (${from}). Read the event document at events/event-${resolvedEventId}.md for context, then check your inbox with team_read_teammate_notes and respond.`,
     cwd: ctx?.cwd || DEFAULT_WORK_DIR,
     autoApprove: true,
-    mode: 'implement',
+    mode: wakeTaskMode,
   };
   console.log(`[${new Date().toISOString()}] Wake triggered: event ${resolvedEventId} (from: ${from}, session: ${ctx?.sessionId || 'new'})`);
   wsSend(_activeWs, {
@@ -357,6 +358,7 @@ function tryWake(from, content, eventId) {
     task_id: syntheticMsg.task_id,
     event_id: resolvedEventId,
     role: AGENT_ROLE,
+    mode: wakeTaskMode,
   });
   handleTask(_activeWs, syntheticMsg)
     .catch(err => console.error(`[${new Date().toISOString()}] Wake failed:`, err.message))

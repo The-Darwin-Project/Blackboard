@@ -6,6 +6,7 @@
 # 4. [Constraint]: This file handles transport only. No LLM logic, no dispatch decisions.
 # 5. [Pattern]: Ephemeral agents registering for a closed/missing event are terminated immediately (orphan cleanup).
 # 6. [Pattern]: wake_register creates queue SYNC (before next receive), then spawns Brain handler via on_wake callback.
+#    Payload may include optional `mode` (default implement in Brain) — single source with sidecar synthetic task.
 """WebSocket handler for agent sidecar connections (reversed WS direction)."""
 from __future__ import annotations
 

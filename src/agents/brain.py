@@ -18,6 +18,7 @@
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
 # 16. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
+# 29. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
 # 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
@@ -2430,11 +2431,18 @@ class Brain:
         already started). Queue was pre-created by the WS handler.
         """
         from ..dependencies import get_registry_and_bridge
-        from .dispatch import consume_wake_task, RETRYABLE_SENTINEL
+        from .dispatch import consume_wake_task, RETRYABLE_SENTINEL, WAKE_REGISTER_MODES
 
         event_id = data.get("event_id", "")
         role = data.get("role", "")
         task_id = data.get("task_id", "")
+        wake_mode = str(data.get("mode") or "implement").strip() or "implement"
+        if wake_mode not in WAKE_REGISTER_MODES:
+            logger.warning(
+                "handle_wake_task: unsupported mode %r in wake_register, coercing to implement",
+                wake_mode,
+            )
+            wake_mode = "implement"
 
         if not event_id or not role or not task_id:
             logger.warning("handle_wake_task: missing fields in data: %s", data)
@@ -2515,7 +2523,7 @@ class Brain:
 
             if session_id:
                 self._agent_sessions.setdefault(event_id, {})[role] = session_id
-                self._agent_session_modes.setdefault(event_id, {})[role] = "implement"
+                self._agent_session_modes.setdefault(event_id, {})[role] = wake_mode
 
             result_str = str(result).strip() if result else ""
 

@@ -4,8 +4,9 @@
 // 2. [Constraint]: No SDK. readline + process.stdout.write + http.request only. Zero npm deps.
 // 3. [Pattern]: Role-filtered tools via AGENT_ROLE env. dev/qe get all 6, architect/sysadmin get 3.
 // 4. [Pattern]: tools/list queries GET /current-mode; tools with notInModes omit when task mode matches (railway for message mode).
-// 5. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
-// 6. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for sending to teammate. team_read_teammate_notes reads from SIDECAR_PORT (own inbox).
+// 5. [Pattern]: handleToolCall logs WARN if team_send_results/team_huddle runs while /current-mode is message (observability; call still proceeds).
+// 6. [Gotcha]: team_huddle blocks the stdio loop for up to 600s. MCP is request-response so this is safe.
+// 7. [Pattern]: SIDECAR_PORT for own HTTP, PEER_PORT for sending to teammate. team_read_teammate_notes reads from SIDECAR_PORT (own inbox).
 'use strict';
 
 const readline = require('readline');
@@ -58,6 +59,17 @@ function httpPost(port, path, body, timeoutMs = 10000) {
   });
 }
 
+async function warnIfNotInModesToolInMessageMode(name) {
+  if (name !== 'team_send_results' && name !== 'team_huddle') return;
+  try {
+    const info = await httpGet(SIDECAR_PORT, '/current-mode');
+    const mode = (info && typeof info === 'object' && info.mode) ? info.mode : '';
+    if (mode === 'message') {
+      console.error(`[TeamChat] WARN: ${name} invoked in message mode (filtered from tools/list; tools/call defense-in-depth)`);
+    }
+  } catch { /* non-critical */ }
+}
+
 function httpGet(port, path) {
   return new Promise((resolve, reject) => {
     const req = http.request({ hostname: '127.0.0.1', port, path, method: 'GET', timeout: 5000 }, (res) => {
@@ -76,6 +88,7 @@ function httpGet(port, path) {
 
 async function handleToolCall(name, args) {
   console.error(`[TeamChat] ${name}(${JSON.stringify(args).slice(0, 80)})`);
+  await warnIfNotInModesToolInMessageMode(name);
   try {
     if (name === 'team_send_message') {
       const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'message', content: args.message || '' });
