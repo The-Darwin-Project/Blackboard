@@ -199,7 +199,7 @@ Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automati
 - **Cross-Event Correlation** -- Brain sees all active events for the same service, avoids conflicting actions
 - **Multimodal Chat** -- Users can paste/upload images; Brain processes via Gemini multimodal API
 - **Agent Streaming Cards** -- Real-time per-agent Gemini CLI stdout in dedicated UI cards with floating windows
-- **AI Transparency** -- All AI-generated messages tagged, user guide page, feedback mechanism
+- **AI Transparency** -- AI-generated actionable outputs tagged in Slack (execute, approval, close); all Dashboard messages tagged; user guide page, feedback mechanism
 - **User Feedback** -- POST `/feedback` endpoint stores ratings in Qdrant for quality tracking
 - **Auth Scaffolding** -- Dex OIDC identity ready (gated behind `DEX_ENABLED`, anonymous mode when off)
 - **TimeKeeper** -- Schedule one-shot or recurring tasks via Dashboard UI. LLM-powered instruction refinement aligns user intent with Brain capabilities. Observer fires when queue is idle (lowest priority). Events arrive as user requests with YAML frontmatter context
@@ -388,7 +388,7 @@ GET /events/                   # Architecture event timeline
 - Structural changes require user approval (Brain pauses for confirmation)
 - Agent concurrency locks prevent WebSocket `recv` conflicts
 - ArgoCD/Kargo passwords masked in logs
-- AI-generated content tagged in both Dashboard and Slack interfaces
+- AI-generated content tagged in Dashboard (all messages) and Slack (actionable outputs only)
 
 ## Project Structure
 

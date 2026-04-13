@@ -41,5 +41,5 @@ Darwin agents execute commands on Kubernetes clusters. The following security co
 - **FORBIDDEN_PATTERNS** in `src/agents/security.py` block destructive commands
 - **Air Gap enforcement** via agent skill files limits each agent's capabilities
 - **Structural changes** require user approval (Brain pauses for confirmation)
-- **AI-generated content** is tagged in both Dashboard and Slack interfaces
+- **AI-generated content** is tagged in Dashboard (all messages) and Slack (actionable outputs: execute results, approval requests, closures)
 - **Secrets** are injected via Kubernetes Secrets, never stored in the repository
