@@ -33,6 +33,10 @@
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
 # 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
 # 29. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
+# 30. [Pattern]: Message-mode early return in _run_agent_task: when mode=="message", skip result turn
+#     and process_event re-entry before is_cancel. Agent's content was delivered via team_send_message
+#     progress turns. Intentional exception to rule #9 (_append_and_broadcast for all turns).
+#     Safety invariant: team_send_results has notInModes:['message'] in MCP (team-chat-mcp.js).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -2548,6 +2552,9 @@ class Brain:
                 self._release_task_state(event_id)
                 return
 
+            # WARNING: If WAKE_REGISTER_MODES ever includes "message", this needs
+            # the same mode-aware skip as _run_agent_task (message-mode agents
+            # deliver content via progress turns, not via result turn).
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=role, action="execute",
@@ -2792,6 +2799,8 @@ class Brain:
             # Lock released -- Brain continues freely
 
             # Parse result -- check for structured responses (question, agent_busy)
+            # Note: unreachable in message mode (team_send_results blocked by MCP notInModes,
+            # so callbackResult is null and stdout is plain text, never structured JSON).
             try:
                 result_data = json.loads(result)
                 if isinstance(result_data, dict):
@@ -2839,6 +2848,29 @@ class Brain:
                 self._release_task_state(event_id)
                 if not await self._is_event_closed(event_id):
                     await self.process_event(event_id)
+                return
+
+            # Message-mode: agent delivered content via progress turns (team_send_message).
+            # CLI exit stdout is redundant noise -- skip result turn and re-entry.
+            # Safety invariant: team_send_results has notInModes:['message'] in MCP layer
+            # (team-chat-mcp.js), so callbackResult is always null in message mode.
+            # Exception to rule #9 (_append_and_broadcast for all turns) -- intentional.
+            # Applies to both local and ephemeral agents (same dispatch + result path).
+            if mode == "message":
+                logger.info(
+                    f"Message-mode task completed: {agent_name} for {event_id} "
+                    f"(skipping result turn, content delivered via progress)"
+                )
+                if routing_turn_num:
+                    await self.blackboard.mark_turn_status(
+                        event_id, routing_turn_num, MessageStatus.EVALUATED
+                    )
+                    await self._broadcast_status_update(
+                        event_id, "evaluated", turns=[routing_turn_num],
+                    )
+                await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
+                self._release_task_state(event_id)
+                self._last_processed[event_id] = time.time()
                 return
 
             # Append agent result turn (cancel = clean termination, not an error)
