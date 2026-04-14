@@ -351,7 +351,7 @@ export default function EventSidebar() {
                   <CollapsibleSection title="Details">
                     <div className="space-y-1.5 text-[13px] text-text-muted">
                       <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} size={18} />{doc.source}</span></div>
-                      <div className="flex justify-between"><span>{doc.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
+                      <div className="flex justify-between"><span>{(doc as any).subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
                       <div className="flex justify-between"><span>Status</span>
                         <span className="px-1.5 py-0.5 rounded text-[12px] font-medium"
                           style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#94a3b8' }}>

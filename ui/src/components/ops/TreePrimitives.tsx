@@ -51,7 +51,7 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
 }
 
 export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
-  evt: { id: string; status: string; source: string; service: string; current_agent?: string | null };
+  evt: { id: string; status: string; source: string; service: string; subject_type?: string; current_agent?: string | null };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const sc = STATUS_COLORS[evt.status];
