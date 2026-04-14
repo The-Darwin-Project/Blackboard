@@ -1613,7 +1613,9 @@ class BlackboardState:
                 continue
             event = EventDocument(**json.loads(raw))
 
-            if event.service != "general" and event.source != "headhunter":
+            if (event.service != "general"
+                    and event.source != "headhunter"
+                    and getattr(event, "subject_type", "service") != "kargo_stage"):
                 continue
 
             # Elapsed time from event creation

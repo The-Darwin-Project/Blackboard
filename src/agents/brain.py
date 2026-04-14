@@ -2789,7 +2789,10 @@ class Brain:
                     use_ephemeral = (
                         self._ephemeral_provisioner
                         and event_doc
-                        and event_doc.source in ("headhunter", "timekeeper")
+                        and (
+                            event_doc.source in ("headhunter", "timekeeper")
+                            or getattr(event_doc, "subject_type", "service") == "kargo_stage"
+                        )
                     )
                     ephemeral_is_overflow = False
 
