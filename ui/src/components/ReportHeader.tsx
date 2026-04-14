@@ -5,6 +5,7 @@
 import type { ReportFull } from '../api/types';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
+import { resolveSubjectType } from '../utils/eventFormat';
 
 export default function ReportHeader({ report }: { report: ReportFull }) {
   const domain = (report.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
@@ -23,7 +24,7 @@ export default function ReportHeader({ report }: { report: ReportFull }) {
       border: `1px solid ${domainColor.border}44`,
       marginBottom: 12,
     }}>
-      <SourceIcon source={report.source} subjectType={report.subject_type} size={28} />
+      <SourceIcon source={report.source} subjectType={resolveSubjectType(report.subject_type, report.service)} size={28} />
 
       <div style={{ flex: 1, minWidth: 160 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: '#e2e8f0' }}>

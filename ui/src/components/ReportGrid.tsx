@@ -8,7 +8,7 @@
  * Displays persisted report metadata in a multi-column grid.
  */
 import type { ReportMeta } from '../api/types';
-import { extractReasonDisplay } from '../utils/eventFormat';
+import { extractReasonDisplay, resolveSubjectType } from '../utils/eventFormat';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
 
@@ -131,7 +131,7 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
     >
       {/* Row 1: icon + severity + domain */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <SourceIcon source={report.source} subjectType={report.subject_type} size={28} />
+        <SourceIcon source={report.source} subjectType={resolveSubjectType(report.subject_type, report.service)} size={28} />
         <span style={{
           background: severity.bg, color: severity.text,
           padding: '3px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600,
