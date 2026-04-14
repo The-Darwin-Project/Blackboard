@@ -116,13 +116,59 @@ Ephemeral agents receive the event document via the `/events/{id}/document` REST
 18:46:11 - Closed event: evt-5b40374a
 ```
 
-## Event Outcome (despite the bug)
+## Second Case: evt-329de81a (Aligner-created, same root cause)
 
-The KargoObserver feature worked end-to-end:
+**Event:** evt-329de81a (must-gather-v4.13@kargo-cnv-must-gather-v4-13)
+**Trigger:** KargoObserver watch callback (automatic detection, not dashboard)
+
+This event demonstrates the bug also affects the **ephemeral limit + defer path**:
+
+1. **18:40:06** -- Brain `select_agent(sysadmin)`
+2. **18:40:10** -- Brain writes event MD to `/data/gitops-sysadmin/events/` (local sidecar volume)
+3. **18:40:11** -- Ephemeral limit reached (1/1, evt-5b40374a using the slot) -- Brain defers for 120s
+4. **Local sidecar already has the file** and starts processing -- it doesn't know about the defer
+5. **18:42:13** -- Defer expires, Brain re-activates event, uses `refresh_kargo_context`
+6. **18:47:53** -- Brain dispatches sysadmin again (ephemeral slot now free), new TaskRun triggered
+7. **Local sidecar + ephemeral agent compete** -- same flickering UX as evt-5b40374a
+
+```
+18:40:10 - Wrote event MD to /data/gitops-sysadmin/events/event-evt-329de81a.md
+18:40:11 - Ephemeral limit for 'aligner' reached (1/1). Event evt-329de81a stays queued.
+18:40:11 - Deferring evt-329de81a for 120s: Waiting for ephemeral agent slot
+18:42:13 - Defer expired for evt-329de81a -- attempting re-activation
+18:42:20 - Brain LLM decision: refresh_kargo_context (tool working correctly)
+18:47:53 - Brain LLM decision: select_agent (second dispatch after refresh)
+```
+
+**Key insight:** The volume write at step 2 happens BEFORE step 3 (ephemeral limit check + defer). The local sidecar picks up the file and starts working during the 120s defer window. When the defer expires and a real ephemeral agent is dispatched, both agents are active.
+
+This confirms the bug is in the dispatch path ordering, not specific to any event source or trigger method. Both user-triggered (evt-5b40374a) and observer-triggered (evt-329de81a) events hit it.
+
+## Proposed Fix (Updated)
+
+The volume write must be gated by BOTH conditions:
+
+```python
+# In brain.py._run_agent_task, AFTER the ephemeral decision:
+if not use_ephemeral:
+    self._write_event_to_volume(event_id, agent_name, event_md)
+```
+
+This prevents the local sidecar from seeing the file when:
+- (a) Ephemeral dispatch is the primary target (Tier 1: headhunter/timekeeper/kargo_stage)
+- (b) Ephemeral dispatch is deferred (limit reached) -- the file should NOT be written because the event is deferred, not dispatched locally
+
+Ephemeral agents receive the event document via REST (`/events/{id}/document`), not the shared volume.
+
+## Event Outcomes (despite the bug)
+
+### evt-5b40374a (quata-app-stage)
 - User created event via dashboard Kargo Stages tree
-- Brain classified as COMPLICATED, dispatched sysadmin
 - Agent investigated, found root cause: `cnv-fbc-quota` app deleted on 2026-03-03 (commit c1279729) but Kargo project `quata-app` was left behind
-- Brain notified maintainer via Slack DM
-- Brain created incident
-- Brain closed event with documented root cause
+- Brain notified maintainer via Slack DM, created incident, closed
 - Archivist archived to Qdrant for deep memory
+
+### evt-329de81a (must-gather-v4.13)
+- KargoObserver auto-detected from watch stream
+- Brain used `refresh_kargo_context` tool (working correctly)
+- Agent investigating MR merge timeout (still active)
