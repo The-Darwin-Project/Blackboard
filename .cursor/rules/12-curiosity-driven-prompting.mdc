@@ -1,0 +1,64 @@
+---
+description: "Prompt design principle: Brain and agent skills must demand proof via probing, not accept assumptions as evidence. Applies when authoring or reviewing skills, tool schemas, and agent instructions."
+globs: "BlackBoard/gemini-sidecar/**/*.md,BlackBoard/helm/files/*.md,BlackBoard/src/agents/brain_skills/**/*.md,BlackBoard/src/agents/llm/types.py"
+alwaysApply: false
+---
+
+# Curiosity-Driven Prompting
+
+When authoring or reviewing Brain skills, agent skills, or tool schemas, apply these principles to prevent the Brain from operating in an open loop — forming assumptions and escalating without proof.
+
+## 1. Demand Proof, Not Assumptions
+
+The Brain must not treat its own inferences as evidence. Skills must distinguish between:
+
+- **Observable evidence**: a specific error message, log excerpt, exit code, concrete resource state
+- **Status labels**: "pipeline failed", "build error", "pod unhealthy" (without the underlying condition)
+
+Any skill that gates an action on "the reason must be known" must define what counts as *known* — observable evidence, not a narrative the Brain constructed from event metadata.
+
+## 2. Questions Before Conclusions
+
+When a skill describes dispatching an agent to investigate, the instruction pattern must be question-driven:
+
+- The `task_instruction` should contain questions the agent must answer
+- NOT conclusions for the agent to verify
+
+This prevents confirmation bias: the Brain sends an agent to *confirm* what it already assumed, rather than to *discover* what actually happened.
+
+## 3. Investigation Depth by Failure Type
+
+Agent investigation skills must branch by failure type, not assume all failures are infrastructure:
+
+- **Infrastructure failures** (pod crash, sync, node): resource state, logs, change attribution
+- **Pipeline failures** (CI/CD, Tekton, Konflux): job/task/step identification, log extraction, error classification
+- **Each branch has a depth target**: stop at the actual error condition, not just the failing component
+
+If the error log references source code (compilation, test assertion), the agent reports the error from the log and recommends a different agent for code-level analysis — mode boundaries remain clean.
+
+## 4. Closed-Loop Evaluation
+
+After an agent returns from investigation, the Brain must evaluate the report:
+
+- Does it contain observable evidence or only status labels?
+- If only labels: re-dispatch with narrower questions targeting the specific failing component
+- If the agent reports it cannot go deeper (permissions, pruned data): accept and note the evidence gap
+
+This is the feedback mechanism that makes the system self-correcting. Without it, the Brain accepts whatever the agent returns and escalates.
+
+## 5. Traceable Outputs
+
+Every outbound communication (Slack DM, incident, MR comment, close summary) must include:
+
+- The event identifier for post-mortem tracing
+- The specific error or root cause from investigation evidence (not just "pipeline failed")
+
+Tool schema descriptions are the mechanism: they steer the LLM's function-calling behavior toward including these fields.
+
+## Anti-Patterns
+
+- A skill says "failure reason must be known" without defining what counts as known (gate without criteria)
+- A dispatch instruction says "check the pipeline status" instead of "what specific error appears in the failing step log?" (status-driven, not question-driven)
+- An agent investigation skill has only infrastructure patterns — no pipeline drill-down (single failure model)
+- The Brain escalates after one shallow investigation with no re-dispatch evaluation (open loop)
+- Notifications or incidents lack the event identifier (untraceable output)
