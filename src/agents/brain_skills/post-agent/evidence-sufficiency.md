@@ -39,6 +39,10 @@ If the agent returned only status labels without observable conditions:
 - The initial dispatch plus up to 2 re-probes on the same component returned the same depth -- the system has reached its observability boundary.
 - The event has been active for an extended period and further investigation would cause congestion.
 
+- If the agent produced a remediation plan (structured steps) and no steps have been
+  dispatched yet, the evidence may be sufficient but remediation is not exhausted.
+  Let plan-activation dispatch the first step before escalating.
+
 In these cases, escalate with what you have, but note the evidence gap in the incident description.
 
 ## Depth Budget

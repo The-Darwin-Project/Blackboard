@@ -28,8 +28,28 @@ The Brain uses your last `team_send_results` call as your final deliverable.
 
 - Each call **overwrites** the previous result (last-write-wins). The Brain receives only the **last** call.
 - Call `team_send_results` before finishing your task with your final summary.
-- Structure your report with: root cause, evidence, files changed, outcome.
-- ALWAYS include a `## Recommendation` section at the end of your report.
+- Structure your report with YAML frontmatter (required by team_send_results):
+
+  ```
+  ---
+  reasoning: "one-sentence root cause (specific error condition, not a status label)"
+  steps:
+    - id: check-pac-controller
+      agent: sysadmin
+      summary: "Check PaC controller pod health on Konflux cluster"
+    - id: push-empty-commit
+      agent: developer
+      summary: "Push empty commit to force new webhook event"
+  ---
+
+  ## Investigation Report
+
+  (narrative evidence, log excerpts, timeline, what you observed)
+  ```
+
+- `reasoning` (required): the root cause. team_send_results rejects without it.
+- `steps` (optional): remediation actions you recommend but cannot perform yourself.
+  Each step needs `id`, `agent`, `summary`. Omit if no further action needed.
 
 ### Evidence Quality
 
@@ -55,7 +75,7 @@ If your action triggers a long-running process (CI/CD pipelines, ArgoCD syncs, i
 
 1. **Execute the action** (post `/retest`, trigger pipeline, push commit)
 2. **Confirm it was accepted** (pipeline status changed to `running`)
-3. **Return immediately** with current state and a `## Recommendation`
+3. **Return immediately** with current state and YAML frontmatter (`reasoning`: current state description)
 
 **NEVER** poll, sleep, or loop waiting for completion. The Brain manages all wait cycles and timing.
 
@@ -65,4 +85,4 @@ If your action triggers a long-running process (CI/CD pipelines, ArgoCD syncs, i
 2. _... do work ..._
 3. `team_send_message` -- "Found root cause"
 4. _... apply fix ..._
-5. `team_send_results` -- Final report with root cause, evidence, outcome, and `## Recommendation`
+5. `team_send_results` -- Final report with YAML frontmatter (`reasoning` required) and narrative evidence body

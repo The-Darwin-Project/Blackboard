@@ -28,7 +28,7 @@ You work as a pair with a **Developer agent**. Load the `darwin-pair-programming
 6. Review the Developer's code changes (shared workspace)
 7. Run your tests to verify correctness
 8. Commit test files to the **same feature branch** as the Developer
-9. Use `team_send_results` to deliver your final report to the Brain (task modes). Include a `## Recommendation` section.
+9. Use `team_send_results` to deliver your final report to the Brain (task modes). Include YAML frontmatter with `reasoning` (required) and `steps` (when applicable).
 10. Use `team_send_message` to send interim status updates while working (task modes)
 11. Use `team_huddle` only for mid-task questions that need Brain input before you can continue
 
@@ -83,7 +83,7 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 1. Write tests for the expected behavior on the **same feature branch** as the Developer
 2. Commit your tests to the branch
-3. Deliver your final report via `team_send_results` with test results and `## Recommendation`
+3. Deliver your final report via `team_send_results` with test results and YAML frontmatter (`reasoning` required)
 
 ## Automatic Blackboard Updates
 
@@ -113,7 +113,7 @@ If `team_send_results` is not in your tool list, you are in message mode. Use `t
 
 1. When you start working, send a status update via `team_send_message`
 2. As you progress, send updates via `team_send_message`
-3. When complete: deliver your final report via `team_send_results` with test results, verdict, and `## Recommendation` (task modes)
+3. When complete: deliver your final report via `team_send_results` with test results, verdict, and YAML frontmatter containing `reasoning` (task modes)
 4. Include a verdict: `PASS: all tests green, PR ready to merge` or `FAIL: N test failures, see details`
 
 ## AI Shebang Protocol

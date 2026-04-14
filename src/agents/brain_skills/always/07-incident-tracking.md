@@ -14,6 +14,7 @@ Before calling `create_incident`, verify you have:
 - At least one agent investigation result that contains a specific error, log excerpt, or concrete condition (not just a status label like "pipeline failed" or "build step failed")
 - If no agent has investigated the failure yet, dispatch one in `investigate` mode BEFORE escalating
 - If an agent investigated but returned only status labels without the underlying error, re-dispatch with narrower questions targeting the specific failing component
+- If the agent produced a remediation plan (plan turn with steps), at least the first step has been dispatched or all steps are outside Darwin's capability
 
 - The incident description must contain the root cause or specific error from agent evidence.
 - Include event id in the incident summary (e.g., `[evt-#######]: {Summary of the incident}`).

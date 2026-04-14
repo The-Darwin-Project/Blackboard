@@ -47,6 +47,10 @@ if [ -z "$CONTENT" ]; then
   exit 1
 fi
 
+if [ "$TYPE" = "result" ]; then
+  echo "[sendResults] WARN: shell fallback used (MCP frontmatter validation bypassed)" >&2
+fi
+
 # POST to sidecar callback endpoint
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$CALLBACK_URL" \
   -H "Content-Type: application/json" \

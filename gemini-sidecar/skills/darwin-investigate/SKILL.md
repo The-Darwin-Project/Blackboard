@@ -37,15 +37,25 @@ Do NOT keep investigating after you have enough evidence. Report and let the Bra
 
 ## What to Report
 
-Structure your findings as:
+Structure your findings with YAML frontmatter (required by team_send_results):
 
-```text
-**Root Cause**: the specific error condition (e.g., "go build failed: undefined reference to X", "OOMKilled exit code 137", "dependency conflict between A v1.2 and B v3.4")
+```
+---
+reasoning: "the specific error condition (e.g., go build failed: undefined reference to X)"
+steps:
+  - id: check-controller
+    agent: sysadmin
+    summary: "Check PaC controller pod health on Konflux cluster"
+---
+
 **Trigger**: code change | dependency update | config change | infrastructure issue | flaky/intermittent
 **Evidence**: 2-3 bullet points including at least one log excerpt or specific error message
 **Unanswered**: anything you could not determine and why (permissions, pruned data, external system)
-**Recommendation**: what the Brain should do next, based on evidence
 ```
+
+- `reasoning` (required): the root cause. Must be a specific error condition.
+- `steps` (optional): remediation actions you recommend but cannot perform in your current mode.
+  Each step needs `id`, `agent`, `summary`. Omit if no further action needed.
 
 ## Rules
 

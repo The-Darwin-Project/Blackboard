@@ -95,7 +95,20 @@ async function handleToolCall(name, args) {
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };
     }
     if (name === 'team_send_results') {
-      const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'result', content: args.content || '' });
+      const content = args.content || '';
+      const trimmed = content.trimStart();
+      if (!trimmed.startsWith('---')) {
+        return { error: 'team_send_results requires YAML frontmatter. Start with ---\\nreasoning: "your root cause"\\n---' };
+      }
+      const endIdx = trimmed.indexOf('---', 3);
+      if (endIdx === -1) {
+        return { error: 'Malformed frontmatter: missing closing ---' };
+      }
+      const fmBlock = trimmed.slice(3, endIdx);
+      if (!fmBlock.includes('reasoning:') && !fmBlock.includes('reasoning :')) {
+        return { error: 'Frontmatter must include reasoning field. Add reasoning: "your root cause" between --- delimiters.' };
+      }
+      const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'result', content });
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };
     }
     if (name === 'team_check_messages') {

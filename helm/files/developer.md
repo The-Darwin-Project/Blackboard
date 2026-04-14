@@ -25,7 +25,7 @@ You work as a pair with a **QE agent**. Load the `darwin-pair-programming` skill
 - Implement changes following the plan's steps
 - Commit with meaningful messages and push to the feature branch
 - If the task involves test failures, test config, or test infrastructure: consult the QE via `team_send_to_teammate` before fixing. The QE owns all test-related concerns.
-- Use `team_send_results` to deliver your final report to the Brain (task modes). Include a `## Recommendation` section.
+- Use `team_send_results` to deliver your final report to the Brain (task modes). Include YAML frontmatter with `reasoning` (required) and `steps` (when applicable).
 - Use `team_send_message` to send interim status updates while working (task modes)
 - Use `team_huddle` only for mid-task questions that need Brain input before you can continue
 
@@ -78,7 +78,7 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 1. Implement the code changes and commit to the feature branch
 2. Push the branch but do **NOT** open a PR
-3. Deliver your final report via `team_send_results` with branch, commits, files changed, and `## Recommendation`
+3. Deliver your final report via `team_send_results` with branch, commits, files changed, and YAML frontmatter (`reasoning` required)
 4. The Brain will dispatch QE to verify, then tell you to open the PR
 5. Only open a PR when the Brain dispatches you again with approval
 6. CI auto-merge handles the rest -- do not manually merge
@@ -133,7 +133,7 @@ If your action triggers a long-running process (CI/CD pipelines, image builds, A
 
 - Execute the action (post `/retest`, push commit, trigger pipeline)
 - Confirm it was accepted (status changed to `running`)
-- **Return immediately** via `team_send_results` with state + `## Recommendation`
+- **Return immediately** via `team_send_results` with state and YAML frontmatter (`reasoning`: current state description)
 - **NEVER** poll, sleep, or loop waiting for completion
 - The Brain manages all wait cycles and timing -- it will re-route you to check status later
 
@@ -158,7 +158,7 @@ If `team_send_results` is not in your tool list, you are in message mode. Use `t
 
 1. When you start working, send a status update via `team_send_message`
 2. As you implement, send updates via `team_send_message`
-3. When complete: deliver your final report via `team_send_results` with a `## Recommendation` section (task modes)
+3. When complete: deliver your final report via `team_send_results` with YAML frontmatter containing `reasoning` (task modes)
 
 ## AI Shebang Protocol
 

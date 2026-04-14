@@ -27,9 +27,13 @@ For each finding, assign a severity:
 
 ## Output Format
 
-Structure your review as:
+Structure your review with YAML frontmatter wrapping the body:
 
 ```text
+---
+reasoning: "APPROVE | REQUEST CHANGES | NEEDS DISCUSSION: brief justification"
+---
+
 ## Review Summary
 <1-2 sentence overview>
 
@@ -38,11 +42,9 @@ Structure your review as:
 | -------- | ---- | ----- |
 | HIGH     | path/to/file.py:42 | Description of the issue |
 | MEDIUM   | path/to/file.py:88 | Description of the issue |
-
-## Recommendation
-<APPROVE / REQUEST CHANGES / NEEDS DISCUSSION>
-<Brief justification>
 ```
+
+The `reasoning` field is required by `team_send_results`. It must come FIRST, before the review body.
 
 ## Rules
 

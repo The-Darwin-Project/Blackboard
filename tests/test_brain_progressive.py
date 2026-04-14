@@ -129,6 +129,7 @@ class TestSurfaceAgentRecommendation:
             turn.actor = "sysadmin"
             turn.result = agent_result
             turn.thoughts = None
+            turn.taskForAgent = None
             event.conversation = [turn]
         else:
             event.conversation = []
@@ -158,3 +159,116 @@ class TestSurfaceAgentRecommendation:
         event = self._make_event_stub(None)
         result = Brain._surface_agent_recommendation(event)
         assert result is None
+
+    @staticmethod
+    def _make_event_stub_with_reasoning(reasoning: str, result_body: str = "Evidence here."):
+        """Stub with explicit taskForAgent.reasoning (structured frontmatter path)."""
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        turn = MagicMock()
+        turn.actor = "developer"
+        turn.result = result_body
+        turn.thoughts = None
+        turn.taskForAgent = {"reasoning": reasoning}
+        event.conversation = [turn]
+        return event
+
+    def test_reasoning_promoted_as_rca(self):
+        event = self._make_event_stub_with_reasoning("PaC controller not processing events")
+        result = Brain._surface_agent_recommendation(event)
+        assert result is not None
+        assert "ROOT CAUSE ANALYSIS" in result
+        assert "PaC controller not processing events" in result
+
+    def test_reasoning_with_steps_still_promotes_rca(self):
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        turn = MagicMock()
+        turn.actor = "sysadmin"
+        turn.result = "Investigation complete."
+        turn.thoughts = None
+        turn.taskForAgent = {
+            "reasoning": "OOMKilled exit code 137",
+            "steps": [{"id": "1", "agent": "developer", "summary": "Fix memory leak"}],
+            "source": "sysadmin",
+        }
+        event.conversation = [turn]
+        result = Brain._surface_agent_recommendation(event)
+        assert "ROOT CAUSE ANALYSIS" in result
+        assert "OOMKilled" in result
+
+    def test_no_reasoning_falls_through_to_legacy(self):
+        """Agent without taskForAgent.reasoning uses legacy regex path."""
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        turn = MagicMock()
+        turn.actor = "developer"
+        turn.result = "Done.\n\n## Recommendation\nMerge the PR."
+        turn.thoughts = None
+        turn.taskForAgent = None
+        event.conversation = [turn]
+        result = Brain._surface_agent_recommendation(event)
+        assert "LATEST AGENT RECOMMENDATION" in result
+        assert "Merge the PR" in result
+
+    def test_empty_reasoning_falls_through_to_legacy(self):
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        turn = MagicMock()
+        turn.actor = "developer"
+        turn.result = "No findings."
+        turn.thoughts = None
+        turn.taskForAgent = {"reasoning": ""}
+        event.conversation = [turn]
+        result = Brain._surface_agent_recommendation(event)
+        assert "ROOT CAUSE ANALYSIS" not in result
+
+
+class TestParsePlanFrontmatter:
+    def test_with_reasoning_and_steps(self):
+        raw = '---\nreasoning: "PaC issue"\nsteps:\n  - id: "1"\n    agent: sysadmin\n    summary: Check controller\n---\nBody text.'
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert body == "Body text."
+        assert steps is not None
+        assert len(steps) == 1
+        assert fm.get("reasoning") == "PaC issue"
+
+    def test_reasoning_only_no_steps(self):
+        raw = '---\nreasoning: "Pipeline passed, MR merged"\n---\nAll good.'
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert body == "All good."
+        assert steps is None
+        assert fm.get("reasoning") == "Pipeline passed, MR merged"
+
+    def test_no_frontmatter(self):
+        raw = "Just a plain result with no frontmatter."
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert body is None
+        assert steps is None
+        assert fm == {}
+
+    def test_malformed_yaml(self):
+        raw = "---\n: bad yaml [[\n---\nBody."
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert body == "Body."
+        assert steps is None
+        assert fm == {}
+
+    def test_leading_whitespace(self):
+        raw = '\n  ---\nreasoning: "with leading spaces"\nsteps:\n  - id: "1"\n    agent: developer\n    summary: Fix it\n---\nBody.'
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert body == "Body."
+        assert steps is not None
+        assert fm.get("reasoning") == "with leading spaces"
+
+    def test_empty_string(self):
+        body, steps, fm = Brain._parse_plan_frontmatter("")
+        assert body is None
+        assert steps is None
+        assert fm == {}
+
+    def test_non_string_reasoning(self):
+        raw = '---\nreasoning: 42\n---\nBody.'
+        body, steps, fm = Brain._parse_plan_frontmatter(raw)
+        assert fm.get("reasoning") == 42
+        assert body == "Body."

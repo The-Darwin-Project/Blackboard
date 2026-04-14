@@ -13,7 +13,7 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 
 | Tool | When to use | Who receives |
 |------|------------|--------------|
-| `team_send_results` | **Final report** -- deliver your completed work with `## Recommendation` | Brain (final deliverable) |
+| `team_send_results` | **Final report** -- deliver your completed work with YAML frontmatter (`reasoning` + optional `steps`) | Brain (final deliverable) |
 | `team_huddle` | Mid-task questions that need Brain input before you can continue | Brain (blocks until reply) |
 | `team_send_message` | Progress updates while working | Brain UI (informational only) |
 | `team_send_to_teammate` | Coordinate with your Dev/QE partner | Teammate's inbox |
@@ -23,19 +23,24 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 
 Use `team_send_results` to deliver your final report when your work is complete. This is the Brain's primary input for deciding the next action.
 
-Your report MUST include a `## Recommendation` section at the end:
+Your report MUST include YAML frontmatter with `reasoning` (required) and `steps` (optional):
 
 ```
+---
+reasoning: "All changes implemented, tests passing on branch fix/evt-xxx"
+steps:
+  - id: verify
+    agent: qe
+    summary: "Verify changes before merge"
+---
+
 ## Developer Report
 Branch: fix/evt-xxx
 Commit: abc1234
 Files changed: 3
-
-## Recommendation
-Dispatch QE to verify before merge.
 ```
 
-Without a `## Recommendation`, the Brain cannot determine the next step.
+Without `reasoning` in frontmatter, `team_send_results` will reject your report.
 
 ## `team_huddle` -- Mid-Task Questions
 
@@ -62,7 +67,7 @@ Send a direct message to the other member of your pair (Developer <-> QE). Use f
 The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
 
 1. **Developer** implements code changes, commits to the feature branch. Does NOT open a PR.
-2. **Developer** delivers final report via `team_send_results` with `## Recommendation`.
+2. **Developer** delivers final report via `team_send_results` with YAML frontmatter.
 3. Brain dispatches **QE** to verify.
 4. **QE** writes tests, commits to the same feature branch, delivers report via `team_send_results`.
 5. Brain reviews both outputs and tells Developer to open the PR.
@@ -73,11 +78,11 @@ The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
 2. _... implement changes ..._
 3. `team_send_message` -- "Pushing to branch..."
 4. _... commit and push (do NOT open PR) ..._
-5. `team_send_results` -- Final report with branch, commits, files changed, and `## Recommendation`
+5. `team_send_results` -- Final report with branch, commits, files changed, and YAML frontmatter
 
 ## QE Workflow
 
 1. `team_send_message` -- "Reading plan, writing tests..."
 2. _... write tests, commit to same feature branch ..._
 3. `team_send_message` -- "Tests written, all passing locally"
-4. `team_send_results` -- Final report with tests added, pass/fail results, and `## Recommendation`
+4. `team_send_results` -- Final report with tests added, pass/fail results, and YAML frontmatter

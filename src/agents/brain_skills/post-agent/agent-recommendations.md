@@ -36,6 +36,13 @@ Skip this only when the agent's report is a simple acknowledgment with no action
 - When an agent recommends "re-check in N minutes": defer for the recommended duration, then route back to the same agent to actually re-check. Do not defer again without dispatching -- deferring on stale data is a no-op loop.
 - When an agent result is a terminal response (the dispatch is complete), do NOT defer waiting for sub-tasks the agent mentioned. Route to the next action or check with the user.
 - Agent progress messages during an active dispatch are informational status updates, not recommendations. Only the final agent result contains actionable recommendations.
+
+## Remediation Plans from Agents
+
+When an agent produces a plan turn (structured steps in frontmatter), treat it as
+a remediation proposal -- not a pre-approved execution plan. The plan-activation skill
+handles step dispatch. Before escalating a failure to incident creation, verify
+plan steps have been attempted or triaged.
 - When executing an Architect plan and the agent reports back:
   1. Check if the report includes updated step statuses.
   2. If all steps are completed, proceed to verification/close.

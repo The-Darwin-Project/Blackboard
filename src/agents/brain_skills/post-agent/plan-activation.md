@@ -50,6 +50,17 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 - If an agent reports a step failure: decide whether to retry, skip, or escalate to the user.
 - If the agent's recommendation conflicts with the plan, prefer the agent's recommendation -- they have fresher context. The agent can create a revised plan turn.
 
+## Agent-Sourced Investigation Plans
+
+When an agent (not the Architect or Brain) produces a plan turn with steps, these are
+**proposed remediation actions** from an investigation, not a pre-approved execution plan.
+Before dispatching agent-sourced plan steps:
+
+1. Verify the steps are actionable with available agents and modes.
+2. Dispatch the first step. Evaluate the result before dispatching the next.
+3. If all steps are outside Darwin's capability, escalate but include them in the
+   incident description as "recommended next steps for the maintainer."
+
 ## Special Cases
 
 - If the plan proposed multiple options with trade-offs, present them to the user first. Only begin execution after the user selects an option.

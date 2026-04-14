@@ -1242,11 +1242,7 @@ class Brain:
         if has_defer_after:
             return None
 
-        result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
-        rec = Brain._extract_recommendation(result_text)
-
-        # QE gate: if last dispatch was mode=implement and developer reported,
-        # inject QE verification regardless of recommendation content
+        # QE gate: resolve early for both structured and legacy paths
         last_route = next(
             (t for t in reversed(event.conversation)
              if t.actor == "brain" and t.action == "route" and t.taskForAgent),
@@ -1257,12 +1253,31 @@ class Brain:
             and last_route.taskForAgent.get("mode") == "implement"
             and last_agent_turn.actor == "developer"
         )
-        if was_implement:
-            qe_gate = (
-                "\n\n## QE VERIFICATION GATE (mandatory)\n"
-                "The Developer completed work in implement mode. "
-                "You MUST dispatch QE (mode: test) to verify before any PR, merge, or close action."
+        qe_gate = (
+            "\n\n## QE VERIFICATION GATE (mandatory)\n"
+            "The Developer completed work in implement mode. "
+            "You MUST dispatch QE (mode: test) to verify before any PR, merge, or close action."
+        ) if was_implement else ""
+
+        # Structured path: reasoning from plan frontmatter (stored in taskForAgent)
+        reasoning = None
+        if last_agent_turn.taskForAgent:
+            reasoning = last_agent_turn.taskForAgent.get("reasoning")
+
+        if reasoning:
+            logger.info(f"Agent reasoning promoted for {event.id} ({len(reasoning)} chars)")
+            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
+            return (
+                f"## ROOT CAUSE ANALYSIS (from {last_agent_turn.actor}, "
+                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
+                f"{reasoning[:1200]}{qe_gate}"
             )
+
+        # Legacy fallback: regex extraction from result body
+        result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
+        rec = Brain._extract_recommendation(result_text)
+
+        if was_implement:
             base_rec = rec or ""
             ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
             return (
@@ -2963,30 +2978,59 @@ class Brain:
 
             # Append agent result turn (cancel = clean termination, not an error)
             is_cancel = result_str.strip() == "Cancelled by Brain"
-            is_plan = (
-                not is_cancel
-                and agent_name == "architect"
-                and result_str.lstrip().startswith("---")
-            )
 
-            plan_md, plan_steps = None, None
-            if is_plan:
-                plan_md, plan_steps = self._parse_plan_frontmatter(result_str)
+            # Parse plan frontmatter for ANY agent with reasoning: in frontmatter
+            # (loosened from architect-only; reasoning: guard mirrors MCP enforcement)
+            body, plan_steps, fm = None, None, {}
+            reasoning = None
+            if not is_cancel and result_str.lstrip().startswith("---"):
+                body, plan_steps, fm = self._parse_plan_frontmatter(result_str)
+                reasoning = fm.get("reasoning")
+                if reasoning and not isinstance(reasoning, str):
+                    reasoning = str(reasoning)
+                if not reasoning:
+                    # Regex fallback: extract reasoning even from malformed YAML
+                    stripped = result_str.lstrip()
+                    end_idx = stripped.find("---", 3)
+                    if end_idx != -1:
+                        fm_block = stripped[3:end_idx]
+                        m = re.search(r'reasoning\s*:\s*["\']?(.*?)(?:["\']?\s*$)', fm_block, re.MULTILINE)
+                        if m:
+                            reasoning = m.group(1).strip()
+                            logger.warning("Reasoning extracted via regex fallback (YAML parse failed) for %s", agent_name)
+                    if not reasoning:
+                        body, plan_steps, fm = None, None, {}
+                        reasoning = None
 
-            has_structured_plan = plan_md and plan_steps
+            has_structured_plan = body and plan_steps
+
+            if has_structured_plan:
+                result_for_turn = body[:15000]
+            elif reasoning and body:
+                result_for_turn = body[:15000]
+            else:
+                result_for_turn = result_str[:15000]
+
+            task_for_agent = None
+            if has_structured_plan:
+                task_for_agent = {"steps": plan_steps, "source": agent_name, "reasoning": reasoning}
+            elif reasoning:
+                task_for_agent = {"reasoning": reasoning}
+
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
                 action="cancel" if is_cancel else ("plan" if has_structured_plan else "execute"),
-                result=result_str[:15000],
-                plan=plan_md if has_structured_plan else None,
-                taskForAgent=(
-                    {"steps": plan_steps, "source": "architect"}
-                    if has_structured_plan else None
-                ),
+                result=result_for_turn,
+                plan=body if has_structured_plan else None,
+                taskForAgent=task_for_agent,
             )
             await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Agent task {'cancelled' if is_cancel else 'plan' if has_structured_plan else 'completed'}: {agent_name} for {event_id}")
+            logger.info(
+                f"Agent task {'cancelled' if is_cancel else 'plan' if has_structured_plan else 'completed'}: "
+                f"{agent_name} for {event_id}"
+                f"{f' (reasoning={len(reasoning)} chars)' if reasoning else ''}"
+            )
 
             if is_cancel:
                 self._release_task_state(event_id)
@@ -3380,31 +3424,33 @@ class Brain:
         logger.debug(f"Wrote event MD to {file_path}")
 
     @staticmethod
-    def _parse_plan_frontmatter(raw: str) -> tuple[str | None, list[dict] | None]:
-        """Extract plan markdown body and structured steps from YAML frontmatter.
+    def _parse_plan_frontmatter(raw: str) -> tuple[str | None, list[dict] | None, dict]:
+        """Extract plan markdown body, structured steps, and frontmatter dict from YAML.
 
-        Returns (plan_markdown, steps_list) or (None, None) if parsing fails.
-        Frontmatter format defined in brain_skills/post-agent/plan-activation.md.
+        Returns (body, steps_list, frontmatter_dict).
+        - body: markdown content after frontmatter (None if no frontmatter detected)
+        - steps_list: validated plan steps or None
+        - frontmatter_dict: raw parsed dict (may contain reasoning, steps, etc.)
         """
         import yaml
 
         stripped = raw.lstrip()
         if not stripped.startswith("---"):
-            return None, None
+            return None, None, {}
         end_idx = stripped.find("---", 3)
         if end_idx == -1:
-            return stripped, None
+            return stripped, None, {}
         frontmatter_str = stripped[3:end_idx].strip()
         body = stripped[end_idx + 3:].strip()
         try:
             fm = yaml.safe_load(frontmatter_str)
         except Exception:
-            return body or stripped, None
+            return body or stripped, None, {}
         if not isinstance(fm, dict):
-            return body or stripped, None
+            return body or stripped, None, {}
         raw_steps = fm.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps:
-            return body or stripped, None
+            return body or stripped, None, fm
         steps = []
         for s in raw_steps:
             if not isinstance(s, dict) or "id" not in s:
@@ -3414,7 +3460,7 @@ class Brain:
                 "agent": s.get("agent", ""),
                 "summary": s.get("summary", ""),
             })
-        return body or stripped, steps if steps else None
+        return body or stripped, steps if steps else None, fm
 
     @staticmethod
     def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:
