@@ -1988,6 +1988,7 @@ class BlackboardState:
                 "markdown": markdown,
                 "service": event.service,
                 "source": event.source,
+                "subject_type": getattr(event, "subject_type", "service"),
                 "domain": domain,
                 "severity": severity,
                 "turns": len(event.conversation),

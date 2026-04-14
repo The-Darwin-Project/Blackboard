@@ -317,6 +317,7 @@ export interface ReportMeta {
   event_id: string;
   service: string;
   source: string;
+  subject_type?: SubjectType;
   domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
   severity: 'info' | 'warning' | 'critical';
   turns: number;
