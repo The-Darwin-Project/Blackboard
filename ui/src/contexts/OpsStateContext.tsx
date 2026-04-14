@@ -9,7 +9,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useMemo, u
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { getAgents } from '../api/client';
-import type { AgentRegistryEntry } from '../api/types';
+import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
 const MAX_BUFFER = 100;
@@ -26,6 +26,11 @@ export interface ContentTile {
   content: string;
 }
 
+export interface KargoEventResult {
+  status: 'created' | 'skipped' | 'error';
+  detail: string;
+}
+
 export interface OpsState {
   selectedEventId: string | null;
   selectEvent: (id: string) => void;
@@ -35,6 +40,8 @@ export interface OpsState {
   ephemeralStream: Record<string, string[]>;
   ephemeralAgents: AgentRegistryEntry[];
   registeredAgents: AgentRegistryEntry[];
+  kargoStages: KargoStageStatus[];
+  kargoEventResult: KargoEventResult | null;
   contentTiles: ContentTile[];
   hotspotTileId: string | null;
   setHotspot: (id: string | null) => void;
@@ -117,6 +124,9 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     const id = setInterval(fetchAgents, 10_000);
     return () => clearInterval(id);
   }, []);
+
+  const [kargoStages, setKargoStages] = useState<KargoStageStatus[]>([]);
+  const [kargoEventResult, setKargoEventResult] = useState<KargoEventResult | null>(null);
 
   const [contentTiles, setContentTiles] = useState<ContentTile[]>([]);
   const [hotspotTileId, setHotspot] = useState<string | null>(null);
@@ -205,6 +215,10 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateActive();
         invalidateClosed();
       }
+    } else if (msg.type === 'kargo_stages_update') {
+      setKargoStages((msg.stages as KargoStageStatus[]) || []);
+    } else if (msg.type === 'kargo_event_result') {
+      setKargoEventResult({ status: msg.status as KargoEventResult['status'], detail: msg.detail as string });
     }
   });
 
@@ -217,6 +231,8 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     ephemeralStream,
     ephemeralAgents,
     registeredAgents,
+    kargoStages,
+    kargoEventResult,
     contentTiles,
     hotspotTileId,
     setHotspot,
@@ -229,6 +245,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   }), [
     selectedEventId, selectEvent, deselectEvent,
     agentStreams, ephemeralStream, ephemeralAgents, registeredAgents,
+    kargoStages, kargoEventResult,
     contentTiles, hotspotTileId, setHotspot, openContentTile, closeContentTile,
     autoHotspot, toggleAutoHotspot, connected, send,
   ]);

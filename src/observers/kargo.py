@@ -39,10 +39,12 @@ class KargoObserver:
         blackboard: "BlackboardState",
         failure_callback: Optional[Callable[..., Awaitable[None]]] = None,
         recovery_callback: Optional[Callable[..., Awaitable[None]]] = None,
+        broadcast_callback: Optional[Callable[..., Awaitable[None]]] = None,
     ):
         self.blackboard = blackboard
         self.failure_callback = failure_callback
         self.recovery_callback = recovery_callback
+        self.broadcast_callback = broadcast_callback
 
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -52,6 +54,7 @@ class KargoObserver:
 
         self._reported_failures: dict[str, str] = {}
         self._active_watches: dict[str, str] = {}
+        self._failure_details: dict[str, dict] = {}
         self._current_watch: Any = None
 
     async def start(self) -> None:
@@ -63,6 +66,7 @@ class KargoObserver:
             return
 
         await self._initial_sync()
+        await self._fire_broadcast()
         self._running = True
         self._task = asyncio.create_task(self._watch_loop())
         logger.info(
@@ -89,6 +93,18 @@ class KargoObserver:
     def register_active_watch(self, stage_key: str, service: str) -> None:
         self._active_watches[stage_key] = service
 
+    def get_failed_stages(self) -> list[dict]:
+        """Return current failure snapshots for dashboard broadcast."""
+        return list(self._failure_details.values())
+
+    async def _fire_broadcast(self) -> None:
+        """Send current failed stages snapshot to dashboard clients."""
+        if self.broadcast_callback:
+            try:
+                await self.broadcast_callback()
+            except Exception as e:
+                logger.error(f"KargoObserver broadcast_callback error: {e}")
+
     async def _init_k8s_client(self) -> bool:
         try:
             from kubernetes import client, config
@@ -112,6 +128,7 @@ class KargoObserver:
 
     async def _initial_sync(self) -> None:
         """List all stages, record currently Errored ones without firing callbacks."""
+        self._failure_details.clear()
         try:
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -198,6 +215,7 @@ class KargoObserver:
                     logger.warning("KargoObserver watch 410 Gone -- re-listing")
                     self._resource_version = ""
                     await self._initial_sync()
+                    await self._fire_broadcast()
                     retry_delay = 1
                     continue
                 logger.warning(f"KargoObserver watch API error ({e.status}): {e.reason}")
@@ -234,14 +252,20 @@ class KargoObserver:
         if phase in FAILED_PHASES:
             if self._reported_failures.get(stage_key) != promo_name:
                 self._reported_failures[stage_key] = promo_name
+                service = f"{name}@{ns}"
+                failed_step = self._extract_failed_step(promo_status)
+                mr_url = self._extract_mr_url(promo_status)
+                freight_name = last_promo.get("freight", {}).get("name", "")
+                message = promo_status.get("message", "")
+                started = promo_status.get("startedAt", "")
+                finished = promo_status.get("finishedAt", "")
+                self._failure_details[stage_key] = {
+                    "project": ns, "stage": name, "promotion": promo_name,
+                    "freight": freight_name, "phase": phase, "message": message,
+                    "failed_step": failed_step, "mr_url": mr_url,
+                    "service": service, "started_at": started, "finished_at": finished,
+                }
                 if not suppress_callbacks and self.failure_callback:
-                    service = f"{name}@{ns}"
-                    failed_step = self._extract_failed_step(promo_status)
-                    mr_url = self._extract_mr_url(promo_status)
-                    freight_name = last_promo.get("freight", {}).get("name", "")
-                    message = promo_status.get("message", "")
-                    started = promo_status.get("startedAt", "")
-                    finished = promo_status.get("finishedAt", "")
                     try:
                         await self.failure_callback(
                             service=service, project=ns, stage=name,
@@ -253,6 +277,8 @@ class KargoObserver:
                         self._active_watches[stage_key] = service
                     except Exception as e:
                         logger.error(f"KargoObserver failure_callback error for {stage_key}: {e}")
+                if not suppress_callbacks:
+                    await self._fire_broadcast()
 
         elif phase == "Succeeded" and stage_key in self._active_watches:
             prev_promo = self._reported_failures.get(stage_key, "")
@@ -267,6 +293,9 @@ class KargoObserver:
                     except Exception as e:
                         logger.error(f"KargoObserver recovery_callback error for {stage_key}: {e}")
                 self._reported_failures.pop(stage_key, None)
+                self._failure_details.pop(stage_key, None)
+                if not suppress_callbacks:
+                    await self._fire_broadcast()
                 self._active_watches.pop(stage_key, None)
 
     async def get_stage_status(self, project: str, stage: str) -> dict:

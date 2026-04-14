@@ -15,7 +15,7 @@ import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
 import SourceIcon from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
-import { agentMenuItems, eventMenuItems, hhMenuItems } from './sidebarMenus';
+import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems } from './sidebarMenus';
 import { MOCK_EVENTS, MOCK_EVENT_DOC, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 import MockConversationFeed from './MockConversationFeed';
 
@@ -31,7 +31,7 @@ const DEFAULT_WIDTH = 500;
 const MAX_WIDTH = 800;
 
 export default function EventSidebar() {
-  const { selectedEventId, selectEvent, deselectEvent, setHotspot, connected, send, openContentTile, registeredAgents } = useOpsState();
+  const { selectedEventId, selectEvent, deselectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsState();
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -154,7 +154,7 @@ export default function EventSidebar() {
           <div className={`overflow-auto ${selectedEventId ? 'flex-shrink-0' : 'flex-1'}`}
             style={selectedEventId ? { maxHeight: '35vh' } : undefined}>
           <CollapsibleSection title="System" defaultOpen={!selectedEventId} badge={
-            <span className="text-[12px] text-text-muted">{AGENTS.length + events.length + demoHH.length + schedules.length}</span>
+            <span className="text-[12px] text-text-muted">{AGENTS.length + events.length + kargoStages.length + demoHH.length + schedules.length}</span>
           }>
             <div className="px-0.5">
             {/* Agents Group */}
@@ -243,6 +243,35 @@ export default function EventSidebar() {
                   ))}
                 </TreeGroup>
               )}
+            </TreeGroup>
+
+            {/* Kargo Stages Group */}
+            <TreeGroup icon={<SourceIcon source="aligner" subjectType="kargo_stage" size={16} />} label="Kargo Stages" count={kargoStages.length}
+              countColor={kargoStages.length > 0 ? '#ef4444' : '#64748b'}
+              forceCollapsed={!!selectedEventId}>
+              {kargoStages.length === 0 && <EmptyLabel>No failed stages</EmptyLabel>}
+              {Object.entries(
+                kargoStages.reduce<Record<string, typeof kargoStages>>((acc, s) => {
+                  (acc[s.project] ??= []).push(s);
+                  return acc;
+                }, {}),
+              ).map(([project, stages]) => (
+                <TreeGroup key={project} icon={<SourceIcon source="aligner" subjectType="kargo_stage" size={13} />} label={project} count={stages.length} nested
+                  countColor="#ef4444">
+                  {stages.map(s => (
+                    <TreeNode key={`${s.project}/${s.stage}`}
+                      icon={<SourceIcon source="aligner" subjectType="kargo_stage" size={18} />}
+                      label={s.stage}
+                      sublabel={s.failed_step || s.phase}
+                      sublabelColor="#ef4444"
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setCtxMenu({ x: e.clientX, y: e.clientY, items: kargoStageMenuItems(s, send, connected) });
+                      }}
+                    />
+                  ))}
+                </TreeGroup>
+              ))}
             </TreeGroup>
 
             {/* HH Queue Group */}

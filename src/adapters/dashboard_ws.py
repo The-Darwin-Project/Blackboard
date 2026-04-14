@@ -4,6 +4,8 @@
 # 2. [Constraint]: JWT auth uses auth.get_user_from_websocket (pure crypto, no network).
 # 3. [Pattern]: connected_clients set managed here. broadcast fans out, removes disconnected.
 # 4. [Constraint]: Brain and Blackboard injected via constructor. No app.state access.
+# 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
+# 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -35,6 +37,11 @@ class DashboardWSAdapter:
         self._blackboard = blackboard
         self._auth_enabled = auth_enabled
         self._clients: set[WebSocket] = set()
+        self._kargo_observer = None
+
+    def set_kargo_observer(self, observer) -> None:
+        """Inject KargoObserver after initialization (observer starts after adapter)."""
+        self._kargo_observer = observer
 
     @property
     def client_count(self) -> int:
@@ -64,6 +71,8 @@ class DashboardWSAdapter:
         self._clients.add(websocket)
         logger.info("UI WebSocket connected (%d clients) user=%s", len(self._clients), user.label)
 
+        await self._send_initial_kargo_state(websocket)
+
         try:
             while True:
                 data = await websocket.receive_json()
@@ -77,6 +86,8 @@ class DashboardWSAdapter:
                     await self._handle_approve(websocket, data, user)
                 elif msg_type == "emergency_stop":
                     await self._handle_emergency_stop(websocket)
+                elif msg_type == "create_kargo_event":
+                    await self._handle_create_kargo_event(websocket, data)
 
         except WebSocketDisconnect:
             pass
@@ -181,3 +192,24 @@ class DashboardWSAdapter:
             "cancelled": cancelled,
         })
         logger.critical("WS emergency stop: %d tasks cancelled", cancelled)
+
+    async def _handle_create_kargo_event(self, ws: WebSocket, data: dict) -> None:
+        project = data.get("project", "")
+        stage = data.get("stage", "")
+        if not project or not stage:
+            await ws.send_json({"type": "kargo_event_result", "status": "error", "detail": "Missing project or stage"})
+            return
+        try:
+            result = await self._brain.create_kargo_event(project, stage)
+            await ws.send_json({"type": "kargo_event_result", **result})
+        except Exception as e:
+            logger.error("create_kargo_event WS handler error: %s", e)
+            await ws.send_json({"type": "kargo_event_result", "status": "error", "detail": str(e)})
+
+    async def _send_initial_kargo_state(self, ws: WebSocket) -> None:
+        """Send current Kargo failed stages snapshot on new WS connection."""
+        stages = self._kargo_observer.get_failed_stages() if self._kargo_observer else []
+        try:
+            await ws.send_json({"type": "kargo_stages_update", "stages": stages})
+        except Exception as e:
+            logger.error("Failed to send initial kargo state: %s", e)

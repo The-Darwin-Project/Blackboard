@@ -3,12 +3,13 @@
 // 1. [Pattern]: Context menu item builders for EventSidebar. One function per node type.
 // 2. [Constraint]: Pure functions returning ContextMenuItem arrays. No hooks, no state.
 // 3. [Pattern]: Each menu item has an icon (lucide), label, color, and optional danger flag.
+// 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
-  Square, ExternalLink,
+  Square, ExternalLink, PlusCircle,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
-import type { AgentRegistryEntry } from '../../api/types';
+import type { AgentRegistryEntry, KargoStageStatus } from '../../api/types';
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
 
@@ -66,5 +67,26 @@ export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
     { id: 'open', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => window.open(todo.target_url, '_blank') },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     { id: 'copy', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(todo.target_url) },
+  ];
+}
+
+export function kargoStageMenuItems(
+  stage: KargoStageStatus,
+  send: (data: Record<string, unknown>) => void,
+  connected: boolean,
+): ContextMenuItem[] {
+  return [
+    {
+      id: 'create-event', label: 'Create Event', icon: <PlusCircle size={18} />, color: '#3b82f6',
+      disabled: !connected,
+      onClick: () => send({ type: 'create_kargo_event', project: stage.project, stage: stage.stage }),
+    },
+    { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
+    { id: 'copy-stage', label: 'Copy Stage Name', icon: <Copy size={18} />, color: '#64748b',
+      onClick: () => navigator.clipboard.writeText(`${stage.stage}@${stage.project}`) },
+    ...(stage.mr_url ? [
+      { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b',
+        onClick: () => window.open(stage.mr_url, '_blank') },
+    ] : []),
   ];
 }

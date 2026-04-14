@@ -329,6 +329,23 @@ export interface ReportFull extends ReportMeta {
 }
 
 // =============================================================================
+// Kargo Stage Status (failed promotion snapshots from KargoObserver)
+// =============================================================================
+
+export interface KargoStageStatus {
+  project: string;
+  stage: string;
+  promotion: string;
+  phase: string;
+  message: string;
+  failed_step: string;
+  service: string;
+  mr_url: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+// =============================================================================
 // Agent Registry (connected sidecars)
 // =============================================================================
 

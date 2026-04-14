@@ -3328,6 +3328,27 @@ class Brain:
         logger.critical(f"EMERGENCY STOP: {cancelled} tasks cancelled")
         return cancelled
 
+    async def create_kargo_event(self, project: str, stage: str) -> dict:
+        """Create a Kargo event from the dashboard (user right-click -> Create Event)."""
+        observer = self.agents.get("_kargo_observer")
+        if observer is None:
+            return {"status": "error", "detail": "KargoObserver not enabled"}
+        try:
+            status = await observer.get_stage_status(project, stage)
+            if "error" in status:
+                return {"status": "error", "detail": str(status["error"])}
+            status["service"] = f"{stage}@{project}"
+            aligner = self.agents.get("_aligner")
+            if aligner is None:
+                return {"status": "error", "detail": "Aligner not available"}
+            event_id = await aligner.handle_failed_promotion(**status)
+            if event_id:
+                return {"status": "created", "detail": f"Event {event_id} created for {stage}@{project}"}
+            return {"status": "skipped", "detail": "Active event exists or cooldown"}
+        except Exception as e:
+            logger.error(f"create_kargo_event failed for {stage}@{project}: {e}")
+            return {"status": "error", "detail": str(e)}
+
     async def send_to_agent(self, event_id: str, agent_name: str, message: str) -> str:
         """Send a follow-up message to a running agent session.
 

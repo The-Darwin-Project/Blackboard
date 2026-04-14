@@ -799,14 +799,17 @@ class Aligner:
         self, *, service: str, project: str, stage: str, promotion: str,
         freight: str, phase: str, message: str, failed_step: str,
         mr_url: str, started_at: str = "", finished_at: str = "",
-    ) -> None:
-        """Create an event for a failed Kargo promotion (called by KargoObserver)."""
+    ) -> Optional[str]:
+        """Create an event for a failed Kargo promotion (called by KargoObserver).
+
+        Returns the event_id on creation, None if skipped (active event or cooldown).
+        """
         active_ids = await self.blackboard.get_active_events()
         for eid in active_ids:
             existing = await self.blackboard.get_event(eid)
             if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
                 logger.info(f"Skipping Kargo event for {service}: active event {eid} exists")
-                return
+                return None
 
         COOLDOWN_SECONDS = 300
         now = time.time()
@@ -818,7 +821,7 @@ class Aligner:
                 self._last_event_creation[service] = last_event_time
         if now - last_event_time < COOLDOWN_SECONDS:
             logger.info(f"Skipping Kargo event for {service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
-            return
+            return None
 
         from ..models import EventEvidence
         evidence = EventEvidence(
@@ -841,7 +844,7 @@ class Aligner:
                 "finished_at": finished_at,
             },
         )
-        await self.blackboard.create_event(
+        event_id = await self.blackboard.create_event(
             source="aligner",
             service=service,
             reason=f"kargo promotion failed: {failed_step or phase}",
@@ -853,6 +856,7 @@ class Aligner:
             f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
         )
         logger.info(f"Created Kargo event for {service} ({phase}: {failed_step})")
+        return event_id
 
     async def handle_promotion_recovery(
         self, *, service: str, project: str, stage: str, promotion: str,

@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
         app.state.brain = brain
 
         # Dashboard WebSocket adapter (implements BroadcastPort)
+        # kargo_observer may not exist yet; attached after Kargo init below
         from .adapters.dashboard_ws import DashboardWSAdapter
         dashboard_adapter = DashboardWSAdapter(brain=brain, blackboard=blackboard, auth_enabled=DEX_ENABLED)
         brain.register_channel(dashboard_adapter)
@@ -257,13 +258,21 @@ async def lifespan(app: FastAPI):
             async def kargo_recovery_callback(**kwargs) -> None:
                 await aligner.handle_promotion_recovery(**kwargs)
 
+            async def kargo_broadcast_callback() -> None:
+                await brain._broadcast({
+                    "type": "kargo_stages_update",
+                    "stages": kargo_observer.get_failed_stages(),
+                })
+
             kargo_observer = KargoObserver(
                 blackboard=blackboard,
                 failure_callback=kargo_failure_callback,
                 recovery_callback=kargo_recovery_callback,
+                broadcast_callback=kargo_broadcast_callback,
             )
             brain.agents["_kargo_observer"] = kargo_observer
             await kargo_observer.start()
+            dashboard_adapter.set_kargo_observer(kargo_observer)
             logger.info("KargoObserver started for promotion state watching")
         else:
             logger.info("KargoObserver disabled (KARGO_OBSERVER_ENABLED=false)")
