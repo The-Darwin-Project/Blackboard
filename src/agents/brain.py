@@ -2989,18 +2989,8 @@ class Brain:
                 if reasoning and not isinstance(reasoning, str):
                     reasoning = str(reasoning)
                 if not reasoning:
-                    # Regex fallback: extract reasoning even from malformed YAML
-                    stripped = result_str.lstrip()
-                    end_idx = stripped.find("---", 3)
-                    if end_idx != -1:
-                        fm_block = stripped[3:end_idx]
-                        m = re.search(r'reasoning\s*:\s*["\']?(.*?)(?:["\']?\s*$)', fm_block, re.MULTILINE)
-                        if m:
-                            reasoning = m.group(1).strip()
-                            logger.warning("Reasoning extracted via regex fallback (YAML parse failed) for %s", agent_name)
-                    if not reasoning:
-                        body, plan_steps, fm = None, None, {}
-                        reasoning = None
+                    body, plan_steps, fm = None, None, {}
+                    reasoning = None
 
             has_structured_plan = body and plan_steps
 
