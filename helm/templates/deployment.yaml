@@ -223,6 +223,11 @@ spec:
             - name: K8S_OBSERVER_LABEL_SELECTOR
               value: "{{ .Values.observer.labelSelector }}"
             {{- end }}
+            # Kargo Stage Observer
+            {{- if .Values.kargoObserver.enabled }}
+            - name: KARGO_OBSERVER_ENABLED
+              value: "true"
+            {{- end }}
             # Aligner anomaly thresholds (configurable via Helm)
             {{- if .Values.aligner }}
             - name: ALIGNER_CPU_THRESHOLD

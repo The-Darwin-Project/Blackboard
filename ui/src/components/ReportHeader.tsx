@@ -23,7 +23,7 @@ export default function ReportHeader({ report }: { report: ReportFull }) {
       border: `1px solid ${domainColor.border}44`,
       marginBottom: 12,
     }}>
-      <SourceIcon source={report.source} size={28} />
+      <SourceIcon source={report.source} subjectType={(report as any).subject_type} size={28} />
 
       <div style={{ flex: 1, minWidth: 160 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: '#e2e8f0' }}>

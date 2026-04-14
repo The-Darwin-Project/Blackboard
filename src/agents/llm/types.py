@@ -583,6 +583,25 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["check_condition"],
         },
     },
+    {
+        "name": "refresh_kargo_context",
+        "description": (
+            "Re-read current Kargo Stage promotion state without dispatching an agent. "
+            "Returns promotion phase, failed step, and error message. Use after dispatching "
+            "sysadmin to retry a promotion, or after deferring to check if a new promotion "
+            "succeeded. Only available for events with kargo_context in evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "check_condition": {
+                    "type": "string",
+                    "description": "What to verify (e.g., 'promotion succeeded after retry', 'new promotion running')",
+                },
+            },
+            "required": ["check_condition"],
+        },
+    },
 ]
 
 

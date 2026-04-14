@@ -67,6 +67,7 @@ async def list_active_events(
                 "id": event.id,
                 "source": event.source,
                 "service": event.service,
+                "subject_type": getattr(event, "subject_type", "service"),
                 "status": event.status.value,
                 "reason": event.event.reason,
                 "evidence": _serialize_evidence(event),
@@ -308,7 +309,7 @@ async def get_event_report(
 
     service_meta = await blackboard.get_service(event.service)
     mermaid = ""
-    if event.source != "headhunter":
+    if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
         try:
             mermaid = await blackboard.generate_mermaid()
         except Exception:
@@ -348,6 +349,7 @@ async def list_closed_events(
                 "id": event.id,
                 "source": event.source,
                 "service": event.service,
+                "subject_type": getattr(event, "subject_type", "service"),
                 "status": event.status.value,
                 "reason": event.event.reason,
                 "evidence": _serialize_evidence(event),

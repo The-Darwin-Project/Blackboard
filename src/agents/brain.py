@@ -676,6 +676,31 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
                 logger.info(f"Refresh already done: stripped refresh_gitlab_context for {event_id}")
 
+        # refresh_kargo_context: same availability window, only when kargo_context present.
+        has_kargo = (
+            event.event and event.event.evidence
+            and hasattr(event.event.evidence, "kargo_context")
+            and event.event.evidence.kargo_context
+        )
+        if not has_kargo:
+            active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
+        elif not refresh_allowed:
+            active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
+        else:
+            last_defer_ts_k = next(
+                (t.timestamp for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.action == "defer"),
+                0,
+            )
+            recent_kargo_refresh = any(
+                t.actor == "brain" and t.action == "verify" and "Kargo Stage:" in (t.thoughts or "")
+                and t.timestamp >= last_defer_ts_k
+                for t in event.conversation
+            )
+            if recent_kargo_refresh:
+                active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
+                logger.info(f"Refresh already done: stripped refresh_kargo_context for {event_id}")
+
         # Domain classification gate: mandatory classify_event before any agent dispatch
         if context_flags and not context_flags.get("brain_has_classified", False):
             pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event"}
@@ -1047,10 +1072,11 @@ class Brain:
         flags["has_recent_closed"] = bool(recent_closed)
 
         mermaid = ""
-        try:
-            mermaid = await self.blackboard.generate_mermaid()
-        except Exception:
-            pass
+        if getattr(event, "subject_type", "service") != "kargo_stage":
+            try:
+                mermaid = await self.blackboard.generate_mermaid()
+            except Exception:
+                pass
         flags["_cached_mermaid"] = mermaid
         flags["has_graph_edges"] = bool(mermaid and "-->" in mermaid)
 
@@ -1134,6 +1160,13 @@ class Brain:
         resolved_contents = self._skill_loader.resolve_dependencies(
             initial_paths, template_vars=template_vars
         )
+
+        # Evidence-driven context: inject Kargo skills when kargo_context is present
+        if (event.event and event.event.evidence
+                and hasattr(event.event.evidence, "kargo_context")
+                and event.event.evidence.kargo_context):
+            kargo_skills = self._skill_loader.find_by_tag("kargo")
+            resolved_contents.extend(kargo_skills)
 
         if "post-agent" in active_phases:
             rec = self._surface_agent_recommendation(event)
@@ -2397,6 +2430,61 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return True
 
+        elif function_name == "refresh_kargo_context":
+            condition = args.get("check_condition", "")
+            kargo_observer = self.agents.get("_kargo_observer")
+            if not kargo_observer:
+                result_text = "KargoObserver not available (KARGO_OBSERVER_ENABLED=false)."
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="verify",
+                    thoughts=result_text,
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+
+            event = await self.blackboard.get_event(event_id)
+            kc = {}
+            if event and event.event and event.event.evidence:
+                kc = getattr(event.event.evidence, "kargo_context", None) or {}
+            project = kc.get("project", "")
+            stage = kc.get("stage", "")
+            if not project or not stage:
+                result_text = "Kargo Stage: unknown\nError: kargo_context missing project/stage"
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="verify",
+                    thoughts=result_text,
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+
+            state = await kargo_observer.get_stage_status(project, stage)
+            if "error" in state:
+                result_text = (
+                    f"Kargo Stage: {stage}@{project}\n"
+                    f"Error: {state['error']}"
+                )
+            else:
+                result_text = (
+                    f"Kargo Stage: {stage}@{project}\n"
+                    f"Promotion: {state.get('promotion', '?')}\n"
+                    f"Phase: {state.get('phase', '?')}\n"
+                    f"Failed Step: {state.get('failed_step', 'N/A')}\n"
+                    f"Message: {state.get('message', '')}"
+                )
+            thoughts = f"Checking: {condition}\n{result_text}" if condition else result_text
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain", action="verify",
+                thoughts=thoughts,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
         else:
             logger.warning(f"Unknown function call: {function_name}")
             return False
@@ -3365,6 +3453,21 @@ class Brain:
                     emails = maintainer.get("emails", [])
                     lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
                     lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
+            if evidence.kargo_context:
+                kc = evidence.kargo_context
+                lines.append("")
+                lines.append("## Kargo Context")
+                lines.append(f"- **Project:** {kc.get('project', '')}")
+                lines.append(f"- **Stage:** {kc.get('stage', '')}")
+                lines.append(f"- **Promotion:** {kc.get('promotion', '')}")
+                lines.append(f"- **Freight:** {(kc.get('freight') or '')[:12]}...")
+                lines.append(f"- **Phase:** {kc.get('phase', '')}")
+                lines.append(f"- **Failed Step:** {kc.get('failed_step', 'N/A')}")
+                lines.append(f"- **Error:** {kc.get('message', '')}")
+                if kc.get("mr_url"):
+                    lines.append(f"- **MR URL:** {kc['mr_url']}")
+                lines.append(f"- **Started:** {kc.get('started_at', '')}")
+                lines.append(f"- **Finished:** {kc.get('finished_at', '')}")
         else:
             lines.append(f"- **Evidence:** {evidence}")
         lines.append(f"- **Time:** {event.event.timeDate}")

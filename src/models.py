@@ -274,6 +274,9 @@ class EventEvidence(BaseModel):
     gitlab_context: Optional[dict] = Field(
         None, description="GitLab todo context: todo_id, action_name, project_id, mr_iid, pipeline_status, maintainer"
     )
+    kargo_context: Optional[dict] = Field(
+        None, description="Kargo stage context: project, stage, promotion, freight, phase, message, failed_step"
+    )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
@@ -335,7 +338,10 @@ class EventDocument(BaseModel):
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
     source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper"]
     status: EventStatus = EventStatus.NEW
-    service: str = Field(..., description="Target service name")
+    service: str = Field(..., description="Target subject identifier (service name or stage@project)")
+    subject_type: Literal["service", "kargo_stage"] = Field(
+        "service", description="What the service field refers to: K8s service or Kargo stage"
+    )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)
     # Slack correlation fields (None for non-Slack events)

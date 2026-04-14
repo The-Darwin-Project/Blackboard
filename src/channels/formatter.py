@@ -356,10 +356,11 @@ def get_turn_attachment_color(turn: "ConversationTurn") -> str | None:
 
 def build_event_report_md(event_doc: "EventDocument") -> str:
     """Build a Markdown report of the event conversation for Slack file attachment."""
+    subj_label = SUBJECT_LABEL.get(getattr(event_doc, "subject_type", "service"), "Service")
     lines = [
         f"# Event: {event_doc.id}",
         f"- **Source:** {event_doc.source}",
-        f"- **Service:** {event_doc.service}",
+        f"- **{subj_label}:** {event_doc.service}",
         f"- **Status:** {event_doc.status}",
         f"- **Reason:** {event_doc.event.reason}",
         "",
@@ -383,10 +384,13 @@ def format_event_summary(event_doc: "EventDocument") -> list[dict]:
     elif isinstance(event_doc.event.evidence, str):
         evidence = event_doc.event.evidence
 
+    subj_label = SUBJECT_LABEL.get(getattr(event_doc, "subject_type", "service"), "Service")
+    subj_icon = SUBJECT_EMOJI.get(getattr(event_doc, "subject_type", "service"), "")
+    prefix = f"{subj_icon} " if subj_icon else ""
     blocks = [
         _section(
-            f"*Event `{event_doc.id}` created*\n"
-            f">*Service:* {event_doc.service}\n"
+            f"{prefix}*Event `{event_doc.id}` created*\n"
+            f">*{subj_label}:* {event_doc.service}\n"
             f">*Reason:* {reason}\n"
             + (f">*Evidence:* {_truncate(evidence, 500)}" if evidence else "")
         ),
@@ -443,6 +447,16 @@ STATUS_EMOJI: dict[str, str] = {
     "closed": ":white_check_mark:",
 }
 
+SUBJECT_EMOJI: dict[str, str] = {
+    "service": "",
+    "kargo_stage": ":kargo:",
+}
+
+SUBJECT_LABEL: dict[str, str] = {
+    "service": "Service",
+    "kargo_stage": "Stage",
+}
+
 
 def build_home_tab_view(
     active_events: list[dict],
@@ -467,13 +481,15 @@ def build_home_tab_view(
     blocks.append(_section(":zap: *Active Events*"))
     if active_events:
         for evt in active_events[:10]:
-            src_icon = SOURCE_EMOJI.get(evt.get("source", ""), ":gear:")
+            subj_type = evt.get("subject_type", "service")
+            src_icon = SUBJECT_EMOJI.get(subj_type) or SOURCE_EMOJI.get(evt.get("source", ""), ":gear:")
             status_icon = STATUS_EMOJI.get(evt.get("status", ""), ":gear:")
             reason = _truncate(evt.get("reason", ""), 120)
             evt_id = evt.get("id", "?")
             svc = evt.get("service", "general")
+            label = SUBJECT_LABEL.get(subj_type, "Service")
             turns = evt.get("turns", 0)
-            line = f"{status_icon} `{evt_id}` {src_icon} *{svc}* -- {reason} _({turns} turns)_"
+            line = f"{status_icon} `{evt_id}` {src_icon} *{label}: {svc}* -- {reason} _({turns} turns)_"
             blocks.append(_section(line))
     else:
         blocks.append(_section("_No active events. All systems nominal._"))

@@ -68,7 +68,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}>
       <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
         style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
-      <SourceIcon source={evt.source} size={18} />
+      <SourceIcon source={evt.source} subjectType={evt.subject_type} size={18} />
       <span className={`truncate ${isWaiting ? 'text-amber-300' : 'text-text-secondary'}`}>{evt.id.slice(4, 12)}</span>
       {isWaiting && (
         <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />

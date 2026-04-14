@@ -45,6 +45,7 @@ from .auth import DEX_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
+from .observers.kargo import KargoObserver, KARGO_OBSERVER_ENABLED
 from .observers.timekeeper import TimeKeeperObserver, TIMEKEEPER_ENABLED
 from .agents.agent_registry import AgentRegistry
 from .agents.task_bridge import TaskBridge
@@ -247,6 +248,26 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("KubernetesObserver disabled (K8S_OBSERVER_ENABLED=false)")
         
+        # === KARGO OBSERVER ===
+        kargo_observer = None
+        if KARGO_OBSERVER_ENABLED:
+            async def kargo_failure_callback(**kwargs) -> None:
+                await aligner.handle_failed_promotion(**kwargs)
+
+            async def kargo_recovery_callback(**kwargs) -> None:
+                await aligner.handle_promotion_recovery(**kwargs)
+
+            kargo_observer = KargoObserver(
+                blackboard=blackboard,
+                failure_callback=kargo_failure_callback,
+                recovery_callback=kargo_recovery_callback,
+            )
+            brain.agents["_kargo_observer"] = kargo_observer
+            await kargo_observer.start()
+            logger.info("KargoObserver started for promotion state watching")
+        else:
+            logger.info("KargoObserver disabled (KARGO_OBSERVER_ENABLED=false)")
+        
         # === TIMEKEEPER OBSERVER ===
         timekeeper_observer = None
         if DEX_ENABLED and TIMEKEEPER_ENABLED:
@@ -286,6 +307,11 @@ async def lifespan(app: FastAPI):
     if headhunter_task and not headhunter_task.done():
         headhunter_task.cancel()
         logger.info("Headhunter task cancelled")
+    
+    # Stop Kargo observer
+    if redis and kargo_observer:
+        await kargo_observer.stop()
+        logger.info("KargoObserver stopped")
     
     # Stop K8s observer
     if redis and K8S_OBSERVER_ENABLED and k8s_observer:

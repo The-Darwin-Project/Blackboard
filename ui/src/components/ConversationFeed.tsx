@@ -20,7 +20,7 @@ function eventToMarkdown(event: { id: string; source: string; status: string; se
   const evidenceText = typeof evidence === 'string' ? evidence : (evidence as Record<string, string>)?.display_text || '';
   const lines: string[] = [
     `# Event: ${event.id}`, '',
-    `- **Source:** ${event.source}`, `- **Service:** ${event.service}`,
+    `- **Source:** ${event.source}`, `- **${(event as any).subject_type === 'kargo_stage' ? 'Stage' : 'Service'}:** ${event.service}`,
     `- **Status:** ${event.status}`, `- **Reason:** ${event.event.reason}`,
     `- **Evidence:** ${evidenceText}`, `- **Time:** ${event.event.timeDate}`,
     '', '## Conversation', '',
@@ -147,7 +147,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             )}
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <SourceIcon source={selectedEvent.source} size={14} />
+            <SourceIcon source={selectedEvent.source} subjectType={(selectedEvent as any).subject_type} size={14} />
             <span style={{ fontSize: 11, color: '#64748b' }}>{selectedEvent.source} | {selectedEvent.conversation.length} turns</span>
           </div>
         </div>

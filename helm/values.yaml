@@ -325,6 +325,11 @@ aligner:
     memory: "85.0" # Memory % above which Flash analyzes the service
     errorRate: "5.0" # Error rate % above which Flash analyzes the service
 # =============================================================================
+# Kargo Stage Observer (promotion failure detection via K8s Watch)
+# =============================================================================
+kargoObserver:
+  enabled: false # Set to true when kargo.akuity.io CRDs are installed
+# =============================================================================
 # Slack Integration (Socket Mode, bidirectional event mirroring)
 # =============================================================================
 slack:

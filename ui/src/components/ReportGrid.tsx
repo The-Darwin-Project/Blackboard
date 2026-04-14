@@ -131,7 +131,7 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
     >
       {/* Row 1: icon + severity + domain */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-        <SourceIcon source={report.source} size={28} />
+        <SourceIcon source={report.source} subjectType={(report as any).subject_type} size={28} />
         <span style={{
           background: severity.bg, color: severity.text,
           padding: '3px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600,

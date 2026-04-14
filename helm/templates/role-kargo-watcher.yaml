@@ -1,0 +1,31 @@
+# Kargo Stage watcher -- read-only cluster-wide access to Kargo CRDs.
+# Scoped to stages + promotions only (no pods, secrets, or other resources).
+{{- if .Values.kargoObserver.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: darwin-kargo-watcher
+  labels:
+    app.kubernetes.io/name: darwin-blackboard
+    app.kubernetes.io/component: kargo-observer
+rules:
+  - apiGroups: ["kargo.akuity.io"]
+    resources: ["stages", "promotions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: darwin-kargo-watcher
+  labels:
+    app.kubernetes.io/name: darwin-blackboard
+    app.kubernetes.io/component: kargo-observer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: darwin-kargo-watcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+{{- end }}

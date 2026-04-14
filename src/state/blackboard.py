@@ -1290,6 +1290,7 @@ class BlackboardState:
         service: str,
         reason: str,
         evidence: "str | EventEvidence",
+        subject_type: str = "service",
     ) -> str:
         """Create a new event and add to the queue for Brain triage.
 
@@ -1305,6 +1306,7 @@ class BlackboardState:
         event = EventDocument(
             source=source,
             service=service,
+            subject_type=subject_type,
             event=EventInput(
                 reason=reason,
                 evidence=evidence,
@@ -1954,7 +1956,7 @@ class BlackboardState:
                 service_meta = await self.get_service(event.service)
             except Exception:
                 pass
-            if event.source != "headhunter":
+            if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
                 try:
                     mermaid = await self.generate_mermaid()
                 except Exception:

@@ -155,13 +155,17 @@ export interface EventEvidence {
   domain_confidence?: 'assessed' | 'default';
   severity: 'info' | 'warning' | 'critical';
   metrics?: EventMetrics;
+  kargo_context?: Record<string, string>;
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
+export type SubjectType = 'service' | 'kargo_stage';
+
 export interface ActiveEvent {
   id: string;
   source: string;
   service: string;
+  subject_type?: SubjectType;
   status: EventStatus;
   reason: string;
   evidence: EventEvidence;
@@ -206,6 +210,7 @@ export interface EventDocument {
   source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper';
   status: EventStatus;
   service: string;
+  subject_type?: SubjectType;
   event: EventInput;
   conversation: ConversationTurn[];
 }

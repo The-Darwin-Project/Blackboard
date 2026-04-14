@@ -185,7 +185,7 @@ class Aligner:
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.1-pro-preview")
+                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.1-flash-lite-preview")
                 
                 self._adapter = create_adapter("gemini", project, location, model_name)
                 logger.info(f"Aligner LLM adapter initialized: gemini/{model_name}")
@@ -442,8 +442,7 @@ class Aligner:
         max_err = max(m["error_rate"] for m in buffer)
         latest = buffer[-1]
 
-        # Check if there's an active event for this service (context for Flash)
-        has_active = await self._has_active_event_for(service)
+        # has_active already computed in pre-filter above -- reuse to save Redis roundtrip
 
         # Temporal context: recent ops journal entries for this service
         # Prevents re-escalating events that were just closed (residual alerts)
@@ -566,8 +565,8 @@ class Aligner:
 
         finally:
             # DON'T clear the buffer -- retain it for continuity across analysis
-            # windows. The 60s trim in _check_anomalies() handles old entries.
-            # This ensures Flash sees a sliding 60s window, not isolated 30s slices.
+            # windows. The 120s trim in check_anomalies_for_service() handles old entries.
+            # This ensures Flash sees a sliding 120s window, not isolated slices.
             self._last_analysis_time[service] = time.time()
             self._metrics_analysis_pending[service] = False
     
@@ -796,6 +795,72 @@ class Aligner:
             "version": svc.version,
         }
     
+    async def handle_failed_promotion(
+        self, *, service: str, project: str, stage: str, promotion: str,
+        freight: str, phase: str, message: str, failed_step: str,
+        mr_url: str, started_at: str = "", finished_at: str = "",
+    ) -> None:
+        """Create an event for a failed Kargo promotion (called by KargoObserver)."""
+        active_ids = await self.blackboard.get_active_events()
+        for eid in active_ids:
+            existing = await self.blackboard.get_event(eid)
+            if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
+                logger.info(f"Skipping Kargo event for {service}: active event {eid} exists")
+                return
+
+        COOLDOWN_SECONDS = 300
+        now = time.time()
+        last_event_time = self._last_event_creation.get(service, 0)
+        if not last_event_time:
+            redis_ts = await self.blackboard.redis.get(f"darwin:aligner:cooldown:{service}")
+            if redis_ts:
+                last_event_time = float(redis_ts)
+                self._last_event_creation[service] = last_event_time
+        if now - last_event_time < COOLDOWN_SECONDS:
+            logger.info(f"Skipping Kargo event for {service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
+            return
+
+        from ..models import EventEvidence
+        evidence = EventEvidence(
+            display_text=f"[kargo] Promotion failed: {stage}@{project} -- {message[:200]}",
+            source_type="aligner",
+            triggered_by="system",
+            domain="clear",
+            domain_confidence="assessed",
+            severity="warning",
+            kargo_context={
+                "project": project,
+                "stage": stage,
+                "promotion": promotion,
+                "freight": freight,
+                "phase": phase,
+                "message": message,
+                "failed_step": failed_step,
+                "mr_url": mr_url,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            },
+        )
+        await self.blackboard.create_event(
+            source="aligner",
+            service=service,
+            reason=f"kargo promotion failed: {failed_step or phase}",
+            evidence=evidence,
+            subject_type="kargo_stage",
+        )
+        self._last_event_creation[service] = now
+        await self.blackboard.redis.set(
+            f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
+        )
+        logger.info(f"Created Kargo event for {service} ({phase}: {failed_step})")
+
+    async def handle_promotion_recovery(
+        self, *, service: str, project: str, stage: str, promotion: str,
+    ) -> None:
+        """Notify active events that a newer promotion succeeded (called by KargoObserver)."""
+        msg = f"[kargo] Promotion succeeded: {stage}@{project} (promotion={promotion})"
+        await self._notify_active_events(service, msg)
+
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""
         self.clear_expired_rules()

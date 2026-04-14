@@ -6,6 +6,7 @@
 
 interface SourceIconProps {
   source: string;
+  subjectType?: string;
   size?: number;
 }
 
@@ -77,6 +78,18 @@ function TimeKeeperIcon({ size }: { size: number }) {
   );
 }
 
+function KargoIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2C6.5 2 5.5 3.5 5 4.5L4 3C3.5 2.5 3 3 3 3.5L3.5 6C2 6 1 6.5 1.5 7.5C2 8 3 8 4 7.5L5 12L6 14H10L11 12L12 7.5C12 6 11.5 4 10.5 3L9.5 4C9 3 8.5 2 8 2Z" fill="#e59655" stroke="#351904" strokeWidth="0.8" strokeLinejoin="round" />
+      <circle cx="6.5" cy="5.5" r="0.6" fill="#351904" />
+      <circle cx="9" cy="5" r="0.6" fill="#351904" />
+      <path d="M7 3.5C6.5 2.5 5.5 1.5 6.5 1C7.5 0.5 8 2 8 3" stroke="#351904" strokeWidth="0.7" strokeLinecap="round" fill="none" />
+      <path d="M9.5 3C10.5 1.5 11.5 1 12 2C12 2.5 11 3.5 10 4" stroke="#351904" strokeWidth="0.7" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
 function FallbackIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -96,8 +109,12 @@ const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   timekeeper: TimeKeeperIcon,
 };
 
-export default function SourceIcon({ source, size = 16 }: SourceIconProps) {
-  const Icon = ICON_MAP[source.toLowerCase()] || FallbackIcon;
+const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
+  kargo_stage: KargoIcon,
+};
+
+export default function SourceIcon({ source, subjectType, size = 16 }: SourceIconProps) {
+  const Icon = (subjectType && SUBJECT_ICON_MAP[subjectType]) || ICON_MAP[source.toLowerCase()] || FallbackIcon;
 
   return (
     <span title={source} style={{ display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle' }}>
