@@ -11,15 +11,27 @@ modes: [investigate]
 
 Your goal: determine the **root cause** and **trigger** of the issue. You have ArgoCD MCP, K8s MCP (remote clusters), Playwright MCP (browser), and CLI tools available. Choose what's appropriate.
 
-Key questions to answer:
+Key questions depend on the failure type:
+
+### Infrastructure Failure (pod crash, sync failure, node issue)
 1. What is the current application state? (sync status, health, conditions)
 2. What resources are affected? (pods, ReplicaSets, ConfigMaps)
-3. What do the logs say? (crash logs, error output)
-4. **Change Attribution** (for crash/unhealthy events): determine WHAT changed:
+3. What do the logs say? (crash logs, error output, exit codes)
+4. **Change Attribution**: determine WHAT changed:
    - Same image + different ConfigMap hash = **config-triggered rollout**
    - Different image = **image-triggered rollout**
    - Neither = **infrastructure issue**
-5. **STOP when you have enough evidence.** The Brain decides the next step.
+
+### Pipeline Failure (CI/CD, Tekton, Konflux)
+1. Which specific job/task/step failed? (not just "pipeline failed")
+2. What does the failing step's log output say? Extract the actual error message.
+3. Is this a code issue (compilation, test assertion), dependency issue (resolution, version conflict), or infrastructure issue (timeout, resource limit, flaky)?
+4. For external/Konflux pipelines: drill PipelineRun -> TaskRun -> step container log. Use KubeArchive if live data is pruned.
+5. For GitLab pipelines: check the failing job log via GitLab API / MCP.
+6. If the error log references source code issues (compilation failure, test assertion), report the specific error and file/line from the log. Recommend Architect or Developer for code-level analysis if a fix is needed.
+
+### Depth Rule
+**STOP when you have the actual error condition**, not just the component that failed. The Brain needs the specific error to make an escalation decision.
 
 Do NOT keep investigating after you have enough evidence. Report and let the Brain decide.
 
@@ -28,10 +40,11 @@ Do NOT keep investigating after you have enough evidence. Report and let the Bra
 Structure your findings as:
 
 ```text
-**Root Cause**: one sentence
-**Trigger**: image change | config change (ConfigMap/Secret) | infrastructure
-**Evidence**: 2-3 bullet points of what you found
-**Recommendation**: what the Brain should do next, based on evidance.
+**Root Cause**: the specific error condition (e.g., "go build failed: undefined reference to X", "OOMKilled exit code 137", "dependency conflict between A v1.2 and B v3.4")
+**Trigger**: code change | dependency update | config change | infrastructure issue | flaky/intermittent
+**Evidence**: 2-3 bullet points including at least one log excerpt or specific error message
+**Unanswered**: anything you could not determine and why (permissions, pruned data, external system)
+**Recommendation**: what the Brain should do next, based on evidence
 ```
 
 ## Rules

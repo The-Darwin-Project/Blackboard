@@ -193,7 +193,12 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "task_instruction": {
                     "type": "string",
-                    "description": "What the agent should do (be specific and actionable)",
+                    "description": (
+                        "What the agent should do. For investigate mode: include specific "
+                        "questions the agent must answer (e.g., 'What error appears in the "
+                        "failing build log?' not 'Check pipeline status'). "
+                        "For all modes: be specific and actionable."
+                    ),
                 },
                 "mode": {
                     "type": "string",
@@ -219,7 +224,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "Summary of what was done and the outcome",
+                    "description": (
+                        "Summary of what was done and the outcome. "
+                        "Start with the event identifier: '[evt-XXXXXXX] summary text'. "
+                        "Include the root cause or resolution, not just 'closed' or 'resolved'."
+                    ),
                 },
             },
             "required": ["summary"],
@@ -360,7 +369,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "message": {
                     "type": "string",
-                    "description": "The notification message to send",
+                    "description": (
+                        "The notification message. Include the event identifier "
+                        "(e.g., '[evt-XXXXXXX]') and the MR/PR URL when available. "
+                        "For failures: include the specific error or root cause, not just 'pipeline failed'."
+                    ),
                 },
             },
             "required": ["user_email", "message"],
@@ -431,7 +444,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "enum": ["success", "failure", "escalation"],
                     "description": "Outcome: success (merged/resolved), failure (still broken), escalation (needs human)",
                 },
-                "summary": {"type": "string", "description": "Text to post as MR comment summarizing what Darwin did"},
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "MR comment summarizing what Darwin did. "
+                        "Include the event identifier (e.g., '[evt-XXXXXXX]'). "
+                        "For failures: include the specific error from investigation, not just 'pipeline failed'."
+                    ),
+                },
                 "reassign_reviewer": {
                     "type": "boolean",
                     "description": "If true, re-tag the maintainer as MR reviewer (use on failure/escalation)",
@@ -515,11 +535,18 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "summary": {
                     "type": "string",
-                    "description": "One-line incident summary",
+                    "description": (
+                        "One-line incident summary. Format: '[evt-XXXXXXX] summary'. "
+                        "Must describe the specific failure, not just 'pipeline failed'."
+                    ),
                 },
                 "description": {
                     "type": "string",
-                    "description": "Detailed description: what failed, timeline, actions taken",
+                    "description": (
+                        "Detailed description: event_id, what failed (specific error), "
+                        "timeline, actions taken, evidence from agent investigation. "
+                        "Include log excerpts or error messages when available."
+                    ),
                 },
                 "priority": {
                     "type": "string",

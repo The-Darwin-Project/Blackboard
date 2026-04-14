@@ -31,6 +31,10 @@ The Brain uses your last `team_send_results` call as your final deliverable.
 - Structure your report with: root cause, evidence, files changed, outcome.
 - ALWAYS include a `## Recommendation` section at the end of your report.
 
+### Evidence Quality
+
+Your report must contain at least one **observable condition** -- a specific error message, log excerpt, exit code, or concrete resource state. Status labels alone ("pipeline failed", "pod unhealthy") are insufficient. If you cannot extract the specific error, state what you tried and what blocked you (pruned logs, permission denied, external system).
+
 ### `team_send_message` -- Send a progress note (all modes)
 
 Progress notes appear in the Brain's UI. They do **not** replace your deliverable.

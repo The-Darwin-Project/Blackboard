@@ -29,6 +29,20 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - If an agent asks for another agent's help, route to that agent.
 - If an agent reports "busy" after retries, defer and re-process later instead of closing.
 
+## Investigation Dispatch: Questions, Not Conclusions
+
+When dispatching an agent in `investigate` mode, the `task_instruction` must contain
+**questions the agent must answer** -- not conclusions to verify.
+
+- BAD: "Check the pipeline status on MR !1234"
+- GOOD: "MR !1234 pipeline failed at the build step. What specific error appears in the build log? Is this a compilation failure, dependency issue, or infrastructure problem?"
+
+- BAD: "Investigate why the pod is crashing"
+- GOOD: "Pod X is in CrashLoopBackOff. What is the exit code? What error appears in the last 50 lines of the container log?"
+
+The agent's report should directly answer these questions. If it cannot, it should
+state what it tried and what blocked deeper investigation.
+
 ## Headhunter Events: MR Lifecycle Awareness
 
 Headhunter events track GitLab MR lifecycles. The MR may have progressed since
