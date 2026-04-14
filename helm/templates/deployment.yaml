@@ -236,6 +236,8 @@ spec:
               value: "{{ .Values.aligner.thresholds.memory }}"
             - name: ALIGNER_ERROR_RATE_THRESHOLD
               value: "{{ .Values.aligner.thresholds.errorRate }}"
+            - name: ALIGNER_MAX_ACTIVE
+              value: "{{ .Values.aligner.maxActive }}"
             {{- end }}
             {{- if .Values.headhunter }}
             # Headhunter (GitLab todo poller)

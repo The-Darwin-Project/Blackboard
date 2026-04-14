@@ -6,7 +6,8 @@
 **Source:** aligner (subject_type=kargo_stage)
 **Trigger:** User right-click "Create Event" from Kargo Stages tree in dashboard
 **Outcome:** Event resolved successfully (11 turns, root cause identified, maintainer notified, incident created)
-**Bug:** Local sysadmin sidecar competed with ephemeral agent during dispatch
+**Bug:** Two bugs -- missing ALIGNER_MAX_ACTIVE config + unconditional volume write before ephemeral decision
+**Status:** Fixed (2026-04-14)
 
 ---
 
@@ -34,7 +35,7 @@ This flickering UX is confusing and makes the system appear broken.
 | 18:37:24 | Brain | select_agent(sysadmin, investigate) |
 | 18:37:26 | Brain | **Wrote event MD to /data/gitops-sysadmin/** (local sidecar volume) |
 | 18:37:27 | Brain | Agent task started, **Triggered TaskRun** (ephemeral) |
-| 18:37:27 - 18:38:57 | Local sidecar + Ephemeral | **RACE**: local sidecar reads event MD from shared volume, ephemeral pod spinning up |
+| 18:37:27 - 18:38:57 | Local sidecar + Ephemeral | **RACE**: "sysadmin starting..." broadcast fires before ephemeral decision, UI shows activity during 90s provisioning wait |
 | 18:38:57 | Ephemeral provisioner | **Ephemeral dispatch failed (1/2)** -- cleanup + retry |
 | 18:39:02 | Ephemeral provisioner | Triggered replacement TaskRun |
 | 18:39:08 | Ephemeral agent (mlgpg) | Registered, marked busy |
@@ -51,38 +52,62 @@ This flickering UX is confusing and makes the system appear broken.
 | 18:46:11 | Brain | close_event |
 | 18:46:39 | Archivist | Archived to Qdrant |
 
-## Root Cause
+## Root Cause: Two Bugs, Not One
 
-The dispatch path in `brain.py._run_agent_task` has a race condition:
+### Bug 1: Missing ALIGNER_MAX_ACTIVE capacity config
 
-1. **Event MD volume write is unconditional** -- when `select_agent(sysadmin)` fires, `_run_agent_task` writes the event markdown to `/data/gitops-sysadmin/events/event-{id}.md` (the local sidecar's shared volume). This happens BEFORE the ephemeral dispatch decision.
+When `kargo_stage` was added to the Tier 1 ephemeral condition, the capacity env var was not wired. The lookup chain:
 
-2. **Local sidecar file watcher picks up the file** -- the local sysadmin sidecar has a file watcher on its events directory. When a new `.md` file appears, it starts processing via its HTTP `/execute` endpoint.
-
-3. **Ephemeral TaskRun starts concurrently** -- the Tier 1 ephemeral check correctly identifies `subject_type=kargo_stage` and triggers a TaskRun. But the TaskRun takes 5-10 seconds to schedule a pod.
-
-4. **Both agents compete** -- the local sidecar starts immediately (file already on disk), while the ephemeral pod is still scheduling. The registry sees both trying to register for the same event. The result is the flickering UI behavior.
-
-## Scope
-
-This is a **pre-existing bug** in the dispatch path, not specific to KargoObserver. It affects all Tier 1 ephemeral sources (headhunter, timekeeper, kargo_stage). It was less visible for headhunter events because:
-- Headhunter events typically arrive when the local sysadmin sidecar is already busy with another task
-- KargoObserver events often arrive when the local sidecar is idle (metrics events don't use sysadmin)
-
-## Proposed Fix
-
-In `brain.py._run_agent_task`, gate the event MD volume write:
-
-```python
-# Current: unconditional write
-self._write_event_to_volume(event_id, agent_name, event_md)
-
-# Fix: skip volume write when ephemeral dispatch is active
-if not use_ephemeral:
-    self._write_event_to_volume(event_id, agent_name, event_md)
+```
+ensure_agent(source=event_doc.source)          # brain.py -- source="aligner" for kargo events
+  -> get_source_limit("aligner")               # ephemeral_provisioner.py
+    -> os.environ.get("ALIGNER_MAX_ACTIVE", "1") # env var NOT SET -> default=1
 ```
 
-Ephemeral agents receive the event document via the `/events/{id}/document` REST endpoint (already implemented at `routes/events.py:43`), not from the shared volume. The volume write is only needed for local sidecars.
+With limit=1, only one kargo ephemeral event can run at a time. evt-329de81a hit this limit (evt-5b40374a had the slot) and was deferred 3x for 120s each.
+
+Headhunter events work because `HEADHUNTER_MAX_ACTIVE=2` is properly wired through Helm values -> deployment template -> ArgoCD overlay.
+
+**Fix:** Wired `ALIGNER_MAX_ACTIVE` through Helm: `aligner.maxActive: "2"` in values.yaml, `ALIGNER_MAX_ACTIVE` env var in deployment.yaml, production override in darwin-blackboard.yaml.
+
+### Bug 2: Unconditional volume write before ephemeral decision
+
+The `select_agent` handler called `write_event_to_volume` unconditionally at line 1704, BEFORE launching `_run_agent_task` where the ephemeral decision is made. When ephemeral capacity was hit and the event deferred, the file stayed on disk for 120+ seconds. Same issue in the `message_agent` handler at line 1819.
+
+Note: the local sidecar does NOT have a file watcher -- it only processes tasks via WS dispatch. The stale file is unnecessary I/O, not a direct race cause. The UI flickering comes from the "agent starting..." broadcast firing before the ephemeral decision.
+
+**Fix:** Moved the volume write into `_run_agent_task`, gated by `agent_id_override is None` (local sidecar dispatch only). This gate correctly handles:
+- Non-ephemeral sources -> local sidecar -> writes file
+- Ephemeral provision success -> ephemeral agent (REST) -> skips file
+- Circuit breaker fallback -> local sidecar -> writes file
+- Capacity defer -> returns early -> no dispatch, no file
+
+## Second Case: evt-329de81a (Aligner-created, same root cause)
+
+**Event:** evt-329de81a (must-gather-v4.13@kargo-cnv-must-gather-v4-13)
+**Trigger:** KargoObserver watch callback (automatic detection, not dashboard)
+
+```
+18:40:10 - Wrote event MD to /data/gitops-sysadmin/events/event-evt-329de81a.md
+18:40:11 - Ephemeral limit for 'aligner' reached (1/1). Event evt-329de81a stays queued.
+18:40:11 - Deferring evt-329de81a for 120s: Waiting for ephemeral agent slot
+18:42:34 - Deferring again for 120s
+18:45:33 - Deferring again for 120s
+```
+
+Deferred 3 times because `ALIGNER_MAX_ACTIVE` defaulted to 1.
+
+## Comparison: evt-1f624e95 (headhunter, clean dispatch)
+
+```
+18:58:33 - select_agent -> developer
+18:58:33 - Wrote event MD to /data/gitops-developer/
+18:58:34 - Agent task started: developer (mode=execute)
+18:58:34 - Triggered TaskRun (status=202)
+18:58:46 - Registered oncall-gzjl8-pod (ephemeral=True)   <- 12 seconds, clean
+```
+
+`HEADHUNTER_MAX_ACTIVE=2` -> capacity available -> no deferral -> no flickering.
 
 ## Log Evidence
 
@@ -115,50 +140,6 @@ Ephemeral agents receive the event document via the `/events/{id}/document` REST
 18:46:11 - Brain LLM decision: close_event
 18:46:11 - Closed event: evt-5b40374a
 ```
-
-## Second Case: evt-329de81a (Aligner-created, same root cause)
-
-**Event:** evt-329de81a (must-gather-v4.13@kargo-cnv-must-gather-v4-13)
-**Trigger:** KargoObserver watch callback (automatic detection, not dashboard)
-
-This event demonstrates the bug also affects the **ephemeral limit + defer path**:
-
-1. **18:40:06** -- Brain `select_agent(sysadmin)`
-2. **18:40:10** -- Brain writes event MD to `/data/gitops-sysadmin/events/` (local sidecar volume)
-3. **18:40:11** -- Ephemeral limit reached (1/1, evt-5b40374a using the slot) -- Brain defers for 120s
-4. **Local sidecar already has the file** and starts processing -- it doesn't know about the defer
-5. **18:42:13** -- Defer expires, Brain re-activates event, uses `refresh_kargo_context`
-6. **18:47:53** -- Brain dispatches sysadmin again (ephemeral slot now free), new TaskRun triggered
-7. **Local sidecar + ephemeral agent compete** -- same flickering UX as evt-5b40374a
-
-```
-18:40:10 - Wrote event MD to /data/gitops-sysadmin/events/event-evt-329de81a.md
-18:40:11 - Ephemeral limit for 'aligner' reached (1/1). Event evt-329de81a stays queued.
-18:40:11 - Deferring evt-329de81a for 120s: Waiting for ephemeral agent slot
-18:42:13 - Defer expired for evt-329de81a -- attempting re-activation
-18:42:20 - Brain LLM decision: refresh_kargo_context (tool working correctly)
-18:47:53 - Brain LLM decision: select_agent (second dispatch after refresh)
-```
-
-**Key insight:** The volume write at step 2 happens BEFORE step 3 (ephemeral limit check + defer). The local sidecar picks up the file and starts working during the 120s defer window. When the defer expires and a real ephemeral agent is dispatched, both agents are active.
-
-This confirms the bug is in the dispatch path ordering, not specific to any event source or trigger method. Both user-triggered (evt-5b40374a) and observer-triggered (evt-329de81a) events hit it.
-
-## Proposed Fix (Updated)
-
-The volume write must be gated by BOTH conditions:
-
-```python
-# In brain.py._run_agent_task, AFTER the ephemeral decision:
-if not use_ephemeral:
-    self._write_event_to_volume(event_id, agent_name, event_md)
-```
-
-This prevents the local sidecar from seeing the file when:
-- (a) Ephemeral dispatch is the primary target (Tier 1: headhunter/timekeeper/kargo_stage)
-- (b) Ephemeral dispatch is deferred (limit reached) -- the file should NOT be written because the event is deferred, not dispatched locally
-
-Ephemeral agents receive the event document via REST (`/events/{id}/document`), not the shared volume.
 
 ## Event Outcomes (despite the bug)
 

@@ -25,11 +25,13 @@
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
 # 25. [Pattern]: WIP cap: _execute_function_call("select_agent") may recursively call _execute_function_call("defer_event") when dispatch semaphore is locked. This is safe -- defer_event does not recurse back into select_agent. Do NOT add agent-dispatching logic to the defer_event handler.
-# 26. [Pattern]: Ephemeral dispatch is two-tier: (a) primary -- headhunter/timekeeper always use ephemeral,
+# 26. [Pattern]: Ephemeral dispatch is two-tier: (a) primary -- headhunter/timekeeper/kargo_stage always use ephemeral,
 #     (b) overflow -- chat/slack scale to ephemeral when local sidecars are full, gated by {SOURCE}_MAX_ACTIVE env var.
 #     Circuit breaker for overflow defers (local was already full); circuit breaker for primary falls back to local.
 #     The overflow availability check (get_available) is best-effort, not a reservation -- a race between check
 #     and dispatch is tolerable (false positive = unnecessary ephemeral, not a failure).
+#     Volume write gate: write_event_to_volume runs only when agent_id_override is None (local sidecar dispatch).
+#     Ephemeral agents fetch the event document via REST (/events/{id}/document), not the shared volume.
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
 # 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
 # 29. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
@@ -1700,9 +1702,6 @@ class Brain:
             # Value stream: stamp dispatch time (overwrites on multi-agent events)
             await self.blackboard.stamp_event(event_id, last_dispatched_at=time.time())
 
-            # Write event MD to agent volume
-            await self.write_event_to_volume(event_id, agent_name)
-
             # Append brain routing turn + broadcast
             action = "route" if function_name == "select_agent" else "route"
             turn = ConversationTurn(
@@ -1816,7 +1815,6 @@ class Brain:
             agent_conn = await registry.get_available(agent_name) if registry else None
 
             if agent_conn:
-                await self.write_event_to_volume(event_id, agent_name)
                 agent = self.agents.get(agent_name)
                 if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
                     event_md_path = f"./events/event-{event_id}.md"
@@ -2846,6 +2844,9 @@ class Brain:
                         else:
                             agent_id_override = provision_result.agent_id
 
+                    if agent_id_override is None:
+                        await self.write_event_to_volume(event_id, agent_name)
+
                     result, session_id = await dispatch_to_agent(
                         registry=registry,
                         bridge=bridge,
@@ -3418,7 +3419,7 @@ class Brain:
 
         service_meta = await self.blackboard.get_service(event.service)
         mermaid = ""
-        if event.source != "headhunter":
+        if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
             try:
                 mermaid = await self.blackboard.generate_mermaid()
             except Exception as e:

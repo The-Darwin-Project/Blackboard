@@ -320,6 +320,7 @@ observer:
 # Aligner Anomaly Thresholds
 # =============================================================================
 aligner:
+  maxActive: "2" # max concurrent ephemeral agents for aligner-sourced events (kargo_stage)
   thresholds:
     cpu: "80.0" # CPU % above which Flash analyzes the service
     memory: "85.0" # Memory % above which Flash analyzes the service
