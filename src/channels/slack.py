@@ -467,6 +467,7 @@ class SlackChannel:
                     "id": event.id,
                     "source": event.source,
                     "service": event.service,
+                    "subject_type": getattr(event, "subject_type", "service"),
                     "status": event.status.value,
                     "reason": event.event.reason,
                     "turns": len(event.conversation),

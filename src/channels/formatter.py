@@ -482,6 +482,8 @@ def build_home_tab_view(
     if active_events:
         for evt in active_events[:10]:
             subj_type = evt.get("subject_type", "service")
+            if subj_type == "service" and "@kargo-" in evt.get("service", ""):
+                subj_type = "kargo_stage"
             src_icon = SUBJECT_EMOJI.get(subj_type) or SOURCE_EMOJI.get(evt.get("source", ""), ":gear:")
             status_icon = STATUS_EMOJI.get(evt.get("status", ""), ":gear:")
             reason = _truncate(evt.get("reason", ""), 120)
