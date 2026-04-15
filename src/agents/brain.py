@@ -2588,12 +2588,20 @@ class Brain:
                     f"Error: {state['error']}"
                 )
             else:
+                new_mr_url = state.get("mr_url", "")
+                old_mr_url = kc.get("mr_url", "")
+                if new_mr_url and new_mr_url != old_mr_url:
+                    await self.blackboard.update_event_kargo_context(
+                        event_id, {"mr_url": new_mr_url}
+                    )
+                    logger.info(f"Updated kargo_context.mr_url for {event_id}: {new_mr_url}")
                 result_text = (
                     f"Kargo Stage: {stage}@{project}\n"
                     f"Promotion: {state.get('promotion', '?')}\n"
                     f"Phase: {state.get('phase', '?')}\n"
                     f"Failed Step: {state.get('failed_step', 'N/A')}\n"
-                    f"Message: {state.get('message', '')}"
+                    f"Message: {state.get('message', '')}\n"
+                    f"MR URL: {new_mr_url or 'N/A'}"
                 )
             thoughts = f"Checking: {condition}\n{result_text}" if condition else result_text
             turn = ConversationTurn(
