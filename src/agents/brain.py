@@ -39,6 +39,14 @@
 #     and process_event re-entry before is_cancel. Agent's content was delivered via team_send_message
 #     progress turns. Intentional exception to rule #9 (_append_and_broadcast for all turns).
 #     Safety invariant: team_send_results has notInModes:['message'] in MCP (team-chat-mcp.js).
+# 31. [Pattern]: Cross-source event merge: when dedup detects same MR URL across different sources
+#     (kargo_context.mr_url vs gitlab_context.target_url), inject the duplicate's evidence as
+#     actor=source, action="evidence", result=<formatted context> turn into the FILO survivor
+#     via _append_and_broadcast, then close the duplicate. Cross-source guard: existing.source
+#     != event.source. "headhunter" excluded from has_agent_result + all agent-turn classifiers
+#     (agent_rounds, last_agent, _surface_agent_recommendation, legacy thinking) so dispatch
+#     phase stays active and recommendation surfacing skips evidence turns.
+#     URL normalized: split("#")[0].rstrip("/").
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -392,6 +400,77 @@ class Brain:
     # Event Processing
     # =========================================================================
 
+    @staticmethod
+    def _extract_mr_url(event: EventDocument) -> str | None:
+        """Extract normalized MR URL from gitlab_context or kargo_context.
+
+        Returns None safely for legacy string evidence (pre-EventEvidence data).
+        """
+        if not (event.event and event.event.evidence):
+            return None
+        ev = event.event.evidence
+        url = None
+        gl = getattr(ev, "gitlab_context", None)
+        if isinstance(gl, dict) and gl.get("target_url"):
+            url = gl["target_url"]
+        if not url:
+            kc = getattr(ev, "kargo_context", None)
+            if isinstance(kc, dict) and kc.get("mr_url"):
+                url = kc["mr_url"]
+        if url:
+            return url.split("#")[0].rstrip("/")
+        return None
+
+    @staticmethod
+    def _format_merge_evidence(duplicate: EventDocument) -> str:
+        """Format duplicate event's evidence as markdown for conversation injection.
+
+        Intentionally duplicates structure from _event_to_markdown (lines 3497-3531)
+        rather than sharing a helper, because _event_to_markdown is a @staticmethod
+        used by queue.py (ai-rule #8) and the merge format may diverge.
+        """
+        lines = [
+            f"Related event {duplicate.id} (source={duplicate.source}) "
+            f"detected for the same MR. Context merged below.",
+            "",
+            f"**Service:** {duplicate.service}",
+            f"**Reason:** {duplicate.event.reason if duplicate.event else 'unknown'}",
+        ]
+        evidence = duplicate.event.evidence if duplicate.event else None
+        if evidence and hasattr(evidence, "gitlab_context") and evidence.gitlab_context:
+            gl = evidence.gitlab_context
+            lines.append("")
+            lines.append("## GitLab Context")
+            lines.append(f"- **Project:** {gl.get('project_path', '')}")
+            lines.append(f"- **MR:** !{gl.get('mr_iid', '')} - {gl.get('mr_title', '')}")
+            lines.append(f"- **MR URL:** {gl.get('target_url', '')}")
+            lines.append(f"- **Pipeline:** {gl.get('pipeline_status', 'unknown')}")
+            lines.append(f"- **Merge Status:** {gl.get('merge_status', '')}")
+            lines.append(f"- **Author:** {gl.get('author', '')}")
+            maintainer = gl.get("maintainer", {})
+            if maintainer:
+                emails = maintainer.get("emails", [])
+                lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
+            mr_desc = gl.get("mr_description", "")
+            if "Bot Instructions" in mr_desc:
+                bot_start = mr_desc.find("### Bot Instructions")
+                if bot_start >= 0:
+                    lines.append("")
+                    lines.append(mr_desc[bot_start:].strip())
+        if evidence and hasattr(evidence, "kargo_context") and evidence.kargo_context:
+            kc = evidence.kargo_context
+            lines.append("")
+            lines.append("## Kargo Context")
+            lines.append(f"- **Project:** {kc.get('project', '')}")
+            lines.append(f"- **Stage:** {kc.get('stage', '')}")
+            lines.append(f"- **Promotion:** {kc.get('promotion', '')}")
+            lines.append(f"- **Phase:** {kc.get('phase', '')}")
+            lines.append(f"- **Failed Step:** {kc.get('failed_step', 'N/A')}")
+            lines.append(f"- **Error:** {kc.get('message', '')}")
+            if kc.get("mr_url"):
+                lines.append(f"- **MR URL:** {kc['mr_url']}")
+        return "\n".join(lines)
+
     async def process_event(
         self, event_id: str, prefetched_event: Optional[EventDocument] = None,
     ) -> None:
@@ -429,43 +508,71 @@ class Brain:
             logger.debug(f"Skipping closed event {event_id}")
             return
 
-        # Dedup: if this is a new event (no turns yet), check for existing active events
-        # on the same service + same MR (if headhunter). Close as duplicate if found.
-        # Skip for user-initiated sources (chat/slack) -- "general" service is a catch-all,
-        # not a meaningful dedup key. Users intentionally start new conversations.
+        # Dedup: if this is a new event (no turns yet), check for existing active events.
+        # Two passes per iteration (single loop):
+        #   Pass 1: service-name match (same-source duplicates, existing behavior)
+        #   Pass 2: MR URL cross-match (cross-source duplicates, new -- kargo <-> headhunter)
+        # Skip for user-initiated sources (chat/slack) -- "general" is a catch-all.
         if not event.conversation and event.source not in ("chat", "slack"):
             active_ids = await self.blackboard.get_active_events()
             new_ctx = (getattr(event.event.evidence, "gitlab_context", None) or {}) if (event.event and event.event.evidence) else {}
             new_mr = new_ctx.get("mr_iid")
             new_project = new_ctx.get("project_id")
+            new_mr_url = self._extract_mr_url(event)
             for eid in active_ids:
                 if eid == event_id:
                     continue
                 existing = await self.blackboard.get_event(eid)
                 if not (existing
-                        and existing.service == event.service
                         and existing.conversation
                         and existing.status.value in ("active", "new", "deferred")):
                     continue
-                # Same service -- but if both have GitLab context, require same project + MR
-                ex_ctx = (getattr(existing.event.evidence, "gitlab_context", None) or {}) if (existing.event and existing.event.evidence) else {}
-                ex_mr = ex_ctx.get("mr_iid")
-                ex_project = ex_ctx.get("project_id")
-                if new_project and ex_project and new_project != ex_project:
-                    continue
-                if new_mr and ex_mr and new_mr != ex_mr:
-                    continue
-                logger.info(
-                    f"Closing duplicate event {event_id} -- "
-                    f"existing event {eid} already handling {event.service}"
-                    f"{f' MR !{ex_mr}' if ex_mr else ''}"
-                )
-                await self._close_and_broadcast(
-                    event_id,
-                    f"Duplicate: merged with existing event {eid} for {event.service}.",
-                    close_reason="duplicate",
-                )
-                return
+
+                # Pass 1: service-name match (existing behavior)
+                if existing.service == event.service:
+                    ex_ctx = (getattr(existing.event.evidence, "gitlab_context", None) or {}) if (existing.event and existing.event.evidence) else {}
+                    ex_mr = ex_ctx.get("mr_iid")
+                    ex_project = ex_ctx.get("project_id")
+                    if new_project and ex_project and new_project != ex_project:
+                        pass  # fall through to URL check
+                    elif new_mr and ex_mr and new_mr != ex_mr:
+                        pass  # fall through to URL check
+                    else:
+                        logger.info(
+                            f"Closing duplicate event {event_id} -- "
+                            f"existing event {eid} already handling {event.service}"
+                            f"{f' MR !{ex_mr}' if ex_mr else ''}"
+                        )
+                        await self._close_and_broadcast(
+                            event_id,
+                            f"Duplicate: merged with existing event {eid} for {event.service}.",
+                            close_reason="duplicate",
+                        )
+                        return
+
+                # Pass 2: MR URL cross-match (cross-source only)
+                if new_mr_url and existing.source != event.source:
+                    existing_mr_url = self._extract_mr_url(existing)
+                    if existing_mr_url and existing_mr_url == new_mr_url:
+                        merge_text = self._format_merge_evidence(event)
+                        turn = ConversationTurn(
+                            turn=len(existing.conversation) + 1,
+                            actor=event.source,
+                            action="evidence",
+                            result=merge_text,
+                            thoughts=f"Duplicate event {event_id} closed -- {event.source} context merged.",
+                        )
+                        await self._append_and_broadcast(eid, turn)
+                        logger.info(
+                            f"Cross-source merge: {event_id} -> {eid} "
+                            f"(MR URL match: {new_mr_url})"
+                        )
+                        await self._close_and_broadcast(
+                            event_id,
+                            f"Duplicate (MR URL match): context merged into {eid}.",
+                            close_reason="duplicate",
+                        )
+                        return
 
         # Value stream: stamp first processing time (after dedup gate, skip re-entry after defer)
         if event.processing_started_at is None:
@@ -714,7 +821,7 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] != "create_plan"]
                 logger.info(f"CLEAR domain: create_plan gated (act directly) for {event_id}")
             elif domain == "complex":
-                agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner"))
+                agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner", "headhunter"))
                 if agent_rounds < 4:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
                     logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
@@ -996,7 +1103,7 @@ class Brain:
             return "high", 0.6
 
         recent = event.conversation[-3:]
-        has_agent_result = any(t.actor not in ("brain", "user") for t in recent)
+        has_agent_result = any(t.actor not in ("brain", "user", "aligner", "headhunter") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
         if has_agent_result:
@@ -1050,7 +1157,7 @@ class Brain:
         }
 
         flags["has_agent_result"] = any(
-            t.actor not in ("brain", "user", "aligner") for t in event.conversation
+            t.actor not in ("brain", "user", "aligner", "headhunter") for t in event.conversation
         )
         recent = event.conversation[-3:] if event.conversation else []
         flags["last_is_user"] = bool(recent and recent[-1].actor == "user")
@@ -1187,7 +1294,7 @@ class Brain:
             last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
             last_agent = next(
                 (t for t in reversed(event.conversation)
-                 if t.actor not in ("brain", "user", "aligner")),
+                 if t.actor not in ("brain", "user", "aligner", "headhunter")),
                 None,
             )
             elapsed_str = ""
@@ -1230,7 +1337,7 @@ class Brain:
         """
         last_agent_turn = next(
             (t for t in reversed(event.conversation)
-             if t.actor not in ("brain", "user", "aligner")),
+             if t.actor not in ("brain", "user", "aligner", "headhunter")),
             None,
         )
         if not last_agent_turn:
@@ -1546,7 +1653,7 @@ class Brain:
                 text = f"[{turn.user_name} via {turn.source or 'dashboard'}]: {turn.thoughts or turn.result or ''}"
             else:
                 text = turn.thoughts or ""
-        elif turn.actor == "aligner":
+        elif turn.actor == "aligner" and turn.action != "evidence":
             text = turn.evidence or turn.thoughts or ""
         else:
             text = turn.result or turn.thoughts or ""
