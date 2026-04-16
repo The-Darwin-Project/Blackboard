@@ -22,16 +22,22 @@ Key questions depend on the failure type:
    - Different image = **image-triggered rollout**
    - Neither = **infrastructure issue**
 
-### Pipeline Failure (CI/CD, Tekton, Konflux)
-1. Which specific job/task/step failed? (not just "pipeline failed")
-2. What does the failing step's log output say? Extract the actual error message.
-3. Is this a code issue (compilation, test assertion), dependency issue (resolution, version conflict), or infrastructure issue (timeout, resource limit, flaky)?
-4. For external/Konflux pipelines: drill PipelineRun -> TaskRun -> step container log. Use KubeArchive if live data is pruned.
-5. For GitLab pipelines: check the failing job log via GitLab API / MCP.
-6. If the error log references source code issues (compilation failure, test assertion), report the specific error and file/line from the log. Recommend Architect or Developer for code-level analysis if a fix is needed.
+### Pipeline Failure (CI/CD, Tekton, Konflux, Kargo)
+Pipeline failures can originate from GitLab (MR, push, tag, scheduled), Kargo promotions, or direct Tekton PipelineRuns. The investigation method depends on the source but the principle is the same: **enumerate ALL failed jobs/tasks before attributing root cause.**
+
+1. **Identify the pipeline source** from the event document: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion, MR URL), Aligner events may reference either.
+2. **For GitLab pipelines**: list ALL jobs in the pipeline. A single pipeline can contain multiple jobs, each mapping to a different external CI PipelineRun (e.g., build, SAST scan, cert checks). Do NOT investigate a single PipelineRun on the cluster without first enumerating all jobs in GitLab.
+3. **For Kargo promotions**: check which step failed. If CI-related (wait-for-merge, pipeline failure), follow the linked MR URL and enumerate its pipeline jobs. If Kargo-internal (timeout, webhook), report the step error directly.
+4. **For direct Tekton/Konflux PipelineRuns**: find the PipelineRun on the cluster, list ALL TaskRuns, identify every failed one.
+5. **Drill into each failure**: for GitLab-native jobs, read the job log. For external/Konflux jobs, follow the external CI link to the PipelineRun, then drill TaskRun -> step container log. Use KubeArchive if live data is pruned.
+6. Extract the actual error message from each failed job/task. Classify: code (compilation, test assertion), dependency (resolution, version conflict), compliance (cert check, license), infrastructure (image pull failure, timeout, resource limit), or orchestration (Kargo timeout, merge conflict, webhook failure).
+7. **Image pull failures take precedence**: `Back-off pulling image` / `ErrImagePull` on a step container means the pod never started and the task never ran. This is a platform-wide infrastructure issue, not a code defect. Report it with higher priority than code/compliance failures.
+8. Report ALL failing jobs/tasks with their individual error classifications. Do NOT attribute root cause from a single failure when multiple jobs/tasks failed independently.
 
 ### Depth Rule
 **STOP when you have the actual error condition**, not just the component that failed. The Brain needs the specific error to make an escalation decision.
+
+**Exception -- pipeline failures**: For pipeline failures (GitLab, Kargo, or direct Tekton), you must enumerate ALL failed jobs/tasks before stopping. Finding one error in one job is not sufficient when the pipeline contains multiple failed jobs or tasks. Each may have a different root cause and different remediation path.
 
 Do NOT keep investigating after you have enough evidence. Report and let the Brain decide.
 
