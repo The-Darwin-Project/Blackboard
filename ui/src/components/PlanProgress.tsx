@@ -67,6 +67,8 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
 
   const done = steps.filter(s => s.status === 'completed').length;
   const source = (planTurn.taskForAgent as { source?: string })?.source || planTurn.actor;
+  const reasoning = (planTurn.taskForAgent as { reasoning?: string })?.reasoning || '';
+  const isAgentSourced = source !== 'architect' && source !== 'brain';
   const progressPct = steps.length > 0 ? (done / steps.length) * 100 : 0;
 
   return (
@@ -85,9 +87,23 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0' }}>Plan</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0' }}>
+            {isAgentSourced ? 'Investigation Findings' : 'Plan'}
+          </span>
           <span style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>{done}/{steps.length}</span>
         </div>
+        {reasoning && (
+          <div style={{
+            fontSize: 11,
+            color: isAgentSourced ? '#f59e0b' : '#94a3b8',
+            lineHeight: 1.3,
+            marginBottom: 4,
+            padding: '3px 0',
+            borderBottom: '1px solid #334155',
+          }}>
+            {reasoning}
+          </div>
+        )}
         <div style={{
           height: 3,
           background: '#334155',
@@ -102,7 +118,9 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
             transition: 'width 0.3s ease',
           }} />
         </div>
-        <div style={{ fontSize: 9, color: '#475569', marginTop: 3 }}>by {source}</div>
+        <div style={{ fontSize: 9, color: '#475569', marginTop: 3 }}>
+          {isAgentSourced ? `suggested by ${source}` : `by ${source}`}
+        </div>
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '4px 0' }}>
@@ -139,6 +157,11 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
                 }}>
                   {step.agent}
                 </span>
+                {isAgentSourced && (
+                  <span style={{ fontSize: 9, color: '#64748b' }}>
+                    suggested
+                  </span>
+                )}
               </div>
               <div style={{
                 fontSize: 11,
