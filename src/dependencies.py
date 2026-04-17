@@ -1,4 +1,8 @@
 # BlackBoard/src/dependencies.py
+# @ai-rules:
+# 1. [Pattern]: Module-level globals set in main.py lifespan, read via async Depends() getters.
+# 2. [Constraint]: get_kargo_observer is the canonical accessor for REST routes. Also on dashboard_adapter and brain.agents.
+# 3. [Constraint]: No UI imports. This module is a FastAPI dependency injection boundary.
 """FastAPI dependency injection for Darwin Blackboard."""
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ if TYPE_CHECKING:
     from .agents.brain import Brain
     from .agents.developer import Developer
     from .agents.sysadmin import SysAdmin
+    from .observers.kargo import KargoObserver
 
 # Global instances (initialized in main.py lifespan)
 _blackboard: Optional[BlackboardState] = None
@@ -108,6 +113,21 @@ async def get_brain() -> "Brain":
     if _brain is None:
         raise RuntimeError("Brain not initialized. Check startup sequence.")
     return _brain
+
+
+# KargoObserver (canonical accessor for REST route -- also on dashboard_adapter and brain.agents)
+_kargo_observer: Optional["KargoObserver"] = None
+
+
+def set_kargo_observer(observer: "KargoObserver") -> None:
+    """Set the global KargoObserver instance."""
+    global _kargo_observer
+    _kargo_observer = observer
+
+
+async def get_kargo_observer() -> Optional["KargoObserver"]:
+    """Get the KargoObserver instance. Returns None when KARGO_OBSERVER_ENABLED=false."""
+    return _kargo_observer
 
 
 # Registry + Bridge (set by main.py lifespan, read by brain.py dispatch)

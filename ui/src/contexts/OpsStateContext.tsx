@@ -8,6 +8,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
+import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
 import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
@@ -125,7 +126,8 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id);
   }, []);
 
-  const [kargoStages, setKargoStages] = useState<KargoStageStatus[]>([]);
+  const { data: kargoStages = [] } = useKargoStages();
+  const { setKargoStages, invalidateKargoStages } = useKargoStagesInvalidation();
   const [kargoEventResult, setKargoEventResult] = useState<KargoEventResult | null>(null);
 
   const [contentTiles, setContentTiles] = useState<ContentTile[]>([]);
@@ -170,7 +172,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   const selectedEventIdRef = useRef(selectedEventId);
   selectedEventIdRef.current = selectedEventId;
 
-  useWSReconnect(() => { invalidateAll(); });
+  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); });
 
   useWSMessage((msg) => {
     if (msg.type === 'progress' && msg.actor) {
@@ -215,8 +217,11 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateActive();
         invalidateClosed();
       }
+    } else if (msg.type === 'event_status_changed') {
+      invalidateActive();
+      if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'kargo_stages_update') {
-      setKargoStages((msg.stages as KargoStageStatus[]) || []);
+      setKargoStages((msg.stages as KargoStageStatus[]) ?? []);
     } else if (msg.type === 'kargo_event_result') {
       setKargoEventResult({ status: msg.status as KargoEventResult['status'], detail: msg.detail as string });
     }

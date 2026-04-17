@@ -3,6 +3,7 @@
 // 1. [Pattern]: Single shared WS connection via React context. All consumers use hooks.
 // 2. [Pattern]: Reconnect signal fires on onopen when retryRef > 0 (not initial connect).
 // 3. [Gotcha]: subscribersRef and reconnectSubscribersRef are Sets -- never recreate, only mutate.
+// 4. [Pattern]: onclose code 4001 = auth rejection -- triggers logout via getWSAuthFailureCallback(), skips reconnect.
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -20,6 +21,7 @@
  */
 import { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo, type ReactNode } from 'react';
 import type { WSMessage } from '../hooks/useWebSocket';
+import { getWSAuthFailureCallback } from '../api/client';
 import { useAuth } from './AuthContext';
 
 type MessageHandler = (msg: WSMessage) => void;
@@ -105,9 +107,14 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         setConnected(false);
         wsRef.current = null;
+        if (event.code === 4001) {
+          console.warn('[WS] Auth rejected (4001) -- triggering logout');
+          getWSAuthFailureCallback()?.();
+          return;
+        }
         const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
         retryRef.current++;
         setReconnecting(true);

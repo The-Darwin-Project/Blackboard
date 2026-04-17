@@ -3,6 +3,11 @@
 // 1. [Pattern]: All API calls go through fetchApi() wrapper -- consistent error handling via ApiError.
 // 2. [Constraint]: closeEvent uses REST POST, not WebSocket -- ensures delivery even during WS reconnect.
 // 3. [Pattern]: getEventReport fetches server-side markdown -- ConversationFeed falls back to client-side eventToMarkdown on failure.
+// 4. [Pattern]: Module-level callback setters (setTokenGetter, setOnUnauthorized, setWSAuthFailureCallback)
+//    are the auth callback home. Both AuthContext and WebSocketContext import FROM here -- no circular deps.
+// 5. [Design]: 401 interceptor fires _onUnauthorized before throwing ApiError. The callback (wired from
+//    AuthContext) gates on user.expired to avoid false logout during silent-renew race. REST routes currently
+//    don't enforce per-route JWT -- 401 only comes from upstream proxies (OpenShift Route, Nginx).
 /**
  * Typed API client for Darwin Brain backend.
  */
@@ -17,6 +22,7 @@ import type {
   EventDocument,
   FlowMetrics,
   GraphResponse,
+  KargoStageStatus,
   ReportFull,
   ReportMeta,
   Service,
@@ -27,10 +33,27 @@ import type {
 const BASE_URL = '';
 
 let _getToken: (() => string | null) | null = null;
+let _onUnauthorized: (() => void) | null = null;
+let _wsAuthFailureCallback: (() => void) | null = null;
 
 /** Set the token getter for authenticated API calls. Called once by AuthProvider. */
 export function setTokenGetter(getter: () => string | null) {
   _getToken = getter;
+}
+
+/** Set the 401 handler. Called by AuthProvider -- triggers logout on expired token. */
+export function setOnUnauthorized(cb: (() => void) | null) {
+  _onUnauthorized = cb;
+}
+
+/** Set the WS auth failure handler. Called by AuthProvider -- triggers logout on 4001 close. */
+export function setWSAuthFailureCallback(cb: (() => void) | null) {
+  _wsAuthFailureCallback = cb;
+}
+
+/** Get the WS auth failure handler. Called by WebSocketContext on close code 4001. */
+export function getWSAuthFailureCallback() {
+  return _wsAuthFailureCallback;
 }
 
 /**
@@ -95,6 +118,9 @@ async function fetchApi<T>(
       detail = errorBody.detail || errorBody.message || errorBody.error;
     } catch {
       // Response body is not JSON or empty
+    }
+    if (response.status === 401 && _onUnauthorized) {
+      _onUnauthorized();
     }
     throw new ApiError(response.status, response.statusText, endpoint, detail);
   }
@@ -279,6 +305,14 @@ export async function getAgents(): Promise<AgentRegistryEntry[]> {
 
 export async function getFlowMetrics(): Promise<FlowMetrics> {
   return fetchApi<FlowMetrics>('/flow');
+}
+
+// =============================================================================
+// Kargo Stages API (polling fallback for WS-only kargo_stages_update)
+// =============================================================================
+
+export async function getKargoStages(): Promise<KargoStageStatus[]> {
+  return fetchApi<KargoStageStatus[]>('/api/kargo/stages');
 }
 
 // =============================================================================

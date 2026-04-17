@@ -25,7 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_registry_and_bridge
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_kargo_observer, set_registry_and_bridge
 from .models import FlowMetricsResponse, HealthResponse
 from .routes import (
     chat_router,
@@ -34,6 +34,7 @@ from .routes import (
     feedback_router,
     incidents_router,
     journal_router,
+    kargo_router,
     metrics_router,
     queue_router,
     reports_router,
@@ -273,6 +274,7 @@ async def lifespan(app: FastAPI):
             brain.agents["_kargo_observer"] = kargo_observer
             await kargo_observer.start()
             dashboard_adapter.set_kargo_observer(kargo_observer)
+            set_kargo_observer(kargo_observer)
             logger.info("KargoObserver started for promotion state watching")
         else:
             logger.info("KargoObserver disabled (KARGO_OBSERVER_ENABLED=false)")
@@ -543,6 +545,7 @@ app.include_router(events_router)
 app.include_router(feedback_router)
 app.include_router(reports_router)
 app.include_router(incidents_router)
+app.include_router(kargo_router)
 if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)

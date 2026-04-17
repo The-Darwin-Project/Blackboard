@@ -16,7 +16,12 @@
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
 # 16. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
-# 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack). All 8 call sites use _broadcast().
+# 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack).
+# 27. [Pattern]: event_status_changed broadcast fires after successful status transitions (new->active, active->deferred, deferred->active). Broadcasts at call sites, NOT inside transition_event_status() (Hexagonal boundary). Defer path is defense-in-depth (turn broadcast already fires via _append_and_broadcast).
+# 28. [Debt]: defer_event handler (~2064) uses read-modify-write (get_event -> set status -> redis.set) without
+#     WATCH/MULTI/EXEC. Protected by per-event asyncio.Lock, but external concurrent writes (REST endpoints)
+#     could theoretically lose turns. Pre-existing pattern -- refactor to use transition_event_status() or
+#     a dedicated blackboard.defer_event() atomic operation when this path is next modified.
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
@@ -603,6 +608,11 @@ class Brain:
         if event.status == EventStatus.NEW:
             if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
                 logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
+                await self._broadcast({
+                    "type": "event_status_changed",
+                    "event_id": event_id,
+                    "status": EventStatus.ACTIVE.value,
+                })
 
         # Health check: nudge idle events, escalate to human after max nudges.
         # Guards: skip if deferred (intentional wait), waiting for user, or last real turn is brain.defer (just woke).
@@ -2067,6 +2077,14 @@ class Brain:
                     str(defer_until),
                     ex=delay + 60,  # Auto-expire the key after delay + buffer
                 )
+                # Defense-in-depth: turn broadcast (line ~2060) carries the conversation
+                # update; this broadcast carries the status field change so the UI can
+                # move the event to the deferred list immediately.
+                await self._broadcast({
+                    "type": "event_status_changed",
+                    "event_id": event_id,
+                    "status": EventStatus.DEFERRED.value,
+                })
             await self.blackboard.record_event(
                 EventType.BRAIN_EVENT_DEFERRED,
                 {"event_id": event_id, "delay_seconds": delay},
@@ -3898,6 +3916,11 @@ class Brain:
                         )
                         await self.blackboard.redis.delete(defer_key)
                         if transitioned:
+                            await self._broadcast({
+                                "type": "event_status_changed",
+                                "event_id": eid,
+                                "status": EventStatus.ACTIVE.value,
+                            })
                             if eid in self._waiting_for_user:
                                 logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
                             else:
