@@ -2701,6 +2701,7 @@ class Brain:
             return
 
         event_source = evt.source if evt else ""
+        subject_type = getattr(evt, "subject_type", "service") if evt else "service"
 
         async def on_progress(progress_data: dict) -> None:
             await self._broadcast({
@@ -2709,6 +2710,7 @@ class Brain:
                 "actor": progress_data.get("actor", role),
                 "message": progress_data.get("message", ""),
                 "event_source": event_source,
+                "subject_type": subject_type,
             })
             if progress_data.get("source") == "agent_message":
                 turn = ConversationTurn(
@@ -2746,6 +2748,7 @@ class Brain:
             "actor": role,
             "message": f"{role} waking (teammate message)...",
             "event_source": event_source,
+            "subject_type": subject_type,
         })
 
         try:
@@ -2840,6 +2843,7 @@ class Brain:
             agent_acked = False  # Track first progress (= agent received task)
             evt = await self.blackboard.get_event(event_id)
             event_source = evt.source if evt else ""
+            subject_type = getattr(evt, "subject_type", "service") if evt else "service"
 
             async def on_progress(progress_data: dict) -> None:
                 """Broadcast agent progress to UI in real-time."""
@@ -2859,6 +2863,7 @@ class Brain:
                     "actor": progress_data.get("actor", agent_name),
                     "message": progress_data.get("message", ""),
                     "event_source": event_source,
+                    "subject_type": subject_type,
                 })
                 if progress_data.get("source") == "agent_message":
                     turn = ConversationTurn(
@@ -2896,6 +2901,7 @@ class Brain:
                 "actor": agent_name,
                 "message": f"{agent_name} starting...",
                 "event_source": event_source,
+                "subject_type": subject_type,
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
                 from ..dependencies import get_registry_and_bridge

@@ -180,8 +180,12 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       const evtId = msg.event_id as string;
       const isEphemeralEvent = evtId && (
         msg.event_source === 'headhunter'
+        || msg.event_source === 'timekeeper'
+        || (msg as Record<string, unknown>).subject_type === 'kargo_stage'
         || ephemeralAgentsRef.current.some((a) => a.bound_event_id === evtId)
-        || activeEventsRef.current?.some((e) => e.id === evtId && e.source === 'headhunter')
+        || activeEventsRef.current?.some((e) => e.id === evtId && (
+          e.source === 'headhunter' || e.source === 'timekeeper' || e.subject_type === 'kargo_stage'
+        ))
       );
       if (!isEphemeralEvent && AGENTS.includes(actor as typeof AGENTS[number])) {
         setAgentStreams((prev) => {
