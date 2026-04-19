@@ -7,10 +7,14 @@
 """Kargo stage status REST endpoint -- polling fallback for WS-only kargo_stages_update."""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from ..dependencies import get_kargo_observer
+from ..dependencies import get_kargo_observer, get_brain
+
+logger = logging.getLogger(__name__)
 
 
 class KargoStageSnapshot(BaseModel):
@@ -36,6 +40,12 @@ async def list_failed_stages(
     observer=Depends(get_kargo_observer),
 ) -> list[KargoStageSnapshot]:
     """Return current failed Kargo stage snapshots from the observer cache."""
+    if not observer:
+        try:
+            brain = await get_brain()
+            observer = brain.agents.get("_kargo_observer")
+        except RuntimeError:
+            pass
     if not observer:
         return []
     return [KargoStageSnapshot(**s) for s in observer.get_failed_stages()]
