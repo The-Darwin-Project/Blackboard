@@ -509,6 +509,87 @@ async def delete_lesson(lesson_id: str):
     return {"status": "deleted", "lesson_id": lesson_id}
 
 
+class LessonExtractionRequest(BaseModel):
+    document: str
+    event_ids: list[str] = Field(default_factory=list)
+    context_notes: str = ""
+
+
+class LessonApplyRequest(BaseModel):
+    lessons: list[LessonRequest] = Field(default_factory=list)
+    corrections: list[CorrectMemoryRequest] = Field(default_factory=list)
+
+
+@router.post("/admin/lessons/extract")
+async def extract_lessons(
+    req: LessonExtractionRequest,
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Extract structured lessons + corrections from a raw document using Claude.
+
+    Optionally cross-references Darwin event reports for richer extraction.
+    """
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+
+    event_reports: dict[str, str] = {}
+    if req.event_ids:
+        from ..agents.brain import Brain
+        for eid in req.event_ids[:10]:
+            event = await blackboard.get_event(eid)
+            if event:
+                event_reports[eid] = Brain._event_to_markdown(event)
+
+    result = await archivist.extract_lessons(
+        document=req.document,
+        event_reports=event_reports or None,
+        context_notes=req.context_notes,
+    )
+    if "error" in result:
+        raise HTTPException(422, result)
+    return result
+
+
+@router.post("/admin/lessons/apply")
+async def apply_lessons(req: LessonApplyRequest):
+    """Store confirmed lessons and apply confirmed corrections in one call."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+
+    stored_lessons = 0
+    applied_corrections = 0
+
+    for lesson in req.lessons:
+        lid = await archivist.store_lesson(
+            title=lesson.title,
+            pattern=lesson.pattern,
+            anti_pattern=lesson.anti_pattern,
+            keywords=lesson.keywords,
+            event_references=lesson.event_references,
+        )
+        if lid:
+            stored_lessons += 1
+
+    for correction in req.corrections:
+        ok = await archivist.correct_memory(
+            event_id=correction.event_id,
+            corrected_root_cause=correction.corrected_root_cause,
+            corrected_fix_action=correction.corrected_fix_action,
+            correction_note=correction.correction_note,
+        )
+        if ok:
+            applied_corrections += 1
+
+    return {
+        "stored_lessons": stored_lessons,
+        "applied_corrections": applied_corrections,
+    }
+
+
 @router.get("/headhunter/pending")
 async def headhunter_pending_todos():
     """Return pending GitLab todos that the Headhunter would process next.

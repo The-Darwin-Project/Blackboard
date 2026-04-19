@@ -9,6 +9,7 @@
 # 7. [Pattern]: correct_memory() overwrites a contaminated event memory with corrected root_cause/fix_action. Uses same deterministic uuid5 point ID.
 # 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key).
 # 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
+# 10. [Pattern]: extract_lessons() uses Claude adapter (not Gemini) for document analysis. Only Claude-compatible kwargs (no thinking_level, no top_p).
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -36,6 +37,7 @@ FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
 EMBEDDING_MODEL = "text-embedding-005"
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
+EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-20250514")
 
 SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object for similarity search.
 Each turn is timestamped as [HH:MM:SS actor.action]. Use timestamps to derive durations.
@@ -486,3 +488,96 @@ class Archivist:
         except Exception as e:
             logger.warning(f"delete_lesson failed for {lesson_id}: {e}")
             return False
+
+    # =========================================================================
+    # Lesson Extraction (Claude)
+    # =========================================================================
+
+    EXTRACTION_PROMPT = (
+        "You are analyzing a lessons-learned document from an operational incident review.\n"
+        "Extract two types of artifacts:\n\n"
+        "1. LESSONS: Abstract, environment-agnostic patterns that teach an AI system how to\n"
+        "   classify similar incidents correctly. Describe WHAT the correct reasoning is and\n"
+        "   WHAT the anti-pattern looks like. Do NOT reference specific component names,\n"
+        "   image URLs, or cluster details in the pattern/anti_pattern fields.\n\n"
+        "2. CORRECTIONS: For each referenced event where the AI's classification was wrong,\n"
+        "   provide the corrected root_cause and fix_action.\n\n"
+        "If the document follows a 'Lessons Learned' template with sections like\n"
+        "'Failure Modes', 'Root Cause of the Misclassification', 'Recommendations',\n"
+        "and 'Event-Level Corrections', extract from those sections directly.\n\n"
+        "Respond with JSON only (no markdown fences):\n"
+        '{"lessons": [{"title": "...", "pattern": "...", "anti_pattern": "...", '
+        '"keywords": [...], "event_references": [...]}], '
+        '"corrections": [{"event_id": "...", "current_root_cause": "...", '
+        '"corrected_root_cause": "...", "corrected_fix_action": "...", '
+        '"correction_note": "..."}]}'
+    )
+
+    MAX_EXTRACTION_CHARS = 50_000
+
+    async def extract_lessons(
+        self,
+        document: str,
+        event_reports: dict[str, str] | None = None,
+        context_notes: str = "",
+    ) -> dict:
+        """Extract structured lessons + corrections from a raw document using Claude.
+
+        Returns {"lessons": [...], "corrections": [...]} or {"error": "..."}.
+        """
+        if len(document) > self.MAX_EXTRACTION_CHARS:
+            return {"error": f"Document exceeds {self.MAX_EXTRACTION_CHARS} character limit"}
+
+        try:
+            from .llm import create_adapter
+
+            adapter = create_adapter("claude", self.project, self.location, EXTRACTOR_MODEL)
+
+            contents = f"## Document\n\n{document}"
+            if event_reports:
+                contents += "\n\n## Darwin Event Reports (for cross-reference)\n"
+                for eid, report in event_reports.items():
+                    contents += f"\n### {eid}\n{report[:3000]}\n"
+            if context_notes:
+                contents += f"\n\n## Additional Context\n{context_notes}"
+
+            response = await adapter.generate(
+                system_prompt=self.EXTRACTION_PROMPT,
+                contents=contents,
+                temperature=0.3,
+                max_output_tokens=8192,
+            )
+
+            raw = response.text.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Claude extraction returned invalid JSON, retrying once")
+                retry = await adapter.generate(
+                    system_prompt=self.EXTRACTION_PROMPT + "\nCRITICAL: respond with valid JSON only.",
+                    contents=contents,
+                    temperature=0.1,
+                    max_output_tokens=8192,
+                )
+                raw = retry.text.strip()
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                result = json.loads(raw)
+
+            result.setdefault("lessons", [])
+            result.setdefault("corrections", [])
+            logger.info(
+                f"Extraction complete: {len(result['lessons'])} lessons, "
+                f"{len(result['corrections'])} corrections"
+            )
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Extraction JSON parse failed after retry: {e}")
+            return {"error": f"Claude returned invalid JSON: {e}", "raw_text": raw[:500]}
+        except Exception as e:
+            logger.warning(f"extract_lessons failed: {e}")
+            return {"error": str(e)}
