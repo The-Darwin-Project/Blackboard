@@ -4,8 +4,8 @@
 // 2. [Pattern]: Step 1 accepts paste, file upload, event selection, context notes.
 // 3. [Pattern]: Step 2 shows editable cards with include/exclude toggles.
 // 4. [Pattern]: Step 3 applies selected items and shows summary.
-import { useState, useCallback } from 'react';
-import { Upload, Loader2, Check, X, Download, ArrowLeft } from 'lucide-react';
+import { useState, useCallback, useMemo } from 'react';
+import { Upload, Loader2, Check, X, Download, ArrowLeft, Search } from 'lucide-react';
 import { useExtractLessons, useApplyLessons, useMemories } from '../../hooks/useMemory';
 import type { ExtractedLesson, ExtractedCorrection } from '../../api/client';
 
@@ -25,9 +25,23 @@ export default function ExtractWizard() {
   const [corrections, setCorrections] = useState<ReviewItem<ExtractedCorrection>[]>([]);
   const [result, setResult] = useState<{ stored_lessons: number; applied_corrections: number } | null>(null);
 
+  const [eventSearch, setEventSearch] = useState('');
   const extractMutation = useExtractLessons();
   const applyMutation = useApplyLessons();
   const { data: memories } = useMemories();
+
+  const filteredMemories = useMemo(() => {
+    if (!memories) return [];
+    const q = eventSearch.toLowerCase().trim();
+    if (!q) return memories.slice(0, 50);
+    return memories.filter(mem => {
+      const p = mem.payload as Record<string, unknown>;
+      const eid = ((p.event_id as string) || mem.id).toLowerCase();
+      const svc = ((p.service as string) || '').toLowerCase();
+      const sym = ((p.symptom as string) || '').toLowerCase();
+      return eid.includes(q) || svc.includes(q) || sym.includes(q);
+    }).slice(0, 50);
+  }, [memories, eventSearch]);
 
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -94,20 +108,33 @@ export default function ExtractWizard() {
 
         {memories && memories.length > 0 && (
           <div>
-            <label className="block text-[10px] text-text-muted mb-1">Cross-reference Events (optional, from Deep Memory)</label>
-            <div className="max-h-32 overflow-auto border border-border rounded p-2 space-y-1">
-              {memories.slice(0, 50).map(mem => {
-                const p = mem.payload as Record<string, unknown>;
-                const eid = (p.event_id as string) || mem.id;
-                return (
-                  <label key={eid} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-tertiary rounded px-1 py-0.5">
-                    <input type="checkbox" checked={selectedEvents.includes(eid)}
-                      onChange={() => toggleEvent(eid)} className="rounded" />
-                    <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
-                    <span className="text-text-secondary truncate">{(p.service as string) || '?'} -- {((p.symptom as string) || '').slice(0, 60)}</span>
-                  </label>
-                );
-              })}
+            <label className="block text-[10px] text-text-muted mb-1">
+              Cross-reference Events (optional, from Deep Memory)
+              {selectedEvents.length > 0 && <span className="ml-1 text-accent">{selectedEvents.length} selected</span>}
+            </label>
+            <div className="relative mb-1">
+              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
+              <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
+                value={eventSearch} onChange={e => setEventSearch(e.target.value)}
+                placeholder="Search by event ID, service, or symptom..." />
+            </div>
+            <div className="max-h-36 overflow-auto border border-border rounded p-2 space-y-1">
+              {filteredMemories.length === 0 ? (
+                <div className="text-[10px] text-text-muted py-1 px-1">No events match "{eventSearch}"</div>
+              ) : (
+                filteredMemories.map(mem => {
+                  const p = mem.payload as Record<string, unknown>;
+                  const eid = (p.event_id as string) || mem.id;
+                  return (
+                    <label key={eid} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-tertiary rounded px-1 py-0.5">
+                      <input type="checkbox" checked={selectedEvents.includes(eid)}
+                        onChange={() => toggleEvent(eid)} className="rounded" />
+                      <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
+                      <span className="text-text-secondary truncate">{(p.service as string) || '?'} -- {((p.symptom as string) || '').slice(0, 60)}</span>
+                    </label>
+                  );
+                })
+              )}
             </div>
           </div>
         )}
