@@ -6,6 +6,9 @@
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
 # 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
+# 7. [Pattern]: correct_memory() overwrites a contaminated event memory with corrected root_cause/fix_action. Uses same deterministic uuid5 point ID.
+# 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key).
+# 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -30,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
+LESSONS_COLLECTION = "darwin_lessons"
 EMBEDDING_MODEL = "text-embedding-005"
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
 
@@ -84,8 +88,9 @@ class Archivist:
             self._vector_store = VectorStore()
             await self._vector_store.ensure_collection(COLLECTION_NAME, vector_size=768)
             await self._vector_store.ensure_collection(FEEDBACK_COLLECTION, vector_size=768)
+            await self._vector_store.ensure_collection(LESSONS_COLLECTION, vector_size=768)
             self._initialized = True
-            logger.info("Archivist initialized (embedding + Qdrant, darwin_events + darwin_feedback)")
+            logger.info("Archivist initialized (embedding + Qdrant, darwin_events + darwin_feedback + darwin_lessons)")
             return True
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
@@ -287,4 +292,182 @@ class Archivist:
             return True
         except Exception as e:
             logger.warning(f"Feedback storage failed (non-fatal): {e}")
+            return False
+
+    # =========================================================================
+    # Corrective Memory
+    # =========================================================================
+
+    async def correct_memory(
+        self,
+        event_id: str,
+        corrected_root_cause: str,
+        corrected_fix_action: str,
+        correction_note: str = "",
+    ) -> bool:
+        """Overwrite a contaminated event memory with corrected fields.
+
+        Re-generates the embedding from corrected fields and upserts with the
+        same deterministic point ID, replacing the old vector + payload.
+        Returns True on success, False on failure.
+        """
+        try:
+            if not await self._ensure_initialized():
+                return False
+
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"darwin:{event_id}"))
+            existing = await self._vector_store.get_points(COLLECTION_NAME, [point_id])
+            if not existing:
+                logger.warning(f"correct_memory: event {event_id} not found in Qdrant")
+                return False
+
+            payload = existing[0].get("payload", {})
+            payload["root_cause"] = corrected_root_cause
+            payload["fix_action"] = corrected_fix_action
+            payload["corrected"] = True
+            payload["correction_note"] = correction_note
+            payload["corrected_at"] = time.time()
+
+            embed_text = (
+                f"{payload.get('symptom', '')} "
+                f"{corrected_root_cause} "
+                f"{corrected_fix_action} "
+                f"{' '.join(payload.get('pattern_keywords', payload.get('keywords', [])))} "
+                f"{' '.join(payload.get('instance_keywords', []))} "
+                f"{payload.get('procedures', '')} "
+                f"{payload.get('outcome', '')}"
+            )
+            embed_response = await self._client.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=embed_text,
+            )
+            vector = embed_response.embeddings[0].values
+
+            await self._vector_store.upsert(
+                collection=COLLECTION_NAME,
+                point_id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Memory corrected: {event_id} (point={point_id})")
+            return True
+
+        except Exception as e:
+            logger.warning(f"correct_memory failed for {event_id}: {e}")
+            return False
+
+    # =========================================================================
+    # Lessons Learned
+    # =========================================================================
+
+    async def store_lesson(
+        self,
+        title: str,
+        pattern: str,
+        anti_pattern: str = "",
+        keywords: list[str] | None = None,
+        event_references: list[str] | None = None,
+    ) -> str | None:
+        """Store a human-authored lesson in darwin_lessons. Returns lesson_id or None."""
+        try:
+            if not await self._ensure_initialized():
+                return None
+
+            lesson_id = str(uuid.uuid4())
+            payload = {
+                "lesson_id": lesson_id,
+                "title": title,
+                "pattern": pattern,
+                "anti_pattern": anti_pattern,
+                "keywords": keywords or [],
+                "event_references": event_references or [],
+                "created_at": time.time(),
+            }
+            embed_text = (
+                f"{title} {pattern} {anti_pattern} "
+                f"{' '.join(keywords or [])}"
+            )
+            embed_response = await self._client.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=embed_text,
+            )
+            vector = embed_response.embeddings[0].values
+
+            await self._vector_store.upsert(
+                collection=LESSONS_COLLECTION,
+                point_id=lesson_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Lesson stored: {lesson_id} ({title})")
+            return lesson_id
+
+        except Exception as e:
+            logger.warning(f"store_lesson failed: {e}")
+            return None
+
+    async def search_lessons(self, query: str, limit: int = 3) -> list[dict]:
+        """Search darwin_lessons for relevant patterns. Returns list of {score, payload}."""
+        try:
+            if not await self._ensure_initialized():
+                return []
+
+            embed_response = await self._client.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=query,
+            )
+            vector = embed_response.embeddings[0].values
+            return await self._vector_store.search(
+                collection=LESSONS_COLLECTION,
+                vector=vector,
+                limit=limit,
+            )
+        except Exception as e:
+            logger.warning(f"Lesson search failed (non-fatal): {e}")
+            return []
+
+    async def list_memories(self, limit: int = 200) -> list[dict]:
+        """List all event memories from Qdrant (single-page scroll, capped)."""
+        try:
+            if not await self._ensure_initialized():
+                return []
+            points, _ = await self._vector_store.scroll(COLLECTION_NAME, limit=limit)
+            return points
+        except Exception as e:
+            logger.warning(f"list_memories failed: {e}")
+            return []
+
+    async def get_memory(self, event_id: str) -> dict | None:
+        """Get a single event memory by event_id."""
+        try:
+            if not await self._ensure_initialized():
+                return None
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"darwin:{event_id}"))
+            results = await self._vector_store.get_points(COLLECTION_NAME, [point_id])
+            return results[0] if results else None
+        except Exception as e:
+            logger.warning(f"get_memory failed for {event_id}: {e}")
+            return None
+
+    async def list_lessons(self, limit: int = 200) -> list[dict]:
+        """List all lessons from Qdrant (single-page scroll, capped)."""
+        try:
+            if not await self._ensure_initialized():
+                return []
+            points, _ = await self._vector_store.scroll(LESSONS_COLLECTION, limit=limit)
+            return points
+        except Exception as e:
+            logger.warning(f"list_lessons failed: {e}")
+            return []
+
+    async def delete_lesson(self, lesson_id: str) -> bool:
+        """Remove a lesson by ID. Returns True on success."""
+        try:
+            if not await self._ensure_initialized():
+                return False
+            await self._vector_store.delete(LESSONS_COLLECTION, [lesson_id])
+            logger.info(f"Lesson deleted: {lesson_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"delete_lesson failed for {lesson_id}: {e}")
             return False

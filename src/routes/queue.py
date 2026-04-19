@@ -406,6 +406,109 @@ async def rebuild_deep_memory(
     }
 
 
+# =============================================================================
+# Admin: Corrective Memory + Lessons Learned
+# =============================================================================
+
+
+class CorrectMemoryRequest(BaseModel):
+    event_id: str
+    corrected_root_cause: str
+    corrected_fix_action: str
+    correction_note: str = ""
+
+
+class LessonRequest(BaseModel):
+    title: str
+    pattern: str
+    anti_pattern: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    event_references: list[str] = Field(default_factory=list)
+
+
+@router.get("/admin/memories")
+async def list_memories():
+    """List all archived event memories from Qdrant."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    return await archivist.list_memories()
+
+
+@router.get("/admin/memories/{event_id}")
+async def get_memory(event_id: str):
+    """Get a single event memory by event_id."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    result = await archivist.get_memory(event_id)
+    if not result:
+        raise HTTPException(404, f"Memory not found for {event_id}")
+    return result
+
+
+@router.post("/admin/correct-memory")
+async def correct_memory(req: CorrectMemoryRequest):
+    """Overwrite a contaminated event memory with corrected root cause."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    success = await archivist.correct_memory(
+        event_id=req.event_id,
+        corrected_root_cause=req.corrected_root_cause,
+        corrected_fix_action=req.corrected_fix_action,
+        correction_note=req.correction_note,
+    )
+    if not success:
+        raise HTTPException(404, f"Event {req.event_id} not found in deep memory")
+    return {"status": "corrected", "event_id": req.event_id}
+
+
+@router.get("/admin/lessons")
+async def list_lessons():
+    """List all lessons learned from Qdrant."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    return await archivist.list_lessons()
+
+
+@router.post("/admin/lessons")
+async def create_lesson(req: LessonRequest):
+    """Store a new lesson learned."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    lesson_id = await archivist.store_lesson(
+        title=req.title,
+        pattern=req.pattern,
+        anti_pattern=req.anti_pattern,
+        keywords=req.keywords,
+        event_references=req.event_references,
+    )
+    if not lesson_id:
+        raise HTTPException(503, "Failed to store lesson")
+    return {"status": "stored", "lesson_id": lesson_id}
+
+
+@router.delete("/admin/lessons/{lesson_id}")
+async def delete_lesson(lesson_id: str):
+    """Delete a lesson by ID."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    success = await archivist.delete_lesson(lesson_id)
+    if not success:
+        raise HTTPException(503, "Failed to delete lesson")
+    return {"status": "deleted", "lesson_id": lesson_id}
+
+
 @router.get("/headhunter/pending")
 async def headhunter_pending_todos():
     """Return pending GitLab todos that the Headhunter would process next.

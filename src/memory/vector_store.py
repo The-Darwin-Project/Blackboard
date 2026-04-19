@@ -4,6 +4,8 @@
 # 2. [Pattern]: All methods are async. Caller handles exceptions.
 # 3. [Gotcha]: ensure_collection is idempotent -- safe to call on every startup.
 # 4. [Pattern]: vector_size=768 for text-embedding-005 model.
+# 5. [Pattern]: scroll() returns (points, next_offset) tuple for cursor-based pagination.
+# 6. [Pattern]: get_points() retrieves by ID list. delete() removes by ID list. Both follow Qdrant REST conventions.
 """
 Thin async wrapper around Qdrant REST API.
 No additional pip dependencies -- uses httpx (already installed).
@@ -108,3 +110,60 @@ class VectorStore:
             }
             for r in results
         ]
+
+    async def scroll(
+        self,
+        collection: str,
+        limit: int = 100,
+        offset: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """List all points in a collection (cursor-based pagination).
+
+        Returns (points, next_offset). next_offset is None when no more pages.
+        """
+        client = await self._get_client()
+        body: dict[str, Any] = {"limit": limit, "with_payload": True}
+        if offset is not None:
+            body["offset"] = offset
+        resp = await client.post(
+            f"/collections/{collection}/points/scroll",
+            json=body,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("result", {})
+        points = [
+            {"id": p.get("id"), "payload": p.get("payload", {})}
+            for p in data.get("points", [])
+        ]
+        return points, data.get("next_page_offset")
+
+    async def get_points(
+        self,
+        collection: str,
+        point_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Retrieve specific points by ID. Returns list of {id, payload}."""
+        client = await self._get_client()
+        resp = await client.post(
+            f"/collections/{collection}/points",
+            json={"ids": point_ids, "with_payload": True},
+        )
+        resp.raise_for_status()
+        results = resp.json().get("result", [])
+        return [
+            {"id": r.get("id"), "payload": r.get("payload", {})}
+            for r in results
+        ]
+
+    async def delete(
+        self,
+        collection: str,
+        point_ids: list[str],
+    ) -> None:
+        """Delete points by ID list."""
+        client = await self._get_client()
+        resp = await client.post(
+            f"/collections/{collection}/points/delete",
+            json={"points": point_ids},
+        )
+        resp.raise_for_status()
