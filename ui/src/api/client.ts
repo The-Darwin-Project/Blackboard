@@ -444,3 +444,68 @@ export async function refineInstructions(payload: {
     body: JSON.stringify(payload),
   });
 }
+
+// =============================================================================
+// Memory API (Deep Memory admin)
+// =============================================================================
+
+export interface MemoryPoint {
+  id: string;
+  payload: Record<string, unknown>;
+}
+
+export interface Lesson {
+  id: string;
+  payload: {
+    lesson_id: string;
+    title: string;
+    pattern: string;
+    anti_pattern: string;
+    keywords: string[];
+    event_references: string[];
+    created_at: number;
+  };
+}
+
+export async function getMemories(): Promise<MemoryPoint[]> {
+  return fetchApi<MemoryPoint[]>('/queue/admin/memories');
+}
+
+export async function getMemory(eventId: string): Promise<MemoryPoint> {
+  return fetchApi<MemoryPoint>(`/queue/admin/memories/${encodeURIComponent(eventId)}`);
+}
+
+export async function correctMemory(payload: {
+  event_id: string;
+  corrected_root_cause: string;
+  corrected_fix_action: string;
+  correction_note?: string;
+}): Promise<{ status: string; event_id: string }> {
+  return fetchApi('/queue/admin/correct-memory', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getLessons(): Promise<Lesson[]> {
+  return fetchApi<Lesson[]>('/queue/admin/lessons');
+}
+
+export async function createLesson(payload: {
+  title: string;
+  pattern: string;
+  anti_pattern?: string;
+  keywords?: string[];
+  event_references?: string[];
+}): Promise<{ status: string; lesson_id: string }> {
+  return fetchApi('/queue/admin/lessons', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteLesson(lessonId: string): Promise<{ status: string }> {
+  return fetchApi(`/queue/admin/lessons/${encodeURIComponent(lessonId)}`, {
+    method: 'DELETE',
+  });
+}
