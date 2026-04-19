@@ -1,17 +1,19 @@
 // BlackBoard/ui/src/components/memory/MemoryPage.tsx
 // @ai-rules:
-// 1. [Pattern]: Sub-nav with Memories | Lessons | Extract tabs. Extract deferred to Batch 6.
+// 1. [Pattern]: Sub-nav with Memories | Lessons | Extract tabs.
 // 2. [Pattern]: URL hash or state-based sub-navigation within the Memory tab.
 import { useState } from 'react';
-import { Database, BookOpen, Download } from 'lucide-react';
+import { Database, BookOpen, Sparkles, Download } from 'lucide-react';
 import MemoriesView from './MemoriesView';
 import LessonsView from './LessonsView';
+import ExtractWizard from './ExtractWizard';
 
-type SubView = 'memories' | 'lessons';
+type SubView = 'memories' | 'lessons' | 'extract';
 
 const SUB_TABS: { id: SubView; label: string; icon: typeof Database }[] = [
   { id: 'memories', label: 'Memories', icon: Database },
   { id: 'lessons', label: 'Lessons', icon: BookOpen },
+  { id: 'extract', label: 'Extract', icon: Sparkles },
 ];
 
 export default function MemoryPage() {
@@ -45,6 +47,7 @@ export default function MemoryPage() {
       <div className="flex-1 overflow-hidden">
         {active === 'memories' && <MemoriesView />}
         {active === 'lessons' && <LessonsView />}
+        {active === 'extract' && <ExtractWizard />}
       </div>
     </div>
   );

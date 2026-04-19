@@ -6,6 +6,9 @@ import {
   getLessons,
   createLesson,
   deleteLesson,
+  extractLessons,
+  applyLessons,
+  getClosedEvents,
 } from '../api/client';
 
 export function useMemories() {
@@ -45,5 +48,28 @@ export function useDeleteLesson() {
   return useMutation({
     mutationFn: (lessonId: string) => deleteLesson(lessonId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['lessons'] }),
+  });
+}
+
+export function useExtractLessons() {
+  return useMutation({ mutationFn: extractLessons });
+}
+
+export function useApplyLessons() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: applyLessons,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['memories'] });
+      qc.invalidateQueries({ queryKey: ['lessons'] });
+    },
+  });
+}
+
+export function useClosedEvents() {
+  return useQuery({
+    queryKey: ['closedEvents'],
+    queryFn: () => getClosedEvents(100),
+    staleTime: 60_000,
   });
 }

@@ -509,3 +509,59 @@ export async function deleteLesson(lessonId: string): Promise<{ status: string }
     method: 'DELETE',
   });
 }
+
+export interface ExtractedLesson {
+  title: string;
+  pattern: string;
+  anti_pattern?: string;
+  keywords?: string[];
+  event_references?: string[];
+}
+
+export interface ExtractedCorrection {
+  event_id: string;
+  current_root_cause?: string;
+  corrected_root_cause: string;
+  corrected_fix_action: string;
+  correction_note?: string;
+}
+
+export interface ExtractionResult {
+  lessons: ExtractedLesson[];
+  corrections: ExtractedCorrection[];
+}
+
+export async function extractLessons(payload: {
+  document: string;
+  event_ids?: string[];
+  context_notes?: string;
+}): Promise<ExtractionResult> {
+  return fetchApi<ExtractionResult>('/queue/admin/lessons/extract', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function applyLessons(payload: {
+  lessons: ExtractedLesson[];
+  corrections: ExtractedCorrection[];
+}): Promise<{ stored_lessons: number; applied_corrections: number }> {
+  return fetchApi('/queue/admin/lessons/apply', {
+    method: 'POST',
+    body: JSON.stringify({
+      lessons: payload.lessons.map(l => ({
+        title: l.title,
+        pattern: l.pattern,
+        anti_pattern: l.anti_pattern || '',
+        keywords: l.keywords || [],
+        event_references: l.event_references || [],
+      })),
+      corrections: payload.corrections.map(c => ({
+        event_id: c.event_id,
+        corrected_root_cause: c.corrected_root_cause,
+        corrected_fix_action: c.corrected_fix_action,
+        correction_note: c.correction_note || '',
+      })),
+    }),
+  });
+}
