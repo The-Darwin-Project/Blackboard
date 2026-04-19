@@ -110,8 +110,23 @@ export default function ExtractWizard() {
           <div>
             <label className="block text-[10px] text-text-muted mb-1">
               Cross-reference Events (optional, from Deep Memory)
-              {selectedEvents.length > 0 && <span className="ml-1 text-accent">{selectedEvents.length} selected</span>}
             </label>
+            {selectedEvents.length > 0 && (
+              <div className="flex flex-wrap gap-1 mb-1.5">
+                {selectedEvents.map(eid => {
+                  const mem = memories.find(m => ((m.payload as Record<string, unknown>).event_id as string || m.id) === eid);
+                  const svc = mem ? (mem.payload as Record<string, unknown>).service as string || '?' : '?';
+                  return (
+                    <span key={eid} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-accent/15 text-accent">
+                      {eid.slice(4, 16)} ({svc})
+                      <button onClick={() => toggleEvent(eid)} className="hover:text-red-400 transition-colors">
+                        <X size={10} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
             <div className="relative mb-1">
               <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted" />
               <input className="w-full bg-bg-primary border border-border rounded pl-7 pr-2 py-1.5 text-xs text-text-primary"
@@ -125,9 +140,12 @@ export default function ExtractWizard() {
                 filteredMemories.map(mem => {
                   const p = mem.payload as Record<string, unknown>;
                   const eid = (p.event_id as string) || mem.id;
+                  const isSelected = selectedEvents.includes(eid);
                   return (
-                    <label key={eid} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-tertiary rounded px-1 py-0.5">
-                      <input type="checkbox" checked={selectedEvents.includes(eid)}
+                    <label key={eid} className={`flex items-center gap-2 text-xs cursor-pointer rounded px-1 py-0.5 transition-colors ${
+                      isSelected ? 'bg-accent/10' : 'hover:bg-bg-tertiary'
+                    }`}>
+                      <input type="checkbox" checked={isSelected}
                         onChange={() => toggleEvent(eid)} className="rounded" />
                       <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
                       <span className="text-text-secondary truncate">{(p.service as string) || '?'} -- {((p.symptom as string) || '').slice(0, 60)}</span>
