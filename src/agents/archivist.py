@@ -37,26 +37,42 @@ LESSONS_COLLECTION = "darwin_lessons"
 EMBEDDING_MODEL = "text-embedding-005"
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
 
-SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object, this will be used to create a vector for similarity search.
+SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object for similarity search.
 Each turn is timestamped as [HH:MM:SS actor.action]. Use timestamps to derive durations.
 
-Include these fields:
-- symptom: What was observed (one sentence)
-- root_cause: What caused it (one sentence, or "unknown")
-- fix_action: What was done to fix it (one sentence)
-- keywords: Array of 3-5 relevant keywords
+Produce fields in THREE categories:
+
+PATTERN FIELDS (component-neutral -- describe the failure TYPE, not the specific instance):
+- symptom: What CLASS of failure was observed (one sentence). Use generic terms like
+  "CI pipeline failed", "container build failed", "promotion timed out", "deployment stuck".
+  Do NOT include MR numbers, image URLs, registry paths, or component names.
+- root_cause: What CATEGORY of issue caused it (one sentence, or "unknown"). Use generic terms like
+  "infrastructure image pull failure", "rate limiting on git resolution",
+  "compliance check failure (missing license)", "merge conflict".
+  Do NOT include specific image URLs, registry paths, or task names.
+- fix_action: What CLASS of remediation was applied (one sentence). Use generic terms like
+  "retested pipeline after transient failure cleared", "escalated to maintainer for upstream fix".
+- pattern_keywords: 3-5 abstract keywords describing the failure pattern.
+  Good: ["infrastructure", "image-pull", "pipeline", "transient"]
+  Bad: ["quay.io/konflux-ci/oras:latest", "sast-shell-check", "virt-launcher"]
+
+TEMPORAL FIELDS (component-specific -- PRESERVED for operational planning):
 - service: The affected service name
 - turns: Number of conversation turns
 - duration_seconds: Total event duration from first to last turn
-- operational_timings: Array of observed process durations (e.g., [{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}])
+- operational_timings: Array of observed process durations (e.g., [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}])
 - defer_patterns: Array of Brain defer actions, each with reason and duration_seconds
-- agent_execution_times: Array of agent tasks, each with agent name and duration_seconds (route to execute)
+- agent_execution_times: Array of agent tasks, each with agent name and duration_seconds
 - procedures: Short workflow description (e.g., "retest pipeline, wait for completion, merge MR")
 - outcome: Final state -- one of: resolved, escalated, user_closed, force_closed, stale
-- domain: Cynefin classification (clear|complicated|complex|chaotic) -- use the Brain's assessment from brain.triage turns
+- domain: Cynefin classification (clear|complicated|complex|chaotic)
+
+INSTANCE FIELDS (component-specific -- for search findability, not shown to Brain):
+- instance_keywords: 2-3 component-specific terms that help find this event via search.
+  Example: ["kubevirt-plugin", "konflux", "v5-99"]
 
 Example output:
-{{"symptom": "pipeline failed for MR !289", "root_cause": "Transient Platform Services infrastructure issue", "fix_action": "Retested pipeline, merged MR after pass", "keywords": ["Platform Services", "pipeline", "kubevirt-plugin", "retest"], "service": "kubevirt-plugin", "turns": 12, "duration_seconds": 1800, "operational_timings": [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}], "defer_patterns": [{{"reason": "Waiting for pipeline", "duration_seconds": 1200}}], "agent_execution_times": [{{"agent": "developer", "duration_seconds": 90}}], "procedures": "retest pipeline, defer for completion, verify result, merge MR", "outcome": "resolved", "domain": "complicated"}}
+{{"symptom": "CI pipeline failed due to transient infrastructure issue in build task", "root_cause": "Container image pull failure prevented build task from starting", "fix_action": "Retested pipeline after infrastructure issue resolved, merged MR", "pattern_keywords": ["pipeline", "infrastructure", "image-pull", "transient", "retest"], "instance_keywords": ["kubevirt-plugin", "konflux"], "service": "kubevirt-plugin", "turns": 12, "duration_seconds": 1800, "operational_timings": [{{"source": "Platform Services", "process": "pipeline", "duration_seconds": 1800}}], "defer_patterns": [{{"reason": "Waiting for pipeline", "duration_seconds": 1200}}], "agent_execution_times": [{{"agent": "developer", "duration_seconds": 90}}], "procedures": "retest pipeline, defer for completion, verify result, merge MR", "outcome": "resolved", "domain": "complicated"}}
 
 Respond with JSON only, no markdown fences."""
 
@@ -187,14 +203,13 @@ class Archivist:
                 summary.setdefault("brain_domain", "complicated")
                 summary.setdefault("source_domain", "complicated")
 
-            # Step 2: Generate embedding
-            timings = summary.get("operational_timings", [])
+            # Step 2: Generate embedding (pattern keywords dominate, instance keywords secondary)
             embed_text = (
                 f"{summary.get('symptom', '')} "
                 f"{summary.get('root_cause', '')} "
                 f"{summary.get('fix_action', '')} "
-                f"{' '.join(summary.get('keywords', []))} "
-                f"{' '.join(str(t) for t in timings) if isinstance(timings, list) else ''} "
+                f"{' '.join(summary.get('pattern_keywords', summary.get('keywords', [])))} "
+                f"{' '.join(summary.get('instance_keywords', []))} "
                 f"{summary.get('procedures', '')} "
                 f"{summary.get('outcome', '')}"
             )

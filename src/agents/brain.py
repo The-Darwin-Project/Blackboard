@@ -2177,33 +2177,56 @@ class Brain:
 
             query = args.get("query", "")
             archivist = self.agents.get("_archivist_memory")
-            results = []
+            memory_text = f"## Deep Memory: \"{query}\"\n\n"
+            has_results = False
+
+            # Search lessons learned first (classification guidance)
+            if archivist and hasattr(archivist, "search_lessons"):
+                lessons = await archivist.search_lessons(query, limit=3)
+                if lessons:
+                    has_results = True
+                    memory_text += "### Lessons Learned\n"
+                    for i, r in enumerate(lessons, 1):
+                        p = r.get("payload", {})
+                        memory_text += (
+                            f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f})\n"
+                            f"   - Pattern: {p.get('pattern', '?')}\n"
+                        )
+                        if p.get("anti_pattern"):
+                            memory_text += f"   - Anti-pattern: {p['anti_pattern']}\n"
+                    memory_text += "\n"
+
+            # Search past events (pattern first, temporal data preserved)
             if archivist and hasattr(archivist, "search"):
                 results = await archivist.search(query, limit=5)
-            if results:
-                memory_text = f"## Deep Memory: \"{query}\"\n\n"
-                for i, r in enumerate(results, 1):
-                    p = r.get("payload", {})
-                    dur = p.get("duration_seconds", 0)
-                    dur_m = f"{dur // 60}m" if dur else "?"
-                    defers = p.get("defer_patterns", [])
-                    total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
-                    defer_m = f"{total_defer // 60}m" if total_defer else "0m"
-                    timings = p.get("operational_timings", [])
-                    timing_str = ", ".join(
-                        f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
-                        for t in timings if isinstance(t, dict)
-                    ) or "none"
-                    domain_str = p.get("brain_domain", p.get("domain", "?"))
-                    memory_text += (
-                        f"{i}. **[{p.get('service', '?')}]** domain: {domain_str} | score: {r.get('score', 0):.2f}\n"
-                        f"   - Symptom: {p.get('symptom', '?')}\n"
-                        f"   - Root cause: {p.get('root_cause', '?')}\n"
-                        f"   - Fix: {p.get('fix_action', '?')}\n"
-                        f"   - Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
-                    )
-            else:
+                if results:
+                    has_results = True
+                    memory_text += "### Past Events\n"
+                    for i, r in enumerate(results, 1):
+                        p = r.get("payload", {})
+                        dur = p.get("duration_seconds", 0)
+                        dur_m = f"{dur // 60}m" if dur else "?"
+                        defers = p.get("defer_patterns", [])
+                        total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
+                        defer_m = f"{total_defer // 60}m" if total_defer else "0m"
+                        timings = p.get("operational_timings", [])
+                        timing_str = ", ".join(
+                            f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
+                            for t in timings if isinstance(t, dict)
+                        ) or "none"
+                        domain_str = p.get("brain_domain", p.get("domain", "?"))
+                        corrected = " [CORRECTED]" if p.get("corrected") else ""
+                        memory_text += (
+                            f"{i}. domain: {domain_str} | score: {r.get('score', 0):.2f}{corrected}\n"
+                            f"   - Pattern: {p.get('symptom', '?')}\n"
+                            f"   - Root cause: {p.get('root_cause', '?')}\n"
+                            f"   - Fix: {p.get('fix_action', '?')}\n"
+                            f"   - Service: {p.get('service', '?')} | Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
+                        )
+
+            if not has_results:
                 memory_text = f"## Deep Memory: \"{query}\"\n\nNo results found."
+
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
