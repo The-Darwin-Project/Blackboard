@@ -413,15 +413,15 @@ async def rebuild_deep_memory(
 
 class CorrectMemoryRequest(BaseModel):
     event_id: str
-    corrected_root_cause: str
-    corrected_fix_action: str
-    correction_note: str = ""
+    corrected_root_cause: str = Field(max_length=5000)
+    corrected_fix_action: str = Field(max_length=5000)
+    correction_note: str = Field(default="", max_length=2000)
 
 
 class LessonRequest(BaseModel):
-    title: str
-    pattern: str
-    anti_pattern: str = ""
+    title: str = Field(max_length=500)
+    pattern: str = Field(max_length=5000)
+    anti_pattern: str = Field(default="", max_length=5000)
     keywords: list[str] = Field(default_factory=list)
     event_references: list[str] = Field(default_factory=list)
 
@@ -503,9 +503,12 @@ async def delete_lesson(lesson_id: str):
         archivist = await get_archivist()
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
+    existing = await archivist.list_lessons(limit=500)
+    if not any(p.get("payload", {}).get("lesson_id") == lesson_id for p in existing):
+        raise HTTPException(404, f"Lesson {lesson_id} not found")
     success = await archivist.delete_lesson(lesson_id)
     if not success:
-        raise HTTPException(503, "Failed to delete lesson")
+        raise HTTPException(503, "Failed to delete lesson from Qdrant")
     return {"status": "deleted", "lesson_id": lesson_id}
 
 

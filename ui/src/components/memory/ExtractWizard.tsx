@@ -6,7 +6,7 @@
 // 4. [Pattern]: Step 3 applies selected items and shows summary.
 import { useState, useCallback } from 'react';
 import { Upload, Loader2, Check, X, Download, ArrowLeft } from 'lucide-react';
-import { useExtractLessons, useApplyLessons, useClosedEvents } from '../../hooks/useMemory';
+import { useExtractLessons, useApplyLessons, useMemories } from '../../hooks/useMemory';
 import type { ExtractedLesson, ExtractedCorrection } from '../../api/client';
 
 type Step = 1 | 2 | 3;
@@ -27,7 +27,7 @@ export default function ExtractWizard() {
 
   const extractMutation = useExtractLessons();
   const applyMutation = useApplyLessons();
-  const { data: closedEvents } = useClosedEvents();
+  const { data: memories } = useMemories();
 
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -92,18 +92,22 @@ export default function ExtractWizard() {
           </label>
         </div>
 
-        {closedEvents && closedEvents.length > 0 && (
+        {memories && memories.length > 0 && (
           <div>
-            <label className="block text-[10px] text-text-muted mb-1">Cross-reference Events (optional)</label>
+            <label className="block text-[10px] text-text-muted mb-1">Cross-reference Events (optional, from Deep Memory)</label>
             <div className="max-h-32 overflow-auto border border-border rounded p-2 space-y-1">
-              {closedEvents.slice(0, 30).map(evt => (
-                <label key={evt.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-tertiary rounded px-1 py-0.5">
-                  <input type="checkbox" checked={selectedEvents.includes(evt.id)}
-                    onChange={() => toggleEvent(evt.id)} className="rounded" />
-                  <span className="font-mono text-[10px] text-text-muted">{evt.id.slice(0, 16)}</span>
-                  <span className="text-text-secondary truncate">{evt.service} -- {evt.reason?.slice(0, 60)}</span>
-                </label>
-              ))}
+              {memories.slice(0, 50).map(mem => {
+                const p = mem.payload as Record<string, unknown>;
+                const eid = (p.event_id as string) || mem.id;
+                return (
+                  <label key={eid} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-tertiary rounded px-1 py-0.5">
+                    <input type="checkbox" checked={selectedEvents.includes(eid)}
+                      onChange={() => toggleEvent(eid)} className="rounded" />
+                    <span className="font-mono text-[10px] text-text-muted">{eid.slice(0, 16)}</span>
+                    <span className="text-text-secondary truncate">{(p.service as string) || '?'} -- {((p.symptom as string) || '').slice(0, 60)}</span>
+                  </label>
+                );
+              })}
             </div>
           </div>
         )}
@@ -146,7 +150,7 @@ export default function ExtractWizard() {
             </h3>
             <div className="space-y-2">
               {lessons.map((item, i) => (
-                <div key={i} className={`border rounded-lg p-3 transition-colors ${
+                <div key={item.data.title || `lesson-${i}`} className={`border rounded-lg p-3 transition-colors ${
                   item.included ? 'border-accent/30 bg-accent/5' : 'border-border bg-bg-secondary opacity-60'
                 }`}>
                   <div className="flex items-start justify-between gap-2 mb-2">
@@ -181,7 +185,7 @@ export default function ExtractWizard() {
             </h3>
             <div className="space-y-2">
               {corrections.map((item, i) => (
-                <div key={i} className={`border rounded-lg p-3 transition-colors ${
+                <div key={item.data.event_id || `correction-${i}`} className={`border rounded-lg p-3 transition-colors ${
                   item.included ? 'border-green-400/30 bg-green-400/5' : 'border-border bg-bg-secondary opacity-60'
                 }`}>
                   <div className="flex items-start justify-between gap-2">

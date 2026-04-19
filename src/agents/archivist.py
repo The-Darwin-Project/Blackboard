@@ -515,6 +515,18 @@ class Archivist:
 
     MAX_EXTRACTION_CHARS = 50_000
 
+    async def _get_claude_adapter(self):
+        """Lazy-load Claude adapter for extraction (same lifecycle pattern as _get_adapter)."""
+        if not hasattr(self, "_claude_adapter") or self._claude_adapter is None:
+            try:
+                from .llm import create_adapter
+                self._claude_adapter = create_adapter("claude", self.project, self.location, EXTRACTOR_MODEL)
+                logger.info(f"Claude adapter initialized: {EXTRACTOR_MODEL}")
+            except Exception as e:
+                logger.warning(f"Claude adapter not available: {e}")
+                self._claude_adapter = None
+        return self._claude_adapter
+
     async def extract_lessons(
         self,
         document: str,
@@ -528,10 +540,12 @@ class Archivist:
         if len(document) > self.MAX_EXTRACTION_CHARS:
             return {"error": f"Document exceeds {self.MAX_EXTRACTION_CHARS} character limit"}
 
+        raw = ""
+        start = time.time()
         try:
-            from .llm import create_adapter
-
-            adapter = create_adapter("claude", self.project, self.location, EXTRACTOR_MODEL)
+            adapter = await self._get_claude_adapter()
+            if not adapter:
+                return {"error": "Claude adapter not available (check GCP_PROJECT)"}
 
             contents = f"## Document\n\n{document}"
             if event_reports:
@@ -569,9 +583,11 @@ class Archivist:
 
             result.setdefault("lessons", [])
             result.setdefault("corrections", [])
+            elapsed_ms = int((time.time() - start) * 1000)
             logger.info(
                 f"Extraction complete: {len(result['lessons'])} lessons, "
-                f"{len(result['corrections'])} corrections"
+                f"{len(result['corrections'])} corrections, "
+                f"elapsed={elapsed_ms}ms, doc_chars={len(document)}"
             )
             return result
 

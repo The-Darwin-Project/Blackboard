@@ -8,7 +8,6 @@ import {
   deleteLesson,
   extractLessons,
   applyLessons,
-  getClosedEvents,
 } from '../api/client';
 
 export function useMemories() {
@@ -66,10 +65,3 @@ export function useApplyLessons() {
   });
 }
 
-export function useClosedEvents() {
-  return useQuery({
-    queryKey: ['closedEvents'],
-    queryFn: () => getClosedEvents(100),
-    staleTime: 60_000,
-  });
-}

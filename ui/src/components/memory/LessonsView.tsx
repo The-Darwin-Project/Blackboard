@@ -131,7 +131,12 @@ export default function LessonsView() {
                       </div>
                     )}
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(p.lesson_id); }}
+                  <button onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`Delete lesson "${p.title}"? This cannot be undone.`)) {
+                        deleteMutation.mutate(p.lesson_id);
+                      }
+                    }}
                     className="p-1.5 rounded text-text-muted hover:text-red-400 hover:bg-red-400/10 transition-colors"
                     title="Delete lesson">
                     <Trash2 size={12} />

@@ -137,6 +137,8 @@ gcp:
       temperature: "0.3"
       thinkingLevel: "high"
       maxOutputTokens: "20000"
+    lessonExtractor:
+      model: "claude-sonnet-4-6" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
       model: "gemini-3.1-flash-lite-preview" # MR triage classification (Tier 2)
       temperature: "1.0"
