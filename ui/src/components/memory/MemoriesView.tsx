@@ -133,8 +133,8 @@ export default function MemoriesView() {
               <div className="col-span-2"><span className="text-text-muted">Pattern:</span> <span className="text-text-primary">{p.symptom as string}</span></div>
               <div className="col-span-2"><span className="text-text-muted">Root cause:</span> <span className="text-text-primary">{p.root_cause as string}</span></div>
               <div className="col-span-2"><span className="text-text-muted">Fix:</span> <span className="text-text-primary">{p.fix_action as string}</span></div>
-              {p.correction_note && (
-                <div className="col-span-2"><span className="text-text-muted">Correction note:</span> <span className="text-green-400">{p.correction_note as string}</span></div>
+              {typeof p.correction_note === 'string' && p.correction_note && (
+                <div className="col-span-2"><span className="text-text-muted">Correction note:</span> <span className="text-green-400">{p.correction_note}</span></div>
               )}
             </div>
 
