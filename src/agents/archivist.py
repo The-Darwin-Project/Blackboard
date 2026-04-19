@@ -37,7 +37,7 @@ FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
 EMBEDDING_MODEL = "text-embedding-005"
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
-EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-20250514")
+EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-6")
 
 SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object for similarity search.
 Each turn is timestamped as [HH:MM:SS actor.action]. Use timestamps to derive durations.
