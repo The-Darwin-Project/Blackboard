@@ -46,28 +46,3 @@ async def list_failed_stages() -> list[KargoStageSnapshot]:
     return [KargoStageSnapshot(**s) for s in observer.get_failed_stages()]
 
 
-@router.get("/api/kargo/debug")
-async def kargo_debug() -> dict:
-    """Diagnostic endpoint to trace observer state from within the running process."""
-    from ..dependencies import _kargo_observer, _brain
-    result: dict = {
-        "di_kargo_observer_is_none": _kargo_observer is None,
-        "di_brain_is_none": _brain is None,
-    }
-    try:
-        brain = await get_brain()
-        result["get_brain_ok"] = True
-        result["brain_agents_keys"] = list(brain.agents.keys())
-        observer = brain.agents.get("_kargo_observer")
-        result["brain_agents_observer_is_none"] = observer is None
-        if observer:
-            stages = observer.get_failed_stages()
-            result["get_failed_stages_count"] = len(stages)
-            result["failure_details_count"] = len(getattr(observer, "_failure_details", {}))
-            result["reported_failures_count"] = len(getattr(observer, "_reported_failures", {}))
-            if stages:
-                result["first_stage_keys"] = list(stages[0].keys())
-    except RuntimeError as e:
-        result["get_brain_ok"] = False
-        result["get_brain_error"] = str(e)
-    return result
