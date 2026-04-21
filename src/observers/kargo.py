@@ -3,6 +3,7 @@
 # 1. [Pattern]: K8s Watch with exponential backoff (1s-30s). Matches KargoWatchAdapter in payloads service.
 # 2. [Pattern]: Initial sync on start() records Errored stages into _reported_failures WITHOUT callbacks.
 # 3. [Pattern]: 410 Gone triggers full re-list with fresh resource_version.
+#    _initial_sync() clears-then-repopulates ONLY on success. Failed K8s API call preserves previous state.
 # 4. [Constraint]: Callbacks are async -- never raise into the watch loop. Wrap in try/except.
 # 5. [Pattern]: get_stage_status() is the on-demand read path for Brain's refresh_kargo_context tool.
 """
@@ -127,8 +128,11 @@ class KargoObserver:
             return False
 
     async def _initial_sync(self) -> None:
-        """List all stages, record currently Errored ones without firing callbacks."""
-        self._failure_details.clear()
+        """List all stages, record currently Errored ones without firing callbacks.
+
+        Builds new state in temporary dicts and swaps on success. A failed K8s API
+        call preserves the previous state instead of leaving _failure_details empty.
+        """
         try:
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
@@ -136,15 +140,20 @@ class KargoObserver:
                     group=KARGO_GROUP, version=KARGO_VERSION, plural=KARGO_PLURAL,
                 ),
             )
-            self._resource_version = result.get("metadata", {}).get("resourceVersion", "")
+            new_rv = result.get("metadata", {}).get("resourceVersion", "")
+            prev_failures = self._reported_failures.copy()
+            prev_details = self._failure_details.copy()
+            self._reported_failures.clear()
+            self._failure_details.clear()
             for stage in result.get("items", []):
                 await self._process_stage(stage, suppress_callbacks=True)
+            self._resource_version = new_rv
             logger.info(
                 f"KargoObserver initial sync: rv={self._resource_version}, "
                 f"errored={len(self._reported_failures)}"
             )
         except Exception as e:
-            logger.error(f"KargoObserver initial sync failed: {e}")
+            logger.error(f"KargoObserver initial sync failed (previous state preserved): {e}")
 
     async def _watch_loop(self) -> None:
         from kubernetes import watch
