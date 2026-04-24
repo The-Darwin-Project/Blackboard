@@ -2527,6 +2527,29 @@ class Brain:
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
             return True
 
+        elif function_name == "set_phase":
+            phase = args.get("phase", "triage")
+            reasoning = args.get("reasoning", "")
+            prev_phase = (await self.blackboard.get_event(event_id) or EventDocument(source="chat", service="", event=EventInput(reason="", evidence=""))).brain_phase or "triage"
+            await self.blackboard.update_event_phase(event_id, phase)
+            thoughts = f"Phase: {phase.upper()}. {reasoning}"
+            logger.info(f"Phase transition: {prev_phase} -> {phase} for {event_id} ({reasoning})")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="phase",
+                thoughts=thoughts,
+                response_parts=response_parts,
+                timestamp=time.time(),
+            )
+            await self._append_and_broadcast(event_id, turn)
+            await self._broadcast({
+                "type": "phase_updated",
+                "event_id": event_id,
+                "phase": phase,
+            })
+            return True
+
         elif function_name == "refresh_gitlab_context":
             condition = args.get("check_condition", "")
             headhunter = self.agents.get("_headhunter")

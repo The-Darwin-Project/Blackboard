@@ -209,6 +209,7 @@ export interface EventDocument {
   id: string;
   source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper';
   status: EventStatus;
+  brain_phase?: string;
   service: string;
   subject_type?: SubjectType;
   event: EventInput;

@@ -175,6 +175,53 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["domain", "reasoning"],
         },
     },
+    # --- Phase declaration (controls tool availability per workflow stage) ---
+    {
+        "name": "set_phase",
+        "description": (
+            "Declare your current processing phase. Tools are gated to the "
+            "phase you declare -- e.g., create_incident requires escalate phase, "
+            "refresh_gitlab_context requires triage or verify phase. "
+            "Call this when your focus shifts. The phase is recorded on the "
+            "blackboard as a visible turn. System states (agent working, "
+            "waiting for user) are handled automatically -- you do not "
+            "declare those."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "enum": ["triage", "investigate", "execute", "verify", "escalate", "close"],
+                    "description": (
+                        "triage: assessing event, classifying, checking initial state. "
+                        "Unlocks refresh_gitlab_context for initial MR state check. "
+                        "investigate: dispatching agents to gather evidence. "
+                        "Unlocks select_agent in investigate and plan modes. "
+                        "execute: dispatching agents to implement fixes. "
+                        "Unlocks select_agent in execute and implement modes. "
+                        "verify: checking results after agent work or defer wake. "
+                        "Unlocks refresh_gitlab_context and refresh_kargo_context. "
+                        "Enter after agent results to check if the issue self-resolved "
+                        "during investigation -- MR may have merged. For automated events "
+                        "this is the only checkpoint before a human is disturbed. "
+                        "escalate: this issue needs human awareness. "
+                        "Unlocks create_incident and notify_user_slack for failures. "
+                        "For non-chaotic events, enter only after verify confirms the "
+                        "issue persists. For automated events, escalation means notifying "
+                        "a human who may be asleep -- verify first. "
+                        "For chaotic events, enter immediately -- act first. "
+                        "close: wrapping up. Unlocks close_event and notify_gitlab_result."
+                    ),
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why you are entering this phase (one sentence).",
+                },
+            },
+            "required": ["phase", "reasoning"],
+        },
+    },
     # --- Routing tools (use AFTER classification when agent action is needed) ---
     {
         "name": "select_agent",

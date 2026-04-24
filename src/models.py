@@ -313,7 +313,7 @@ class ConversationTurn(BaseModel):
     actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, aligner, headhunter, user")
     action: str = Field(
         ...,
-        description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence",
+        description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence, phase",
     )
     thoughts: Optional[str] = None
     result: Optional[str] = None
@@ -338,6 +338,10 @@ class EventDocument(BaseModel):
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
     source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper"]
     status: EventStatus = EventStatus.NEW
+    brain_phase: Optional[str] = Field(
+        None,
+        description="Brain-declared processing phase (triage, investigate, execute, verify, escalate, close)"
+    )
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
     subject_type: Literal["service", "kargo_stage"] = Field(
         "service", description="What the service field refers to: K8s service or Kargo stage"
