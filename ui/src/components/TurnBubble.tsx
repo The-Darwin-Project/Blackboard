@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { approveEvent, rejectEvent, submitFeedback } from '../api/client';
 import type { ConversationTurn, MessageStatus } from '../api/types';
-import { ACTOR_COLORS, STATUS_COLORS } from '../constants/colors';
+import { ACTOR_COLORS, STATUS_COLORS, PHASE_COLORS } from '../constants/colors';
 import { resizeImage } from '../utils/imageResize';
 import { RefreshCw } from 'lucide-react';
 import MarkdownPreview from '@uiw/react-markdown-preview';
@@ -198,6 +198,24 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
       <div style={{ borderLeft: '3px solid #64748b', paddingLeft: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', color: '#64748b', fontSize: 12, fontStyle: 'italic' }}>
         <RefreshCw size={14} className="animate-spin" />
         Brain retrying...
+      </div>
+    );
+  }
+
+  if (turn.action === 'phase' && turn.actor === 'brain') {
+    const phaseMatch = (turn.thoughts || '').match(/^Phase:\s*(\w+)/i);
+    const phaseName = phaseMatch ? phaseMatch[1].toLowerCase() : 'triage';
+    const pc = PHASE_COLORS[phaseName] || PHASE_COLORS.triage;
+    const reasoning = (turn.thoughts || '').replace(/^Phase:\s*\w+\.\s*/i, '');
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, padding: '6px 16px',
+        margin: '8px 0', borderRadius: 6,
+        background: `${pc.bg}`, borderLeft: `3px solid ${pc.border}`,
+      }}>
+        <span style={{ fontSize: 10, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: pc.text, textTransform: 'uppercase' as const, letterSpacing: '0.05em' }}>{pc.label}</span>
+        {reasoning && <span style={{ fontSize: 12, color: '#9ca3af' }}>{reasoning}</span>}
       </div>
     );
   }

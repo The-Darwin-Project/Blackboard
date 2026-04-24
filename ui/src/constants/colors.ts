@@ -39,3 +39,12 @@ export const SEVERITY_COLORS: Record<string, { bg: string; text: string; label: 
   warning:  { bg: '#78350f', text: '#fcd34d', label: 'Warning' },
   critical: { bg: '#7f1d1d', text: '#fca5a5', label: 'Critical' },
 };
+
+export const PHASE_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {
+  triage:      { bg: '#1e3a5f', text: '#7dd3fc', border: '#3b82f6', label: 'Triage' },
+  investigate: { bg: '#1e3a5f', text: '#93c5fd', border: '#60a5fa', label: 'Investigate' },
+  execute:     { bg: '#14532d', text: '#86efac', border: '#22c55e', label: 'Execute' },
+  verify:      { bg: '#4c1d95', text: '#c4b5fd', border: '#8b5cf6', label: 'Verify' },
+  escalate:    { bg: '#7f1d1d', text: '#fca5a5', border: '#ef4444', label: 'Escalate' },
+  close:       { bg: '#1c1917', text: '#a8a29e', border: '#57534e', label: 'Close' },
+};

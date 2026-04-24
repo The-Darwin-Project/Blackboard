@@ -13,7 +13,7 @@ import type { ConversationTurn } from '../api/types';
 import TurnBubble, { StatusBadge } from './TurnBubble';
 import MarkdownViewer from './MarkdownViewer';
 import SourceIcon from './SourceIcon';
-import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
+import { DOMAIN_COLORS, SEVERITY_COLORS, PHASE_COLORS } from '../constants/colors';
 
 function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: unknown; timeDate: string }; conversation: ConversationTurn[] }): string {
   const evidence = event.event.evidence;
@@ -194,10 +194,13 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             const dc = DOMAIN_COLORS[domain as keyof typeof DOMAIN_COLORS] || DOMAIN_COLORS.disorder;
             const severity = ev.brain_severity || ev.severity || 'info';
             const sc = SEVERITY_COLORS[severity] || SEVERITY_COLORS.info;
+            const phase = selectedEvent.brain_phase || null;
+            const pc = phase ? (PHASE_COLORS[phase] || PHASE_COLORS.triage) : null;
             return (
               <>
                 <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 8, fontWeight: 600, background: dc.bg, color: dc.text, border: `1px solid ${dc.border}30` }}>{domain}</span>
                 <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 8, fontWeight: 600, background: sc.bg, color: sc.text }}>{severity}</span>
+                {pc && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 8, fontWeight: 600, background: pc.bg, color: pc.text, border: `1px solid ${pc.border}30` }}>{pc.label}</span>}
               </>
             );
           })()}
