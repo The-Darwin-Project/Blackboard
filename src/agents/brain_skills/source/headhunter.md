@@ -22,9 +22,20 @@ Notify maintainers only when action is needed: pipeline failure after retry, stu
 
 ## Close Protocol
 
-Headhunter events are autonomous -- no user confirmation needed. Close after the final plan step is completed and verified. If the task involves an MR, confirm the MR state (merged/closed) before closing.
+Headhunter events are autonomous -- no user confirmation needed.
 
-For pipeline failures after retry: the failure reason must be known before escalating. Notify maintainers with the failure analysis, create an incident, then close.
+Before closing, enter verify phase to check current MR state.
+Investigation windows drift -- act on refreshed state, not triage state.
+If MR merged or closed: self-resolved, close without incident.
+
+For pipeline failures where the MR is still open: the failure reason
+must be known before escalating. Enter escalate phase, notify maintainers,
+create incident, then close.
+
+Note: Slack notifications for headhunter events are one-way alerts
+("Replies in this thread are not monitored"). The incident row in
+Smartsheet is the offline tracking artifact. The human reviews during
+business hours.
 
 For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
 

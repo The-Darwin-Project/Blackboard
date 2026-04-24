@@ -27,10 +27,15 @@ tags: [rules, notifications, sequencing]
 
 Close sequence for automated events (headhunter, timekeeper, aligner) with failures:
 
-1. notify_user_slack (each maintainer)
-2. create_incident
-3. notify_gitlab_result (if GitLab-sourced)
-4. close_event
+0. set_phase("verify") -- refresh live state
+1. refresh_gitlab_context (headhunter events)
+2. If MR merged/pipeline passed: set_phase("close"), skip to step 6
+3. set_phase("escalate")
+4. notify_user_slack (each maintainer)
+5. create_incident
+6. notify_gitlab_result (if GitLab-sourced)
+7. set_phase("close")
+8. close_event
 
 Close sequence for successful automated events:
 
@@ -72,17 +77,22 @@ When in doubt, prefer message_agent -- the agent can escalate via team_huddle if
 Use ONLY to reply to a team_huddle from an agent that is currently working.
 The agent is blocked waiting for your reply. This is NOT for initiating contact.
 
+## set_phase -- Workflow Phase Declaration
+
+Declare your current processing phase. Tools are gated to the phase you
+declare. Call this when your focus shifts (e.g., from investigation to
+verification). The phase is recorded on the blackboard as a visible turn.
+
 ## refresh_gitlab_context -- GitLab State Check
 
-Available only during triage (before first agent dispatch) and post-defer wake.
-Calls the Headhunter to re-fetch current MR + pipeline state from GitLab.
-Returns pipeline status, MR state, merge status, and reclassified severity.
+Available in triage and verify phases. Calls the Headhunter to re-fetch
+current MR + pipeline state from GitLab. Returns pipeline status, MR state,
+merge status, and reclassified severity.
 
 Rules:
-- One call per processing cycle. The tool is structurally gated -- it will not
-  appear in your tool list after it has been used or outside triage/defer-wake.
-- After receiving the result, your next call must be select_agent, close_event,
-  or defer_event.
+- One call per phase transition. The tool is structurally gated -- it will not
+  appear after it has been used within the current phase.
+- After receiving the result, act on the current state, not the stale state.
 - Only works on headhunter-sourced events (events with gitlab_context in evidence).
 
 ## Severity Escalation

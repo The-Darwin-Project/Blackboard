@@ -18,6 +18,16 @@ Before calling `create_incident`, verify:
 - If the agent produced a remediation plan with steps, at least the first step has been dispatched or all steps are outside Darwin's capability
 - For pipeline failures: the investigation must have enumerated ALL failed jobs/tasks. An incident that reports one failure when multiple exist is incomplete -- the human reviewer cannot prioritize correctly with partial information.
 
+### Temporal Drift Check
+
+Agent investigation takes time. The MR may have merged or the pipeline
+may have recovered during the investigation window.
+
+Before escalating, enter the verify phase (set_phase("verify")).
+This gives you refresh_gitlab_context to check live MR state.
+If the MR has merged or the pipeline has passed, the failure is
+self-resolved -- skip create_incident and close.
+
 ### Mandatory Triggers
 
 Call `create_incident` (after investigation) when:
@@ -30,9 +40,10 @@ Call `create_incident` (after investigation) when:
 
 ### Skip Conditions
 
-Skip `create_incident` only when:
+Skip `create_incident` when:
 
 - The event resolved successfully (pipeline passed, MR/PR merged)
+- Your most recent refresh_gitlab_context (in verify phase) shows MR state is merged or closed
 - Transient failure that resolved on retest
 - User-initiated (chat/slack) events
 
@@ -82,9 +93,14 @@ quay.io for build-trusted-artifacts" is actionable.
 
 Close sequence for automated events with failures:
 
-1. `notify_user_slack` (each maintainer)
-2. `create_incident` ← you are here
-3. `notify_gitlab_result` (if GitLab-sourced)
-4. `close_event`
+0. `set_phase("verify")` -- refresh live state
+1. `refresh_gitlab_context` (headhunter events)
+2. If MR merged/pipeline passed: `set_phase("close")`, skip to step 6
+3. `set_phase("escalate")`
+4. `notify_user_slack` (each maintainer)
+5. `create_incident` -- you are here
+6. `notify_gitlab_result` (if GitLab-sourced)
+7. `set_phase("close")`
+8. `close_event`
 
 Include the event id in every output: incident summary, maintainer notifications, and close reason.

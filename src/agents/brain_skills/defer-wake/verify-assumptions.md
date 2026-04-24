@@ -8,6 +8,9 @@ tags: [defer, memory, verification]
 
 You are waking from a deferred state. The information from the last agent result may be stale.
 
+When waking from a defer, enter the verify phase (set_phase("verify"))
+to unlock refresh tools before checking current state.
+
 ## Before deferring again, you MUST
 
 1. **Consult deep memory** -- check if past events reveal how long this type of task typically takes or what the resolution looked like.

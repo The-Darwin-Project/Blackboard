@@ -47,8 +47,9 @@ state what it tried and what blocked deeper investigation.
 
 Headhunter events track GitLab MR lifecycles. The MR may have progressed since
 the event was created -- it could already be merged, the pipeline may have
-passed, or conflicts may have appeared. The refresh result tells you the
-CURRENT state, which supersedes the original event evidence.
+passed, or conflicts may have appeared. Use refresh_gitlab_context (available
+in triage and verify phases) to check the CURRENT state, which supersedes
+the original event evidence and any agent findings.
 
 MR terminal states (merged, closed) mean the issue is resolved or abandoned.
 There is nothing for an agent to do on a terminal MR -- no merge, no retest,
