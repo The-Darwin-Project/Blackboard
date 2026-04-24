@@ -162,7 +162,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, optimisticRemoveEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, optimisticRemoveEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgentsRef = useRef(ephemeralAgents);
@@ -172,7 +172,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   const selectedEventIdRef = useRef(selectedEventId);
   selectedEventIdRef.current = selectedEventId;
 
-  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); });
+  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
 
   useWSMessage((msg) => {
     if (msg.type === 'progress' && msg.actor) {
@@ -220,6 +220,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateEvent(msg.event_id as string);
         invalidateActive();
         invalidateClosed();
+        invalidateHeadhunter();
       }
     } else if (msg.type === 'event_status_changed') {
       invalidateActive();

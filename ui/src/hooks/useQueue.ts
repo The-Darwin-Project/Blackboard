@@ -2,6 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: Hybrid hydration -- REST on mount, WS for incremental, polling as safety net.
 // 2. [Gotcha]: refetchInterval on activeEvents catches missed WS event_closed messages (ghost events).
+// 3. [Pattern]: useHeadhunterPending uses react-query (30s poll + WS invalidation via invalidateHeadhunter).
 /**
  * Queue hooks with hybrid hydration:
  * - Initial state from REST GET (on mount / reconnect)
@@ -9,7 +10,7 @@
  * - Polling safety net (10s) to catch missed WS messages
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getEventDocument } from '../api/client';
+import { getActiveEvents, getEventDocument, getHeadhunterPending } from '../api/client';
 import type { ActiveEvent } from '../api/types';
 
 export function useActiveEvents() {
@@ -37,6 +38,15 @@ export function useEventDocument(eventId: string | null) {
   });
 }
 
+export function useHeadhunterPending() {
+  return useQuery({
+    queryKey: ['headhunterPending'],
+    queryFn: getHeadhunterPending,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
 /**
  * Hook to invalidate queue queries (called by WebSocket message handler).
  */
@@ -50,6 +60,7 @@ export function useQueueInvalidation() {
       queryClient.invalidateQueries({ queryKey: ['eventDocument'] });
     },
     invalidateClosed: () => queryClient.invalidateQueries({ queryKey: ['closedEvents'] }),
+    invalidateHeadhunter: () => queryClient.invalidateQueries({ queryKey: ['headhunterPending'] }),
     optimisticRemoveEvent: (eventId: string) => {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
         old ? old.filter((e) => e.id !== eventId) : [],

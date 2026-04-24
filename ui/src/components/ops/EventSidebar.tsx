@@ -9,8 +9,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useEventDocument, useQueueInvalidation } from '../../hooks/useQueue';
-import { getClosedEvents, getHeadhunterPending, type HeadhunterTodo } from '../../api/client';
+import { useActiveEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
+import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
 import SourceIcon from '../SourceIcon';
@@ -85,20 +85,9 @@ export default function EventSidebar() {
     queryFn: () => getClosedEvents(20),
     refetchInterval: 10_000,
   });
-  const [hhTodos, setHhTodos] = useState<HeadhunterTodo[]>([]);
-  const [hhError, setHhError] = useState(false);
+  const { data: hhTodos = [], isError: hhError } = useHeadhunterPending();
   const { data: schedules = [] } = useSchedules();
   const { invalidateActive } = useQueueInvalidation();
-
-  useEffect(() => {
-    const fetchHH = async () => {
-      try { setHhTodos(await getHeadhunterPending()); setHhError(false); }
-      catch { setHhError(true); }
-    };
-    fetchHH();
-    const id = setInterval(fetchHH, 30_000);
-    return () => clearInterval(id);
-  }, []);
 
   const { data: eventDoc, isLoading: docLoading, isError: docError } = useEventDocument(selectedEventId);
   const { hasPlan } = usePlanState(eventDoc?.conversation || []);
