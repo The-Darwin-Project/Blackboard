@@ -86,7 +86,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
       });
     } else if (msg.type === 'brain_thinking_done') {
       setBrainThinking(null);
-    } else if (msg.type === 'message_status' || msg.type === 'domain_updated') {
+    } else if (msg.type === 'message_status' || msg.type === 'domain_updated' || msg.type === 'phase_updated') {
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'attachment') {
       setAttachments((prev) => {
