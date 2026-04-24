@@ -837,6 +837,23 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
+        # Reorder tools: always-available first, then phase-relevant, then rest.
+        # Gives the LLM a signal about what's most useful for the current phase.
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "defer_event", "wait_for_user"}
+        _phase_tool_priority: dict[str, set[str]] = {
+            "triage":      {"refresh_gitlab_context", "refresh_kargo_context"},
+            "investigate":  {"select_agent", "create_plan", "message_agent"},
+            "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent"},
+            "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress"},
+            "escalate":     {"create_incident", "notify_user_slack", "notify_gitlab_result", "close_event"},
+            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
+        }
+        priority_names = _phase_tool_priority.get(brain_phase, set())
+        tier_always = [t for t in active_tools if t["name"] in _always_tools]
+        tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
+        tier_rest = [t for t in active_tools if t["name"] not in _always_tools and t["name"] not in priority_names]
+        active_tools = tier_always + tier_phase + tier_rest
+
         prompt = await self._build_contents(event, context_cache=context_flags)
 
         prompt = [
