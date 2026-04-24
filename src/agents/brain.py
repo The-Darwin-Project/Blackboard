@@ -1267,6 +1267,7 @@ class Brain:
         # In-flight migration: events without brain_phase that have agent results
         # get verify-equivalent skills until the Brain calls set_phase (one-release bridge)
         if event.brain_phase is None and ctx.get("has_agent_result", False):
+            logger.info(f"In-flight migration bridge: {event.id} has brain_phase=None with agent result, loading verify skills")
             for folder in BRAIN_PHASE_SKILLS.get("verify", []):
                 if folder not in active:
                     active.append(folder)
@@ -2299,8 +2300,11 @@ class Brain:
                 result_text = "Missing user_email or message parameter."
             else:
                 try:
-                    user_info = await slack_channel._app.client.users_lookupByEmail(email=user_email)
-                    slack_user_id = user_info["user"]["id"]
+                    if "@" in user_email:
+                        user_info = await slack_channel._app.client.users_lookupByEmail(email=user_email)
+                        slack_user_id = user_info["user"]["id"]
+                    else:
+                        slack_user_id = user_email
                     dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
                     dm_channel = dm["channel"]["id"]
                     event_doc = await self.blackboard.get_event(event_id)
@@ -2464,7 +2468,7 @@ class Brain:
                         self._incident_created.add(event_id)
                         verify_preceded = any(
                             t.actor == "brain" and t.action == "phase"
-                            and "VERIFY" in (t.thoughts or "").upper()
+                            and (t.thoughts or "").startswith("Phase: VERIFY")
                             for t in event_doc.conversation
                         )
                         logger.info(f"Incident created for {event_id}: verify_preceded={verify_preceded}")
@@ -2574,10 +2578,9 @@ class Brain:
         elif function_name == "set_phase":
             phase = args.get("phase", "triage")
             reasoning = args.get("reasoning", "")
-            prev_phase = (await self.blackboard.get_event(event_id) or EventDocument(source="chat", service="", event=EventInput(reason="", evidence=""))).brain_phase or "triage"
             await self.blackboard.update_event_phase(event_id, phase)
             thoughts = f"Phase: {phase.upper()}. {reasoning}"
-            logger.info(f"Phase transition: {prev_phase} -> {phase} for {event_id} ({reasoning})")
+            logger.info(f"Phase transition: -> {phase} for {event_id} ({reasoning})")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -3448,7 +3451,7 @@ class Brain:
             logger.warning(f"Escalation: no email resolved for {event_id}, wait_for_user set without DM")
 
         wait_turn = ConversationTurn(
-            turn=len(event.conversation) + 1,
+            turn=(await self._next_turn_number(event_id)),
             actor="brain",
             action="wait",
             thoughts=escalation_msg,
