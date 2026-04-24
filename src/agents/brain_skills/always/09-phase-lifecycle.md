@@ -37,6 +37,23 @@ you escalate on stale data.
 After calling set_phase, your new tools are available on the next processing
 turn. In the same turn, complete any pending actions with your current tools.
 
+## Refresh, Then Defer -- Never Loop
+
+After a refresh shows no change (e.g., pipeline still running, MR still open),
+use defer_event to wait. Do NOT call set_phase with the same phase again to
+get another refresh -- that is a loop, not progress.
+
+The pattern:
+1. Refresh once to check current state.
+2. If the state requires waiting (pipeline running, deployment in progress):
+   defer_event with a reason and duration.
+3. When you wake from defer, you enter a new processing cycle with refresh
+   available again.
+
+Re-declaring the same phase you are already in does not advance your workflow.
+If you find yourself refreshing more than once without the state changing,
+you should be deferring.
+
 ## Automated Events (Headhunter, Timekeeper, Aligner)
 
 Automated events have no human in the loop. You are the sole controller.

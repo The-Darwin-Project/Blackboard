@@ -182,10 +182,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "Declare your current processing phase. Tools are gated to the "
             "phase you declare -- e.g., create_incident requires escalate phase, "
             "refresh_gitlab_context requires triage or verify phase. "
-            "Call this when your focus shifts. The phase is recorded on the "
-            "blackboard as a visible turn. System states (agent working, "
-            "waiting for user) are handled automatically -- you do not "
-            "declare those."
+            "Call this when your focus shifts to a DIFFERENT phase. "
+            "Do not re-declare the same phase you are already in -- "
+            "if the situation has not changed after a refresh, use defer_event "
+            "to wait, not set_phase to refresh again. "
+            "The phase is recorded on the blackboard as a visible turn. "
+            "System states (agent working, waiting for user) are handled "
+            "automatically -- you do not declare those."
         ),
         "input_schema": {
             "type": "object",
@@ -196,6 +199,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "description": (
                         "triage: assessing event, classifying, checking initial state. "
                         "Unlocks refresh_gitlab_context for initial MR state check. "
+                        "If refresh shows pipeline still running, defer_event to wait -- "
+                        "do not refresh repeatedly. "
                         "investigate: dispatching agents to gather evidence. "
                         "Unlocks select_agent in investigate and plan modes. "
                         "execute: dispatching agents to implement fixes. "
