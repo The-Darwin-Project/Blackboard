@@ -2578,9 +2578,14 @@ class Brain:
         elif function_name == "set_phase":
             phase = args.get("phase", "triage")
             reasoning = args.get("reasoning", "")
+            event_doc = await self.blackboard.get_event(event_id)
+            current_phase = (event_doc.brain_phase if event_doc else None) or "triage"
+            if phase == current_phase:
+                logger.debug(f"set_phase: already in {phase} for {event_id}, skipping")
+                return True
             await self.blackboard.update_event_phase(event_id, phase)
             thoughts = f"Phase: {phase.upper()}. {reasoning}"
-            logger.info(f"Phase transition: -> {phase} for {event_id} ({reasoning})")
+            logger.info(f"Phase transition: {current_phase} -> {phase} for {event_id} ({reasoning})")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
