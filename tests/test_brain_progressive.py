@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.agents.brain import Brain, PHASE_CONDITIONS, PHASE_EXCLUSIONS
+from src.agents.brain import Brain, BRAIN_PHASE_SKILLS
 
 
 class TestExtractRecommendation:
@@ -62,60 +62,98 @@ class TestMatchPhases:
             "brain_has_classified": False,
             "event_domain": "complicated",
             "domain_confidence": "default",
+            "has_slack_participant": False,
+            "is_intermediate": False,
+            "has_pending_huddle": False,
         }
         defaults.update(overrides)
         return defaults
 
-    def test_new_event_dispatch_gated_before_classify(self):
-        ctx = self._make_ctx(turn_count=0)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+    @staticmethod
+    def _make_event_stub(brain_phase=None):
+        from unittest.mock import MagicMock
+        event = MagicMock()
+        event.brain_phase = brain_phase
+        return event
+
+    def test_triage_default_loads_always_source(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase=None)
+        active = Brain._match_phases(None, event, ctx)
         assert "always" in active
-        assert "dispatch" not in active, "dispatch must be gated until brain classifies"
         assert "source" in active
+        assert "dispatch" not in active
+
+    def test_investigate_loads_dispatch(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="investigate")
+        active = Brain._match_phases(None, event, ctx)
+        assert "dispatch" in active
         assert "post-agent" not in active
 
-    def test_new_event_dispatch_unlocked_after_classify(self):
-        ctx = self._make_ctx(turn_count=1, brain_has_classified=True)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
-        assert "dispatch" in active, "dispatch available after classify_event"
-
-    def test_post_agent_excludes_dispatch(self):
-        ctx = self._make_ctx(turn_count=1, has_agent_result=True, brain_has_classified=True)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+    def test_verify_loads_post_agent_and_defer_wake(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="verify")
+        active = Brain._match_phases(None, event, ctx)
         assert "post-agent" in active
-        assert "dispatch" in active
+        assert "defer-wake" in active
+        assert "dispatch" not in active
 
-        excluded: set[str] = set()
-        for phase in active:
-            excluded.update(PHASE_EXCLUSIONS.get(phase, []))
-        final = [p for p in active if p not in excluded]
-        assert "post-agent" in final
-        assert "dispatch" not in final
-        assert "source" in final
+    def test_escalate_loads_post_agent(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="escalate")
+        active = Brain._match_phases(None, event, ctx)
+        assert "post-agent" in active
+        assert "dispatch" not in active
 
-    def test_waiting_excludes_dispatch_postagent(self):
-        ctx = self._make_ctx(turn_count=5, is_waiting=True, has_agent_result=True)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+    def test_intermediate_preempts_brain_phase(self):
+        ctx = self._make_ctx(is_intermediate=True)
+        event = self._make_event_stub(brain_phase="investigate")
+        active = Brain._match_phases(None, event, ctx)
+        assert "intermediate" in active
+        assert "dispatch" not in active
+        assert "post-agent" not in active
 
-        excluded: set[str] = set()
-        for phase in active:
-            excluded.update(PHASE_EXCLUSIONS.get(phase, []))
-        final = [p for p in active if p not in excluded]
-        assert "waiting" in final
-        assert "always" in final
-        assert "source" in final
-        assert "dispatch" not in final
-        assert "post-agent" not in final
+    def test_waiting_preempts_brain_phase(self):
+        ctx = self._make_ctx(is_waiting=True)
+        event = self._make_event_stub(brain_phase="verify")
+        active = Brain._match_phases(None, event, ctx)
+        assert "waiting" in active
+        assert "always" in active
+        assert "source" in active
+        assert "post-agent" not in active
+        assert "dispatch" not in active
 
     def test_context_phase_activates_on_related(self):
-        ctx = self._make_ctx(turn_count=1, has_related=True)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+        ctx = self._make_ctx(has_related=True)
+        event = self._make_event_stub(brain_phase="triage")
+        active = Brain._match_phases(None, event, ctx)
         assert "context" in active
 
     def test_context_phase_inactive_when_no_context(self):
-        ctx = self._make_ctx(turn_count=1)
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="triage")
+        active = Brain._match_phases(None, event, ctx)
         assert "context" not in active
+
+    def test_in_flight_migration_loads_verify_skills(self):
+        ctx = self._make_ctx(has_agent_result=True)
+        event = self._make_event_stub(brain_phase=None)
+        active = Brain._match_phases(None, event, ctx)
+        assert "post-agent" in active
+        assert "defer-wake" in active
+
+    def test_brain_phase_skills_mapping_complete(self):
+        expected_phases = {"triage", "investigate", "execute", "verify", "escalate", "close"}
+        assert set(BRAIN_PHASE_SKILLS.keys()) == expected_phases
+
+    def test_intermediate_with_huddle_includes_coordination(self):
+        ctx = self._make_ctx(is_intermediate=True, has_pending_huddle=True)
+        event = self._make_event_stub(brain_phase="investigate")
+        active = Brain._match_phases(None, event, ctx)
+        assert "intermediate" in active
+        assert "coordination" in active
+        assert "dispatch" not in active
 
 
 class TestSurfaceAgentRecommendation:

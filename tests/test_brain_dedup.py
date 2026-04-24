@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.agents.brain import Brain, PHASE_CONDITIONS
+from src.agents.brain import Brain, BRAIN_PHASE_SKILLS
 
 
 MR_URL = "https://gitlab.cee.redhat.com/org/repo/-/merge_requests/49"
@@ -184,24 +184,28 @@ class TestPhaseConditionsWithHeadhunter:
         has_agent = turn.actor not in ("brain", "user", "aligner", "headhunter")
         assert has_agent is False
 
+        event_stub = MagicMock()
+        event_stub.brain_phase = "investigate"
         ctx = self._make_ctx(
             turn_count=5, has_agent_result=False, brain_has_classified=True,
         )
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+        active = Brain._match_phases(None, event_stub, ctx)
         assert "dispatch" in active
         assert "post-agent" not in active
 
     def test_real_agent_result_still_flips(self):
-        """Sysadmin/developer turns should still activate post-agent."""
+        """Sysadmin/developer turns should still activate post-agent via verify phase."""
         turn = MagicMock()
         turn.actor = "sysadmin"
         has_agent = turn.actor not in ("brain", "user", "aligner", "headhunter")
         assert has_agent is True
 
+        event_stub = MagicMock()
+        event_stub.brain_phase = "verify"
         ctx = self._make_ctx(
             turn_count=5, has_agent_result=True, brain_has_classified=True,
         )
-        active = [p for p, cond in PHASE_CONDITIONS.items() if cond(None, ctx)]
+        active = Brain._match_phases(None, event_stub, ctx)
         assert "post-agent" in active
 
 
