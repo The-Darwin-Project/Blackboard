@@ -760,34 +760,26 @@ class Brain:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
             logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
 
-        # refresh_gitlab_context: only available during triage (post-classify, pre-agent) and defer-wake.
-        # Stripped after first use as defense-in-depth against loops.
-        is_triage = (
-            context_flags
-            and context_flags.get("brain_has_classified", False)
-            and not context_flags.get("has_agent_result", False)
-        )
-        refresh_allowed = is_triage or is_defer_wake
-        if not refresh_allowed:
-            active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
-        else:
-            # Anchor to the last defer turn -- any verify after it means we already refreshed.
-            # Prevents the 3-turn sliding window from re-enabling refresh across reprocessing cycles.
-            last_defer_ts = next(
-                (t.timestamp for t in reversed(event.conversation)
-                 if t.actor == "brain" and t.action == "defer"),
-                0,
-            )
-            recent_refresh = any(
-                t.actor == "brain" and t.action == "verify" and "MR State:" in (t.thoughts or "")
-                and t.timestamp >= last_defer_ts
-                for t in event.conversation
-            )
-            if recent_refresh:
-                active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
-                logger.info(f"Refresh already done: stripped refresh_gitlab_context for {event_id}")
+        # === Phase-driven tool gating ===
+        # Code reads the Brain's declared phase and provides matching tools.
+        # Same pattern as domain gating (CLEAR strips create_plan, etc.).
+        brain_phase = event.brain_phase or "triage"
 
-        # refresh_kargo_context: same availability window, only when kargo_context present.
+        # Phase gates: tools gated to specific phases
+        escalate_tools = {"create_incident"}
+        if brain_phase != "escalate":
+            active_tools = [t for t in active_tools if t["name"] not in escalate_tools]
+
+        notify_tools = {"notify_user_slack"}
+        if brain_phase not in ("escalate", "close"):
+            active_tools = [t for t in active_tools if t["name"] not in notify_tools]
+
+        close_tools = {"close_event", "notify_gitlab_result"}
+        if brain_phase not in ("escalate", "close"):
+            active_tools = [t for t in active_tools if t["name"] not in close_tools]
+
+        # Refresh tools: available in triage and verify, with strip-after-use guard
+        refresh_tools = {"refresh_gitlab_context", "refresh_kargo_context"}
         has_kargo = (
             event.event and event.event.evidence
             and hasattr(event.event.evidence, "kargo_context")
@@ -795,28 +787,41 @@ class Brain:
         )
         if not has_kargo:
             active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
-        elif not refresh_allowed:
-            active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
+
+        if brain_phase not in ("triage", "verify"):
+            active_tools = [t for t in active_tools if t["name"] not in refresh_tools]
         else:
-            last_defer_ts_k = next(
+            last_phase_ts = next(
                 (t.timestamp for t in reversed(event.conversation)
-                 if t.actor == "brain" and t.action == "defer"),
+                 if t.actor == "brain" and t.action == "phase"),
                 0,
             )
-            recent_kargo_refresh = any(
-                t.actor == "brain" and t.action == "verify" and "Kargo Stage:" in (t.thoughts or "")
-                and t.timestamp >= last_defer_ts_k
+            recent_gl_refresh = any(
+                t.actor == "brain" and t.action == "verify"
+                and "MR State:" in (t.thoughts or "")
+                and t.timestamp >= last_phase_ts
                 for t in event.conversation
             )
-            if recent_kargo_refresh:
-                active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
-                logger.info(f"Refresh already done: stripped refresh_kargo_context for {event_id}")
+            if recent_gl_refresh:
+                active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
+                logger.info(f"Post-phase refresh already done: stripped refresh_gitlab_context for {event_id}")
 
-        # Domain classification gate: mandatory classify_event before any agent dispatch
+            if has_kargo:
+                recent_kargo_refresh = any(
+                    t.actor == "brain" and t.action == "verify"
+                    and "Kargo Stage:" in (t.thoughts or "")
+                    and t.timestamp >= last_phase_ts
+                    for t in event.conversation
+                )
+                if recent_kargo_refresh:
+                    active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
+                    logger.info(f"Post-phase refresh already done: stripped refresh_kargo_context for {event_id}")
+
+        # === Domain classification gate (mandatory before routing) ===
         if context_flags and not context_flags.get("brain_has_classified", False):
-            pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event"}
+            pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase"}
             active_tools = [t for t in active_tools if t["name"] in pre_classify_tools]
-            logger.info(f"Pre-classification gate: only lookup+classify tools for {event_id}")
+            logger.info(f"Pre-classification gate: only lookup+classify+set_phase tools for {event_id}")
         elif context_flags:
             domain = context_flags.get("event_domain", "complicated")
             if domain == "clear":
@@ -828,7 +833,7 @@ class Brain:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
                     logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
             elif domain == "chaotic":
-                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "create_incident"}
+                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "create_incident", "set_phase"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
