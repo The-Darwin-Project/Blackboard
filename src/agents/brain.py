@@ -26,7 +26,7 @@
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
-# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy.
+# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
 # 25. [Pattern]: WIP cap: _execute_function_call("select_agent") may recursively call _execute_function_call("defer_event") when dispatch semaphore is locked. This is safe -- defer_event does not recurse back into select_agent. Do NOT add agent-dispatching logic to the defer_event handler.
@@ -265,26 +265,16 @@ VOLUME_PATHS = {
     "qe": "/data/gitops-qe",
 }
 
-# Progressive skill phase conditions: phase_name -> callable(event, context_flags) -> bool
-PHASE_CONDITIONS: dict[str, Any] = {
-    "always":       lambda e, c: True,
-    "dispatch":     lambda e, c: (c["turn_count"] <= 4 or not c["has_agent_result"]) and c.get("brain_has_classified", False),
-    "post-agent":   lambda e, c: c["has_agent_result"],
-    "waiting":      lambda e, c: c["is_waiting"],
-    "defer-wake":   lambda e, c: c.get("is_defer_wakeup", False),
-    "context":      lambda e, c: c["has_related"] or c["has_graph_edges"] or c["has_recent_closed"],
-    "source":       lambda e, c: True,
-    "multi-user":   lambda e, c: c.get("has_slack_participant", False),
-    "intermediate": lambda e, c: c.get("is_intermediate", False),
-    "coordination": lambda e, c: c.get("has_pending_huddle", False),
-}
-
-# Phase exclusion matrix (cleanSlate): active phase -> phases to exclude
-PHASE_EXCLUSIONS: dict[str, list[str]] = {
-    "post-agent":   ["dispatch"],
-    "defer-wake":   ["dispatch"],
-    "waiting":      ["dispatch", "post-agent", "defer-wake"],
-    "intermediate": ["dispatch", "post-agent", "defer-wake", "waiting", "context"],
+# Brain-declared phase -> additional skill folders to load alongside plumbing phases.
+# Plumbing phases (always, source, context, multi-user) are auto-detected from data presence.
+# System states (intermediate, waiting) preempt Brain phase via early-return in _match_phases.
+BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
+    "triage":       [],
+    "investigate":  ["dispatch"],
+    "execute":      ["dispatch", "coordination"],
+    "verify":       ["post-agent", "defer-wake"],
+    "escalate":     ["post-agent"],
+    "close":        [],
 }
 
 # Context priming: synthetic prefill so the LLM treats protocols as already-committed.
@@ -1248,15 +1238,42 @@ class Brain:
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
-        """Determine which skill phases are active for this event state."""
-        active = [
-            phase for phase, condition in PHASE_CONDITIONS.items()
-            if condition(event, ctx)
-        ]
-        excluded: set[str] = set()
-        for phase in active:
-            excluded.update(PHASE_EXCLUSIONS.get(phase, []))
-        return [p for p in active if p not in excluded]
+        """Determine active skill phases: system overrides, plumbing, Brain-declared."""
+        active = ["always", "source"]
+        if ctx["has_related"] or ctx["has_graph_edges"] or ctx["has_recent_closed"]:
+            active.append("context")
+        if ctx.get("has_slack_participant", False):
+            active.append("multi-user")
+
+        # System state overrides -- NOT Brain decisions, preempt Brain phase
+        if ctx.get("is_intermediate", False):
+            active.append("intermediate")
+            if ctx.get("has_pending_huddle", False):
+                active.append("coordination")
+            return active
+
+        if ctx.get("is_waiting", False):
+            active.append("waiting")
+            return active
+
+        # Normal processing: Brain-declared phase
+        brain_phase = event.brain_phase or "triage"
+
+        # In-flight migration: events without brain_phase that have agent results
+        # get verify-equivalent skills until the Brain calls set_phase (one-release bridge)
+        if event.brain_phase is None and ctx.get("has_agent_result", False):
+            for folder in BRAIN_PHASE_SKILLS.get("verify", []):
+                if folder not in active:
+                    active.append(folder)
+        else:
+            for folder in BRAIN_PHASE_SKILLS.get(brain_phase, []):
+                if folder not in active:
+                    active.append(folder)
+
+        if ctx.get("has_pending_huddle", False):
+            active.append("coordination")
+
+        return active
 
     def _build_system_prompt(
         self, event: EventDocument, active_phases: list[str],
