@@ -4,6 +4,7 @@
 # 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() for Slack cleanup (Brain path uses _close_and_broadcast instead).
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 # 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
+# 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
 """
 Conversation Queue API - Event document management.
 
@@ -636,6 +637,9 @@ async def headhunter_pending_todos():
         if action not in V1_ACTIONABLE:
             continue
         target = todo.get("target", {})
+        mr_state = target.get("state")
+        if mr_state in ("merged", "closed"):
+            continue
         project = todo.get("project", {})
         result.append({
             "todo_id": todo.get("id"),

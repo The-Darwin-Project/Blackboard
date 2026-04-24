@@ -12,6 +12,7 @@
 # 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
 # 11. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
 # 12. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
+# 13. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note). mark_feedback_sent runs only after successful dismiss (or no todo_id for duplicate/stale).
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
 
@@ -758,8 +759,35 @@ class Headhunter:
             close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
 
             if close_reason in ("stale", "duplicate"):
-                await self.blackboard.mark_feedback_sent(event.id)
-                logger.info(f"Headhunter feedback skipped for {event.id}: {close_reason} on !{mr_iid} (todo left alive)")
+                if not todo_id:
+                    await self.blackboard.mark_feedback_sent(event.id)
+                    logger.info(
+                        f"Headhunter duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid} — MR note skipped"
+                    )
+                    continue
+                async with httpx.AsyncClient(verify=False, timeout=30) as client:
+                    headers = self._headers()
+                    dismiss = await client.post(
+                        self._api_url(f"/todos/{todo_id}/mark_as_done"),
+                        headers=headers,
+                    )
+                    if dismiss.status_code == 429:
+                        logger.warning("GitLab rate limited -- skipping remaining headhunter feedback this cycle")
+                        return
+                    if dismiss.status_code == 404:
+                        logger.info(
+                            f"Headhunter duplicate/stale: todo {todo_id} not found for {event.id} ({close_reason}) on !{mr_iid}"
+                        )
+                    elif not dismiss.is_success:
+                        logger.warning(
+                            f"Headhunter duplicate/stale: mark_as_done failed ({dismiss.status_code}) for {event.id}: "
+                            f"{dismiss.text[:200]}"
+                        )
+                        continue
+                    await self.blackboard.mark_feedback_sent(event.id)
+                    logger.info(
+                        f"Headhunter duplicate/stale todo dismissed without MR note for {event.id}: {close_reason} on !{mr_iid}"
+                    )
                 continue
 
             outcome = self._build_feedback_comment(event, close_reason)
@@ -780,14 +808,27 @@ class Headhunter:
                 elif not resp.is_success:
                     logger.warning(f"MR comment failed ({resp.status_code}): {resp.text[:200]}")
 
+                dismiss_ok = True
                 if todo_id:
-                    await client.post(
+                    done_resp = await client.post(
                         self._api_url(f"/todos/{todo_id}/mark_as_done"),
                         headers=headers,
                     )
+                    if done_resp.status_code == 429:
+                        logger.warning("GitLab rate limited -- skipping remaining feedback this cycle")
+                        return
+                    if done_resp.status_code == 404:
+                        logger.info(f"Headhunter feedback: todo {todo_id} not found for {event.id}")
+                    elif not done_resp.is_success:
+                        dismiss_ok = False
+                        logger.warning(
+                            f"Headhunter feedback: mark_as_done failed ({done_resp.status_code}) for {event.id}: "
+                            f"{done_resp.text[:200]}"
+                        )
 
-            await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"Headhunter feedback for {event.id}: {close_reason} on !{mr_iid}")
+                if dismiss_ok:
+                    await self.blackboard.mark_feedback_sent(event.id)
+                    logger.info(f"Headhunter normal feedback posted for {event.id}: {close_reason} on !{mr_iid}")
 
     @staticmethod
     def _build_feedback_comment(event: "EventDocument", close_reason: str) -> str:

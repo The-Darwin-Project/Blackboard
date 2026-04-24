@@ -52,6 +52,8 @@
 #     (agent_rounds, last_agent, _surface_agent_recommendation, legacy thinking) so dispatch
 #     phase stays active and recommendation surfacing skips evidence turns.
 #     URL normalized: split("#")[0].rstrip("/").
+# 32. [Pattern]: _cleanup_stale_events wakes Headhunter via _headhunter_close_signal when source=headhunter
+#     (mirrors _close_and_broadcast); main.py assigns the signal before start_event_loop().
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -3811,6 +3813,9 @@ class Brain:
                     "event_id": eid,
                     "summary": stale_summary,
                 })
+                signal = getattr(self, "_headhunter_close_signal", None)
+                if signal and event.source == "headhunter":
+                    signal.set()
                 # Archive to deep memory (same as _close_and_broadcast path)
                 archivist = self.agents.get("_archivist_memory")
                 if archivist and hasattr(archivist, "archive_event"):

@@ -3,6 +3,7 @@
 # 1. [Constraint]: No real GitLab API calls. All HTTP mocked via httpx_mock or monkeypatch.
 # 2. [Pattern]: StubBlackboard from run_headhunter_local.py pattern for event capture.
 # 3. [Pattern]: Each test creates a Headhunter with StubBlackboard, never Redis.
+# 4. [Pattern]: StubBlackboard implements get_recent_closed_by_source / feedback flags for _process_closed_events tests.
 """Unit tests for Headhunter GitLab todo poller."""
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agents.headhunter import ACTION_PRIORITY, V1_ACTIONABLE, Headhunter
-from src.models import EventEvidence
+from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
 
 
 # =========================================================================
@@ -61,6 +62,19 @@ class StubBlackboard:
         self.events: list[dict] = []
         self._counter = 0
         self._active = active_events or []
+        self._recent_closed: list[EventDocument] = []
+        self.feedback_sent: set[str] = set()
+        self.mark_feedback_sent_calls: list[str] = []
+
+    async def get_recent_closed_by_source(self, source: str, minutes: int = 30):
+        return [e for e in self._recent_closed if e.source == source]
+
+    async def is_feedback_sent(self, event_id: str) -> bool:
+        return event_id in self.feedback_sent
+
+    async def mark_feedback_sent(self, event_id: str) -> None:
+        self.feedback_sent.add(event_id)
+        self.mark_feedback_sent_calls.append(event_id)
 
     async def create_event(self, source, service, reason, evidence):
         self._counter += 1
@@ -490,3 +504,200 @@ class TestRefreshMrState:
             result = await hh.refresh_mr_state("evt-test-004")
 
         assert result["severity"] == "warning"
+
+
+# =========================================================================
+# Closed-event feedback (_process_closed_events)
+# =========================================================================
+
+
+def _closed_headhunter_event(
+    close_reason: str,
+    *,
+    event_id: str = "evt-hh-001",
+    todo_id: int = 99,
+    project_id: int = 100,
+    mr_iid: int = 22,
+) -> EventDocument:
+    evidence = EventEvidence(
+        display_text="GitLab: review_requested",
+        source_type="headhunter",
+        severity="info",
+        gitlab_context={
+            "todo_id": todo_id,
+            "project_id": project_id,
+            "mr_iid": mr_iid,
+        },
+    )
+    return EventDocument(
+        id=event_id,
+        source="headhunter",
+        service="group/repo",
+        event=EventInput(reason="GitLab MR todo", evidence=evidence),
+        conversation=[
+            ConversationTurn(turn=0, actor="headhunter", action="investigate", result="triaged"),
+            ConversationTurn(turn=1, actor="brain", action="close", evidence=close_reason),
+        ],
+    )
+
+
+class TestProcessClosedEventsFeedback:
+    @pytest.mark.asyncio
+    async def test_duplicate_calls_mark_as_done_without_mr_note(self):
+        ev = _closed_headhunter_event("duplicate")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+        posted_urls: list[str] = []
+
+        async def capture_post(url: str, **kwargs):
+            posted_urls.append(str(url))
+            r = MagicMock()
+            r.status_code = 200
+            r.is_success = True
+            r.text = ""
+            return r
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=capture_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert any("mark_as_done" in u for u in posted_urls), "duplicate must dismiss GitLab todo"
+        assert not any("/notes" in u for u in posted_urls), "duplicate must not post MR note"
+        assert ev.id in bb.feedback_sent
+
+    @pytest.mark.asyncio
+    async def test_stale_calls_mark_as_done_without_mr_note(self):
+        ev = _closed_headhunter_event("stale")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+        posted_urls: list[str] = []
+
+        async def capture_post(url: str, **kwargs):
+            posted_urls.append(str(url))
+            r = MagicMock()
+            r.status_code = 200
+            r.is_success = True
+            r.text = ""
+            return r
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=capture_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert any("mark_as_done" in u for u in posted_urls)
+        assert not any("/notes" in u for u in posted_urls)
+        assert ev.id in bb.feedback_sent
+
+    @pytest.mark.asyncio
+    async def test_duplicate_does_not_mark_feedback_sent_when_mark_as_done_fails(self):
+        ev = _closed_headhunter_event("duplicate")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+
+        fail = MagicMock()
+        fail.status_code = 500
+        fail.is_success = False
+        fail.text = "error"
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=fail)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert ev.id not in bb.feedback_sent
+
+    @pytest.mark.asyncio
+    async def test_resolved_posts_mr_note_then_mark_as_done(self):
+        ev = _closed_headhunter_event("resolved")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+        posted_urls: list[str] = []
+
+        ok = MagicMock()
+        ok.status_code = 201
+        ok.is_success = True
+        ok.text = ""
+
+        async def capture_post(url: str, **kwargs):
+            posted_urls.append(str(url))
+            return ok
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=capture_post)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert any("/notes" in u for u in posted_urls)
+        assert any("mark_as_done" in u for u in posted_urls)
+        assert ev.id in bb.feedback_sent
+
+    @pytest.mark.asyncio
+    async def test_resolved_does_not_mark_feedback_sent_when_mark_as_done_fails(self):
+        ev = _closed_headhunter_event("resolved")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+
+        note_ok = MagicMock()
+        note_ok.status_code = 201
+        note_ok.is_success = True
+        note_ok.text = ""
+        done_fail = MagicMock()
+        done_fail.status_code = 500
+        done_fail.is_success = False
+        done_fail.text = "fail"
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(side_effect=[note_ok, done_fail])
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert ev.id not in bb.feedback_sent
+
+    @pytest.mark.asyncio
+    async def test_duplicate_rate_limit_returns_without_marking_feedback_sent(self):
+        ev = _closed_headhunter_event("duplicate")
+        bb = StubBlackboard()
+        bb._recent_closed = [ev]
+        hh = _make_headhunter(blackboard=bb)
+        rate = MagicMock()
+        rate.status_code = 429
+        rate.is_success = False
+        rate.text = "limit"
+
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=rate)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_cls.return_value = mock_client
+
+            await hh._process_closed_events()
+
+        assert ev.id not in bb.feedback_sent

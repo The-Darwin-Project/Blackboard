@@ -6,6 +6,7 @@
 # 4. [Pattern]: emergency_stop WS handler cancels all active tasks and responds with cancelled count.
 # 5. [Pattern]: Slack channel init is conditional on SLACK_BOT_TOKEN + SLACK_APP_TOKEN env vars. Graceful degradation if missing.
 # 6. [Pattern]: /agent/ws endpoint delegates to agent_ws_handler.py. Registry + Bridge on app.state, initialized in lifespan().
+# 7. [Gotcha]: brain._headhunter_close_signal must be assigned before asyncio.create_task(brain.start_event_loop()) so startup stale cleanup can wake Headhunter.
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -176,6 +177,15 @@ async def lifespan(app: FastAPI):
             set_oidc_adapter(oidc_adapter)
             app.state.oidc_adapter = oidc_adapter
 
+        # Headhunter close signal must exist before Brain startup cleanup runs stale closures
+        # (start_event_loop awaits _cleanup_stale_events first; Slack startup below may yield before Headhunter wiring).
+        headhunter_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
+        gitlab_host = os.getenv("GITLAB_HOST", "")
+        headhunter_close_signal: asyncio.Event | None = None
+        if headhunter_enabled and gitlab_host:
+            headhunter_close_signal = asyncio.Event()
+            brain._headhunter_close_signal = headhunter_close_signal
+
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
         logger.info("Brain event loop started - WebSocket conversation queue active")
@@ -203,13 +213,11 @@ async def lifespan(app: FastAPI):
         
         # === HEADHUNTER (GitLab Todo Poller) ===
         headhunter_task = None
-        headhunter_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
-        gitlab_host = os.getenv("GITLAB_HOST", "")
         if headhunter_enabled and gitlab_host:
             from .agents.headhunter import Headhunter
-            close_signal = asyncio.Event()
-            brain._headhunter_close_signal = close_signal
-            headhunter = Headhunter(blackboard, close_signal=close_signal)
+            if headhunter_close_signal is None:
+                raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
+            headhunter = Headhunter(blackboard, close_signal=headhunter_close_signal)
             brain.agents["_headhunter"] = headhunter
             headhunter_task = asyncio.create_task(headhunter.run())
             logger.info("Headhunter started (GitLab todo poller)")
