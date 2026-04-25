@@ -1307,6 +1307,7 @@ class BlackboardState:
             source=source,
             service=service,
             subject_type=subject_type,
+            brain_phase="triage",
             event=EventInput(
                 reason=reason,
                 evidence=evidence,
@@ -1768,7 +1769,7 @@ class BlackboardState:
         """Close an event with summary. Move from active to closed.
 
         close_reason: structured reason for closure. Stored in close turn's evidence field.
-        Values: resolved, stale, timeout, force_closed, duplicate, user_closed.
+        Values: resolved, stale, timeout, force_closed, duplicate, user_closed, error.
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """

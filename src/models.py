@@ -313,7 +313,7 @@ class ConversationTurn(BaseModel):
     actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, aligner, headhunter, user")
     action: str = Field(
         ...,
-        description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence, phase",
+        description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence, phase, error",
     )
     thoughts: Optional[str] = None
     result: Optional[str] = None

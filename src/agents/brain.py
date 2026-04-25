@@ -54,6 +54,14 @@
 #     URL normalized: split("#")[0].rstrip("/").
 # 32. [Pattern]: _cleanup_stale_events wakes Headhunter via _headhunter_close_signal when source=headhunter
 #     (mirrors _close_and_broadcast); main.py assigns the signal before start_event_loop().
+# 33. [Pattern]: _handle_orphan_blank_event() encapsulates orphan recovery logic.
+#     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
+#     Reset on successful first turn or on close.
+#     In-memory only -- assumes single Brain instance per cluster. Multi-replica makes cap best-effort.
+# 34. [Pattern]: Event loop scan blank-event guard uses processing_started_at with queued_at
+#     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
+#     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
+#     prevent hot retry loops (has_unread=True -> process_event -> fail -> repeat).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -329,6 +337,8 @@ class Brain:
         self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
         self._last_processed: dict[str, float] = {}
+        # Orphan re-queue attempts per event (blank events stuck in active set)
+        self._orphan_requeue_count: dict[str, int] = {}
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
         self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
@@ -505,6 +515,10 @@ class Brain:
             logger.debug(f"Skipping closed event {event_id}")
             return
 
+        # Clear orphan re-queue count on successful recovery (event now has turns)
+        if event.conversation and event_id in self._orphan_requeue_count:
+            self._orphan_requeue_count.pop(event_id, None)
+
         # Dedup: if this is a new event (no turns yet), check for existing active events.
         # Two passes per iteration (single loop):
         #   Pass 1: service-name match (same-source duplicates, existing behavior)
@@ -654,70 +668,84 @@ class Brain:
         # Snapshot turn count BEFORE LLM call -- any turns appended during processing
         # (e.g., Aligner confirm arriving mid-evaluation) will have index > turn_snapshot
         # and stay SENT/DELIVERED for the next event loop iteration.
-        turn_snapshot = len(event.conversation)
+        try:
+            turn_snapshot = len(event.conversation)
 
-        # Get LLM adapter; fall back to probe mode if unavailable
-        adapter = await self._get_adapter()
-        if not adapter:
-            # PROBE MODE fallback (no LLM available)
-            turn = ConversationTurn(
-                turn=len(event.conversation) + 1,
-                actor="brain",
-                action="triage",
-                thoughts=f"PROBE: Brain received event {event_id} for service {event.service}. "
-                         f"Source: {event.source}. Reason: {event.event.reason}. "
-                         f"Conversation has {len(event.conversation)} turns.",
+            # Get LLM adapter; fall back to probe mode if unavailable
+            adapter = await self._get_adapter()
+            if not adapter:
+                # PROBE MODE fallback (no LLM available)
+                turn = ConversationTurn(
+                    turn=len(event.conversation) + 1,
+                    actor="brain",
+                    action="triage",
+                    thoughts=f"PROBE: Brain received event {event_id} for service {event.service}. "
+                             f"Source: {event.source}. Reason: {event.event.reason}. "
+                             f"Conversation has {len(event.conversation)} turns.",
+                )
+                await self.blackboard.append_turn(event_id, turn)
+                await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot + 1)
+                logger.info(f"Brain processed event {event_id} (probe mode)")
+                return
+
+            # Determine defer-wake state ONCE before the iterative loop.
+            # Persists across iterations so tool stripping survives lookup re-invocations.
+            # Uses defer-vs-route timestamp comparison so intermediate turns (brain.think,
+            # brain.wait from intermediate phase during deferral) don't break detection.
+            last_defer = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.action == "defer"),
+                None,
             )
-            await self.blackboard.append_turn(event_id, turn)
-            logger.info(f"Brain processed event {event_id} (probe mode)")
-            return
-
-        # Determine defer-wake state ONCE before the iterative loop.
-        # Persists across iterations so tool stripping survives lookup re-invocations.
-        # Uses defer-vs-route timestamp comparison so intermediate turns (brain.think,
-        # brain.wait from intermediate phase during deferral) don't break detection.
-        last_defer = next(
-            (t for t in reversed(event.conversation)
-             if t.actor == "brain" and t.action == "defer"),
-            None,
-        )
-        last_route = next(
-            (t for t in reversed(event.conversation)
-             if t.actor == "brain" and t.action == "route"),
-            None,
-        )
-        is_defer_wake = bool(
-            last_defer
-            and (not last_route or last_defer.timestamp > last_route.timestamp)
-        )
-
-        # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
-        # returns True, meaning the LLM needs to make a follow-up decision.
-        # Bounded to prevent runaway loops.
-        max_llm_iterations = 5
-        for iteration in range(max_llm_iterations):
-            # Re-fetch event to pick up turns appended by the previous iteration
-            if iteration > 0:
-                event = await self.blackboard.get_event(event_id)
-                if not event:
-                    return
-            should_continue = await self._process_with_llm(
-                event_id, event, is_defer_wake=is_defer_wake,
+            last_route = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.action == "route"),
+                None,
             )
-            if not should_continue:
-                break
-            logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
-        else:
-            logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
+            is_defer_wake = bool(
+                last_defer
+                and (not last_route or last_defer.timestamp > last_route.timestamp)
+            )
 
-        # After LLM loop exits -- only mark turns the Brain actually saw.
-        # Turns appended during LLM processing (e.g., Aligner confirm) stay SENT/DELIVERED
-        # and will trigger re-processing on the next event loop scan.
-        await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
-        await self._broadcast_status_update(
-            event_id, "evaluated",
-            turns=list(range(1, turn_snapshot + 1)),  # Scoped to snapshot, not "all"
-        )
+            # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
+            # returns True, meaning the LLM needs to make a follow-up decision.
+            # Bounded to prevent runaway loops.
+            max_llm_iterations = 5
+            for iteration in range(max_llm_iterations):
+                # Re-fetch event to pick up turns appended by the previous iteration
+                if iteration > 0:
+                    event = await self.blackboard.get_event(event_id)
+                    if not event:
+                        return
+                should_continue = await self._process_with_llm(
+                    event_id, event, is_defer_wake=is_defer_wake,
+                )
+                if not should_continue:
+                    break
+                logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
+            else:
+                logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
+
+            # After LLM loop exits -- only mark turns the Brain actually saw.
+            # Turns appended during LLM processing (e.g., Aligner confirm) stay SENT/DELIVERED
+            # and will trigger re-processing on the next event loop scan.
+            await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
+            await self._broadcast_status_update(
+                event_id, "evaluated",
+                turns=list(range(1, turn_snapshot + 1)),  # Scoped to snapshot, not "all"
+            )
+        except Exception as e:
+            event_fresh = await self.blackboard.get_event(event_id)
+            if event_fresh and not event_fresh.conversation:
+                error_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="error",
+                    thoughts=f"Brain failed on first processing: {type(e).__name__}: {e}",
+                )
+                await self._append_and_broadcast(event_id, error_turn)
+                await self.blackboard.mark_turns_evaluated(event_id)
+            raise
 
     async def _process_with_llm(
         self,
@@ -2596,8 +2624,8 @@ class Brain:
             phase = args.get("phase", "triage")
             reasoning = args.get("reasoning", "")
             event_doc = await self.blackboard.get_event(event_id)
-            current_phase = (event_doc.brain_phase if event_doc else None) or "triage"
-            if phase == current_phase:
+            current_phase = event_doc.brain_phase if event_doc else None
+            if current_phase is not None and phase == current_phase:
                 logger.debug(f"set_phase: already in {phase} for {event_id}, skipping")
                 return True
             await self.blackboard.update_event_phase(event_id, phase)
@@ -3482,6 +3510,42 @@ class Brain:
         await self._append_and_broadcast(event_id, wait_turn)
         logger.warning(f"Escalating {event_id} to human after {nudge_count} nudges ({idle_min}m idle)")
 
+    async def _handle_orphan_blank_event(self, event_id: str, event: EventDocument) -> None:
+        """Handle a blank event (no conversation) stuck in the active set.
+
+        Uses processing_started_at (with queued_at fallback) as age anchor.
+        Re-queues up to 3 times; after the cap, writes an error turn and
+        force-closes. Counter is in-memory (_orphan_requeue_count).
+        """
+        anchor = event.processing_started_at or event.queued_at
+        if anchor is None:
+            return
+        age = time.time() - anchor
+        if age <= 60:
+            return
+        count = self._orphan_requeue_count.get(event_id, 0)
+        if count < 3:
+            await self.blackboard.redis.lpush(self.blackboard.EVENT_QUEUE, event_id)
+            self._orphan_requeue_count[event_id] = count + 1
+            logger.warning(
+                f"Re-queued orphaned blank event {event_id} "
+                f"(attempt {count + 1}/3, age={int(age)}s)"
+            )
+        else:
+            error_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="error",
+                thoughts="Event failed to process after 3 re-queue attempts. Force closing.",
+            )
+            await self._append_and_broadcast(event_id, error_turn)
+            await self._close_and_broadcast(
+                event_id, "Orphan: failed to process after 3 attempts.",
+                close_reason="error",
+            )
+            self._orphan_requeue_count.pop(event_id, None)
+            logger.error(f"Orphan {event_id} closed after 3 failed re-queue attempts")
+
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event and broadcast the closure to UI."""
         if self._ephemeral_provisioner:
@@ -3514,6 +3578,7 @@ class Brain:
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.discard(event_id)
         self._last_processed.pop(event_id, None)
+        self._orphan_requeue_count.pop(event_id, None)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
@@ -4009,7 +4074,10 @@ class Brain:
                             continue
 
                     event = await self.blackboard.get_event(eid)
-                    if not event or not event.conversation:
+                    if not event:
+                        continue
+                    if not event.conversation:
+                        await self._handle_orphan_blank_event(eid, event)
                         continue
 
                     # Check if event is deferred -- skip until delay expires OR user interrupts
