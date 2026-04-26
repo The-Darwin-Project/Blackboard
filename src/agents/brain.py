@@ -1983,7 +1983,10 @@ class Brain:
             from ..dependencies import get_registry_and_bridge
             registry, _ = get_registry_and_bridge()
 
-            if event_id in self._active_tasks and not self._active_tasks[event_id].done():
+            running_agent = self._active_agent_for_event.get(event_id)
+            event_has_active_task = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+
+            if event_has_active_task and running_agent == agent_name:
                 if registry:
                     agent_conn = await registry.get_by_event(event_id)
                     if not agent_conn:
@@ -2009,16 +2012,18 @@ class Brain:
                     task_coro = self._run_agent_task(
                         event_id, agent_name, agent, message, event_md_path,
                         routing_turn_num=turn.turn, mode="message",
+                        parallel=event_has_active_task,
                     )
-                    self._active_tasks[event_id] = asyncio.create_task(task_coro)
-                    logger.info(f"Brain message_agent -> {agent_name} (idle, dispatch) ({len(message)} chars)")
+                    task = asyncio.create_task(task_coro)
+                    if not event_has_active_task:
+                        self._active_tasks[event_id] = task
+                    label = "parallel" if event_has_active_task else "idle, dispatch"
+                    logger.info(f"Brain message_agent -> {agent_name} ({label}) ({len(message)} chars)")
                 else:
                     logger.warning(f"message_agent: no agent class for role {agent_name}")
             else:
                 if registry:
                     busy_conn = await registry.get_by_role(agent_name)
-                    if not busy_conn:
-                        busy_conn = await registry.get_by_event(event_id)
                     if busy_conn and busy_conn.ws:
                         try:
                             await busy_conn.ws.send_json({
@@ -2972,6 +2977,7 @@ class Brain:
         event_md_path: str,
         routing_turn_num: int = 0,
         mode: str = "",
+        parallel: bool = False,
     ) -> None:
         """
         Run agent.process() with progress streaming. Non-blocking via create_task.
@@ -3029,9 +3035,11 @@ class Brain:
                     await self._append_and_broadcast(event_id, turn)
 
             mode_label = f" (mode={mode})" if mode else ""
-            logger.info(f"Agent task started: {agent_name}{mode_label} for {event_id}")
-            self._active_agent_for_event[event_id] = agent_name
-            self._routing_turn_for_event[event_id] = routing_turn_num or 0
+            parallel_label = " [parallel]" if parallel else ""
+            logger.info(f"Agent task started: {agent_name}{mode_label}{parallel_label} for {event_id}")
+            if not parallel:
+                self._active_agent_for_event[event_id] = agent_name
+                self._routing_turn_for_event[event_id] = routing_turn_num or 0
 
             prior_mode = self._agent_session_modes.get(event_id, {}).get(agent_name, "")
             reuse_session = (prior_mode == mode) if mode and prior_mode else bool(prior_mode)
@@ -3261,7 +3269,8 @@ class Brain:
                         event_id, "evaluated", turns=[routing_turn_num],
                     )
                 await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
-                self._release_task_state(event_id)
+                if not parallel:
+                    self._release_task_state(event_id)
                 self._last_processed[event_id] = time.time()
                 return
 
@@ -3361,7 +3370,8 @@ class Brain:
                 self._dispatch_semaphore.release()
             # Safety net -- only clean up if _active_tasks still holds OUR task.
             # Re-entry (process_event) may have created a NEW task; don't clobber it.
-            if self._active_tasks.get(event_id) is current_task:
+            # Parallel message tasks never own event state -- skip unconditionally.
+            if not parallel and self._active_tasks.get(event_id) is current_task:
                 self._release_task_state(event_id)
             # Note: _agent_sessions is NOT cleaned here -- sessions persist across
             # task invocations for Phase 2 follow-ups. Cleaned in cancel/close paths.
