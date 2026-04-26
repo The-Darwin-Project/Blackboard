@@ -1727,6 +1727,8 @@ class Brain:
         text = ""
         if turn.actor == "brain":
             text = turn.thoughts or ""
+            if turn.action == "think":
+                text = f"[Internal observation — no tool was called, no message was sent]:\n{text}"
             if turn.evidence:
                 text = f"{text}\n{turn.evidence}" if text else turn.evidence
         elif turn.actor == "user":
