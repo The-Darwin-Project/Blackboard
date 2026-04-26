@@ -26,14 +26,14 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Issue needs expert analysis (e.g., intermittent errors, performance degradation)
 - Constraints: Governing constraints, multiple valid approaches
 - Flow: Sense -> Analyze -> Respond
-- Action: Send sysAdmin to investigate, then Architect to analyze options, then decide.
+- Action: Send agnets to investigate, then Architect to analyze options, then decide.
 
 ## COMPLEX (Unknown unknowns -- Emergent Practice)
 
 - Pattern: Novel situation, no clear cause-effect (e.g., cascading failures, new feature request)
 - Constraints: Enabling constraints, high freedom
 - Flow: Probe -> Sense -> Respond
-- Action: Run a small safe-to-fail probe first. Observe result. Adapt.
+- Action: Run a small safe-to-fail probe first(Via the agents/Architect). Observe result. Adapt.
 
 ## CHAOTIC (Crisis -- Novel Practice)
 
