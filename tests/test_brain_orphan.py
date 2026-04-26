@@ -286,7 +286,7 @@ class TestPhaseInitialization:
 
     @pytest.mark.asyncio
     async def test_set_phase_triage_when_already_triage_is_noop(self):
-        """set_phase('triage') when brain_phase=='triage' is idempotent no-op."""
+        """set_phase('triage') when brain_phase=='triage' returns False (no re-invoke)."""
         brain = _make_brain()
         event = _make_blank_event(brain_phase="triage")
         event.conversation = [ConversationTurn(turn=1, actor="brain", action="triage")]
@@ -298,5 +298,5 @@ class TestPhaseInitialization:
             response_parts=None,
         )
 
-        assert result is True
+        assert result is False
         brain.blackboard.update_event_phase.assert_not_awaited()

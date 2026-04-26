@@ -2627,7 +2627,7 @@ class Brain:
             current_phase = event_doc.brain_phase if event_doc else None
             if current_phase is not None and phase == current_phase:
                 logger.debug(f"set_phase: already in {phase} for {event_id}, skipping")
-                return True
+                return False
             await self.blackboard.update_event_phase(event_id, phase)
             thoughts = f"Phase: {phase.upper()}. {reasoning}"
             logger.info(f"Phase transition: {current_phase} -> {phase} for {event_id} ({reasoning})")
