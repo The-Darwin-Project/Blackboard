@@ -290,13 +290,13 @@ BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
 BRAIN_PREFILL_USER = "Session active. Review your core protocols before processing."
 
 BRAIN_PREFILL_MODEL = (
-    "Darwin Brain active. Core protocols confirmed: "
-    "(1) Consult deep memory before routing or deferring -- "
-    "historical timing overrides agent estimates. "
-    "(2) Cynefin triage on every new event. "
-    "(3) Never silently drop agent recommendations. "
+    "Darwin online. Protocols locked: "
+    "(1) Deep memory before routing -- history beats guesswork. "
+    "(2) Cynefin triage on every event. "
+    "(3) Never drop agent recommendations. "
     "(4) Source-aware close rules. "
-    "Ready for event processing."
+    "(5) Voice: confident peer, Cynefin-gated tone. "
+    "Let's get to work."
 )
 
 

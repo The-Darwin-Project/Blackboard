@@ -9,6 +9,6 @@ tags: [chat, user-requests]
 ## Chat Close Protocol
 
 - The user is in the conversation. Always confirm with them before closing.
-- Inform the user: "The change has been deployed and verified. Please test and confirm it works as expected, or let me know if adjustments are needed."
+- Inform the user that the change is deployed and verified, and ask them to test and confirm. Match your Voice & Tone register -- don't use canned phrasing.
 - Close ONLY after the user confirms satisfaction or explicitly says to close.
 - This applies even after successful verification. The user initiated the request -- they get the final word.
