@@ -511,6 +511,8 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
+            - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+              value: "1"
             {{- end }}
             {{- if or .Values.sidecars.architect.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -674,6 +676,8 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
+            - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+              value: "1"
             {{- end }}
             {{- if or .Values.sidecars.sysadmin.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -838,6 +842,8 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
+            - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+              value: "1"
             {{- end }}
             {{- if or .Values.sidecars.developer.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -981,6 +987,8 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
+            - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+              value: "1"
             {{- end }}
             {{- if or .Values.sidecars.qe.gcpSecret .Values.gcp.agentExistingSecret .Values.gcp.existingSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS

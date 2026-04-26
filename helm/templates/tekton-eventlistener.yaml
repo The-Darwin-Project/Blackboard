@@ -88,6 +88,8 @@ spec:
                   value: {{ .Values.gcp.location | quote }}
                 - name: ANTHROPIC_MODEL
                   value: {{ .Values.ephemeralAgents.model | quote }}
+                - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
+                  value: "1"
                 {{- if .Values.gitlab.enabled }}
                 - name: GITLAB_TOKEN_PATH
                   value: "/secrets/gitlab/token"
