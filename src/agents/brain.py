@@ -1540,6 +1540,7 @@ class Brain:
             f"Source: {event.source}",
             f"Service: {event.service}",
             f"Status: {event.status.value}",
+            f"Phase: {event.brain_phase or 'triage'}",
             f"Reason: {event.event.reason}",
             f"Evidence: {evidence_text}",
             f"Time: {event.event.timeDate}",
