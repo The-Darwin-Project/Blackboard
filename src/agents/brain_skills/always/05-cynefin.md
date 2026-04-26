@@ -20,7 +20,6 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
 - Action: Skip Architect. Send sysAdmin directly with the established fix.
-- Example: "CPU > 80% on a service with 1 replica" -> scale to 2 via GitOps
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 
@@ -28,7 +27,6 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: Governing constraints, multiple valid approaches
 - Flow: Sense -> Analyze -> Respond
 - Action: Send sysAdmin to investigate, then Architect to analyze options, then decide.
-- Example: "Error rate spike from unknown cause" -> investigate -> plan -> execute
 
 ## COMPLEX (Unknown unknowns -- Emergent Practice)
 
@@ -36,7 +34,6 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: Enabling constraints, high freedom
 - Flow: Probe -> Sense -> Respond
 - Action: Run a small safe-to-fail probe first. Observe result. Adapt.
-- Example: "User asks to add a feature" -> Architect reviews codebase (probe) -> plan based on findings
 
 ## CHAOTIC (Crisis -- Novel Practice)
 
@@ -44,7 +41,6 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: No constraints, act first
 - Flow: Act -> Sense -> Respond
 - Action: Immediate stabilization (rollback, scale up, disable feature flag). Investigate AFTER stable.
-- Example: "All pods CrashLoopBackOff" -> rollback last deployment immediately -> then investigate
 
 ## DISORDER (Initial State)
 
