@@ -719,6 +719,7 @@ class Brain:
                         return
                 should_continue = await self._process_with_llm(
                     event_id, event, is_defer_wake=is_defer_wake,
+                    iteration=iteration,
                 )
                 if not should_continue:
                     break
@@ -753,6 +754,7 @@ class Brain:
         event: EventDocument,
         *,
         is_defer_wake: bool = False,
+        iteration: int = 0,
     ) -> bool:
         """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
@@ -782,11 +784,13 @@ class Brain:
             phase_max_tokens = self.max_output_tokens
             context_flags = None
 
-        # Strip defer_event on defer-wake -- forces Brain to act (route/close/escalate)
+        # Strip defer_event on first iteration of defer-wake -- forces Brain to act
+        # before re-deferring. After iteration 0, defer is available so LLM can
+        # re-defer based on tool results + skill protocol.
         active_tools = BRAIN_TOOL_SCHEMAS
-        if is_defer_wake:
+        if is_defer_wake and iteration == 0:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
-            logger.info(f"Defer-wake: stripped defer_event from tools for {event_id}")
+            logger.info(f"Defer-wake iter 0: stripped defer_event from tools for {event_id}")
 
         # === Phase-driven tool gating ===
         # Code reads the Brain's declared phase and provides matching tools.
@@ -819,31 +823,36 @@ class Brain:
         if brain_phase not in ("triage", "verify"):
             active_tools = [t for t in active_tools if t["name"] not in refresh_tools]
         else:
-            last_phase_ts = next(
-                (t.timestamp for t in reversed(event.conversation)
-                 if t.actor == "brain" and t.action == "phase"),
-                0,
-            )
+            if is_defer_wake:
+                last_window_ts = next(
+                    (t.timestamp for t in reversed(event.conversation)
+                     if t.actor == "brain" and t.action == "defer"),
+                    0,
+                )
+            else:
+                last_window_ts = next(
+                    (t.timestamp for t in reversed(event.conversation)
+                     if t.actor == "brain" and t.action == "phase"),
+                    0,
+                )
             recent_gl_refresh = any(
-                t.actor == "brain" and t.action == "verify"
-                and "MR State:" in (t.thoughts or "")
-                and t.timestamp >= last_phase_ts
+                t.actor == "brain" and t.waitingFor == "refresh_gitlab_context"
+                and t.timestamp >= last_window_ts
                 for t in event.conversation
             )
             if recent_gl_refresh:
                 active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
-                logger.info(f"Post-phase refresh already done: stripped refresh_gitlab_context for {event_id}")
+                logger.info(f"Refresh window guard: stripped refresh_gitlab_context for {event_id}")
 
             if has_kargo:
                 recent_kargo_refresh = any(
-                    t.actor == "brain" and t.action == "verify"
-                    and "Kargo Stage:" in (t.thoughts or "")
-                    and t.timestamp >= last_phase_ts
+                    t.actor == "brain" and t.waitingFor == "refresh_kargo_context"
+                    and t.timestamp >= last_window_ts
                     for t in event.conversation
                 )
                 if recent_kargo_refresh:
                     active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
-                    logger.info(f"Post-phase refresh already done: stripped refresh_kargo_context for {event_id}")
+                    logger.info(f"Refresh window guard: stripped refresh_kargo_context for {event_id}")
 
         # === Domain classification gate (mandatory before routing) ===
         if context_flags and not context_flags.get("brain_has_classified", False):
@@ -1386,8 +1395,7 @@ class Brain:
                 )
             resolved_contents.append(
                 f"**DEFER WAKE-UP ({consecutive}x):** {last_reason}\n"
-                f"{elapsed_str}\n"
-                f"The defer_event tool is not available. You must take action: route an agent to verify current state, close, or escalate."
+                f"{elapsed_str}"
             )
 
         if context_flags and context_flags.get("consecutive_agent_waits", 0) >= 2:
@@ -2662,8 +2670,9 @@ class Brain:
                 result_text = "Headhunter not available (GITLAB_HOST not configured). Use select_agent to check MR state manually."
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="verify",
-                    thoughts=result_text,
+                    actor="brain", action="tool_result",
+                    waitingFor="refresh_gitlab_context",
+                    evidence=result_text,
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -2711,11 +2720,12 @@ class Brain:
                     f"{merge_line}\n"
                     f"Severity: {state['severity']}"
                 )
-            thoughts = f"Checking: {condition}\n{result_text}" if condition else result_text
+            evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="verify",
-                thoughts=thoughts,
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=evidence,
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -2728,8 +2738,9 @@ class Brain:
                 result_text = "KargoObserver not available (KARGO_OBSERVER_ENABLED=false)."
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="verify",
-                    thoughts=result_text,
+                    actor="brain", action="tool_result",
+                    waitingFor="refresh_kargo_context",
+                    evidence=result_text,
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -2745,8 +2756,9 @@ class Brain:
                 result_text = "Kargo Stage: unknown\nError: kargo_context missing project/stage"
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="verify",
-                    thoughts=result_text,
+                    actor="brain", action="tool_result",
+                    waitingFor="refresh_kargo_context",
+                    evidence=result_text,
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -2774,11 +2786,12 @@ class Brain:
                     f"Message: {state.get('message', '')}\n"
                     f"MR URL: {new_mr_url or 'N/A'}"
                 )
-            thoughts = f"Checking: {condition}\n{result_text}" if condition else result_text
+            evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="verify",
-                thoughts=thoughts,
+                actor="brain", action="tool_result",
+                waitingFor="refresh_kargo_context",
+                evidence=evidence,
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
