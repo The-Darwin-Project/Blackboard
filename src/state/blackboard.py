@@ -2257,22 +2257,28 @@ class BlackboardState:
         are needed for commit_inflight() and requeue -- the inflight SET stores
         the same JSON strings as the ZSET members.
         """
+        import redis.exceptions as _rexc
         from ..models import StagedEscalation
 
-        members = await self.redis.zrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
-        if not members:
-            return [], []
-
-        json_members = [m if isinstance(m, str) else m.decode() for m in members]
-
-        async with self.redis.pipeline(transaction=True) as pipe:
-            await pipe.watch(self.NIGHTWATCHER_PENDING)
-            pipe.multi()
-            pipe.zremrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
-            for jm in json_members:
-                pipe.sadd(self.NIGHTWATCHER_INFLIGHT, jm)
-            pipe.expire(self.NIGHTWATCHER_INFLIGHT, self.INFLIGHT_TTL)
-            await pipe.execute()
+        while True:
+            try:
+                async with self.redis.pipeline(transaction=True) as pipe:
+                    await pipe.watch(self.NIGHTWATCHER_PENDING)
+                    members = await pipe.zrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
+                    if not members:
+                        await pipe.reset()
+                        return [], []
+                    json_members = [m if isinstance(m, str) else m.decode() for m in members]
+                    pipe.multi()
+                    for jm in json_members:
+                        pipe.zrem(self.NIGHTWATCHER_PENDING, jm)
+                        pipe.sadd(self.NIGHTWATCHER_INFLIGHT, jm)
+                    pipe.expire(self.NIGHTWATCHER_INFLIGHT, self.INFLIGHT_TTL)
+                    await pipe.execute()
+                    break
+            except _rexc.WatchError:
+                logger.info("Nightwatcher: lease WatchError, retrying")
+                continue
 
         escalations = [StagedEscalation.model_validate_json(jm) for jm in json_members]
         logger.info("Nightwatcher: leased %d escalations (inflight TTL=%ds)", len(escalations), self.INFLIGHT_TTL)
@@ -2313,6 +2319,21 @@ class BlackboardState:
     async def count_pending_escalations(self) -> int:
         """Count pending escalations waiting for next sweep."""
         return await self.redis.zcard(self.NIGHTWATCHER_PENDING)
+
+    async def restage_orphans(self, json_members: list[str]) -> int:
+        """Re-stage orphan escalations back to pending ZSET for next sweep."""
+        import json as _json
+        count = 0
+        for jm in json_members:
+            try:
+                data = _json.loads(jm)
+                await self.redis.zadd(self.NIGHTWATCHER_PENDING, {jm: data.get("staged_at", 0.0)})
+                count += 1
+            except Exception:
+                logger.warning("Nightwatcher: corrupt orphan skipped: %s", jm[:100])
+        if count:
+            logger.warning("Nightwatcher: restaged %d orphan escalations", count)
+        return count
 
     async def persist_shift_report(self, report) -> None:
         """Persist a ShiftReport for the Shifts UI. SET + ZADD index."""

@@ -304,6 +304,7 @@ async def lifespan(app: FastAPI):
         nightwatcher_observer = None
         if nightwatcher_enabled:
             from .observers.nightwatcher import NightwatcherObserver
+            slack_inst = getattr(app.state, 'slack', None)
             nightwatcher_observer = NightwatcherObserver(
                 blackboard=blackboard,
                 registry=agent_registry,
@@ -311,9 +312,7 @@ async def lifespan(app: FastAPI):
                 provisioner=getattr(brain, '_ephemeral_provisioner', None),
                 smartsheet_adapter=brain._get_smartsheet_incident_adapter(),
                 archivist=archivist,
-                slack_notify=lambda msg: asyncio.ensure_future(
-                    brain._broadcast({"type": "nightwatcher_summary", "text": msg})
-                ),
+                slack_notify=slack_inst.post_nightwatcher_summary if slack_inst else None,
             )
             await nightwatcher_observer.start()
             logger.info("NightwatcherObserver started")

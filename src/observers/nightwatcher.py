@@ -120,13 +120,17 @@ class NightwatcherObserver:
 
     async def _sweep(self) -> None:
         from ..models import ShiftReport
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
         sweep_start = time.time()
         now_utc = datetime.now(timezone.utc)
         shift_date = now_utc.strftime("%Y-%m-%d")
         window = "morning" if now_utc.hour < 12 else "evening"
-        window_start = now_utc.replace(hour=18 if window == "morning" else 6, minute=0, second=0).isoformat()
+        if window == "morning":
+            ws = (now_utc - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+        else:
+            ws = now_utc.replace(hour=6, minute=0, second=0, microsecond=0)
+        window_start = ws.isoformat()
         window_end = now_utc.isoformat()
 
         escalations, json_members = await self.blackboard.lease_pending_escalations(time.time())
@@ -152,6 +156,26 @@ class NightwatcherObserver:
             return
 
         system_prompt = build_system_prompt(escalations, window_start, window_end)
+        try:
+            await self._run_flash_loop(escalations, json_members, system_prompt,
+                                       window_start, window_end, shift_date, window,
+                                       sweep_start, pending_count)
+        except Exception:
+            logger.exception("Nightwatcher sweep failed, requeueing and persisting failed report")
+            await self.blackboard.requeue_inflight()
+            failed_report = ShiftReport(
+                shift_date=shift_date, window=window,
+                window_start=window_start, window_end=window_end,
+                status="failed", started_at=sweep_start, completed_at=time.time(),
+            )
+            await self.blackboard.persist_shift_report(failed_report)
+
+    async def _run_flash_loop(self, escalations, json_members, system_prompt,
+                              window_start, window_end, shift_date, window,
+                              sweep_start, pending_count):
+        """Flash tool-calling loop with phase gating and orphan re-injection."""
+        from ..models import ShiftReport
+        adapter = await self._get_adapter()
         escalation_text = "\n\n".join(
             f"**{e.event_id}** | {e.service} | {e.platform} | {e.summary}\n{e.description[:300]}"
             for e in escalations
@@ -191,10 +215,15 @@ class NightwatcherObserver:
                     phases = ["review", "investigate", "report"]
                     cur_idx = phases.index(current_phase) if current_phase in phases else 0
                     new_idx = phases.index(new_phase) if new_phase in phases else -1
-                    if new_idx > cur_idx:
+                    if new_idx == cur_idx + 1:
                         current_phase = new_phase
                         logger.info("Nightwatcher phase: %s -> %s (%s)", phases[cur_idx], new_phase, args.get("reasoning", ""))
-                    tool_result = f"Phase: {current_phase.upper()}"
+                        tool_result = f"Phase: {current_phase.upper()}"
+                    else:
+                        tool_result = (
+                            f"Invalid phase transition: {current_phase} -> {new_phase}. "
+                            f"Advance one step at a time (review -> investigate -> report)."
+                        )
                 else:
                     tool_result = await execute_tool(name, args, ctx)
                     logger.info("Nightwatcher tool %s: %s", name, tool_result[:200])
@@ -217,10 +246,7 @@ class NightwatcherObserver:
                 if orphans:
                     logger.warning("Nightwatcher: %d orphans after %d re-injections, re-staging", len(orphans), reinjection_count)
                     orphan_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in orphans]
-                    for oj in orphan_jsons:
-                        import json as _json
-                        data = _json.loads(oj)
-                        await self.blackboard.redis.zadd(self.blackboard.NIGHTWATCHER_PENDING, {oj: data.get("staged_at", 0)})
+                    await self.blackboard.restage_orphans(orphan_jsons)
                 break
 
         await self.blackboard.commit_inflight(json_members)

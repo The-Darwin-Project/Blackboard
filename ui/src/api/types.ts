@@ -354,9 +354,12 @@ export interface ShiftInvestigationDTO {
   cluster_id: string;
 }
 
-export interface ShiftReportFull extends ShiftReportSummary {
+export interface ShiftReportFull {
+  shift_date: string;
+  window: 'morning' | 'evening';
   window_start: string;
   window_end: string;
+  status: 'completed' | 'running' | 'empty' | 'failed';
   manifest: StagedEscalationDTO[];
   incidents: ShiftIncidentDTO[];
   investigations: ShiftInvestigationDTO[];

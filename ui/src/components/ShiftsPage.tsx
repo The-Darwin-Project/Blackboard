@@ -118,7 +118,7 @@ export default function ShiftsPage() {
               const dateStr = d.toISOString().slice(0, 10);
               const shift = shiftMap[`${dateStr}:morning`];
               return <ShiftCard key={`m-${dateStr}`} dateStr={dateStr} window="morning" shift={shift}
-                isToday={dateStr === todayStr} onClick={() => setSelectedShift({ date: dateStr, window: 'morning' })}
+                onClick={() => setSelectedShift({ date: dateStr, window: 'morning' })}
                 isSelected={selectedShift?.date === dateStr && selectedShift?.window === 'morning'} />;
             })}
           </div>
@@ -128,7 +128,7 @@ export default function ShiftsPage() {
               const dateStr = d.toISOString().slice(0, 10);
               const shift = shiftMap[`${dateStr}:evening`];
               return <ShiftCard key={`e-${dateStr}`} dateStr={dateStr} window="evening" shift={shift}
-                isToday={dateStr === todayStr} onClick={() => setSelectedShift({ date: dateStr, window: 'evening' })}
+                onClick={() => setSelectedShift({ date: dateStr, window: 'evening' })}
                 isSelected={selectedShift?.date === dateStr && selectedShift?.window === 'evening'} />;
             })}
           </div>
@@ -141,9 +141,9 @@ export default function ShiftsPage() {
   );
 }
 
-function ShiftCard({ dateStr, window: w, shift, isToday, onClick, isSelected }: {
+function ShiftCard({ dateStr, window: w, shift, onClick, isSelected }: {
   dateStr: string; window: string; shift?: ShiftReportSummary;
-  isToday: boolean; onClick: () => void; isSelected: boolean;
+  onClick: () => void; isSelected: boolean;
 }) {
   const status = shift?.status ?? 'empty';
   const colors = SHIFT_STATUS_COLORS[status] || SHIFT_STATUS_COLORS.empty;

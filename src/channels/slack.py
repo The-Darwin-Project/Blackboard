@@ -789,6 +789,20 @@ class SlackChannel:
         except Exception as e:
             logger.warning(f"Slack post failed: {e}")
 
+    async def post_nightwatcher_summary(self, summary: str) -> None:
+        """Post a Nightwatcher shift summary to the infra channel."""
+        if not self._infra_channel:
+            logger.warning("post_nightwatcher_summary: SLACK_INFRA_CHANNEL is empty, skipping")
+            return
+        try:
+            await self._app.client.chat_postMessage(
+                channel=self._infra_channel,
+                text=summary,
+            )
+            logger.info("Nightwatcher shift summary posted to %s", self._infra_channel)
+        except Exception as e:
+            logger.warning("Nightwatcher Slack summary failed: %s", e)
+
     async def open_infra_thread(self, event_doc: Any, summary: str) -> None:
         """Post an event to #darwin-infra and store thread_ts (Phase 2)."""
         if not self._infra_channel:
