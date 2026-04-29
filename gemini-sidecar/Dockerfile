@@ -92,6 +92,8 @@ RUN npm install -g kubernetes-mcp-server@latest && \
 
 # Playwright MCP server (headless browser automation via accessibility snapshots)
 # Agents can navigate, click, fill forms, take screenshots, monitor network -- no vision model needed
+# PLAYWRIGHT_BROWSERS_PATH: shared location so chromium installed by root is found by non-root USER 1001
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN npm install -g @playwright/mcp@latest && \
     npx @playwright/mcp@latest --help 2>&1 | head -1 || echo "playwright-mcp installed"
 
@@ -113,6 +115,7 @@ RUN dnf install -y \
     python3 --version && python3 -m pytest --version && \
     npm install -g playwright@latest && \
     npx playwright install chromium && \
+    chmod -R o+rx $PLAYWRIGHT_BROWSERS_PATH && \
     npx playwright --version
 
 # Create app directory
