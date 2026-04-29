@@ -9,14 +9,15 @@
  * Header: logo + tabs only (clean, minimal).
  * Bottom bar: activity feed + bell + status + controls (XProtect-style status strip).
  */
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Activity } from 'lucide-react';
 import { OpsStateProvider, useOpsState } from '../contexts/OpsStateContext';
+import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
 import ActivityPanel from './ops/ActivityPanel';
 
-const TABS = [
+const BASE_TABS = [
   { id: '/', label: 'Streams' },
   { id: '/topology', label: 'Topology' },
   { id: '/reports', label: 'Reports' },
@@ -24,12 +25,22 @@ const TABS = [
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
   { id: '/guide', label: 'Guide' },
-] as const;
+];
 
 function LayoutInner() {
   const location = useLocation();
   const navigate = useNavigate();
   const { selectEvent } = useOpsState();
+  const { data: config } = useConfig();
+
+  const TABS = useMemo(() => {
+    const tabs = [...BASE_TABS];
+    if (config?.nightwatcher?.enabled) {
+      const incIdx = tabs.findIndex(t => t.id === '/incidents');
+      tabs.splice(incIdx + 1, 0, { id: '/shifts', label: 'Shifts' });
+    }
+    return tabs;
+  }, [config]);
 
   const activeTab = TABS.find(t => t.id === location.pathname)?.id
     || (location.pathname.startsWith('/reports') ? '/reports' : '/');
