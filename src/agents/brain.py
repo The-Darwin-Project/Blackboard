@@ -2482,7 +2482,7 @@ class Brain:
                 return True
             prior_incident = any(
                 t.actor == "brain" and t.action == "notify"
-                and "Incident created" in (t.thoughts or "")
+                and ("Incident created" in (t.thoughts or "") or "Escalation staged [nightwatcher]" in (t.thoughts or ""))
                 for t in (event_doc.conversation or [])
             )
             if prior_incident:
@@ -2500,6 +2500,46 @@ class Brain:
                     f"create_incident is only available for automated events "
                     f"(source={event_doc.source} is not eligible)."
                 )
+            elif os.environ.get("NIGHTWATCHER_ENABLED", "false").lower() == "true":
+                from ..models import StagedEscalation
+                conv_turns = [
+                    t for t in (event_doc.conversation or [])
+                    if t.actor != "user" and t.action != "phase"
+                ]
+                summary_parts = [
+                    f"[{t.actor}.{t.action}] {(t.thoughts or '')[:150]}"
+                    for t in conv_turns[-3:]
+                ]
+                conversation_summary = " | ".join(summary_parts)[:500]
+                slack_thread_url = ""
+                if event_doc.slack_thread_ts and event_doc.slack_channel_id:
+                    ts_nodot = event_doc.slack_thread_ts.replace(".", "")
+                    workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
+                    slack_thread_url = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                evidence = event_doc.event.evidence
+                staged = StagedEscalation(
+                    event_id=event_id,
+                    service=event_doc.service,
+                    source=event_doc.source,
+                    reason=event_doc.event.reason,
+                    summary=args.get("summary", "")[:200],
+                    platform=args.get("platform", ""),
+                    priority=args.get("priority", "Normal"),
+                    description=args.get("description", ""),
+                    evidence_snapshot=evidence.model_dump() if hasattr(evidence, "model_dump") else {},
+                    conversation_summary=conversation_summary,
+                    slack_thread_url=slack_thread_url,
+                )
+                try:
+                    await self.blackboard.stage_escalation(staged)
+                    self._incident_created.add(event_id)
+                    result_text = (
+                        f"Escalation staged [nightwatcher] for consolidation "
+                        f"(event {event_id}, service {event_doc.service})"
+                    )
+                except Exception as e:
+                    result_text = f"Failed to stage escalation: {e}"
+                    logger.warning(f"stage_escalation failed for {event_id}: {e}")
             else:
                 adapter = self._get_smartsheet_incident_adapter()
                 if not adapter:
