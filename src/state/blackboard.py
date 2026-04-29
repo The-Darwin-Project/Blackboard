@@ -2232,3 +2232,124 @@ class BlackboardState:
     async def count_user_schedules(self, email: str) -> int:
         """Count active schedules for a user."""
         return await self.redis.scard(f"{self.TIMEKEEPER_USER_PREFIX}{email}")
+
+    # =========================================================================
+    # Nightwatcher (Shift Consolidation Staging)
+    # =========================================================================
+
+    NIGHTWATCHER_PENDING = "darwin:nightwatcher:pending"
+    NIGHTWATCHER_INFLIGHT = "darwin:nightwatcher:inflight"
+    SHIFT_PREFIX = "darwin:nightwatcher:shift:"
+    SHIFT_INDEX = "darwin:nightwatcher:shifts:index"
+    SHIFT_TTL = 2_592_000   # 30 days
+    INFLIGHT_TTL = 3_600    # 1h safety net
+
+    async def stage_escalation(self, data) -> None:
+        """Stage an escalation for Nightwatcher consolidation. ZADD to pending ZSET."""
+        payload = data.model_dump_json()
+        await self.redis.zadd(self.NIGHTWATCHER_PENDING, {payload: data.staged_at})
+        logger.info("Nightwatcher: staged escalation %s (service=%s)", data.event_id, data.service)
+
+    async def lease_pending_escalations(self, before_ts: float) -> tuple[list, list[str]]:
+        """Atomically lease all pending escalations: move from pending ZSET to inflight SET.
+
+        Returns (parsed_escalations, raw_json_members) tuple. The raw JSON strings
+        are needed for commit_inflight() and requeue -- the inflight SET stores
+        the same JSON strings as the ZSET members.
+        """
+        from ..models import StagedEscalation
+
+        members = await self.redis.zrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
+        if not members:
+            return [], []
+
+        json_members = [m if isinstance(m, str) else m.decode() for m in members]
+
+        async with self.redis.pipeline(transaction=True) as pipe:
+            await pipe.watch(self.NIGHTWATCHER_PENDING)
+            pipe.multi()
+            pipe.zremrangebyscore(self.NIGHTWATCHER_PENDING, "-inf", before_ts)
+            for jm in json_members:
+                pipe.sadd(self.NIGHTWATCHER_INFLIGHT, jm)
+            pipe.expire(self.NIGHTWATCHER_INFLIGHT, self.INFLIGHT_TTL)
+            await pipe.execute()
+
+        escalations = [StagedEscalation.model_validate_json(jm) for jm in json_members]
+        logger.info("Nightwatcher: leased %d escalations (inflight TTL=%ds)", len(escalations), self.INFLIGHT_TTL)
+        return escalations, json_members
+
+    async def commit_inflight(self, json_members: list[str]) -> None:
+        """Remove committed items from inflight SET after successful persist."""
+        if not json_members:
+            return
+        await self.redis.srem(self.NIGHTWATCHER_INFLIGHT, *json_members)
+        logger.info("Nightwatcher: committed %d inflight items", len(json_members))
+
+    async def requeue_inflight(self) -> int:
+        """On startup: recover inflight items from a prior crash back to pending.
+
+        Reads all members from inflight SET, re-ZADDs to pending with
+        original staged_at timestamps, then DELetes the inflight SET.
+        Returns the number of requeued items.
+        """
+        import json as _json
+        members = await self.redis.smembers(self.NIGHTWATCHER_INFLIGHT)
+        if not members:
+            return 0
+        json_members = [m if isinstance(m, str) else m.decode() for m in members]
+        mapping: dict[str, float] = {}
+        for jm in json_members:
+            try:
+                data = _json.loads(jm)
+                mapping[jm] = data.get("staged_at", 0.0)
+            except Exception:
+                logger.warning("Nightwatcher: skipping corrupt inflight member: %s", jm[:100])
+        if mapping:
+            await self.redis.zadd(self.NIGHTWATCHER_PENDING, mapping)
+        await self.redis.delete(self.NIGHTWATCHER_INFLIGHT)
+        logger.warning("Nightwatcher: requeued %d inflight items from prior crash", len(mapping))
+        return len(mapping)
+
+    async def count_pending_escalations(self) -> int:
+        """Count pending escalations waiting for next sweep."""
+        return await self.redis.zcard(self.NIGHTWATCHER_PENDING)
+
+    async def persist_shift_report(self, report) -> None:
+        """Persist a ShiftReport for the Shifts UI. SET + ZADD index."""
+        key = f"{self.SHIFT_PREFIX}{report.shift_date}:{report.window}"
+        await self.redis.set(key, report.model_dump_json(), ex=self.SHIFT_TTL)
+        await self.redis.zadd(self.SHIFT_INDEX, {f"{report.shift_date}:{report.window}": report.started_at or time.time()})
+        logger.info("Nightwatcher: persisted shift report %s:%s (status=%s)", report.shift_date, report.window, report.status)
+
+    async def get_shift_report(self, date: str, window: str):
+        """Get a persisted ShiftReport by date and window."""
+        from ..models import ShiftReport
+        raw = await self.redis.get(f"{self.SHIFT_PREFIX}{date}:{window}")
+        if not raw:
+            return None
+        return ShiftReport.model_validate_json(raw)
+
+    async def list_shift_reports(self, from_ts: float, to_ts: float) -> list[dict]:
+        """List shift report metadata for a time range. ZRANGEBYSCORE + MGET."""
+        import json as _json
+        keys = await self.redis.zrangebyscore(self.SHIFT_INDEX, from_ts, to_ts)
+        if not keys:
+            return []
+        decoded = [k if isinstance(k, str) else k.decode() for k in keys]
+        full_keys = [f"{self.SHIFT_PREFIX}{k}" for k in decoded]
+        raw_reports = await self.redis.mget(full_keys)
+        results = []
+        for raw in raw_reports:
+            if not raw:
+                continue
+            data = _json.loads(raw)
+            results.append({
+                "shift_date": data.get("shift_date", ""),
+                "window": data.get("window", ""),
+                "status": data.get("status", ""),
+                "escalation_count": len(data.get("manifest", [])),
+                "incident_count": len(data.get("incidents", [])),
+                "noise_reduction_pct": data.get("metrics", {}).get("noise_reduction_pct", 0),
+            })
+        results.sort(key=lambda r: r["shift_date"], reverse=True)
+        return results

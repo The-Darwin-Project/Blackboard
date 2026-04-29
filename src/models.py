@@ -495,6 +495,63 @@ class RefineResponse(BaseModel):
 
 
 # =============================================================================
+# Nightwatcher (Shift Consolidation Agent)
+# =============================================================================
+
+class StagedEscalation(BaseModel):
+    """An escalation staged for Nightwatcher consolidation instead of immediate Smartsheet write."""
+    event_id: str = Field(..., description="Source event ID (e.g., evt-09ef9c7c)")
+    service: str = Field(..., description="Affected service or kargo stage")
+    source: str = Field(..., description="Event source: aligner | headhunter | timekeeper")
+    reason: str = Field(..., description="Original event reason")
+    summary: str = Field(..., max_length=200, description="Brain's create_incident summary")
+    platform: str = Field("", description="Affected platform (Konflux, Kargo, etc.)")
+    priority: str = Field("Normal", description="Normal | Major | Critical")
+    description: str = Field("", description="Brain's create_incident description")
+    evidence_snapshot: dict = Field(default_factory=dict, description="Serialized EventEvidence at staging time")
+    conversation_summary: str = Field("", max_length=500, description="Last 3 non-automated turns")
+    slack_thread_url: str = Field("", description="Slack thread URL for traceability")
+    staged_at: float = Field(default_factory=time.time, description="Unix timestamp when staged")
+
+
+class ShiftInvestigation(BaseModel):
+    """An on-call agent investigation dispatched during a Nightwatcher sweep."""
+    task: str = Field(..., description="Fixed-template investigation prompt sent to ephemeral agent")
+    service: str = Field("", description="Target service investigated")
+    agent_result: str = Field("", description="Agent response text")
+    duration_seconds: float = Field(0.0, description="Investigation wall-clock time")
+    cluster_id: str = Field("", description="Which incident cluster this investigated")
+
+
+class ShiftIncident(BaseModel):
+    """A consolidated incident created by the Nightwatcher in Smartsheet."""
+    platform: str = Field(..., description="Affected platform")
+    summary: str = Field(..., description="Consolidated root cause summary")
+    description: str = Field("", description="Full consolidated description")
+    priority: str = Field("Normal", description="Normal | Major | Critical")
+    status: str = Field("New", description="New | Self-Resolved")
+    affected_events: list[str] = Field(default_factory=list, description="Event IDs consolidated into this incident")
+    smartsheet_row_id: str = Field("", description="Smartsheet row ID after creation")
+    smartsheet_url: str = Field("", description="Smartsheet permalink")
+
+
+class ShiftReport(BaseModel):
+    """Persisted result of a Nightwatcher sweep for the Shifts UI."""
+    shift_date: str = Field(..., description="Date string YYYY-MM-DD")
+    window: Literal["morning", "evening"] = Field(..., description="Sweep window")
+    window_start: str = Field(..., description="ISO timestamp of window start")
+    window_end: str = Field(..., description="ISO timestamp of window end")
+    status: Literal["completed", "running", "failed", "empty"] = Field("running")
+    manifest: list[StagedEscalation] = Field(default_factory=list, description="All staged escalations input")
+    incidents: list[ShiftIncident] = Field(default_factory=list, description="Consolidated incidents created")
+    investigations: list[ShiftInvestigation] = Field(default_factory=list, description="On-call agent dispatches")
+    summary_text: str = Field("", description="Slack shift summary text")
+    metrics: dict = Field(default_factory=dict, description="escalation_count, incident_count, noise_reduction_pct, etc.")
+    started_at: Optional[float] = Field(None, description="Sweep start timestamp")
+    completed_at: Optional[float] = Field(None, description="Sweep completion timestamp")
+
+
+# =============================================================================
 # API Response Models
 # =============================================================================
 

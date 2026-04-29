@@ -16,6 +16,7 @@ import os
 from .types import (
     ALIGNER_TOOL_SCHEMAS,
     BRAIN_TOOL_SCHEMAS,
+    NIGHTWATCHER_TOOL_SCHEMAS,
     FunctionCall,
     LLMChunk,
     LLMPort,
@@ -32,6 +33,7 @@ __all__ = [
     "LLMPort",
     "BRAIN_TOOL_SCHEMAS",
     "ALIGNER_TOOL_SCHEMAS",
+    "NIGHTWATCHER_TOOL_SCHEMAS",
     "QuotaTracker",
     "QuotaExhaustedError",
 ]

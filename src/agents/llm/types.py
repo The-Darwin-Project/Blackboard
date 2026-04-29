@@ -754,3 +754,184 @@ ALIGNER_TOOL_SCHEMAS: list[dict] = [
         },
     },
 ]
+
+
+# =============================================================================
+# Nightwatcher Tool Schemas (shift consolidation agent)
+# =============================================================================
+# Phase-gated: tool descriptions indicate which phase(s) they are available in.
+# The Nightwatcher's get_phase_tools() filters by current_phase at runtime.
+
+NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
+    {
+        "name": "set_phase",
+        "description": (
+            "Transition between workflow phases. Phases are sequential: "
+            "review -> investigate -> report. You cannot skip phases or go backwards. "
+            "Call once when you are ready to move to the next phase."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "string",
+                    "enum": ["review", "investigate", "report"],
+                    "description": (
+                        "review: read event reports, journals, and deep memory to understand the shift. "
+                        "investigate: dispatch on-call agents for live data on unresolved issues. "
+                        "report: write consolidated incidents to the tracking sheet and post the shift summary."
+                    ),
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "Why you are entering this phase (one sentence).",
+                },
+            },
+            "required": ["phase", "reasoning"],
+        },
+    },
+    {
+        "name": "get_event_report",
+        "description": (
+            "(review, investigate) Read the full closed event report for a specific event. "
+            "Returns the complete markdown conversation history with agent actions, "
+            "plans, and outcomes. Use to understand WHAT happened, not just the manifest summary."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "Event ID from the manifest (e.g., evt-09ef9c7c)",
+                },
+            },
+            "required": ["event_id"],
+        },
+    },
+    {
+        "name": "search_journal",
+        "description": (
+            "(review, investigate) Read recent ops journal entries for a service. "
+            "Returns timestamped entries showing recent event closures, anomaly "
+            "patterns, and operational history. Use to detect oscillation patterns."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Service name to look up in the ops journal",
+                },
+            },
+            "required": ["service"],
+        },
+    },
+    {
+        "name": "consult_deep_memory",
+        "description": (
+            "(review, investigate) Search vectorized operational history for similar "
+            "past events. Returns scored matches with symptom, root_cause, fix_action, "
+            "and recurrence count. Use to determine if a root cause is recurring."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Semantic search query describing the pattern (e.g., 's390x host pool exhaustion')",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "dispatch_investigation",
+        "description": (
+            "(investigate only) Send an on-call sysadmin agent to check live cluster "
+            "state for a service. The investigation uses a fixed template -- you only "
+            "provide the service name. The agent reports pipeline health, current errors, "
+            "and whether manual intervention is needed. "
+            "The service must be in the manifest. Maximum 3 dispatches per sweep."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Service name from the manifest to investigate",
+                },
+            },
+            "required": ["service"],
+        },
+    },
+    {
+        "name": "create_incident",
+        "description": (
+            "(report only) Create a consolidated incident in the tracking sheet. "
+            "Call ONCE per distinct root cause cluster, not per event. "
+            "The affected_events array must contain all event IDs consolidated "
+            "into this incident. System fields (labels, components, reporter, date) "
+            "are auto-populated by the handler."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "platform": {
+                    "type": "string",
+                    "enum": [
+                        "CPaaS", "Konflux", "Kargo", "CNV2 Cluster",
+                        "QE-Smoke tests", "QE-Gating", "CVP", "GitLab CEE",
+                        "Quay", "Brew", "Errata", "Candidate-releases",
+                        "Downstream-Sync", "Jira",
+                    ],
+                    "description": "Affected platform (infer from escalation evidence)",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One-line consolidated root cause summary (max 200 chars)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Full consolidated description including: root cause, "
+                        "affected services list, timeline, investigation findings if any"
+                    ),
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["Normal", "Major", "Critical"],
+                    "description": "Critical if deep_memory shows 3+ recurrences in 14 days or active crisis",
+                },
+                "affected_events": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "All event IDs consolidated into this incident",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["New", "Self-Resolved"],
+                    "description": "New if still active at sweep time, Self-Resolved if probes confirmed recovery",
+                },
+            },
+            "required": ["platform", "summary", "description", "priority", "affected_events"],
+        },
+    },
+    {
+        "name": "post_shift_summary",
+        "description": (
+            "(report only) Post the end-of-shift summary to the Slack infra channel. "
+            "Call once, after all incidents are created. Include: total escalations, "
+            "incident count, noise reduction percentage, critical findings."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "The shift report text for Slack notification",
+                },
+            },
+            "required": ["summary"],
+        },
+    },
+]
