@@ -289,7 +289,7 @@ class Headhunter:
         prompt = self._build_analysis_prompt(context)
         try:
             response = await adapter.generate(
-                system="You are a GitLab MR triage agent. Classify and plan.",
+                system_prompt="You are a GitLab MR triage agent. Classify and plan.",
                 contents=prompt,
                 temperature=self._temperature,
                 max_output_tokens=10000,

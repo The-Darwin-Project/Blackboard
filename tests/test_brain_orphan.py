@@ -285,8 +285,8 @@ class TestPhaseInitialization:
         brain.blackboard.update_event_phase.assert_awaited_once_with("evt-orphan-1", "triage")
 
     @pytest.mark.asyncio
-    async def test_set_phase_triage_when_already_triage_is_noop(self):
-        """set_phase('triage') when brain_phase=='triage' returns False (no re-invoke)."""
+    async def test_set_phase_triage_when_already_triage_writes_confirmation(self):
+        """set_phase('triage') when brain_phase=='triage' writes a confirmation turn and re-invokes."""
         brain = _make_brain()
         event = _make_blank_event(brain_phase="triage")
         event.conversation = [ConversationTurn(turn=1, actor="brain", action="triage")]
@@ -298,5 +298,9 @@ class TestPhaseInitialization:
             response_parts=None,
         )
 
-        assert result is False
+        assert result is True
         brain.blackboard.update_event_phase.assert_not_awaited()
+        brain.blackboard.append_turn.assert_awaited_once()
+        appended = brain.blackboard.append_turn.call_args[0][1]
+        assert appended.action == "phase"
+        assert "(confirmed)" in appended.thoughts

@@ -58,6 +58,10 @@
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
 #     In-memory only -- assumes single Brain instance per cluster. Multi-replica makes cap best-effort.
+# 35. [Gotcha]: set_phase no-op (already in requested phase) MUST still write a turn and return True.
+#     Returning False without a turn leaves event.conversation empty, triggering the orphan blank-event
+#     guard on the next scan (3 retries, force close). The LLM deterministically calls set_phase("triage")
+#     on fresh headhunter events because brain_phase defaults to "triage" at creation.
 # 34. [Pattern]: Event loop scan blank-event guard uses processing_started_at with queued_at
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
@@ -2642,8 +2646,17 @@ class Brain:
             event_doc = await self.blackboard.get_event(event_id)
             current_phase = event_doc.brain_phase if event_doc else None
             if current_phase is not None and phase == current_phase:
-                logger.debug(f"set_phase: already in {phase} for {event_id}, skipping")
-                return False
+                logger.debug(f"set_phase: confirmed {phase} for {event_id}")
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="phase",
+                    thoughts=f"Phase: {phase.upper()} (confirmed). {reasoning}",
+                    response_parts=response_parts,
+                    timestamp=time.time(),
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
             await self.blackboard.update_event_phase(event_id, phase)
             thoughts = f"Phase: {phase.upper()}. {reasoning}"
             logger.info(f"Phase transition: {current_phase} -> {phase} for {event_id} ({reasoning})")
