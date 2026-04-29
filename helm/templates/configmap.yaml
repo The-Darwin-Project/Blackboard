@@ -38,6 +38,11 @@ data:
   LLM_MODEL_TIMEKEEPER: "{{ .Values.gcp.llm.timekeeper.model }}"
   LLM_TEMPERATURE_TIMEKEEPER: "{{ .Values.gcp.llm.timekeeper.temperature }}"
   LLM_MAX_TOKENS_TIMEKEEPER: "{{ .Values.gcp.llm.timekeeper.maxOutputTokens }}"
+  # Nightwatcher (shift consolidation)
+  LLM_MODEL_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.model }}"
+  LLM_TEMPERATURE_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.temperature }}"
+  LLM_THINKING_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.thinkingLevel }}"
+  LLM_MAX_TOKENS_NIGHTWATCHER: "{{ .Values.gcp.llm.nightwatcher.maxOutputTokens }}"
   # Quota rate limiter
   LLM_TPM_LIMIT: "{{ .Values.gcp.tpmLimit }}"
   

@@ -147,6 +147,11 @@ gcp:
       model: "gemini-3.1-flash-lite-preview" # Instruction refinement (user-facing, fast)
       temperature: "0.3"
       maxOutputTokens: "2048"
+    nightwatcher:
+      model: "gemini-3-flash-preview" # Shift consolidation (high thinking for clustering)
+      temperature: "0.3"
+      thinkingLevel: "high"
+      maxOutputTokens: "8192"
   tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
   # Service account JSON secrets (pre-created K8s Secrets)
   # Brain SA -- for Brain orchestrator Vertex AI calls
@@ -402,6 +407,15 @@ timekeeper:
   pollInterval: "30" # seconds between poll cycles
   maxPerUser: "10" # max schedules per authenticated user
   maxTotal: "50" # max schedules system-wide
+# =============================================================================
+# Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
+# =============================================================================
+nightwatcher:
+  enabled: false # Set to true to intercept Brain escalations for batch consolidation
+  sweepCron: "0 6,18 * * *" # Twice daily: 06:00 UTC (morning) and 18:00 UTC (evening)
+  minPending: "1" # Minimum pending escalations to trigger a sweep
+  maxActive: "1" # Ephemeral agent concurrency limit for nightwatcher source
+  dispatchCap: "3" # Max investigation dispatches per sweep
 # =============================================================================
 # Dex OIDC Identity Provider (bundled, reverse-proxied via Brain at /dex/*)
 # Prerequisites: cert-manager operator installed in cluster

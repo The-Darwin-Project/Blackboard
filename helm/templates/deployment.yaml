@@ -319,6 +319,39 @@ spec:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_TIMEKEEPER
             {{- end }}
+            {{- if .Values.nightwatcher }}
+            # Nightwatcher (shift consolidation agent)
+            - name: NIGHTWATCHER_ENABLED
+              value: "{{ .Values.nightwatcher.enabled }}"
+            - name: NIGHTWATCHER_SWEEP_CRON
+              value: "{{ .Values.nightwatcher.sweepCron }}"
+            - name: NIGHTWATCHER_MIN_PENDING
+              value: "{{ .Values.nightwatcher.minPending }}"
+            - name: NIGHTWATCHER_MAX_ACTIVE
+              value: "{{ .Values.nightwatcher.maxActive }}"
+            - name: NIGHTWATCHER_DISPATCH_CAP
+              value: "{{ .Values.nightwatcher.dispatchCap }}"
+            - name: LLM_MODEL_NIGHTWATCHER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MODEL_NIGHTWATCHER
+            - name: LLM_TEMPERATURE_NIGHTWATCHER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_TEMPERATURE_NIGHTWATCHER
+            - name: LLM_THINKING_NIGHTWATCHER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_THINKING_NIGHTWATCHER
+            - name: LLM_MAX_TOKENS_NIGHTWATCHER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_NIGHTWATCHER
+            {{- end }}
             {{- if and .Values.slack.enabled .Values.slack.existingSecret }}
             # Slack integration (Socket Mode)
             - name: SLACK_BOT_TOKEN
