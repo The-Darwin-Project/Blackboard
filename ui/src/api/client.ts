@@ -565,3 +565,21 @@ export async function applyLessons(payload: {
     }),
   });
 }
+
+// =============================================================================
+// Shifts (Nightwatcher)
+// =============================================================================
+
+import type { ShiftReportSummary, ShiftReportFull, ShiftCurrentStatus } from './types';
+
+export async function getShiftsList(week: string): Promise<ShiftReportSummary[]> {
+  return fetchApi<ShiftReportSummary[]>(`/shifts/list?week=${week}`);
+}
+
+export async function getShiftDetail(date: string, window: string): Promise<ShiftReportFull> {
+  return fetchApi<ShiftReportFull>(`/shifts/${date}/${window}`);
+}
+
+export async function getCurrentShift(): Promise<ShiftCurrentStatus> {
+  return fetchApi<ShiftCurrentStatus>('/shifts/current');
+}

@@ -48,3 +48,11 @@ export const PHASE_COLORS: Record<string, { bg: string; text: string; border: st
   escalate:    { bg: '#7f1d1d', text: '#fca5a5', border: '#ef4444', label: 'Escalate' },
   close:       { bg: '#1c1917', text: '#a8a29e', border: '#57534e', label: 'Close' },
 };
+
+export const SHIFT_STATUS_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {
+  empty:     { bg: '#33415515', text: '#64748b', border: '#334155', label: 'Empty' },
+  completed: { bg: '#22c55e15', text: '#4ade80', border: '#22c55e', label: 'Completed' },
+  running:   { bg: '#6366f115', text: '#818cf8', border: '#6366f1', label: 'Running' },
+  pending:   { bg: '#f59e0b15', text: '#fcd34d', border: '#f59e0b', label: 'Pending' },
+  failed:    { bg: '#ef444415', text: '#f87171', border: '#ef4444', label: 'Failed' },
+};

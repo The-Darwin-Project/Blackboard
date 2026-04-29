@@ -308,6 +308,68 @@ export interface AppConfig {
   feedbackFormUrl: string;
   appVersion: string;
   auth?: AuthConfig;
+  nightwatcher?: { enabled: boolean };
+}
+
+// =============================================================================
+// Shifts (Nightwatcher)
+// =============================================================================
+
+export interface ShiftReportSummary {
+  shift_date: string;
+  window: 'morning' | 'evening';
+  status: 'completed' | 'running' | 'empty' | 'failed';
+  escalation_count: number;
+  incident_count: number;
+  noise_reduction_pct: number;
+}
+
+export interface StagedEscalationDTO {
+  event_id: string;
+  service: string;
+  source: string;
+  platform: string;
+  priority: string;
+  summary: string;
+  description: string;
+  staged_at: number;
+}
+
+export interface ShiftIncidentDTO {
+  platform: string;
+  summary: string;
+  description: string;
+  priority: string;
+  status: string;
+  affected_events: string[];
+  smartsheet_row_id: string;
+  smartsheet_url: string;
+}
+
+export interface ShiftInvestigationDTO {
+  task: string;
+  service: string;
+  agent_result: string;
+  duration_seconds: number;
+  cluster_id: string;
+}
+
+export interface ShiftReportFull extends ShiftReportSummary {
+  window_start: string;
+  window_end: string;
+  manifest: StagedEscalationDTO[];
+  incidents: ShiftIncidentDTO[];
+  investigations: ShiftInvestigationDTO[];
+  summary_text: string;
+  metrics: Record<string, number>;
+  started_at: number | null;
+  completed_at: number | null;
+}
+
+export interface ShiftCurrentStatus {
+  pending_count: number;
+  next_sweep_utc: string;
+  enabled: boolean;
 }
 
 // =============================================================================
