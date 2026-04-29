@@ -39,6 +39,7 @@ from .routes import (
     metrics_router,
     queue_router,
     reports_router,
+    shifts_router,
     telemetry_router,
     timekeeper_router,
     topology_router,
@@ -297,6 +298,27 @@ async def lifespan(app: FastAPI):
             logger.warning("TIMEKEEPER_ENABLED=true but DEX_ENABLED=false -- TimeKeeper requires auth, disabled")
         else:
             logger.info("TimeKeeperObserver disabled (TIMEKEEPER_ENABLED=false)")
+        
+        # === NIGHTWATCHER OBSERVER ===
+        nightwatcher_enabled = os.getenv("NIGHTWATCHER_ENABLED", "false").lower() == "true"
+        nightwatcher_observer = None
+        if nightwatcher_enabled:
+            from .observers.nightwatcher import NightwatcherObserver
+            nightwatcher_observer = NightwatcherObserver(
+                blackboard=blackboard,
+                registry=agent_registry,
+                bridge=task_bridge,
+                provisioner=getattr(brain, '_ephemeral_provisioner', None),
+                smartsheet_adapter=brain._get_smartsheet_incident_adapter(),
+                archivist=archivist,
+                slack_notify=lambda msg: asyncio.ensure_future(
+                    brain._broadcast({"type": "nightwatcher_summary", "text": msg})
+                ),
+            )
+            await nightwatcher_observer.start()
+            logger.info("NightwatcherObserver started")
+        else:
+            logger.info("NightwatcherObserver disabled (NIGHTWATCHER_ENABLED=false)")
     
     logger.info("Darwin Blackboard ready")
     
@@ -341,6 +363,11 @@ async def lifespan(app: FastAPI):
     if redis and timekeeper_observer:
         await timekeeper_observer.stop()
         logger.info("TimeKeeperObserver stopped")
+    
+    # Stop Nightwatcher observer
+    if redis and nightwatcher_observer:
+        await nightwatcher_observer.stop()
+        logger.info("NightwatcherObserver stopped")
     
     await close_redis()
     logger.info("Redis connection closed")
@@ -491,6 +518,9 @@ async def get_config() -> dict:
         }
     else:
         config["auth"] = {"enabled": False}
+    config["nightwatcher"] = {
+        "enabled": os.getenv("NIGHTWATCHER_ENABLED", "false").lower() == "true",
+    }
     return config
 
 
@@ -557,6 +587,7 @@ app.include_router(kargo_router)
 if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)
+    app.include_router(shifts_router)
 
 
 # =============================================================================
