@@ -5,6 +5,7 @@
 # 3. [Gotcha]: ConversationTurn.status defaults to SENT for backward compat with existing Redis data.
 # 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
 # 5. [Pattern]: EventDocument.slack_* fields and ConversationTurn.source are Optional for backward compat with existing Redis data (pre-Slack events have None).
+# 6. [Pattern]: EventDocument.created_by_email is Optional[str] for backward compat -- existing Redis events deserialize with None.
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -359,6 +360,11 @@ class EventDocument(BaseModel):
     last_dispatched_at: Optional[float] = Field(None, description="Last select_agent call (multi-agent: tracks most recent)")
     last_completed_at: Optional[float] = Field(None, description="Last agent task completion")
     closed_at: Optional[float] = Field(None, description="When close_event() persisted the closure")
+    # Multi-tenant ownership
+    created_by_email: Optional[str] = Field(
+        None,
+        description="Email of the user who created this event (stable identity for multi-tenant filtering)"
+    )
 
 
 # =============================================================================

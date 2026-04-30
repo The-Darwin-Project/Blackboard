@@ -7,6 +7,7 @@
 # 5. [Pattern]: Slack channel init is conditional on SLACK_BOT_TOKEN + SLACK_APP_TOKEN env vars. Graceful degradation if missing.
 # 6. [Pattern]: /agent/ws endpoint delegates to agent_ws_handler.py. Registry + Bridge on app.state, initialized in lifespan().
 # 7. [Gotcha]: brain._headhunter_close_signal must be assigned before asyncio.create_task(brain.start_event_loop()) so startup stale cleanup can wake Headhunter.
+# 8. [Pattern]: auth_enabled on DashboardWSAdapter is (DEX_ENABLED or TRUSTED_PROXY_ENABLED) -- fail-closed when either auth mode is active.
 """
 Darwin Blackboard (Brain) - FastAPI Application
 
@@ -44,7 +45,7 @@ from .routes import (
     timekeeper_router,
     topology_router,
 )
-from .auth import DEX_ENABLED, set_oidc_adapter
+from .auth import DEX_ENABLED, TRUSTED_PROXY_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
 from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
@@ -144,7 +145,7 @@ async def lifespan(app: FastAPI):
         # Dashboard WebSocket adapter (implements BroadcastPort)
         # kargo_observer may not exist yet; attached after Kargo init below
         from .adapters.dashboard_ws import DashboardWSAdapter
-        dashboard_adapter = DashboardWSAdapter(brain=brain, blackboard=blackboard, auth_enabled=DEX_ENABLED)
+        dashboard_adapter = DashboardWSAdapter(brain=brain, blackboard=blackboard, auth_enabled=(DEX_ENABLED or TRUSTED_PROXY_ENABLED))
         brain.register_channel(dashboard_adapter)
         app.state.dashboard_adapter = dashboard_adapter
         logger.info("Brain orchestrator initialized with Dashboard WS adapter")

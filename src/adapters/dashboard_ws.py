@@ -6,6 +6,7 @@
 # 4. [Constraint]: Brain and Blackboard injected via constructor. No app.state access.
 # 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
 # 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
+# 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -107,10 +108,11 @@ class DashboardWSAdapter:
             evidence=EventEvidence(
                 display_text=message,
                 source_type="chat",
-                triggered_by="dashboard",
+                triggered_by=user.source,
                 domain="disorder",
                 severity="info",
             ),
+            created_by_email=user.email,
         )
         image = data.get("image")
         if image and len(image) > 1_400_000:

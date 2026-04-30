@@ -7,6 +7,7 @@
 # 5. [Pattern]: Journal writes happen in 3 places: Brain._close_and_broadcast(), queue.py close_event_by_user(), Brain._startup_cleanup().
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
+# 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -1291,6 +1292,7 @@ class BlackboardState:
         reason: str,
         evidence: "str | EventEvidence",
         subject_type: str = "service",
+        created_by_email: Optional[str] = None,
     ) -> str:
         """Create a new event and add to the queue for Brain triage.
 
@@ -1314,6 +1316,7 @@ class BlackboardState:
                 timeDate=datetime.now(timezone.utc).isoformat(),
             ),
             queued_at=time.time(),
+            created_by_email=created_by_email,
         )
         # Store event document
         await self.redis.set(

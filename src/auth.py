@@ -6,15 +6,19 @@
 # 4. [Pattern]: _validate_jwt() is pure crypto -- zero network calls. Keys provided by OIDCKeyAdapter.
 # 5. [Pattern]: get_user_from_request/get_user_from_slack are forward-looking scaffolding (RBAC v2).
 # 6. [Pattern]: require_auth is a FastAPI Depends() that enforces named identity (raises 401 if anonymous).
+# 7. [Pattern]: Trusted-proxy path (TRUSTED_PROXY_ENABLED) is checked BEFORE JWT. Uses hmac.compare_digest for timing-safe secret comparison.
+# 8. [Gotcha]: TRUSTED_PROXY_ENABLED and TRUSTED_PROXY_SECRET are read at import time. Tests must patch module constants directly, not env vars.
 """User identity domain -- pure JWT validation and UserContext abstraction.
 
 When dex.enabled=false (default): returns anonymous UserContext for Dashboard users.
 When dex.enabled=true:  validates JWT against pre-cached keys, returns named UserContext.
+When TRUSTED_PROXY_ENABLED=true: accepts X-Forwarded-Email + X-BFF-Token from in-cluster BFF.
 
 Network concerns (JWKS fetch, SSL) live in adapters/oidc_adapter.py, not here.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from dataclasses import dataclass, field
@@ -31,6 +35,9 @@ logger = logging.getLogger(__name__)
 DEX_ENABLED = os.getenv("DEX_ENABLED", "false").lower() == "true"
 DEX_ISSUER_URL = os.getenv("DEX_ISSUER_URL", "")
 DEX_CLIENT_ID = os.getenv("DEX_CLIENT_ID", "darwin-dashboard")
+
+TRUSTED_PROXY_ENABLED = os.getenv("TRUSTED_PROXY_ENABLED", "false").lower() == "true"
+TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET", "")
 
 _oidc_adapter: OIDCKeyAdapter | None = None
 
@@ -95,12 +102,27 @@ def _claims_to_user(claims: dict) -> UserContext:
 
 
 def get_user_from_websocket(websocket) -> UserContext:
-    """Extract user identity from WebSocket query param ?token=<JWT>.
+    """Extract user identity from WebSocket connection.
 
-    When DEX_ENABLED=false: returns anonymous stub.
-    When DEX_ENABLED=true: validates JWT, returns named UserContext.
+    Priority:
+    1. Trusted proxy header (X-Forwarded-Email + X-BFF-Token) when TRUSTED_PROXY_ENABLED
+    2. JWT from ?token= query param when DEX_ENABLED
+    3. Anonymous fallback
+
     On validation failure: returns anonymous (caller decides whether to reject).
     """
+    if TRUSTED_PROXY_ENABLED:
+        bff_token = websocket.headers.get("x-bff-token", "")
+        forwarded_email = websocket.headers.get("x-forwarded-email", "")
+        if bff_token and forwarded_email and hmac.compare_digest(bff_token, TRUSTED_PROXY_SECRET):
+            logger.info("Trusted proxy auth: %s (source=release-console)", forwarded_email)
+            return UserContext(
+                user_id=forwarded_email,
+                display_name=forwarded_email.split("@")[0],
+                email=forwarded_email,
+                source="release-console",
+            )
+
     if not DEX_ENABLED:
         return UserContext()
 

@@ -5,6 +5,7 @@
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
 # 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
 # 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
+# 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
 """
 Conversation Queue API - Event document management.
 
@@ -74,6 +75,7 @@ async def list_active_events(
                 "evidence": _serialize_evidence(event),
                 "turns": len(event.conversation),
                 "created": event.event.timeDate,
+                "created_by_email": event.created_by_email,
             })
     return events
 
@@ -356,6 +358,7 @@ async def list_closed_events(
                 "evidence": _serialize_evidence(event),
                 "turns": len(event.conversation),
                 "created": event.event.timeDate,
+                "created_by_email": event.created_by_email,
             })
     return events
 
