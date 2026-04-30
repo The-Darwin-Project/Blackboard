@@ -29,12 +29,20 @@
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
-# 25. [Pattern]: WIP cap: _execute_function_call("select_agent") may recursively call _execute_function_call("defer_event") when dispatch semaphore is locked. This is safe -- defer_event does not recurse back into select_agent. Do NOT add agent-dispatching logic to the defer_event handler.
+# 25. [Pattern]: WIP cap (two layers):
+#     Layer 1 (per-source): _get_source_wip_limit + _count_source_wip gate NEW->ACTIVE transition.
+#       Counts events in ACTIVE+DEFERRED status for the source. NEW events are input buffer, not WIP.
+#       ONLY applies to _EPHEMERAL_ONLY_SOURCES (aligner, headhunter, timekeeper) -- sources whose
+#       events exclusively use ephemeral agents. Internal-agent sources (chat, slack) are NOT gated
+#       at admission; their bottleneck is agent idle/busy at dispatch time.
+#       {SOURCE}_MAX_ACTIVE env var (default 1 for ephemeral sources). Event close is the release trigger.
+#     Layer 2 (global): _dispatch_semaphore on select_agent. May recursively call defer_event -- safe,
+#       defer_event does not recurse back into select_agent.
+#     DO NOT add agent-dispatching logic to the defer_event handler.
 # 26. [Pattern]: Ephemeral dispatch is two-tier: (a) primary -- headhunter/timekeeper/kargo_stage always use ephemeral,
 #     (b) overflow -- chat/slack scale to ephemeral when local sidecars are full, gated by {SOURCE}_MAX_ACTIVE env var.
 #     Circuit breaker for overflow defers (local was already full); circuit breaker for primary falls back to local.
-#     The overflow availability check (get_available) is best-effort, not a reservation -- a race between check
-#     and dispatch is tolerable (false positive = unnecessary ephemeral, not a failure).
+#     Provisioner is pure plumbing (spawn/terminate). Capacity logic lives in Brain (event-based WIP gate).
 #     Volume write gate: write_event_to_volume runs only when agent_id_override is None (local sidecar dispatch).
 #     Ephemeral agents fetch the event document via REST (/events/{id}/document), not the shared volume.
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
@@ -386,6 +394,39 @@ class Brain:
         self._journal_cache[service] = (now, entries)
         return entries
 
+    # Sources whose events exclusively use ephemeral agents (Tier 1).
+    # These get WIP-gated at admission (NEW->ACTIVE). Internal-agent sources
+    # (chat, slack) are NOT gated here -- their bottleneck is dispatch-time
+    # agent availability, not event count.
+    _EPHEMERAL_ONLY_SOURCES = frozenset({"aligner", "headhunter", "timekeeper"})
+
+    def _get_source_wip_limit(self, source: str) -> int:
+        """Per-source WIP limit for ephemeral-only sources.
+
+        Returns 0 (unlimited) for sources that use internal agents (chat,
+        slack). Only Tier 1 ephemeral sources are admission-gated.
+        """
+        if source not in self._EPHEMERAL_ONLY_SOURCES:
+            return 0
+        env_key = f"{source.upper().replace('-', '_')}_MAX_ACTIVE"
+        return int(os.environ.get(env_key, "1"))
+
+    async def _count_source_wip(self, source: str, exclude_id: str = "") -> int:
+        """Count events admitted for a source (status ACTIVE or DEFERRED).
+
+        NEW events are in the input buffer and don't count as WIP.
+        CLOSED events are out of the system.
+        """
+        active_ids = await self.blackboard.get_active_events()
+        count = 0
+        for eid in active_ids:
+            if eid == exclude_id:
+                continue
+            evt = await self.blackboard.get_event(eid)
+            if evt and evt.source == source and evt.status in (EventStatus.ACTIVE, EventStatus.DEFERRED):
+                count += 1
+        return count
+
     async def _get_adapter(self):
         """Lazy-load LLM adapter (Gemini or Claude based on LLM_PROVIDER)."""
         if self._adapter is None:
@@ -615,7 +656,19 @@ class Brain:
             return
 
         # Lifecycle: transition NEW -> ACTIVE on first processing
+        # Per-source WIP gate: count events already admitted (ACTIVE + DEFERRED)
+        # for this source. If at capacity, leave event as NEW and skip processing.
         if event.status == EventStatus.NEW:
+            source_limit = self._get_source_wip_limit(event.source)
+            if source_limit > 0:
+                wip = await self._count_source_wip(event.source, exclude_id=event_id)
+                if wip >= source_limit:
+                    logger.info(
+                        "Source WIP gate: %s at capacity (%d/%d). "
+                        "Event %s stays NEW.",
+                        event.source, wip, source_limit, event_id,
+                    )
+                    return
             if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
                 logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
                 await self._broadcast({
@@ -3127,7 +3180,7 @@ class Brain:
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
                 from ..dependencies import get_registry_and_bridge
-                from .ephemeral_provisioner import CAPACITY_SENTINEL, INFRA_SENTINEL
+                from .ephemeral_provisioner import INFRA_SENTINEL
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
                     async def on_huddle(data: dict) -> None:
@@ -3172,9 +3225,7 @@ class Brain:
                                 ephemeral_is_overflow = True
 
                     if use_ephemeral:
-                        provision_result = await self._ephemeral_provisioner.ensure_agent(
-                            event_id, source=event_doc.source,
-                        )
+                        provision_result = await self._ephemeral_provisioner.ensure_agent(event_id)
                         if provision_result is None:
                             if ephemeral_is_overflow:
                                 logger.info(
@@ -3189,17 +3240,11 @@ class Brain:
                                 return
                             else:
                                 logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
-                        elif isinstance(provision_result, str):
-                            defer_seconds = 120 if provision_result == CAPACITY_SENTINEL else 60
-                            reason = (
-                                "Waiting for ephemeral agent slot"
-                                if provision_result == CAPACITY_SENTINEL
-                                else "Tekton infrastructure unavailable"
-                            )
-                            logger.info("Deferring %s for %ds: %s", event_id, defer_seconds, reason)
+                        elif provision_result == INFRA_SENTINEL:
+                            logger.info("Deferring %s for 60s: Tekton infrastructure unavailable", event_id)
                             await self._execute_function_call(
                                 event_id, "defer_event",
-                                {"delay_seconds": defer_seconds, "reason": reason},
+                                {"delay_seconds": 60, "reason": "Tekton infrastructure unavailable"},
                             )
                             return
                         else:

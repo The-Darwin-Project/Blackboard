@@ -135,11 +135,11 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
     sweep_event_id = f"nw-sweep-{int(time.time())}"
     start = time.time()
     try:
-        from ..agents.ephemeral_provisioner import CAPACITY_SENTINEL, INFRA_SENTINEL
+        from ..agents.ephemeral_provisioner import INFRA_SENTINEL
         from ..agents.dispatch import dispatch_to_agent
-        agent = await ctx.provisioner.ensure_agent(sweep_event_id, "nightwatcher")
-        if agent in (CAPACITY_SENTINEL, INFRA_SENTINEL):
-            return f"Ephemeral agent unavailable ({agent}). Skipping investigation for {service}."
+        agent = await ctx.provisioner.ensure_agent(sweep_event_id)
+        if agent == INFRA_SENTINEL:
+            return f"Ephemeral agent unavailable (Tekton infra). Skipping investigation for {service}."
         if not agent:
             return "No ephemeral agent available. Skipping investigation."
         result_text, _ = await dispatch_to_agent(
