@@ -1,0 +1,110 @@
+---
+description: Nightwatcher agent -- shift consolidation daemon, phase-gated LLM loop, lease safety
+globs: "**/nightwatcher*.py"
+alwaysApply: false
+---
+
+# Nightwatcher (Agent 6) -- Shift Consolidation
+
+The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Smartsheet incidents. It runs a phase-gated Gemini Flash tool-calling session on a cron schedule (default 06:00/18:00 UTC).
+
+## Core Principle: LLM Decides, Code Executes
+
+The Nightwatcher contains ZERO routing or clustering logic. The Flash LLM session decides how to cluster events, which services to investigate, and what incidents to write. Code enforces mechanical safety: phase transitions, lease lifecycle, manifest accounting, and orphan re-injection.
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `nightwatcher.py` | Observer lifecycle (start/stop/cron), Flash tool-calling loop, phase gating, orphan re-injection |
+| `nightwatcher_tools.py` | Stateless tool handlers, `NightwatcherContext` dataclass, `get_phase_tools()` phase filter |
+| `nightwatcher_prompt.py` | System prompt builder: identity, phase lifecycle, consolidation rules, manifest table |
+
+## Phase-Gated Tool Availability
+
+Tools are filtered by `get_phase_tools(current_phase)`. Phase transitions are strictly forward-only via `set_phase`:
+
+| Phase | Available Tools | Purpose |
+|---|---|---|
+| **review** | `set_phase`, `get_event_report`, `search_journal`, `consult_deep_memory` | Understand the shift -- read events, check history, identify clusters |
+| **investigate** | All review tools + `dispatch_investigation` | Verify clusters with live evidence via ephemeral agents |
+| **report** | `create_issue`, `post_shift_summary` | Write consolidated Smartsheet incidents and Slack summary |
+
+Phase transitions: `review` -> `investigate` -> `report`. Backward transitions are rejected.
+
+## Lease Pattern (Crash Safety)
+
+Escalations flow through a three-stage lease pipeline in Redis:
+
+```
+pending  ->  inflight  ->  commit / requeue
+```
+
+1. **Staging**: Brain's `report_incident` handler pushes to `darwin:nightwatcher:pending` when `NIGHTWATCHER_ENABLED=true`.
+2. **Lease**: `lease_pending_escalations()` atomically moves all pending items to `darwin:nightwatcher:inflight`.
+3. **Commit**: On success, `commit_inflight()` deletes the inflight set.
+4. **Requeue**: On crash or error, `requeue_inflight()` moves items back to pending (called on `start()` and on sweep failure).
+
+## Orphan Re-Injection
+
+After the LLM emits its final text response (no more tool calls), code checks:
+
+1. Which manifest event IDs were covered by `create_issue` calls (`affected_events` field).
+2. Uncovered IDs are "orphans." Code re-injects a user turn forcing the LLM to account for them.
+3. Max `MAX_ORPHAN_REINJECTIONS` (default 2) attempts. Remaining orphans after that are re-staged to pending via `restage_orphans()`.
+
+## Tool Naming Convention
+
+| Context | Tool Name | Writes To |
+|---|---|---|
+| Brain (real-time) | `report_incident` | Redis staging area (`darwin:nightwatcher:pending`) |
+| Nightwatcher (batch) | `create_issue` | Smartsheet via `SmartsheetIncidentAdapter` |
+
+The Brain's tool was renamed from `create_incident` to `report_incident` to avoid confusion -- Brain stages, Nightwatcher writes.
+
+## Redis Keys
+
+| Key | Type | Purpose |
+|---|---|---|
+| `darwin:nightwatcher:pending` | Sorted Set | Staged escalations awaiting next sweep (score = timestamp) |
+| `darwin:nightwatcher:inflight` | Set | Escalations currently being processed by a sweep |
+| `darwin:nightwatcher:shift:{date}:{window}` | Hash | Persisted ShiftReport (JSON) for the Shifts UI |
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `NIGHTWATCHER_ENABLED` | `false` | Master toggle. When true, Brain stages escalations instead of writing directly. |
+| `NIGHTWATCHER_SWEEP_CRON` | `0 6,18 * * *` | Cron expression for sweep schedule (06:00 and 18:00 UTC) |
+| `NIGHTWATCHER_MIN_PENDING` | `1` | Minimum pending escalations to trigger a sweep |
+| `NIGHTWATCHER_DISPATCH_CAP` | `3` | Max ephemeral investigations per sweep |
+| `LLM_MODEL_NIGHTWATCHER` | `gemini-3-flash-preview` | Flash model for the tool-calling session |
+| `LLM_TEMPERATURE_NIGHTWATCHER` | `0.3` | Low temperature for deterministic consolidation |
+| `LLM_MAX_TOKENS_NIGHTWATCHER` | `8192` | Max output tokens per LLM turn |
+| `LLM_THINKING_NIGHTWATCHER` | `high` | Thinking budget for complex clustering |
+
+## Two Shifts Per Day
+
+| Window | Cron Fire | Covers |
+|---|---|---|
+| Morning | 06:00 UTC | 18:00-06:00 UTC (graveyard shift) |
+| Evening | 18:00 UTC | 06:00-18:00 UTC (workday) |
+
+## Safety Invariants
+
+1. Every manifest event ID MUST appear in at least one `create_issue` call's `affected_events`. Orphans are mechanically re-injected or re-staged.
+2. `MAX_TOOL_ROUNDS = 50` caps the tool-calling loop as a safety net against infinite LLM loops.
+3. `requeue_inflight()` on startup recovers from prior crashes -- no data loss.
+4. Phase transitions are forward-only and single-step. LLM cannot skip phases.
+5. `dispatch_investigation` is capped at `NIGHTWATCHER_DISPATCH_CAP` per sweep.
+6. Ephemeral-only dispatch: Nightwatcher uses `EphemeralProvisioner` (Tekton TaskRun), never in-pod sidecars.
+
+## Shifts API & UI
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /shifts/list` | All shift reports (paginated) |
+| `GET /shifts/{date}/{window}` | Single shift report detail |
+| `GET /shifts/current` | Current or most recent shift |
+
+UI: `ShiftsPage.tsx` renders a calendar view of shifts with drill-down to incident detail.

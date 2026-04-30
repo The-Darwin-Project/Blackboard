@@ -18,6 +18,7 @@ graph TD
         Redis["Redis - State + Queue"]
         Aligner["Aligner - In-process + Flash"]
         Archivist["Archivist - Deep Memory"]
+        Nightwatcher["Nightwatcher - In-process + Flash"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
 
@@ -33,6 +34,7 @@ graph TD
 
     Brain <-->|state| Redis
     Redis <-->|state| Aligner
+    Redis <-->|staging| Nightwatcher
     Brain -->|archive| Archivist
     Archivist <-->|vectors| Qdrant
 
@@ -83,6 +85,7 @@ Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the B
 | **SysAdmin** | Execution | CLI sidecar (configurable: `gemini` or `claude`) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
 | **Developer** | Implementation | CLI sidecar (configurable: `gemini` or `claude`) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
 | **QE** | Verification | CLI sidecar (configurable: `gemini` or `claude`) | Test writing, test execution, verification of Developer changes |
+| **Nightwatcher** | Shift Consolidation | In-process Python + Vertex AI Flash | Phase-gated escalation review (review/investigate/report), batch clustering, Smartsheet incident writing, Slack shift summaries |
 
 ### Agent Dispatch (Reverse WebSocket)
 
@@ -205,6 +208,7 @@ Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automati
 - **TimeKeeper** -- Schedule one-shot or recurring tasks via Dashboard UI. LLM-powered instruction refinement aligns user intent with Brain capabilities. Observer fires when queue is idle (lowest priority). Events arrive as user requests with YAML frontmatter context
 - **Ephemeral Agents** -- On-demand Tekton TaskRun agents for Headhunter and TimeKeeper events. Circuit breaker falls back to sidecar after 2 infra failures. Prune trigger cleans up stuck TaskRuns via the same EventListener
 - **darwin.io Annotations** -- Service discovery via pod annotations (`darwin.io/monitored`, `darwin.io/service-name`, `darwin.io/icon`). Custom graph node icons per service. Aligner monitors annotated pods for anomalies including stuck Pending pods (>5min)
+- **Nightwatcher Shift Consolidation** -- End-of-shift agent that batch-processes Brain escalations. Phase-gated Flash LLM session (review -> investigate -> report) clusters events by root cause, dispatches ephemeral investigations, and writes deduplicated Smartsheet incidents. Two sweeps per day (06:00/18:00 UTC). Lease pattern (pending -> inflight -> commit/requeue) for crash safety. Orphan re-injection ensures no event is silently dropped.
 
 ## Autonomous Remediation Examples
 
@@ -224,6 +228,7 @@ The Brain and Aligner use the `google-genai` SDK. Sidecar agents use either Gemi
 | SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 | Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
 | QE sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
+| Nightwatcher | `google-genai` Python SDK | `gemini-3-flash-preview` |
 
 ## Quick Start
 
@@ -299,6 +304,14 @@ PATCH  /api/timekeeper/{id}/toggle  # Enable/disable (owner only)
 POST   /api/timekeeper/refine  # LLM instruction refinement (auth required)
 ```
 
+### Shifts (Nightwatcher)
+
+```text
+GET /shifts/list                # All shift reports (paginated)
+GET /shifts/{date}/{window}     # Single shift report detail (date=YYYY-MM-DD, window=morning|evening)
+GET /shifts/current             # Current or most recent shift report
+```
+
 ### Chat
 
 ```json
@@ -369,6 +382,12 @@ GET /events/                   # Architecture event timeline
 | `TIMEKEEPER_MAX_PER_USER` | Max schedules per authenticated user | `10` |
 | `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
 | `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.1-flash-lite-preview` |
+| `NIGHTWATCHER_ENABLED` | Enable Nightwatcher shift consolidation | `false` |
+| `NIGHTWATCHER_SWEEP_CRON` | Cron schedule for sweeps | `0 6,18 * * *` |
+| `NIGHTWATCHER_MIN_PENDING` | Min pending escalations to trigger sweep | `1` |
+| `NIGHTWATCHER_DISPATCH_CAP` | Max ephemeral investigations per sweep | `3` |
+| `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
+| `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
 | `DEBUG` | Enable debug logging | `false` |
 
 ## Safety
@@ -428,12 +447,16 @@ BlackBoard/
       topology.py            # Topology graph and Mermaid diagram
       telemetry.py           # Telemetry ingestion from services
       reports.py             # Reports SPA serving
+      shifts.py              # Shifts API (list, detail, current) for Nightwatcher shift reports
       timekeeper.py          # TimeKeeper CRUD + LLM refine (DEX auth required)
     models.py                # Pydantic models (EventDocument, ConversationTurn, PlanStep)
     auth.py                  # Dex OIDC identity + require_auth dependency
     observers/
       kubernetes.py          # K8s metrics observer (darwin.io annotations, pending pod detection)
       timekeeper.py          # TimeKeeper observer (idle-gated, ZPOPMIN, YAML frontmatter)
+      nightwatcher.py        # Nightwatcher observer (cron, Flash tool-calling loop, phase gating)
+      nightwatcher_tools.py  # Tool handlers, NightwatcherContext, phase filtering
+      nightwatcher_prompt.py # System prompt: phases, consolidation rules, manifest table
     main.py                  # FastAPI app, WebSocket endpoint, lifespan
   gemini-sidecar/
     Dockerfile               # Sidecar image (Node.js 22, CLI toolkit)
