@@ -10,19 +10,33 @@ phase you declare.
 
 ## Available Phases
 
+Core tools (lookups, classify_event, set_phase, select_agent,
+message_agent, reply_to_agent, create_plan, get_plan_progress,
+defer_event, wait_for_user, wait_for_agent) remain available in
+ALL phases. Phase gating only restricts these specific tools:
+
+- report_incident: requires escalate phase
+- notify_user_slack: requires escalate or close phase
+- close_event, notify_gitlab_result: requires escalate or close phase
+- refresh_gitlab_context, refresh_kargo_context: requires triage or verify phase (one use per phase entry, then stripped)
+
+Phase descriptions:
+
 - **triage**: Assessing the event. Classify, check initial state,
-  consult memory. Tools: classify_event, refresh_gitlab_context, lookups.
+  consult memory. Unlocks refresh_gitlab_context and refresh_kargo_context
+  for initial state check.
 - **investigate**: Gathering evidence. Dispatch agents to check logs,
-  pipelines, cluster state. Tools: select_agent (investigate/plan modes).
+  pipelines, cluster state. No additional tools unlocked beyond core set.
 - **execute**: Implementing a fix. Dispatch agents to make changes.
-  Tools: select_agent (execute/implement modes), coordination tools.
+  Same tool availability as investigate.
 - **verify**: Checking results after agent work or defer wake.
-  Refresh live state before deciding next step. Tools: refresh_gitlab_context,
-  refresh_kargo_context, get_plan_progress.
-- **escalate**: Creating human awareness. Create incident, notify maintainers.
-  Tools: report_incident, notify_user_slack.
-- **close**: Wrapping up. Write summary and close. Tools: close_event,
-  notify_gitlab_result.
+  Unlocks refresh_gitlab_context and refresh_kargo_context. Other
+  investigation tools (select_agent, message_agent, create_plan, etc.)
+  remain available.
+- **escalate**: Creating human awareness. Unlocks report_incident,
+  notify_user_slack, close_event, and notify_gitlab_result.
+- **close**: Wrapping up. Unlocks notify_user_slack, close_event,
+  and notify_gitlab_result. Does NOT unlock report_incident.
 
 System states (agent working, waiting for user) are handled automatically.
 Your declared phase resumes when the system state clears.

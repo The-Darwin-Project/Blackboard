@@ -14,6 +14,8 @@ Skills and rules describe WHAT the environment is. Timing comes from operational
 
 Let the LLM discover appropriate tools from its tool declarations. Describe the data or task needed, not the function to call. Do not list explicit tool/function names in prompts.
 
+**Exception:** Brain operational skills (`brain_skills/`) may reference tool names where execution order is safety-critical (e.g., `report_incident` before `close_event`, phase transitions). These are hard-sequenced workflows where ambiguity risks incorrect escalation or data loss.
+
 ## 3. No Negative Examples with Specific Patterns
 
 Models learn patterns from ALL examples, including "wrong" ones. Frame constraints positively. Instead of "Do NOT do X (e.g., bad-example)", write "Follow the convention established in Step N".

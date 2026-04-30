@@ -15,8 +15,8 @@ Nature: Hybrid Daemon (Python + Gemini LLM via google-genai for configuration)
 The Aligner processes incoming telemetry and updates the Blackboard layers.
 It can be configured via natural language (e.g., "Ignore errors for 1h").
 
-CLOSED-LOOP: The Aligner detects anomalies and triggers the Architect
-for autonomous analysis, completing the observation → strategy loop.
+CLOSED-LOOP: The Aligner detects anomalies and creates events for the
+Brain to process, completing the observation → triage loop.
 
 AIR GAP: This module may import google-genai (for Aligner LLM) but NOT kubernetes or git.
 """
@@ -149,7 +149,7 @@ class Aligner:
     - Buffer K8s Observer metrics (120s sliding window)
     - Apply filter rules for noise reduction
     - LLM-based anomaly analysis via Gemini Flash (every 120s)
-    - Detect anomalies and trigger Architect (closed-loop)
+    - Detect anomalies and create events for Brain (closed-loop)
     - Provide check_state() for Brain inline verification
     - Configurable via natural language (Gemini Flash via LLM adapter)
     """
@@ -714,7 +714,7 @@ class Aligner:
         Handle unhealthy pod detected by K8s observer.
         
         Called for ImagePullBackOff, CrashLoopBackOff, OOMKilled, etc.
-        Records event and triggers investigation + Architect analysis.
+        Records event and creates an event for Brain triage.
         """
         # Map pod state reasons to anomaly types
         if "OOMKilled" in reason:
