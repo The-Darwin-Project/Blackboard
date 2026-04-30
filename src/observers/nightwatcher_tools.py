@@ -161,6 +161,7 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
 async def _handle_create_incident(args: dict, ctx: NightwatcherContext) -> str:
     if not ctx.smartsheet_adapter:
         return "Smartsheet adapter not configured. Incident not created."
+    logger.info("Nightwatcher create_incident args: %s", {k: (v[:80] if isinstance(v, str) else v) for k, v in args.items()})
     fields = {
         "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
         "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Nightwatcher"),
