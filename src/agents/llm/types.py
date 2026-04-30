@@ -77,9 +77,9 @@ class LLMPort(Protocol):
 
 
 # =============================================================================
-# Brain Tool Schemas (11 tools -- plain dicts, provider-agnostic)
+# Brain Tool Schemas (plain dicts, provider-agnostic)
 # =============================================================================
-# Extracted from brain.py _build_brain_tools() FunctionDeclaration objects.
+# Phase-gated by brain.py. Skills in brain_skills/ are the canonical behavioral docs.
 # Each adapter converts these to its SDK's native format.
 
 BRAIN_TOOL_SCHEMAS: list[dict] = [

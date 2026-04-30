@@ -1,6 +1,7 @@
 # BlackBoard/src/agents/brain.py
 # @ai-rules:
-# 1. [Constraint]: ALL decision logic in BRAIN_SYSTEM_PROMPT + function declarations. Python = plumbing only.
+# 1. [Constraint]: ALL decision logic in system prompt + function declarations. Python = plumbing only.
+#    Active path: brain_skills/*.md (BrainSkillLoader). BRAIN_SYSTEM_PROMPT is deprecated fallback.
 # 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
 # 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
@@ -316,7 +317,7 @@ class Brain:
     """
     Brain orchestrator - thin shell around LLM function calling.
     
-    ALL decision logic lives in BRAIN_SYSTEM_PROMPT + function declarations.
+    ALL decision logic lives in system prompt (brain_skills/) + function declarations.
     Python code only polls, serializes, calls LLM, and executes the result.
     """
 

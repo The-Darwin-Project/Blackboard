@@ -77,8 +77,10 @@ Escalation creates human awareness. What happens next depends on the situation:
 In CHAOTIC events, the normal flow (triage -> investigate -> verify -> escalate)
 is compressed. Act first:
 
-- triage -> escalate -> close (immediate crisis response)
-- After stabilization, reclassify to COMPLICATED and resume normal flow
+- triage -> escalate (immediate crisis: report_incident + notify_user_slack)
+- close_event is NOT available in chaotic domain. To close, first reclassify
+  to COMPLICATED (via classify_event) then transition to the close phase.
+- After stabilization, reclassify to COMPLICATED and resume normal flow.
 
 The act-first principle overrides the verify-before-escalate guidance.
 
