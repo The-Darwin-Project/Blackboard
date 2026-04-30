@@ -132,7 +132,7 @@ class TestFullSweep:
         call_sequence = [
             MockResponse(function_call=MockFunctionCall("set_phase", {"phase": "investigate"})),
             MockResponse(function_call=MockFunctionCall("set_phase", {"phase": "report"})),
-            MockResponse(function_call=MockFunctionCall("create_incident", {
+            MockResponse(function_call=MockFunctionCall("create_issue", {
                 "platform": "Konflux", "summary": "Shared root cause",
                 "affected_events": ["evt-1", "evt-2"],
             })),
@@ -179,11 +179,11 @@ class TestOrphanReinjection:
         obs.blackboard.commit_inflight = AsyncMock()
         obs.blackboard.persist_shift_report = AsyncMock()
 
-        first_incident = MockResponse(function_call=MockFunctionCall("create_incident", {
+        first_incident = MockResponse(function_call=MockFunctionCall("create_issue", {
             "platform": "K", "summary": "S", "affected_events": ["evt-1"],
         }))
         text_done = MockResponse(text="Done.")
-        second_incident = MockResponse(function_call=MockFunctionCall("create_incident", {
+        second_incident = MockResponse(function_call=MockFunctionCall("create_issue", {
             "platform": "K", "summary": "S2", "affected_events": ["evt-2"],
         }))
         final_done = MockResponse(text="All done.")
@@ -229,7 +229,7 @@ class TestPhaseTransitions:
             MockResponse(function_call=MockFunctionCall("set_phase", {"phase": "investigate"})),
             MockResponse(function_call=MockFunctionCall("set_phase", {"phase": "review"})),
             MockResponse(function_call=MockFunctionCall("set_phase", {"phase": "report"})),
-            MockResponse(function_call=MockFunctionCall("create_incident", {
+            MockResponse(function_call=MockFunctionCall("create_issue", {
                 "platform": "K", "summary": "S", "affected_events": ["evt-1"],
             })),
             MockResponse(text="Done."),

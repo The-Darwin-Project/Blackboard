@@ -55,19 +55,19 @@ class TestPhaseGating:
         assert "consult_deep_memory" in names
         assert "search_journal" in names
         assert "dispatch_investigation" not in names
-        assert "create_incident" not in names
+        assert "create_issue" not in names
 
     def test_investigate_phase_adds_dispatch(self):
         tools = get_phase_tools("investigate")
         names = {t["name"] for t in tools}
         assert "dispatch_investigation" in names
         assert "get_event_report" in names
-        assert "create_incident" not in names
+        assert "create_issue" not in names
 
     def test_report_phase_write_only(self):
         tools = get_phase_tools("report")
         names = {t["name"] for t in tools}
-        assert "create_incident" in names
+        assert "create_issue" in names
         assert "post_shift_summary" in names
         assert "get_event_report" not in names
         assert "dispatch_investigation" not in names
@@ -236,14 +236,14 @@ class TestDispatchInvestigation:
 
 
 # =========================================================================
-# create_incident
+# create_issue
 # =========================================================================
 
 class TestCreateIncident:
     @pytest.mark.asyncio
     async def test_no_smartsheet_adapter(self):
         ctx = _make_ctx(smartsheet_adapter=None)
-        result = await execute_tool("create_incident", {
+        result = await execute_tool("create_issue", {
             "platform": "Konflux", "summary": "test",
             "affected_events": ["evt-1"],
         }, ctx)
@@ -256,7 +256,7 @@ class TestCreateIncident:
         ctx.smartsheet_adapter.create_incident = AsyncMock(
             return_value={"row_id": 12345, "sheet_url": "https://ss.com/row/12345"},
         )
-        result = await execute_tool("create_incident", {
+        result = await execute_tool("create_issue", {
             "platform": "Konflux", "summary": "Pipeline failures",
             "description": "All s390x pipelines failing",
             "priority": "Critical", "status": "New",
@@ -281,7 +281,7 @@ class TestCreateIncident:
             return {"row_id": 1, "sheet_url": ""}
 
         ctx.smartsheet_adapter.create_incident = capture_fields
-        await execute_tool("create_incident", {
+        await execute_tool("create_issue", {
             "platform": "P", "summary": "S", "affected_events": ["e"],
         }, ctx)
         assert captured_fields["Labels"] == "darwin-auto, release-incident"
@@ -294,7 +294,7 @@ class TestCreateIncident:
         ctx.smartsheet_adapter.create_incident = AsyncMock(
             side_effect=RuntimeError("API 500"),
         )
-        result = await execute_tool("create_incident", {
+        result = await execute_tool("create_issue", {
             "platform": "P", "summary": "S", "affected_events": [],
         }, ctx)
         assert "Failed to create incident" in result
