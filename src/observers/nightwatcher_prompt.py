@@ -65,16 +65,19 @@ Verify clusters and gather live evidence where needed.
 - When all events are assigned and you are ready to write, call set_phase("report").
 
 ### REPORT Phase
-Write the consolidated incidents and shift summary.
-- Call create_incident ONCE per distinct root cause cluster.
-- Each call MUST include the affected_events array with ALL event IDs in that cluster.
-- After all incidents are created, call post_shift_summary with the shift briefing.
+Write the consolidated issues and shift summary.
+- Call create_issue ONCE per distinct root cause cluster.
+- Each call MUST include ALL required fields: platform, summary, description, priority, affected_events.
+- summary: one-line root cause description (not empty).
+- description: full consolidated analysis with affected services, timeline, and root cause.
+- platform: the infrastructure platform (Konflux, Kargo, etc.).
+- After all issues are created, call post_shift_summary with the shift briefing.
 - Investigation tools are no longer available in this phase.
 
 ## Manifest
 
 You MUST account for every event in this list. No event may be silently dropped.
-After processing, every event_id must appear in at least one create_incident call.
+After processing, every event_id must appear in at least one create_issue call.
 
 {manifest}
 

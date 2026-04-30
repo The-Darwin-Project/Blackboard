@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Pattern]: Stateless tool handlers. All state lives in NightwatcherContext dataclass.
 # 2. [Constraint]: dispatch_investigation uses a FIXED server-side template. Service must be in manifest.
-# 3. [Constraint]: create_incident populates system fields (Labels, Components, Reporter) from env -- same contract as Brain.
+# 3. [Constraint]: create_issue populates system fields (Labels, Components, Reporter) from env -- same contract as Brain.
 # 4. [Pattern]: get_phase_tools() returns filtered NIGHTWATCHER_TOOL_SCHEMAS by current_phase.
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
@@ -39,7 +39,7 @@ INVESTIGATION_TEMPLATE = (
 _PHASE_TOOLS: dict[str, set[str]] = {
     "review": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory"},
     "investigate": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory", "dispatch_investigation"},
-    "report": {"create_incident", "post_shift_summary"},
+    "report": {"create_issue", "post_shift_summary"},
 }
 
 
@@ -76,7 +76,7 @@ async def execute_tool(name: str, args: dict, ctx: NightwatcherContext) -> str:
         "search_journal": _handle_search_journal,
         "consult_deep_memory": _handle_consult_deep_memory,
         "dispatch_investigation": _handle_dispatch_investigation,
-        "create_incident": _handle_create_incident,
+        "create_issue": _handle_create_incident,
         "post_shift_summary": _handle_post_shift_summary,
     }
     handler = handlers.get(name)
@@ -161,7 +161,7 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
 async def _handle_create_incident(args: dict, ctx: NightwatcherContext) -> str:
     if not ctx.smartsheet_adapter:
         return "Smartsheet adapter not configured. Incident not created."
-    logger.info("Nightwatcher create_incident args: %s", {k: (v[:80] if isinstance(v, str) else v) for k, v in args.items()})
+    logger.info("Nightwatcher create_issue args: %s", {k: (v[:80] if isinstance(v, str) else v) for k, v in args.items()})
     fields = {
         "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
         "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Nightwatcher"),

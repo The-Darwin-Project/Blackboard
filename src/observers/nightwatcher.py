@@ -240,7 +240,7 @@ class NightwatcherObserver:
                     logger.warning("Nightwatcher orphan re-injection #%d: %s", reinjection_count, orphan_list)
                     contents.append({"role": "user", "parts": [{"text":
                         f"You have not accounted for these events: [{orphan_list}]. "
-                        f"Every event in the manifest must appear in a create_incident call. "
+                        f"Every event in the manifest must appear in a create_issue call. "
                         f"Create incidents for the remaining events now."}]})
                     continue
                 if orphans:

@@ -32,7 +32,7 @@ Close sequence for automated events (headhunter, timekeeper, aligner) with failu
 2. If MR merged/pipeline passed: set_phase("close"), skip to step 6
 3. set_phase("escalate")
 4. notify_user_slack (each maintainer)
-5. create_incident
+5. report_incident
 6. notify_gitlab_result (if GitLab-sourced)
 7. set_phase("close")
 8. close_event

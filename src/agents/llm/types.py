@@ -180,7 +180,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "set_phase",
         "description": (
             "Declare your current processing phase. Tools are gated to the "
-            "phase you declare -- e.g., create_incident requires escalate phase, "
+            "phase you declare -- e.g., report_incident requires escalate phase, "
             "refresh_gitlab_context requires triage or verify phase. "
             "Call once when transitioning to a new phase. Re-declaring the "
             "same phase is a no-op -- only transitions change the tool set. "
@@ -207,7 +207,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "during investigation -- MR may have merged. For automated events "
                         "this is the only checkpoint before a human is disturbed. "
                         "escalate: this issue needs human awareness. "
-                        "Unlocks create_incident and notify_user_slack for failures. "
+                        "Unlocks report_incident and notify_user_slack for failures. "
                         "For non-chaotic events, enter only after verify confirms the "
                         "issue persists. For automated events, escalation means notifying "
                         "a human who may be asleep -- verify first. "
@@ -559,12 +559,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
-        "name": "create_incident",
+        "name": "report_incident",
         "description": (
-            "Create an incident report in the CNV Release Incident tracking sheet. "
+            "Report an incident to the tracking system. When Nightwatcher is enabled, "
+            "this stages the escalation for consolidated batch processing. When disabled, "
+            "it writes directly to the CNV Release Incident tracking sheet. "
             "Use when an automated event (headhunter, timekeeper) results in a persistent "
-            "failure requiring team investigation -- e.g., pipeline fails after retest, "
-            "infrastructure outage, or repeated CI failures. Systemic fields (reporter, "
+            "failure requiring team investigation. Systemic fields (reporter, "
             "date, status, labels, issue type, components) are auto-populated. You only "
             "provide event-specific details."
         ),
@@ -865,12 +866,12 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
-        "name": "create_incident",
+        "name": "create_issue",
         "description": (
-            "(report only) Create a consolidated incident in the tracking sheet. "
+            "(report only) Create a consolidated issue in the tracking sheet. "
             "Call ONCE per distinct root cause cluster, not per event. "
             "The affected_events array must contain all event IDs consolidated "
-            "into this incident. System fields (labels, components, reporter, date) "
+            "into this issue. System fields (labels, components, reporter, date) "
             "are auto-populated by the handler."
         ),
         "input_schema": {

@@ -855,7 +855,7 @@ class Brain:
         brain_phase = event.brain_phase or "triage"
 
         # Phase gates: tools gated to specific phases
-        escalate_tools = {"create_incident"}
+        escalate_tools = {"report_incident"}
         if brain_phase != "escalate":
             active_tools = [t for t in active_tools if t["name"] not in escalate_tools]
 
@@ -927,7 +927,7 @@ class Brain:
                     active_tools = [t for t in active_tools if t["name"] != "close_event"]
                     logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
             elif domain == "chaotic":
-                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "create_incident", "set_phase"}
+                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "report_incident", "set_phase"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
@@ -939,7 +939,7 @@ class Brain:
             "investigate":  {"select_agent", "create_plan", "message_agent"},
             "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent"},
             "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress"},
-            "escalate":     {"create_incident", "notify_user_slack", "notify_gitlab_result", "close_event"},
+            "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event"},
             "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
         }
         priority_names = _phase_tool_priority.get(brain_phase, set())
@@ -2515,7 +2515,7 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return True
 
-        elif function_name == "create_incident":
+        elif function_name == "report_incident":
             event_doc = await self.blackboard.get_event(event_id)
             if not event_doc:
                 result_text = f"Event {event_id} not found. Cannot create incident."
@@ -2550,7 +2550,7 @@ class Brain:
             automated_sources = ("headhunter", "timekeeper", "aligner")
             if event_doc.source not in automated_sources:
                 result_text = (
-                    f"create_incident is only available for automated events "
+                    f"report_incident is only available for automated events "
                     f"(source={event_doc.source} is not eligible)."
                 )
             elif os.environ.get("NIGHTWATCHER_ENABLED", "false").lower() == "true":
@@ -2636,7 +2636,7 @@ class Brain:
                         )
                     except Exception as e:
                         result_text = f"Failed to create incident: {e}"
-                        logger.warning(f"create_incident failed for {event_id}: {e}")
+                        logger.warning(f"report_incident failed for {event_id}: {e}")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",

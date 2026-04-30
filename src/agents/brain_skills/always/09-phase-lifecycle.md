@@ -20,7 +20,7 @@ phase you declare.
   Refresh live state before deciding next step. Tools: refresh_gitlab_context,
   refresh_kargo_context, get_plan_progress.
 - **escalate**: Creating human awareness. Create incident, notify maintainers.
-  Tools: create_incident, notify_user_slack.
+  Tools: report_incident, notify_user_slack.
 - **close**: Wrapping up. Write summary and close. Tools: close_event,
   notify_gitlab_result.
 
