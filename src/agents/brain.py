@@ -67,6 +67,9 @@
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
 #     In-memory only -- assumes single Brain instance per cluster. Multi-replica makes cap best-effort.
+#     [Gotcha]: Orphan guard MUST skip events in NEW status -- they're WIP-gated (waiting for a source
+#     slot), not crashed. Without this guard, the orphan detector misidentifies gated events as stuck
+#     and force-closes them after 3 re-queue attempts.
 # 35. [Gotcha]: set_phase no-op (already in requested phase) MUST still write a turn and return True.
 #     Returning False without a turn leaves event.conversation empty, triggering the orphan blank-event
 #     guard on the next scan (3 retries, force close). The LLM deterministically calls set_phase("triage")
@@ -4202,6 +4205,8 @@ class Brain:
                     if not event:
                         continue
                     if not event.conversation:
+                        if event.status == EventStatus.NEW:
+                            continue  # WIP-gated: waiting for slot, not orphaned
                         await self._handle_orphan_blank_event(eid, event)
                         continue
 
