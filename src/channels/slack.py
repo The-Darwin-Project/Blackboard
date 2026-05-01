@@ -92,11 +92,11 @@ class SlackChannel:
                         "title": f"Resume active event ({event_ids[0]})",
                         "message": f"What is the status of event {event_ids[0]}?",
                     })
-                set_suggested_prompts(prompts=prompts)
-                say("How can I help you?")
+                await set_suggested_prompts(prompts=prompts)
+                await say("How can I help you?")
             except Exception as e:
                 logger.warning(f"Assistant thread_started failed: {e}")
-                say("How can I help you?")
+                await say("How can I help you?")
 
         @self._assistant.user_message
         async def on_user_message(
@@ -109,7 +109,7 @@ class SlackChannel:
                 user_id = payload["user"]
                 text = payload.get("text", "")
 
-                set_status("Darwin is thinking...")
+                await set_status("Darwin is thinking...")
 
                 event_id = await self._blackboard.get_event_by_slack_thread(channel_id, thread_ts)
 
@@ -131,7 +131,7 @@ class SlackChannel:
                         event_id, channel_id, thread_ts, user_id,
                     )
                     await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
-                    set_title(f"evt-{event_id}: {text[:50]}")
+                    await set_title(f"evt-{event_id}: {text[:50]}")
                     logger.info(f"Assistant: new event {event_id} by {user_id}")
                 else:
                     from ..models import ConversationTurn
