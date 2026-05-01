@@ -631,7 +631,7 @@ class SlackChannel:
         if event_id not in self._stream_sessions:
             ctx = self._assistant_context[event_id]
             try:
-                stream = self._app.client.chat_stream(
+                stream = await self._app.client.chat_stream(
                     channel=ctx["channel"],
                     thread_ts=ctx["thread_ts"],
                     recipient_user_id=ctx["user_id"],
