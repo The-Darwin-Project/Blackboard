@@ -195,7 +195,10 @@ async def _handle_create_incident(args: dict, ctx: NightwatcherContext) -> str:
 
 async def _handle_post_shift_summary(args: dict, ctx: NightwatcherContext) -> str:
     summary = args.get("summary", "")
+    if not summary.strip():
+        return "Error: summary is empty. Provide the shift report text including escalation count, incident count, and key findings."
     ctx._summary_text = summary
+    logger.info("Nightwatcher post_shift_summary: %d chars", len(summary))
     if ctx.slack_notify:
         try:
             await ctx.slack_notify(summary)

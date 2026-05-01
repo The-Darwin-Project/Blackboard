@@ -794,14 +794,26 @@ class SlackChannel:
         if not self._infra_channel:
             logger.warning("post_nightwatcher_summary: SLACK_INFRA_CHANNEL is empty, skipping")
             return
+        truncated = summary[:3900] if len(summary) > 4000 else summary
         try:
-            await self._app.client.chat_postMessage(
+            result = await self._app.client.chat_postMessage(
                 channel=self._infra_channel,
-                text=summary,
+                text=truncated,
             )
-            logger.info("Nightwatcher shift summary posted to %s", self._infra_channel)
+            if result.get("ok"):
+                logger.info("Nightwatcher shift summary posted to %s (%d chars)", self._infra_channel, len(truncated))
+            else:
+                error = result.get("error", "unknown")
+                logger.warning("Nightwatcher Slack summary rejected: %s", error)
+                raise RuntimeError(f"Slack API rejected: {error}")
+        except RuntimeError:
+            raise
         except Exception as e:
-            logger.warning("Nightwatcher Slack summary failed: %s", e)
+            error_detail = ""
+            if hasattr(e, "response") and hasattr(e.response, "data"):
+                error_detail = e.response.data.get("error", "")
+            logger.warning("Nightwatcher Slack summary failed: %s (detail: %s)", e, error_detail)
+            raise RuntimeError(f"Slack post failed: {error_detail or e}") from e
 
     async def open_infra_thread(self, event_doc: Any, summary: str) -> None:
         """Post an event to #darwin-infra and store thread_ts (Phase 2)."""
