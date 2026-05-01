@@ -635,7 +635,7 @@ class SlackChannel:
                     channel=ctx["channel"],
                     thread_ts=ctx["thread_ts"],
                     recipient_user_id=ctx["user_id"],
-                    recipient_team_id=ctx["team_id"],
+                    recipient_team_id=ctx["team_id"] or None,
                     buffer_size=256,
                 )
                 self._stream_sessions[event_id] = stream
