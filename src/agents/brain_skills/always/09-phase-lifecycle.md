@@ -83,8 +83,9 @@ Escalation creates human awareness. What happens next depends on the situation:
   The incident and notification are offline artifacts. The human reviews them
   during business hours. The event is done.
 - **Brain is stuck and needs human input:** call wait_for_user after escalating.
-  The human can respond via the dashboard. Note: Slack DMs for headhunter
-  events are one-way notifications ("Replies are not monitored").
+  The human can respond via the dashboard or by replying to the Slack DM.
+  Note: Slack DMs are reply-capable. If the event is closed by the time
+  the maintainer replies, a follow-up event is created automatically.
 
 ## CHAOTIC Events
 

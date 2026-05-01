@@ -32,10 +32,10 @@ For pipeline failures where the MR is still open: the failure reason
 must be known before escalating. Enter escalate phase, notify maintainers,
 create incident, then close.
 
-Note: Slack notifications for headhunter events are one-way alerts
-("Replies in this thread are not monitored"). The incident row in
-Smartsheet is the offline tracking artifact. The human reviews during
-business hours.
+Note: Slack notification DMs are reply-capable. Maintainer replies
+join the active event conversation. If the event is already closed,
+a follow-up event is created automatically. The incident row in
+Smartsheet is the offline tracking artifact.
 
 For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
 

@@ -10,9 +10,8 @@
 # 4. [Pattern]: create_feedback_block uses slack-sdk model objects (ContextActionsBlock, FeedbackButtonsElement).
 # 5. [Contract]: AI disclaimer only on _DISCLAIMER_ACTIONS (execute, request_approval, close). Not on operational status turns.
 # 6. [Contract]: get_turn_attachment_color fires for action in ("message", "execute") on agent actors.
-# 7. [Pattern]: brain.think uses _format_kv_lines for 3+ consecutive Key:Value lines (key<=30 chars,
-#    alpha/underscore/space only -- digits excluded). Consecutive = unbroken streak, not total count.
-#    _THINK_CONTEXT_THRESHOLD (200) controls section vs context block cutoff. Both are tunable constants.
+# 7. [Pattern]: brain.think always renders as compact _context_line (small grey text). No KV formatting in Slack.
+#    brain.notify renders as :bell: context block. Both are low-weight system cards.
 # 8. [Pattern]: agent.cancel uses :stop_button: (System Card style, not Agent Card identity). No color bar.
 """Convert ConversationTurn objects to Slack Block Kit payloads."""
 from __future__ import annotations
@@ -51,11 +50,7 @@ AGENT_SHORTCODE: dict[str, str] = {
     "qe": ":test_tube:",
 }
 
-_THINK_CONTEXT_THRESHOLD = 200
-
 _DISCLAIMER_ACTIONS = frozenset({"execute", "request_approval", "close"})
-
-_KV_RE = re.compile(r"^([A-Za-z_ ]{1,30}):\s+(.+)$")
 
 
 def _context_line(text: str) -> dict[str, Any]:
@@ -64,43 +59,6 @@ def _context_line(text: str) -> dict[str, Any]:
         "type": "context",
         "elements": [{"type": "mrkdwn", "text": _truncate(text)}],
     }
-
-
-def _format_kv_lines(text: str) -> str | None:
-    """Detect 3+ consecutive Key: Value lines and convert to bulleted mrkdwn.
-
-    Returns None if no run of 3+ consecutive KV lines exists.
-    Only lines within a consecutive run of 3+ are bulleted; isolated KV lines
-    outside a qualifying run are left as plain text.
-    Key portion limited to 30 chars, letters/underscores/spaces only.
-    """
-    lines = text.strip().splitlines()
-    is_kv = [bool(_KV_RE.match(line.strip())) for line in lines]
-
-    streak_len = 0
-    run_lengths: list[int] = [0] * len(lines)
-    for i, kv in enumerate(is_kv):
-        streak_len = streak_len + 1 if kv else 0
-        run_lengths[i] = streak_len
-
-    max_streak = max(run_lengths) if run_lengths else 0
-    if max_streak < 3:
-        return None
-
-    in_qualifying_run: list[bool] = [False] * len(lines)
-    for i in range(len(lines) - 1, -1, -1):
-        if run_lengths[i] >= 3:
-            for j in range(i, i - run_lengths[i], -1):
-                in_qualifying_run[j] = True
-
-    parts: list[str] = []
-    for i, line in enumerate(lines):
-        m = _KV_RE.match(line.strip())
-        if m and in_qualifying_run[i]:
-            parts.append(f"- *{m.group(1).strip()}:* {m.group(2).strip()}")
-        else:
-            parts.append(line)
-    return "\n".join(parts)
 
 
 def _parse_md_table(text: str) -> list[list[str]]:
@@ -272,16 +230,8 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     elif key == "brain.think":
         raw = turn.thoughts or turn.evidence or ""
-        if not raw:
-            pass
-        else:
-            kv = _format_kv_lines(raw)
-            if kv:
-                blocks.append(_section(f":brain:\n{kv}"))
-            elif len(raw) <= _THINK_CONTEXT_THRESHOLD and not re.search(r"^#{1,6}\s", raw, re.MULTILINE):
-                blocks.append(_context_line(f":brain: {raw}"))
-            else:
-                blocks.append(_section(f":brain: {_md_to_mrkdwn(raw)}"))
+        if raw:
+            blocks.append(_context_line(f":brain: {raw}"))
 
     elif key == "brain.tool_result":
         tool_name = turn.waitingFor or "tool"
@@ -292,6 +242,9 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     elif key == "brain.close":
         blocks.append(_section(f":white_check_mark: *Event closed:* {turn.thoughts or ''}"))
+
+    elif key == "brain.notify":
+        blocks.append(_context_line(f":bell: {turn.thoughts or 'Notification sent.'}"))
 
     elif turn.action == "message" and turn.actor in AGENT_COLORS:
         emoji = AGENT_SHORTCODE.get(turn.actor, ":robot_face:")

@@ -25,16 +25,15 @@ def _make_turn(**kwargs) -> ConversationTurn:
 # ── Test 1: KV happy path ──────────────────────────────────────────────
 
 def test_brain_think_kv_happy_path():
-    """3+ Key: Value lines render as a bulleted mrkdwn list."""
+    """brain.think with KV lines renders as compact context block (no KV formatting in Slack)."""
     thoughts = "MR State: opened\nPipeline: running\nMerge Blocked: ci_still_running\nSeverity: info"
     turn = _make_turn(thoughts=thoughts)
     blocks = format_turn(turn)
-    section_blocks = [b for b in blocks if b.get("type") == "section"]
-    assert section_blocks
-    text = section_blocks[0]["text"]["text"]
-    assert "- *MR State:*" in text
-    assert "- *Pipeline:*" in text
-    assert "- *Merge Blocked:*" in text
+    ctx = [b for b in blocks if b.get("type") == "context" and "AI-generated" not in str(b)]
+    assert ctx, "brain.think should produce a context block"
+    text = ctx[0]["elements"][0]["text"]
+    assert ":brain:" in text
+    assert "MR State" in text
 
 
 # ── Test 2: KV false positive ──────────────────────────────────────────
@@ -188,7 +187,7 @@ def test_cancel_no_disclaimer_no_color():
 # ── Test 11: Isolated KV before a qualifying streak stays plain text ───
 
 def test_brain_think_kv_isolated_before_streak():
-    """Isolated KV line before a 3+ consecutive streak must NOT be bulleted."""
+    """brain.think with mixed KV/prose renders as compact context block (no KV formatting in Slack)."""
     thoughts = (
         "Summary: overview of the situation\n"
         "Some prose here\n"
@@ -198,12 +197,24 @@ def test_brain_think_kv_isolated_before_streak():
     )
     turn = _make_turn(thoughts=thoughts)
     blocks = format_turn(turn)
-    section_blocks = [b for b in blocks if b.get("type") == "section"]
-    assert section_blocks
-    text = section_blocks[0]["text"]["text"]
-    assert "- *MR State:*" in text, "Streak KV lines should be bulleted"
-    assert "- *Summary:*" not in text, "Isolated KV line before streak should NOT be bulleted"
-    assert "Summary: overview" in text, "Isolated line should remain as plain text"
+    ctx = [b for b in blocks if b.get("type") == "context" and "AI-generated" not in str(b)]
+    assert ctx, "brain.think should produce a context block"
+    text = ctx[0]["elements"][0]["text"]
+    assert ":brain:" in text
+    assert "Summary: overview" in text, "Raw content should be preserved"
+
+
+# ── Test 12: brain.notify renders as context block with bell ──────────
+
+def test_brain_notify_context_block():
+    """brain.notify renders as context block with bell emoji, no disclaimer."""
+    turn = _make_turn(action="notify", thoughts="Slack DM sent to user@co.com.")
+    blocks = format_turn(turn)
+    ctx = [b for b in blocks if b.get("type") == "context"]
+    assert ctx
+    assert ":bell:" in ctx[0]["elements"][0]["text"]
+    disclaimer = [b for b in blocks if "AI-generated" in str(b)]
+    assert not disclaimer
 
 
 # ── build_event_report_md: actor-aware labels ────────────────────────
