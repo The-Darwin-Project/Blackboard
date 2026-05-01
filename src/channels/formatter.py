@@ -368,9 +368,16 @@ def build_event_report_md(event_doc: "EventDocument") -> str:
     ]
     for t in event_doc.conversation:
         name = t.user_name or t.actor
-        text = (t.thoughts or t.result or t.action or "")[:300]
         lines.append(f"### Turn {t.turn} - {name} ({t.action})")
-        lines.append(text)
+        if t.actor == "user":
+            text = (t.thoughts or t.result or t.action or "")[:300]
+            lines.append(f"**Message:** {text}")
+        elif t.action == "tool_result":
+            text = (t.result or t.evidence or t.thoughts or t.action or "")[:300]
+            lines.append(f"**Evidence:** {text}")
+        else:
+            text = (t.thoughts or t.result or t.action or "")[:300]
+            lines.append(text)
         lines.append("")
     return "\n".join(lines)
 

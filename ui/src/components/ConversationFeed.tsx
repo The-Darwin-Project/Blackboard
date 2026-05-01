@@ -32,8 +32,16 @@ function eventToMarkdown(event: { id: string; source: string; status: string; se
     const deltaLabel = delta > 0 ? `+${Math.floor(delta / 60)}m ${delta % 60}s` : '+0s';
     lines.push(`### Turn ${turn.turn} - ${turn.actor} (${turn.action}) [${ts}] (${deltaLabel})`);
     prevTs = turn.timestamp;
-    if (turn.thoughts) lines.push(`**Thoughts:** ${turn.thoughts}`);
-    if (turn.result) lines.push(`**Result:** ${turn.result}`);
+    if (turn.actor === 'user') {
+      const text = turn.thoughts || turn.result || '';
+      if (text) lines.push(`**Message:** ${text}`);
+    } else if (turn.action === 'tool_result') {
+      const text = turn.result || turn.thoughts || '';
+      if (text) lines.push(`**Evidence:** ${text}`);
+    } else {
+      if (turn.thoughts) lines.push(`**Thoughts:** ${turn.thoughts}`);
+      if (turn.result) lines.push(`**Result:** ${turn.result}`);
+    }
     if (turn.plan) lines.push(`**Plan:**\n${turn.plan}`);
     if (turn.evidence) lines.push(`**Evidence:** ${turn.evidence}`);
     if (turn.selectedAgents) lines.push(`**Selected Agents:** ${turn.selectedAgents.join(', ')}`);

@@ -29,7 +29,11 @@
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
-# 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on non-user turns. Observation-only (zero tools, 256 tokens) unless huddle turns present (reply_to_agent/message_agent, 1024 tokens). Appends brain.think, marks turns EVALUATED.
+# 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
+#     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
+#     Token limit: 256 (agent-only), 1024 (user or huddle present). NEVER add wait_for_user to
+#     intermediate -- it sets _waiting_for_user which blocks the event loop. Appends brain.think,
+#     marks turns EVALUATED.
 # 25. [Pattern]: WIP cap (two layers):
 #     Layer 1 (per-source): _get_source_wip_limit + _count_source_wip gate NEW->ACTIVE transition.
 #       Counts events in ACTIVE+DEFERRED status for the source. NEW events are input buffer, not WIP.
@@ -1064,10 +1068,11 @@ class Brain:
     async def _process_intermediate(
         self, event_id: str, event: EventDocument, turns: list[ConversationTurn]
     ) -> None:
-        """Process intermediate turns (agent progress, aligner confirms) with a lightweight LLM call.
+        """Evaluate intermediate turns during active agent dispatch via LLM.
 
-        Observation-only (zero tools, 256 tokens) unless huddle turns present
-        (reply_to_agent/message_agent, 1024 tokens).
+        Processes ALL non-brain unseen turns: agent progress, user messages, aligner signals.
+        Tools: reply_to_agent, message_agent, wait_for_agent (always available).
+        Token limit: 256 (agent-only), 1024 (user or huddle present).
         Appends brain.think turn for temporal context; marks processed turns EVALUATED.
         """
         if not self._adapter:
@@ -1080,11 +1085,13 @@ class Brain:
             if t["name"] in ("reply_to_agent", "message_agent", "wait_for_agent")
         ]
         huddle_turns = [t for t in turns if t.action == "huddle"]
-        max_tokens = 1024 if huddle_turns else 256
+        user_turns = [t for t in turns if t.actor == "user"]
+        max_tokens = 1024 if (huddle_turns or user_turns) else 256
 
         ctx: ContextFlags = {
             "is_intermediate": True,
             "has_pending_huddle": bool(huddle_turns),
+            "last_is_user": bool(user_turns),
             "turn_count": len(event.conversation),
             "has_agent_result": False,
             "is_waiting": False,
@@ -1092,7 +1099,10 @@ class Brain:
             "has_related": False,
             "has_graph_edges": False,
             "has_recent_closed": False,
-            "has_slack_participant": False,
+            "has_slack_participant": bool(
+                getattr(event, "slack_thread_ts", None)
+                and any(t.actor == "user" and t.source == "slack" for t in event.conversation)
+            ),
             "source": event.source,
             "service": event.service or "",
         }
@@ -3824,30 +3834,6 @@ class Brain:
             return "Agent not found"
         return await agent.followup(event_id, session_id, message)
 
-    async def _forward_user_to_agent(
-        self, event_id: str, agent_name: str, user_text: str
-    ) -> None:
-        """Forward a user message to an active agent session and persist the response.
-
-        Tracked in _active_tasks so cancel_active_task() and emergency_stop() can
-        cancel it. Runs as asyncio.create_task() so the event loop is not blocked.
-        """
-        try:
-            followup_result = await self.send_to_agent(
-                event_id, agent_name, f"The user says: {user_text}")
-            if followup_result and not followup_result.startswith("Error:"):
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor=agent_name,
-                    action="followup",
-                    result=followup_result[:15000],
-                )
-                await self._append_and_broadcast(event_id, turn)
-        except asyncio.CancelledError:
-            logger.info(f"Follow-up forwarding cancelled for {event_id}")
-        except Exception as e:
-            logger.warning(f"Follow-up forwarding failed for {event_id}: {e}")
-
     # =========================================================================
     # Volume Writer
     # =========================================================================
@@ -4013,10 +3999,19 @@ class Brain:
             delta_label = f"+{delta // 60}m {delta % 60}s" if delta > 0 else "+0s"
             lines.append(f"### Turn {turn.turn} - {turn.actor} ({turn.action}) [{ts_str}] ({delta_label})")
             prev_ts = turn.timestamp
-            if turn.thoughts:
-                lines.append(f"**Thoughts:** {turn.thoughts}")
-            if turn.result:
-                lines.append(f"**Result:** {turn.result}")
+            if turn.actor == "user":
+                user_text = turn.thoughts or turn.result or ""
+                if user_text:
+                    lines.append(f"**Message:** {user_text}")
+            elif turn.action == "tool_result":
+                evidence_text = turn.result or turn.thoughts or ""
+                if evidence_text:
+                    lines.append(f"**Evidence:** {evidence_text}")
+            else:
+                if turn.thoughts:
+                    lines.append(f"**Thoughts:** {turn.thoughts}")
+                if turn.result:
+                    lines.append(f"**Result:** {turn.result}")
             if turn.plan:
                 lines.append(f"**Plan:**\n{turn.plan}")
             if turn.evidence:
@@ -4149,55 +4144,13 @@ class Brain:
                             if unseen:
                                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                            routing_turn = self._routing_turn_for_event.get(eid, 0)
-                            user_turns = [t for t in unseen if t.actor == "user" and t.turn > routing_turn]
-                            if user_turns:
-                                agent_name = self._active_agent_for_event.get(eid)
-                                session_id = self._agent_sessions.get(eid, {}).get(agent_name) if agent_name else None
-                                if session_id and agent_name:
-                                    # Phase 2: Forward user message to agent via session.
-                                    # Brain calls send_to_agent() uniformly for all agents.
-                                    # Developer.followup() handles Huddle routing internally.
-                                    user_text = " ".join(
-                                        t.thoughts for t in user_turns if t.thoughts
-                                    )
-                                    if not user_text:
-                                        continue
-                                    fwd_task = asyncio.create_task(
-                                        self._forward_user_to_agent(eid, agent_name, user_text)
-                                    )
-                                    self._active_tasks[eid] = fwd_task
-                                    continue
-                                else:
-                                    # No session -- forward user message via proactive_message WS
-                                    if agent_name:
-                                        from ..dependencies import get_registry_and_bridge
-                                        registry, _ = get_registry_and_bridge()
-                                        if registry:
-                                            agent_conn = await registry.get_by_event(eid)
-                                            if not agent_conn:
-                                                agent_conn = await registry.get_available(agent_name)
-                                            if agent_conn and agent_conn.ws:
-                                                user_text = " ".join(t.thoughts for t in user_turns if t.thoughts)
-                                                if user_text:
-                                                    try:
-                                                        await agent_conn.ws.send_json({
-                                                            "type": "proactive_message",
-                                                            "from": "user",
-                                                            "content": user_text,
-                                                        })
-                                                        logger.info("Forwarded user message to %s via proactive_message for %s", agent_name, eid)
-                                                    except Exception as e:
-                                                        logger.warning("Failed to forward user message to %s: %s", agent_name, e)
-                                    continue
-                            else:
-                                intermediate = [
-                                    t for t in unseen
-                                    if t.actor not in ("brain", "user")
-                                ]
-                                if intermediate:
-                                    await self._process_intermediate(eid, event, intermediate)
-                                continue
+                            intermediate = [
+                                t for t in unseen
+                                if t.actor != "brain"
+                            ]
+                            if intermediate:
+                                await self._process_intermediate(eid, event, intermediate)
+                            continue
                         else:
                             continue
 

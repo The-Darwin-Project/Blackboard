@@ -2,4 +2,7 @@ thinking_level: "low"
 temperature: 0.3
 priority: 90
 max_output_tokens: 1024
-description: "Lightweight acknowledgment of agent progress and Aligner confirms; no tools, minimal tokens"
+description: "Evaluate intermediate turns during active dispatch. Tools:
+  reply_to_agent, message_agent, wait_for_agent. Token limit: 256 (agent-only),
+  1024 (user or huddle present). Thinking escalates to high when last turn is
+  user."

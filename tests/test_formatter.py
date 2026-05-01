@@ -9,10 +9,11 @@ import pytest
 
 from src.channels.formatter import (
     AGENT_SHORTCODE,
+    build_event_report_md,
     format_turn,
     get_turn_attachment_color,
 )
-from src.models import ConversationTurn
+from src.models import ConversationTurn, EventDocument, EventInput
 
 
 def _make_turn(**kwargs) -> ConversationTurn:
@@ -203,3 +204,37 @@ def test_brain_think_kv_isolated_before_streak():
     assert "- *MR State:*" in text, "Streak KV lines should be bulleted"
     assert "- *Summary:*" not in text, "Isolated KV line before streak should NOT be bulleted"
     assert "Summary: overview" in text, "Isolated line should remain as plain text"
+
+
+# ── build_event_report_md: actor-aware labels ────────────────────────
+
+def _make_event_doc(*turns: ConversationTurn) -> EventDocument:
+    return EventDocument(
+        source="chat",
+        service="test-service",
+        event=EventInput(reason="test", evidence="test evidence"),
+        conversation=list(turns),
+    )
+
+
+def test_report_md_user_turn_message_label():
+    """User turn in build_event_report_md renders **Message:** label."""
+    turn = _make_turn(actor="user", action="message", thoughts="Hello from user")
+    md = build_event_report_md(_make_event_doc(turn))
+    assert "**Message:** Hello from user" in md
+    assert "**Thoughts:**" not in md
+
+
+def test_report_md_tool_result_evidence_label():
+    """tool_result turn in build_event_report_md renders **Evidence:** from evidence field."""
+    turn = _make_turn(actor="brain", action="tool_result", result=None, evidence="service healthy")
+    md = build_event_report_md(_make_event_doc(turn))
+    assert "**Evidence:** service healthy" in md
+
+
+def test_report_md_brain_turn_no_label():
+    """Non-user, non-tool_result turns render raw text without bold label prefix."""
+    turn = _make_turn(actor="brain", action="think", thoughts="Analyzing")
+    md = build_event_report_md(_make_event_doc(turn))
+    assert "Analyzing" in md
+    assert "**Message:**" not in md
