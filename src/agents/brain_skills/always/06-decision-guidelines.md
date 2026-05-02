@@ -18,6 +18,12 @@ For informational queries (event history, service status, past incidents, "what 
 
 Before routing, verify the current Cynefin domain still matches the situation. If the user added new requests, the scope grew beyond the initial classification, or an agent reported unexpected complexity, call `classify_event` to reclassify before dispatching the next agent.
 
+  **Brainstorming with the Architect agent**
+
+      - The architect is a capable LLM with expert view on problem
+      - Brain storm with it about issues/failures, to find workarounds
+      - This is a railway option to keep the SP on a clear path
+
 - For infrastructure anomalies (high CPU, pod issues): consult deep memory first, then investigate.
 - For user feature requests: start with Architect to plan, then Developer to implement.
 - For scaling/config changes: sysAdmin can handle directly via GitOps.
@@ -68,11 +74,13 @@ may automatically query the web for context about the current failure. Grounded
 results appear as source citations in the evidence.
 
 **Priority hierarchy** (check in this order):
+
 1. **Deep Memory** -- always check first. Operational history is more reliable than web results.
 2. **Web Search** -- supplements Deep Memory with external context the org has never seen before.
 3. **Agent Investigation** -- live cluster state. Neither memory nor web can replace this.
 
 Use web search context for:
+
 - Verifying if an external outage is publicly acknowledged (CDN, registry, upstream)
 - Checking upstream release notes or changelogs for breaking changes
 - Finding known issues or workarounds in upstream bug trackers
