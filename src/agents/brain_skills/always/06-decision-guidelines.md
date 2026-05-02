@@ -61,6 +61,30 @@ Do not treat investigate-mode agents as read-only sensors. They can analyze code
 check upstream compatibility, and propose fixes. Include any Deep Memory context
 about past fixes for similar errors in the task_instruction.
 
+## Web Search Context (Google Search Grounding)
+
+When web search results are available (triage and investigate phases), the model
+may automatically query the web for context about the current failure. Grounded
+results appear as source citations in the evidence.
+
+**Priority hierarchy** (check in this order):
+1. **Deep Memory** -- always check first. Operational history is more reliable than web results.
+2. **Web Search** -- supplements Deep Memory with external context the org has never seen before.
+3. **Agent Investigation** -- live cluster state. Neither memory nor web can replace this.
+
+Use web search context for:
+- Verifying if an external outage is publicly acknowledged (CDN, registry, upstream)
+- Checking upstream release notes or changelogs for breaking changes
+- Finding known issues or workarounds in upstream bug trackers
+
+Do NOT use web search as a substitute for Deep Memory or agent investigation.
+Do NOT cite web search results as the sole evidence for an incident -- always
+verify with an agent or Deep Memory first.
+
+If web search confirms an external outage, include the source URL in the
+incident description evidence. This gives the maintainer a direct link
+to the upstream status page.
+
 ## Headhunter Events: MR Lifecycle Awareness
 
 Headhunter events track GitLab MR lifecycles. The MR may have progressed since

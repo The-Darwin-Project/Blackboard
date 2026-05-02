@@ -10,6 +10,9 @@
 # 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
+# 11. [Pattern]: set_search_enabled() controls Google Search grounding. Adapter-level state, not LLMPort param.
+#     _build_config reads self._search_enabled to append GoogleSearch tool. Grounding metadata extracted
+#     from final candidate and yielded on the done=True chunk. Graceful fallback: None if not available.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -39,7 +42,16 @@ class GeminiAdapter:
         )
         self._model_name = model_name
         self._tracker = quota_tracker
+        self._search_enabled = False
         logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
+
+    def set_search_enabled(self, enabled: bool) -> None:
+        """Enable/disable Google Search grounding for subsequent calls.
+
+        Adapter-level state -- callers set before generate_stream() and reset after.
+        Only affects _build_config tool assembly. No impact on LLMPort interface.
+        """
+        self._search_enabled = enabled
 
     # -----------------------------------------------------------------
     # Quota tracking helpers
@@ -93,11 +105,16 @@ class GeminiAdapter:
         if system_prompt:
             kwargs["system_instruction"] = system_prompt
         if tools is not None:
-            kwargs["tools"] = [self._convert_tools(tools)]
+            tool_objects = [self._convert_tools(tools)]
+            if self._search_enabled:
+                tool_objects.append(types.Tool(google_search=types.GoogleSearch()))
+            kwargs["tools"] = tool_objects
             kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
             kwargs["tool_config"] = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode="AUTO")
             )
+        elif self._search_enabled:
+            kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
         return types.GenerateContentConfig(**kwargs)
 
@@ -250,11 +267,11 @@ class GeminiAdapter:
         )
         last_parts = None
         last_usage = None
+        last_grounding = None
         async for chunk in stream:
             if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                 last_usage = chunk.usage_metadata
 
-            # Accumulate last candidate parts for thought_signature preservation
             if chunk.candidates:
                 for candidate in chunk.candidates:
                     if candidate.content and candidate.content.parts:
@@ -262,12 +279,20 @@ class GeminiAdapter:
                         for part in candidate.content.parts:
                             if hasattr(part, 'thought') and part.thought and hasattr(part, 'text') and part.text:
                                 yield LLMChunk(text=part.text, is_thought=True)
+                    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                        gm = candidate.grounding_metadata
+                        last_grounding = {
+                            "queries": list(gm.web_search_queries or []),
+                            "chunks": [
+                                {"title": c.web.title, "uri": c.web.uri}
+                                for c in (gm.grounding_chunks or [])
+                                if hasattr(c, 'web') and c.web
+                            ],
+                        }
 
-            # Regular text chunks (non-thought)
             if chunk.text:
                 yield LLMChunk(text=chunk.text)
 
-            # Function call (final chunk)
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
                 self._record_usage(last_usage, estimate)
@@ -275,8 +300,11 @@ class GeminiAdapter:
                     function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                     done=True,
                     raw_parts=last_parts,
+                    grounding_metadata=last_grounding,
                 )
                 return
 
         self._record_usage(last_usage, estimate)
-        yield LLMChunk(done=True, raw_parts=last_parts)
+        if last_grounding:
+            logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
+        yield LLMChunk(done=True, raw_parts=last_parts, grounding_metadata=last_grounding)

@@ -79,6 +79,9 @@
 #     Returning False without a turn leaves event.conversation empty, triggering the orphan blank-event
 #     guard on the next scan (3 retries, force close). The LLM deterministically calls set_phase("triage")
 #     on fresh headhunter events because brain_phase defaults to "triage" at creation.
+# 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/investigate).
+#     Brain calls adapter.set_search_enabled() before/after generate_stream via try/finally. hasattr guard for Claude.
+#     Grounding metadata formatted as evidence, not thoughts. Graceful fallback if search unavailable.
 # 34. [Pattern]: Event loop scan blank-event guard uses processing_started_at with queued_at
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
@@ -387,9 +390,12 @@ class Brain:
         max_dispatches = int(os.getenv("BRAIN_MAX_CONCURRENT_DISPATCHES", "0"))
         self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
 
+        self._search_enabled = os.getenv("BRAIN_GOOGLE_SEARCH_ENABLED", "false").lower() == "true"
+
         skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
         wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, agents={list(self.agents.keys())})")
+        search_status = "search=on" if self._search_enabled else "search=off"
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, agents={list(self.agents.keys())})")
 
     JOURNAL_CACHE_TTL = 60  # seconds
 
@@ -983,53 +989,64 @@ class Brain:
         accumulated_text = ""
         function_call = None
         raw_parts = None
+        last_grounding = None
 
-        for attempt in range(max_retries + 1):
-            accumulated_text = ""
-            accumulated_thoughts = ""
-            function_call = None
-            raw_parts = None
+        want_search = self._search_enabled and brain_phase in ("triage", "investigate")
+        if want_search and hasattr(self._adapter, 'set_search_enabled'):
+            self._adapter.set_search_enabled(True)
 
-            try:
-                async for chunk in self._adapter.generate_stream(
-                    system_prompt=system_prompt,
-                    contents=prompt,
-                    tools=active_tools,
-                    temperature=call_temp,
-                    max_output_tokens=phase_max_tokens,
-                    thinking_level=thinking_level,
-                ):
-                    if chunk.text:
-                        if chunk.is_thought:
-                            accumulated_thoughts += chunk.text
-                        else:
-                            accumulated_text += chunk.text
-                        await self._broadcast({
-                            "type": "brain_thinking",
-                            "event_id": event_id,
-                            "text": chunk.text,
-                            "accumulated": accumulated_thoughts + accumulated_text,
-                            "is_thought": chunk.is_thought,
-                        })
-                    if chunk.function_call:
-                        function_call = chunk.function_call
-                    if chunk.raw_parts:
-                        raw_parts = chunk.raw_parts
-                last_error = None
-                break  # Success
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries and self._is_transient(e):
-                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
-                    base = 30 if is_rate_limit else 5
-                    delay = min(base * (2 ** attempt), 120)
-                    jitter = delay * 0.3 * (0.5 - __import__('random').random())
-                    delay = max(1, delay + jitter)
-                    logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
-                    await asyncio.sleep(delay)
-                    continue
-                logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
-                break
+        try:
+            for attempt in range(max_retries + 1):
+                accumulated_text = ""
+                accumulated_thoughts = ""
+                function_call = None
+                raw_parts = None
+
+                try:
+                    async for chunk in self._adapter.generate_stream(
+                        system_prompt=system_prompt,
+                        contents=prompt,
+                        tools=active_tools,
+                        temperature=call_temp,
+                        max_output_tokens=phase_max_tokens,
+                        thinking_level=thinking_level,
+                    ):
+                        if chunk.text:
+                            if chunk.is_thought:
+                                accumulated_thoughts += chunk.text
+                            else:
+                                accumulated_text += chunk.text
+                            await self._broadcast({
+                                "type": "brain_thinking",
+                                "event_id": event_id,
+                                "text": chunk.text,
+                                "accumulated": accumulated_thoughts + accumulated_text,
+                                "is_thought": chunk.is_thought,
+                            })
+                        if chunk.function_call:
+                            function_call = chunk.function_call
+                        if chunk.raw_parts:
+                            raw_parts = chunk.raw_parts
+                        if chunk.grounding_metadata:
+                            last_grounding = chunk.grounding_metadata
+                    last_error = None
+                    break  # Success
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries and self._is_transient(e):
+                        is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
+                        base = 30 if is_rate_limit else 5
+                        delay = min(base * (2 ** attempt), 120)
+                        jitter = delay * 0.3 * (0.5 - __import__('random').random())
+                        delay = max(1, delay + jitter)
+                        logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+                    break
+        finally:
+            if want_search and hasattr(self._adapter, 'set_search_enabled'):
+                self._adapter.set_search_enabled(False)
 
         # Clear thinking indicator ONCE after the loop exits
         await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
@@ -1061,12 +1078,23 @@ class Brain:
                 response_parts=captured_parts,
             )
 
+        grounding_evidence = ""
+        if last_grounding and last_grounding.get("chunks"):
+            sources = "\n".join(
+                f"- [{c['title']}]({c['uri']})"
+                for c in last_grounding["chunks"]
+            )
+            queries = ", ".join(last_grounding.get("queries", []))
+            grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
+            logger.info(f"Google Search grounding for {event_id}: {len(last_grounding['chunks'])} sources")
+
         if accumulated_text or accumulated_thoughts:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
                 action="think",
                 thoughts=accumulated_text or "[Brain reasoning complete]",
+                evidence=grounding_evidence if grounding_evidence else None,
                 response_parts=captured_parts,
             )
             await self._append_and_broadcast(event_id, turn)

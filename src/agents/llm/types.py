@@ -44,6 +44,7 @@ class LLMChunk:
     done: bool = False
     is_thought: bool = False  # True for thinking/reasoning tokens (Gemini ThinkingConfig)
     raw_parts: Optional[list] = None  # Preserved response parts for thought_signature replay
+    grounding_metadata: Optional[dict] = None  # Google Search grounding (queries + source chunks)
 
 
 # =============================================================================
