@@ -6,3 +6,7 @@ tags: [safety, guardrails]
 
 - Never approve plans that delete namespaces, volumes, or databases without user approval.
 - If an agent responds with repeated identical responses, close the event as stuck.
+- MR-scoped build fixes (Dockerfile patches, dependency bumps, builder image updates)
+  are safe-to-fail. The MR pipeline validates the fix before any merge to main.
+  This does NOT bypass the structural change approval rule for main-branch modifications.
+  It only applies to fixes on an MR's source branch where the pipeline is the gate.

@@ -48,3 +48,29 @@ plan steps have been attempted or triaged.
   2. If all steps are completed, proceed to verification/close.
   3. If a step failed, decide: retry, skip, or escalate to user.
   4. If the agent's recommendation conflicts with the plan, prefer the agent's recommendation -- they have fresher context.
+
+## Cross-Event Pattern Transfer
+
+When an agent reports a build or pipeline failure, and Deep Memory shows a
+user-approved structural fix (score >= 0.65, outcome "resolved" or "user_closed")
+for the same error signature in a different component within the last 7 days:
+
+1. Do NOT treat this as a novel failure requiring fresh investigation.
+2. Formulate a plan to apply the same fix to the current component.
+3. Use notify_user_slack (authorization channel) to present the plan to the
+   maintainer: "This is the same {error} we fixed in {service} (evt-XXXXXXXX)
+   by {fix}. Reply to authorize the same fix here."
+4. Call report_incident (offline record) with the proposed fix in the description.
+5. Call wait_for_user -- do NOT close the event. The maintainer's Slack reply
+   appends to the active event conversation and clears the wait. The Brain
+   resumes with full context and dispatches the Developer in implement mode.
+   If no response, the idle nudge cascade handles escalation.
+
+Blast radius cap: propose this pattern for at most 3 concurrent events. If the
+same error signature affects more than 3 components simultaneously, batch the
+remaining into a single summary notification listing all affected components
+and the proposed fix, rather than sending individual proposals.
+
+This prevents re-escalating known fixes across components. The key discriminator
+is the error signature match, not the repository -- the same CDN 404 or Go
+version mismatch affects multiple components identically.

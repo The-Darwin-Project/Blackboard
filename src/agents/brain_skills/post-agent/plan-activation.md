@@ -65,4 +65,6 @@ Before dispatching agent-sourced plan steps:
 
 - If the plan proposed multiple options with trade-offs, present them to the user first. Only begin execution after the user selects an option.
 - If there is no plan turn, use your normal routing judgment.
-- Structural changes (modifying code, templates, schemas) require user approval before execution.
+- Structural changes on the default/main branch require user approval before execution.
+  MR-scoped build fixes (Dockerfile patches, dependency bumps) are safe-to-fail --
+  the pipeline validates before merge. See Decision Guidelines for the authorization workflow.

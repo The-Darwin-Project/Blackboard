@@ -32,6 +32,22 @@ For pipeline failures where the MR is still open: the failure reason
 must be known before escalating. Enter escalate phase, notify maintainers,
 create incident, then close.
 
+Before escalating a pipeline failure, consult Deep Memory with the error signature.
+If a proven fix exists (score >= 0.65, outcome "resolved" or "user_closed"):
+
+- In the **notify_user_slack** DM (authorization channel): include the fix as an
+  actionable proposal: "Pipeline failed due to {error}. I resolved this in {service}
+  by {fix}. Reply to authorize the same fix here."
+- In the **report_incident** (offline record): include the fix in the "Proposed Fix"
+  section of the incident description. This goes to Nightwatcher staging (when enabled)
+  or directly to Smartsheet -- it is NOT the authorization channel.
+- Call **wait_for_user** instead of closing the event. The Slack DM is reply-capable --
+  the maintainer's reply joins the active event conversation. The Brain resumes with
+  full investigation context and can execute the fix immediately on authorization.
+  If no response, the normal idle nudge cascade handles follow-up.
+
+If no proven fix exists, escalate normally with evidence only (report_incident + close).
+
 Note: Slack notification DMs are reply-capable. Maintainer replies
 join the active event conversation. If the event is already closed,
 a follow-up event is created automatically. The incident row in

@@ -78,6 +78,14 @@ What Darwin did (retested, investigated, notified) and the outcome.
 What the team should do next. Be specific -- "investigate pipeline"
 is not actionable. "Verify if digest sha256:abc123 still exists on
 quay.io for build-trusted-artifacts" is actionable.
+
+## Proposed Fix (from Deep Memory)
+If Deep Memory contains a proven fix for this error signature, describe it here:
+- Past event: [event ID]
+- Fix applied: [specific change]
+- Outcome: [resolved/merged]
+- Authorization: "Reply to the Slack notification to authorize this fix."
+If no proven fix exists, omit this section.
 ```
 
 ### Field Selection Guide

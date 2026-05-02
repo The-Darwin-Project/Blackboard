@@ -33,7 +33,12 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Novel situation, no clear cause-effect (e.g., cascading failures, new feature request)
 - Constraints: Enabling constraints, high freedom
 - Flow: Probe -> Sense -> Respond
-- Action: Run a small safe-to-fail probe first(Via the agents/Architect). Observe result. Adapt.
+- Action: Run a small safe-to-fail probe. For build failures, this can be dispatching
+  the Developer to push a speculative fix to the MR branch -- if the pipeline passes,
+  the probe succeeded. Notify the maintainer with the working fix for authorization.
+  If the probe fails, the MR branch is unchanged and you have new evidence to guide
+  escalation. Limit: one speculative probe per event. If it fails, escalate -- do not
+  chain probes (each Konflux pipeline run consumes cluster resources across architectures).
 
 ## CHAOTIC (Crisis -- Novel Practice)
 

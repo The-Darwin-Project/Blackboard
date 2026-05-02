@@ -41,6 +41,7 @@
 #       events exclusively use ephemeral agents. Internal-agent sources (chat, slack) are NOT gated
 #       at admission; their bottleneck is agent idle/busy at dispatch time.
 #       {SOURCE}_MAX_ACTIVE env var (default 1 for ephemeral sources). Event close is the release trigger.
+#       Events in _waiting_for_user are excluded from WIP count (Propose and Prompt slot release).
 #     Layer 2 (global): _dispatch_semaphore on select_agent. May recursively call defer_event -- safe,
 #       defer_event does not recurse back into select_agent.
 #     DO NOT add agent-dispatching logic to the defer_event handler.
@@ -424,11 +425,16 @@ class Brain:
 
         NEW events are in the input buffer and don't count as WIP.
         CLOSED events are out of the system.
+        Events parked in _waiting_for_user (Propose and Prompt awaiting
+        maintainer reply) are excluded -- they release the WIP slot so
+        new events can be admitted while the proposal awaits authorization.
         """
         active_ids = await self.blackboard.get_active_events()
         count = 0
         for eid in active_ids:
             if eid == exclude_id:
+                continue
+            if eid in self._waiting_for_user:
                 continue
             evt = await self.blackboard.get_event(eid)
             if evt and evt.source == source and evt.status in (EventStatus.ACTIVE, EventStatus.DEFERRED):
@@ -980,6 +986,7 @@ class Brain:
 
         for attempt in range(max_retries + 1):
             accumulated_text = ""
+            accumulated_thoughts = ""
             function_call = None
             raw_parts = None
 
@@ -993,12 +1000,15 @@ class Brain:
                     thinking_level=thinking_level,
                 ):
                     if chunk.text:
-                        accumulated_text += chunk.text
+                        if chunk.is_thought:
+                            accumulated_thoughts += chunk.text
+                        else:
+                            accumulated_text += chunk.text
                         await self._broadcast({
                             "type": "brain_thinking",
                             "event_id": event_id,
                             "text": chunk.text,
-                            "accumulated": accumulated_text,
+                            "accumulated": accumulated_thoughts + accumulated_text,
                             "is_thought": chunk.is_thought,
                         })
                     if chunk.function_call:
@@ -1025,7 +1035,7 @@ class Brain:
         await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
 
         # If all retries failed with no output, write error turn
-        if last_error and not function_call and not accumulated_text:
+        if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -1051,12 +1061,12 @@ class Brain:
                 response_parts=captured_parts,
             )
 
-        if accumulated_text:
+        if accumulated_text or accumulated_thoughts:
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
                 action="think",
-                thoughts=accumulated_text,
+                thoughts=accumulated_text or "[Brain reasoning complete]",
                 response_parts=captured_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -1140,7 +1150,8 @@ class Brain:
                 thinking_level=thinking_level,
             ):
                 if chunk.text:
-                    accumulated_text += chunk.text
+                    if not chunk.is_thought:
+                        accumulated_text += chunk.text
                 if chunk.function_call:
                     function_call = chunk.function_call
         except Exception as e:

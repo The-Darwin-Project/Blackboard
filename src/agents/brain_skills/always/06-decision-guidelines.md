@@ -21,7 +21,11 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - For infrastructure anomalies (high CPU, pod issues): consult deep memory first, then investigate.
 - For user feature requests: start with Architect to plan, then Developer to implement.
 - For scaling/config changes: sysAdmin can handle directly via GitOps.
-- Structural changes (source code, templates) require user approval.
+- Structural changes on the default/main branch require user approval.
+- Structural changes on an MR source branch (Dockerfile patches, dependency bumps,
+  builder image updates) are safe-to-fail probes -- the pipeline validates the fix
+  before any merge. Propose these via notify_user_slack; the maintainer authorizes
+  via reply. If no response, escalate normally.
 - Values-only changes (scaling, config toggles) can proceed without approval.
 - After execution, verify the change took effect.
 - Before acting on anomalies, check if related events explain the issue.
@@ -42,6 +46,20 @@ When dispatching an agent in `investigate` mode, the `task_instruction` must con
 
 The agent's report should directly answer these questions. If it cannot, it should
 state what it tried and what blocked deeper investigation.
+
+## Investigation Dispatch: Find Fixes, Not Just Errors
+
+When dispatching an agent in `investigate` mode for a build or pipeline failure,
+the task_instruction MUST include BOTH diagnostic and remediation questions:
+
+- DIAGNOSTIC: "What specific error appears in the build log?"
+- REMEDIATION: "Search the repository's Dockerfile and build config for the failing
+  dependency/version. Does a version bump or config change fix this? Propose the
+  specific change."
+
+Do not treat investigate-mode agents as read-only sensors. They can analyze code,
+check upstream compatibility, and propose fixes. Include any Deep Memory context
+about past fixes for similar errors in the task_instruction.
 
 ## Headhunter Events: MR Lifecycle Awareness
 
