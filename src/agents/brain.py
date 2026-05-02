@@ -1001,6 +1001,7 @@ class Brain:
                 accumulated_thoughts = ""
                 function_call = None
                 raw_parts = None
+                last_grounding = None
 
                 try:
                     async for chunk in self._adapter.generate_stream(
@@ -1070,14 +1071,6 @@ class Brain:
             logger.info(f"Event {event_id} closed during LLM call -- discarding result")
             return False
 
-        # Process the final result
-        if function_call:
-            logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
-            return await self._execute_function_call(
-                event_id, function_call.name, function_call.args,
-                response_parts=captured_parts,
-            )
-
         grounding_evidence = ""
         if last_grounding and last_grounding.get("chunks"):
             sources = "\n".join(
@@ -1087,6 +1080,15 @@ class Brain:
             queries = ", ".join(last_grounding.get("queries", []))
             grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
             logger.info(f"Google Search grounding for {event_id}: {len(last_grounding['chunks'])} sources")
+
+        # Process the final result
+        if function_call:
+            logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
+            return await self._execute_function_call(
+                event_id, function_call.name, function_call.args,
+                response_parts=captured_parts,
+                grounding_evidence=grounding_evidence or None,
+            )
 
         if accumulated_text or accumulated_thoughts:
             turn = ConversationTurn(
@@ -1965,6 +1967,7 @@ class Brain:
         function_name: str,
         args: dict,
         response_parts: list[dict] | None = None,
+        grounding_evidence: str | None = None,
     ) -> bool:
         """
         Execute an LLM function call. Maps function names to real operations.
@@ -1975,6 +1978,18 @@ class Brain:
         Agent dispatch uses asyncio.create_task for non-blocking execution.
         Other functions (close, approve, verify) are fast Redis writes.
         """
+        if grounding_evidence:
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                waitingFor="google_search",
+                evidence=grounding_evidence,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            response_parts = None
+
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
             task = args.get("task_instruction", "") or args.get("question", "")
