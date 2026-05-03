@@ -408,6 +408,11 @@ timekeeper:
   maxPerUser: "10" # max schedules per authenticated user
   maxTotal: "50" # max schedules system-wide
 # =============================================================================
+# Google Search Grounding (Brain web search during triage/investigate)
+# =============================================================================
+googleSearch:
+  enabled: false # Set to true to enable Google Search grounding in triage/investigate phases
+# =============================================================================
 # Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
 # =============================================================================
 nightwatcher:

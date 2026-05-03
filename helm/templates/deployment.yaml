@@ -319,6 +319,11 @@ spec:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_TIMEKEEPER
             {{- end }}
+            {{- if .Values.googleSearch }}
+            # Google Search Grounding
+            - name: BRAIN_GOOGLE_SEARCH_ENABLED
+              value: "{{ .Values.googleSearch.enabled }}"
+            {{- end }}
             {{- if .Values.nightwatcher }}
             # Nightwatcher (shift consolidation agent)
             - name: NIGHTWATCHER_ENABLED
