@@ -137,11 +137,37 @@ class SlackChannel:
                     from ..models import ConversationTurn
                     event_doc = await self._blackboard.get_event(event_id)
                     if not event_doc:
-                        say(":warning: Event not found.")
+                        await say(":warning: Event not found.")
                         return
                     display_name = await self._resolve_display_name(client, user_id)
+
+                    if event_doc.status == "closed":
+                        event_id = await self._blackboard.create_event(
+                            source="slack",
+                            service=event_doc.service,
+                            reason=f"Follow-up on {event_id}: {text[:200]}",
+                            evidence=EventEvidence(
+                                display_text=f"Follow-up on [{event_id}]: {text}",
+                                source_type="slack",
+                                triggered_by=display_name,
+                                domain="disorder",
+                                severity="info",
+                            ),
+                        )
+                        await self._blackboard.update_event_slack_context(
+                            event_id, channel_id, thread_ts, user_id,
+                        )
+                        await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
+                        await set_title(f"evt-{event_id}: {text[:50]}")
+                        logger.info(
+                            f"Assistant: smart-routed to new event {event_id} "
+                            f"(original was closed)"
+                        )
+                    else:
+                        logger.info(f"Assistant: reply on {event_id} from {display_name}")
+
                     turn = ConversationTurn(
-                        turn=len(event_doc.conversation) + 1,
+                        turn=1 if event_doc.status == "closed" else len(event_doc.conversation) + 1,
                         actor="user",
                         action="message",
                         thoughts=text,
@@ -149,7 +175,6 @@ class SlackChannel:
                         user_name=display_name,
                     )
                     await self._blackboard.append_turn(event_id, turn)
-                    logger.info(f"Assistant: reply on {event_id} from {display_name}")
 
                 self._assistant_context[event_id] = {
                     "channel": channel_id, "thread_ts": thread_ts,
@@ -158,7 +183,7 @@ class SlackChannel:
                 self._brain.clear_waiting(event_id)
             except Exception as e:
                 logger.exception(f"Assistant user_message failed: {e}")
-                say(f":warning: Something went wrong ({e})")
+                await say(f":warning: Something went wrong ({e})")
 
         @self._assistant.thread_context_changed
         async def on_context_changed() -> None:
