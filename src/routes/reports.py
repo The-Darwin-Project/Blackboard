@@ -1,9 +1,12 @@
 # BlackBoard/src/routes/reports.py
 # @ai-rules:
-# 1. [Gotcha]: GET /reports/ (SPA handler) MUST be first. GET /reports/list MUST stay before GET /reports/{event_id}.
+# 1. [Gotcha]: GET /reports/ (SPA handler) MUST be first. GET /reports/list and /reports/search
+#    MUST stay before GET /reports/{event_id} (path param catch-all).
 # 2. [Pattern]: Reports are persisted snapshots (90-day TTL), NOT live-generated like queue/{id}/report.
 # 3. [Gotcha]: GET /reports/ serves index.html so the SPA loads when browser navigates to /reports.
 #    Without this, FastAPI's router intercepts the request and returns 404 (no bare /reports handler).
+# 4. [Pattern]: /reports/search uses compound cursor pagination (score:event_id) for stable keyset
+#    pagination. Filters operate on ZSET score (indexed_at), not closed_at ISO string.
 """
 Reports API - Persisted event report management.
 
@@ -66,6 +69,34 @@ async def list_reports(
 ):
     """Get all persisted report metadata, sorted newest first."""
     return await blackboard.list_reports(limit=limit, offset=offset, service=service)
+
+
+@router.get("/search")
+async def search_reports(
+    cursor: Optional[str] = Query(None, description="Compound cursor: {score}:{event_id}"),
+    limit: int = Query(50, ge=1, le=200),
+    start_time: Optional[float] = Query(None, description="Unix epoch start (ZSET indexed_at)"),
+    end_time: Optional[float] = Query(None, description="Unix epoch end (ZSET indexed_at)"),
+    service: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    domain: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Substring search on event_id, service, reason"),
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Search reports with compound cursor pagination and facet filters."""
+    result = await blackboard.search_reports(
+        limit=limit,
+        cursor=cursor,
+        start_time=start_time,
+        end_time=end_time,
+        service=service,
+        source=source,
+        domain=domain,
+        severity=severity,
+        q=q,
+    )
+    return result
 
 
 @router.get("/{event_id}")

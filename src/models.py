@@ -575,6 +575,26 @@ class FlowMetricsResponse(BaseModel):
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
 
 
+class ReportMeta(BaseModel):
+    """Report summary for list views. Created by persist_report, stored as JSON."""
+    event_id: str
+    service: str
+    source: str
+    domain: str
+    severity: str
+    reason: str
+    turns: int
+    closed_at: str
+    indexed_at: float = 0.0
+
+
+class ReportSearchResponse(BaseModel):
+    """Paginated response for /reports/search."""
+    items: list[ReportMeta]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+
+
 class ChatRequest(BaseModel):
     """Chat request to Architect."""
     message: str = Field(..., description="User intent (e.g., 'Scale inventory-api to 3 replicas')")

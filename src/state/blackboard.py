@@ -2036,6 +2036,7 @@ class BlackboardState:
                 domain = evidence.brain_domain or evidence.domain
                 severity = evidence.brain_severity or evidence.severity
 
+            indexed_at = time.time()
             report_data = {
                 "event_id": event_id,
                 "markdown": markdown,
@@ -2047,11 +2048,12 @@ class BlackboardState:
                 "turns": len(event.conversation),
                 "reason": event.event.reason,
                 "closed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "indexed_at": indexed_at,
             }
 
             key = f"{self.REPORT_PREFIX}{event_id}"
             await self.redis.set(key, json.dumps(report_data), ex=self.REPORT_TTL)
-            await self.redis.zadd(self.REPORT_INDEX, {event_id: time.time()})
+            await self.redis.zadd(self.REPORT_INDEX, {event_id: indexed_at})
             logger.info(f"Persisted report for event {event_id} (TTL={self.REPORT_TTL}s)")
 
         except Exception as e:
@@ -2097,6 +2099,103 @@ class BlackboardState:
 
         # Apply pagination
         return results[offset : offset + limit]
+
+    async def search_reports(
+        self,
+        *,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        service: Optional[str] = None,
+        source: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> dict:
+        """Search reports with compound cursor pagination and facet filters.
+
+        Returns {items: list[dict], next_cursor: str|None, has_more: bool}.
+        Cursor format: '{score}:{event_id}' for stable keyset pagination.
+        """
+        max_score = end_time if end_time is not None else "+inf"
+        min_score = start_time if start_time is not None else "-inf"
+
+        all_with_scores: list[tuple[str, float]] = await self.redis.zrevrangebyscore(
+            self.REPORT_INDEX,
+            max=max_score,
+            min=min_score,
+            withscores=True,
+        )
+        if not all_with_scores:
+            return {"items": [], "next_cursor": None, "has_more": False}
+
+        if len(all_with_scores) > 1000:
+            logger.warning(f"search_reports: large ZSET range ({len(all_with_scores)} IDs)")
+
+        cursor_score: Optional[float] = None
+        cursor_event_id: Optional[str] = None
+        if cursor:
+            parts = cursor.split(":", 1)
+            if len(parts) == 2:
+                cursor_score = float(parts[0])
+                cursor_event_id = parts[1]
+
+        keys = [f"{self.REPORT_PREFIX}{eid}" for eid, _ in all_with_scores]
+        raw_values = await self.redis.mget(keys)
+
+        results: list[dict] = []
+        expired_ids: list[str] = []
+        past_cursor = cursor is None
+
+        for (eid, score), raw in zip(all_with_scores, raw_values):
+            if not raw:
+                expired_ids.append(eid)
+                continue
+
+            if not past_cursor:
+                if score == cursor_score:
+                    if eid >= cursor_event_id:
+                        continue
+                elif score < cursor_score:
+                    past_cursor = True
+                else:
+                    continue
+            if not past_cursor and score < cursor_score:
+                past_cursor = True
+
+            data = json.loads(raw)
+            meta = {k: v for k, v in data.items() if k != "markdown"}
+            meta.setdefault("indexed_at", score)
+
+            if service and meta.get("service") != service:
+                continue
+            if source and meta.get("source") != source:
+                continue
+            if domain and meta.get("domain") != domain:
+                continue
+            if severity and meta.get("severity") != severity:
+                continue
+            if q:
+                q_lower = q.lower()
+                searchable = f"{meta.get('event_id', '')} {meta.get('service', '')} {meta.get('reason', '')}".lower()
+                if q_lower not in searchable:
+                    continue
+
+            results.append(meta)
+
+        if expired_ids:
+            await self.redis.zrem(self.REPORT_INDEX, *expired_ids)
+
+        has_more = len(results) > limit
+        page = results[:limit]
+
+        next_cursor = None
+        if has_more and page:
+            last = page[-1]
+            next_cursor = f"{last['indexed_at']}:{last['event_id']}"
+
+        return {"items": page, "next_cursor": next_cursor, "has_more": has_more}
 
     async def get_report(self, event_id: str) -> Optional[dict]:
         """Get a persisted report by event ID (full content including markdown)."""
