@@ -17,6 +17,7 @@ RUN npm ci
 
 # Copy source and build
 COPY ui/ ./
+ENV VITE_EVENT_HISTORY_ENABLED=true
 RUN npm run build && \
     # Validate build output exists
     test -f /build/dist/index.html || (echo "ERROR: React build failed - index.html not found" && exit 1)
