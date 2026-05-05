@@ -139,6 +139,13 @@ export default function EventHistoryTable({ reports, selectedId, onSelect }: Pro
           ))}
         </thead>
         <tbody>
+          {table.getRowModel().rows.length === 0 && (
+            <tr>
+              <td colSpan={columns.length} className="px-3 py-10 text-center text-text-muted text-sm">
+                No events match your filters.
+              </td>
+            </tr>
+          )}
           {table.getRowModel().rows.map((row) => (
             <tr
               key={row.id}

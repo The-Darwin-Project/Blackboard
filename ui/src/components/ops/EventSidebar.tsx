@@ -6,6 +6,7 @@
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
 // 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
@@ -227,9 +228,9 @@ export default function EventSidebar() {
                       }}
                     />
                   ))}
-                  <a href="/reports" className="block px-4 py-1.5 text-[11px] text-accent hover:underline">
+                  <Link to="/reports" className="block px-4 py-1.5 text-[11px] text-accent hover:underline">
                     View all in Event History &rarr;
-                  </a>
+                  </Link>
                 </TreeGroup>
               )}
             </TreeGroup>

@@ -44,15 +44,16 @@ export default function EventHistory() {
     localStorage.setItem('darwin:eventHistoryView', viewMode);
   }, [viewMode]);
 
-  const { startTime, endTime } = useMemo(() => timeRangeToEpoch(timeRange), [timeRange]);
-
-  const filters = useMemo(() => ({
-    startTime,
-    endTime,
-    service: service || undefined,
-    source: source || undefined,
-    q: debouncedQuery || undefined,
-  }), [startTime, endTime, service, source, debouncedQuery]);
+  const filters = useMemo(() => {
+    const { startTime, endTime } = timeRangeToEpoch(timeRange);
+    return {
+      startTime,
+      endTime,
+      service: service || undefined,
+      source: source || undefined,
+      q: debouncedQuery || undefined,
+    };
+  }, [timeRange, service, source, debouncedQuery]);
 
   const {
     data,

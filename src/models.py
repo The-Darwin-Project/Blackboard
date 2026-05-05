@@ -580,6 +580,7 @@ class ReportMeta(BaseModel):
     event_id: str
     service: str
     source: str
+    subject_type: str = "service"
     domain: str
     severity: str
     reason: str

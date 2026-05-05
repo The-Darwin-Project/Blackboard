@@ -2154,15 +2154,13 @@ class BlackboardState:
                 continue
 
             if not past_cursor:
-                if score == cursor_score:
-                    if eid >= cursor_event_id:
-                        continue
+                if score == cursor_score and eid == cursor_event_id:
+                    past_cursor = True
+                    continue
                 elif score < cursor_score:
                     past_cursor = True
                 else:
                     continue
-            if not past_cursor and score < cursor_score:
-                past_cursor = True
 
             data = json.loads(raw)
             meta = {k: v for k, v in data.items() if k != "markdown"}
