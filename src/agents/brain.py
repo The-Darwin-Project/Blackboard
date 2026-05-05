@@ -54,7 +54,12 @@
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
 # 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
 # 29. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
-# 30. [Pattern]: Message-mode early return in _run_agent_task: when mode=="message", skip result turn
+# 30. [Pattern]: _build_event_state_header: live 2-line compass inserted at TOP of system prompt
+#     (insert(0), unlike DEFER/WAIT which append). Line 1: domain/severity/phase/turn/wall-clock.
+#     Line 2: evidence delta since last classify_event. Challenge question "Any new evidence to
+#     reclassify?" fires only on agent return (plan/execute) or user message -- prevents
+#     reclassification loop by not prompting when nothing new happened.
+# 31. [Pattern]: Message-mode early return in _run_agent_task: when mode=="message", skip result turn
 #     and process_event re-entry before is_cancel. Agent's content was delivered via team_send_message
 #     progress turns. Intentional exception to rule #9 (_append_and_broadcast for all turns).
 #     Safety invariant: team_send_results has notInModes:['message'] in MCP (team-chat-mcp.js).
@@ -1471,6 +1476,9 @@ class Brain:
             initial_paths, template_vars=template_vars
         )
 
+        # Live event state header -- first thing the LLM reads, before all skill instructions.
+        resolved_contents.insert(0, self._build_event_state_header(event, context_flags))
+
         # Evidence-driven context: inject Kargo skills when kargo_context is present
         if (event.event and event.event.evidence
                 and hasattr(event.event.evidence, "kargo_context")
@@ -1529,6 +1537,71 @@ class Brain:
         logger.info(f"Brain skills: [{phase_str}] ({total_tokens} tokens) for {event.id}")
 
         return prompt
+
+    @staticmethod
+    def _build_event_state_header(
+        event: EventDocument, context_flags: dict | None = None,
+    ) -> str:
+        """Live event state compass -- injected at the top of the system prompt.
+
+        Two-line header recomputed every LLM call:
+        Line 1: Current state (domain, severity, phase, turn count, wall clock).
+        Line 2: Evidence delta since last classification.
+        """
+        from ..models import EventEvidence
+
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%H:%M UTC")
+        turn_count = len(event.conversation)
+        phase = event.brain_phase or "triage"
+
+        evidence = event.event.evidence if event.event else None
+        if isinstance(evidence, EventEvidence):
+            domain = evidence.brain_domain or evidence.domain
+            classified = evidence.brain_domain is not None
+            severity = evidence.brain_severity or evidence.severity
+        else:
+            domain = "disorder"
+            classified = False
+            severity = "info"
+
+        line1 = (
+            f"## Event State\n"
+            f"Cynefin: {domain.upper()} | Severity: {severity} "
+            f"| Phase: {phase} | Turn: {turn_count} | Time: {now_str}"
+        )
+
+        if not classified:
+            line2 = "Unclassified — call classify_event before routing."
+        else:
+            last_classify_idx = None
+            for i in range(len(event.conversation) - 1, -1, -1):
+                t = event.conversation[i]
+                if t.actor == "brain" and t.action == "triage":
+                    last_classify_idx = i
+                    break
+
+            tail = event.conversation[last_classify_idx + 1:] if last_classify_idx is not None else event.conversation
+            has_agent_return = any(
+                t.actor not in ("brain", "aligner", "headhunter") and t.action in ("plan", "execute")
+                for t in tail
+            )
+            has_user_message = any(
+                t.actor == "user" and t.action == "message"
+                for t in tail
+            )
+            challenge = has_agent_return or has_user_message
+
+            if last_classify_idx is None:
+                line2 = "Classified (source-assessed)."
+            else:
+                turns_since = turn_count - (last_classify_idx + 1)
+                line2 = f"Last classified: turn {last_classify_idx + 1} ({turns_since} turns ago)."
+
+            if challenge:
+                line2 += " Any new evidence to reclassify?"
+
+        return f"{line1}\n{line2}"
 
     @staticmethod
     def _surface_agent_recommendation(event: EventDocument) -> str | None:
