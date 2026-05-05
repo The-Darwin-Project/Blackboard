@@ -1,73 +1,84 @@
-# React + TypeScript + Vite
+<!-- @ai-rules:
+  1. [Scope]: This README documents the Darwin Dashboard UI only.
+  2. [Constraint]: Keep under 100 lines. No emojis. Professional tone.
+  3. [Pattern]: Update this file when pages or key components are added/removed.
+-->
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Darwin Dashboard
 
-Currently, two official plugins are available:
+React + TypeScript + Vite application serving as the primary web UI for the Darwin Brain. Provides real-time monitoring, event management, and agent interaction via WebSocket.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Pages
 
-## React Compiler
+| Page | Description |
+|------|-------------|
+| **Dashboard (Ops Center)** | XProtect-inspired adaptive layout with service tiles, conversation feed, agent streaming cards. Side-by-side layout activates with 4+ tiles. |
+| **Event History** | TanStack Table with card grid toggle, server pagination, compound cursor pagination. Facet filters: service, source, domain, severity, time range, text search. |
+| **Memory** | Two views: Memories (vector store entries) and Lessons (extracted lessons learned). Includes LLM-powered Extract wizard with multi-select event picker. |
+| **Shifts** | Nightwatcher shift reports (morning/evening). Conditional nav tab, visible only when Nightwatcher is enabled. |
+| **TimeKeeper** | Schedule management UI (create, edit, toggle, delete). Requires Dex auth. |
+| **Topology** | Service dependency graph rendered with Cytoscape.js. |
+| **User Guide** | AI transparency page. |
+| **Incidents** | Smartsheet incident tracker view. |
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Key Components
 
-## Expanding the ESLint configuration
+- **ConversationFeed** — Append-only event conversation renderer.
+- **AgentStreamCard** — Real-time Gemini CLI stdout in dedicated cards with floating windows.
+- **ServiceTile** — Per-service health and metrics tile.
+- **PlanViewer** — Floating viewer for plan and approval turns.
+- **PhaseIndicator** — Brain phase badge with transition markers.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Tech Stack
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- React 19, TypeScript (strict mode)
+- Vite (dev server port 5174, production build served by FastAPI)
+- TanStack Query for server state management
+- WebSocket context provider for real-time updates
+- Cytoscape.js for topology visualization
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## Directory Structure
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+ui/
+  src/
+    components/     # 25+ React components
+    contexts/       # WebSocketContext provider
+    hooks/          # TanStack Query hooks (useQueue, useChat, useWebSocket, etc.)
+    api/            # API client + TypeScript types
+  public/           # Static assets including lessons-learned template
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd ui
+npm ci
+npm run dev    # Vite dev server on port 5174
+npm run build  # Production build to ui/dist/
+npm run lint   # ESLint
 ```
+
+Production build is served by the FastAPI Brain server (static mount at `/`). In development, run the Vite dev server with the Brain on port 8000.
+
+## WebSocket Protocol
+
+Connects to `WS /ws` on the Brain.
+
+**Inbound (server to client):**
+
+| Message | Purpose |
+|---------|---------|
+| `turn` | New conversation turn |
+| `progress` | Agent execution progress |
+| `event_created` / `event_closed` | Event lifecycle transitions |
+| `attachment` | File or image attachments |
+| `phase_updated` | Brain phase transitions |
+
+**Outbound (client to server):**
+
+| Message | Purpose |
+|---------|---------|
+| `chat` | User messages |
+| `approve` / `reject` | Plan approval or rejection |
+| `user_message` | Follow-up messages in active events |

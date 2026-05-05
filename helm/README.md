@@ -50,6 +50,12 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Dex OIDC | `dex.enabled: true` | Requires cert-manager |
 | TimeKeeper | `timekeeper.enabled: true` | Requires `dex.enabled: true` |
 | Ephemeral Agents | `ephemeralAgents.enabled: true` | Requires Tekton Triggers CRDs |
+| Nightwatcher | `nightwatcher.enabled: true` | -- |
+| Headhunter | `headhunter.enabled: true` | Requires `gitlab.enabled: true` |
+| KargoObserver | `kargoObserver.enabled: true` | Requires `kargo.enabled: true` |
+| Google Search | `brain.googleSearchEnabled: true` | -- |
+| Trusted Proxy (BFF) | `trustedProxy.enabled: true` | `trustedProxy.existingSecret` |
+| K8s Observer | `observer.enabled: true` | Pod ServiceAccount |
 
 ## Networking
 
@@ -78,6 +84,17 @@ Four agent sidecars are included (Architect, SysAdmin, Developer, QE). Each supp
 --set sidecars.architect.cliType=claude
 --set sidecars.architect.modelName=claude-opus-4-6
 ```
+
+## Observers
+
+Four background observers can be enabled independently:
+
+| Observer | Purpose | Enable Flag |
+| :--- | :--- | :--- |
+| Kubernetes | Pod health, metrics-server, darwin.io annotations | `observer.enabled: true` |
+| Kargo | Promotion failure/recovery detection | `kargoObserver.enabled: true` |
+| TimeKeeper | Scheduled task execution | `timekeeper.enabled: true` |
+| Nightwatcher | Shift consolidation (cron-based) | `nightwatcher.enabled: true` |
 
 ## Full Values Reference
 

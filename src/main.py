@@ -13,8 +13,8 @@ Darwin Blackboard (Brain) - FastAPI Application
 
 The central nervous system of Darwin, hosting:
 - Blackboard state (Redis-backed)
-- Trinity Agents (Aligner, Architect, SysAdmin)
-- Two key visualizations (Architecture Graph, Resources Chart)
+- 9 agents: Brain, Aligner, Archivist, Architect, SysAdmin, Developer, QE, Headhunter, Nightwatcher
+- React Dashboard, Slack integration, Release Console BFF
 """
 from __future__ import annotations
 
@@ -603,29 +603,49 @@ async def api_info() -> dict:
         "description": "Central nervous system for autonomous infrastructure management",
         "endpoints": {
             "health": "GET /health",
-            "telemetry": "POST /telemetry/",
-            "topology": {
-                "list": "GET /topology/",
-                "mermaid": "GET /topology/mermaid",
-                "services": "GET /topology/services",
-            },
+            "config": "GET /config",
+            "chat": "POST /chat/",
             "queue": {
                 "active": "GET /queue/active",
                 "get": "GET /queue/{event_id}",
+                "turns": "GET /queue/{event_id}/turns",
                 "approve": "POST /queue/{event_id}/approve",
+                "reject": "POST /queue/{event_id}/reject",
+                "close": "POST /queue/{event_id}/close",
                 "closed": "GET /queue/closed/list",
+                "headhunter_pending": "GET /queue/headhunter/pending",
+            },
+            "reports": {
+                "list": "GET /reports/list",
+                "search": "GET /reports/search",
+                "get": "GET /reports/{event_id}",
+            },
+            "topology": {
+                "list": "GET /topology/",
+                "graph": "GET /topology/graph",
+                "mermaid": "GET /topology/mermaid",
             },
             "metrics": {
                 "current": "GET /metrics/{service}",
-                "history": "GET /metrics/{service}/history",
                 "chart": "GET /metrics/chart",
             },
-            "chat": "POST /chat/",
+            "flow": {
+                "overview": "GET /flow",
+                "event": "GET /flow/{event_id}",
+            },
             "events": "GET /events/",
+            "feedback": "POST /feedback",
+            "journal": "GET /api/journal",
+            "agents": "GET /api/agents",
+            "timekeeper": "POST|GET /api/timekeeper",
+            "shifts": "GET /shifts/list",
+            "incidents": "GET /incidents/list",
+            "kargo": "GET /api/kargo/stages",
+            "telemetry": "GET /telemetry/llm",
         },
-        "visualizations": {
-            "architecture_graph": "GET /topology/mermaid",
-            "resources_chart": "GET /metrics/chart",
+        "websocket": {
+            "dashboard": "WS /ws",
+            "agents": "WS /agent/ws",
         },
         "ui": "GET / (React Dashboard)",
     }

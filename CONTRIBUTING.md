@@ -54,6 +54,17 @@ npm run dev
 
 The Vite dev server starts on port 5174 with hot reload.
 
+### 5. Build the sidecar image (optional)
+
+The sidecar image contains all agent CLIs (Gemini, Claude, kubectl, oc, argocd, etc.). Only needed if modifying sidecar code.
+
+```bash
+cd gemini-sidecar
+docker build -t darwin-sidecar .
+```
+
+The sidecar Dockerfile is large (~170 lines) because it installs multiple CLIs, MCP servers, and Playwright/Chromium. Build time is ~10 minutes on first run.
+
 ### Common targets
 
 A `Makefile` is provided for convenience:
@@ -66,6 +77,25 @@ make lint     # ESLint for UI
 make test     # Run pytest
 make docker   # Build Docker image locally
 ```
+
+### Running Tests
+
+```bash
+# Python tests (Brain, agents, observers)
+python -m pytest tests/ -v
+
+# Specific test file
+python -m pytest tests/test_brain_progressive_skills.py -v
+
+# UI lint
+cd ui && npm run lint
+
+# Helm validation
+helm lint ./helm
+helm template darwin-brain ./helm
+```
+
+Tests use `fakeredis` for Redis mocking. See `tests/conftest.py` for shared fixtures.
 
 ## Code Style
 
@@ -93,7 +123,7 @@ Follow the existing convention:
 
 ## Architecture
 
-See [README.md](README.md) for the full architecture overview, including the Blackboard pattern, agent system, and progressive skill loading.
+See the [Architecture Guide](docs/architecture.md) for the full architecture overview, the [Agent System](docs/agents.md) for agent details, and the [API Reference](docs/api-reference.md) for all endpoints.
 
 ## Dockerfile Base Images
 
@@ -102,6 +132,18 @@ The Dockerfiles use Red Hat UBI 9 base images (`registry.access.redhat.com/ubi9/
 ## Sidecar CLI Versions
 
 The sidecar Dockerfile downloads `latest` for all CLI tools (kubectl, oc, argocd, kargo, tkn, helm, etc.). This is intentional -- agents need current CLI versions to work with real clusters. This is a design decision, not an oversight.
+
+## Documentation Structure
+
+| Document | Content |
+|:---|:---|
+| [README.md](README.md) | Project overview and quick start |
+| [docs/architecture.md](docs/architecture.md) | Architecture, WebSocket protocol, safety model |
+| [docs/agents.md](docs/agents.md) | Agent system, sidecars, skills, MCP servers |
+| [docs/api-reference.md](docs/api-reference.md) | All REST and WebSocket API endpoints |
+| [docs/deployment.md](docs/deployment.md) | Environment variables, Helm deployment |
+| [docs/brain-skills.md](docs/brain-skills.md) | Progressive skill system, phases, configuration |
+| [helm/README.md](helm/README.md) | Helm chart installation and values |
 
 ## Questions?
 

@@ -1,3 +1,9 @@
+<!-- @ai-rules:
+1. [Constraint]: This is the concise overview. Detailed content lives in docs/*.md. Do not duplicate.
+2. [Pattern]: Keep under 200 lines. Link to sub-docs for details.
+3. [Constraint]: No internal hostnames, emails, or credentials. Open-source hygiene.
+4. [Gotcha]: The mermaid diagram must match docs/architecture.md topology.
+-->
 # Darwin Blackboard (Brain)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -9,27 +15,35 @@ The central nervous system of Darwin -- an autonomous closed-loop cloud operatio
 
 ## Architecture
 
-The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard and Slack:
+The Brain orchestrates multi-agent conversations via the **Blackboard Pattern** with bidirectional WebSocket communication across Dashboard, Slack, and Release Console:
 
 ```mermaid
 graph TD
     subgraph pod [Darwin Brain Pod]
         Brain["Brain - Vertex AI Pro"]
         Redis["Redis - State + Queue"]
-        Aligner["Aligner - In-process + Flash"]
+        Aligner["Aligner - In-process + Flash Lite"]
         Archivist["Archivist - Deep Memory"]
         Nightwatcher["Nightwatcher - In-process + Flash"]
+        Headhunter["Headhunter - GitLab Poller"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
 
-        Architect["Architect :9091 - Gemini CLI"]
-        SysAdmin["SysAdmin :9092 - Gemini CLI"]
-        Developer["Developer :9093 - Gemini CLI"]
+        Architect["Architect - CLI Sidecar"]
+        SysAdmin["SysAdmin - CLI Sidecar"]
+        Developer["Developer - CLI Sidecar"]
+    end
+
+    subgraph observers [Observers]
+        K8sObs["K8s Observer - metrics-server"]
+        KargoObs["Kargo Observer - Stage CRDs"]
+        TimeKeeper["TimeKeeper - Scheduled Tasks"]
     end
 
     subgraph ui [Clients]
         Dashboard["React Dashboard"]
         SlackApp["Slack /darwin"]
+        Console["Release Console"]
     end
 
     Brain <-->|state| Redis
@@ -42,439 +56,126 @@ graph TD
     Brain -->|WebSocket| SysAdmin
     Brain -->|WebSocket| Developer
 
+    K8sObs -->|anomalies| Aligner
+    KargoObs -->|failures| Brain
+    TimeKeeper -->|schedules| Brain
+    Headhunter -->|MR events| Brain
+
     Dashboard <-->|WebSocket| Brain
     SlackApp <-->|Socket Mode| Slack
     Slack <-->|events| Brain
+    Console <-->|trusted-proxy| Brain
 ```
 
-### Reversed WebSocket Architecture
-
-In **reverse mode** (`AGENT_WS_MODE=reverse`), the connection direction is flipped: sidecars connect **to** the Brain's `/agent/ws` endpoint instead of the Brain connecting out to sidecars.
-
-| Component | Purpose |
-| --- | --- |
-| **AgentRegistry** | Dynamic pool of connected agents with busy/idle tracking |
-| **TaskBridge** | Per-task `asyncio.Queue` bridging WS handler to dispatch coroutines |
-| **Feature flag** | `AGENT_WS_MODE` (`legacy` / `reverse`) |
-| **Dashboard** | `GET /api/agents` endpoint for visibility of connected agents |
-
-Legacy mode (`AGENT_WS_MODE=legacy`) preserves the original behavior where the Brain initiates WebSocket connections to sidecars.
-
-### WebSocket Message Protocol (Reverse Mode)
-
-| Direction | Type | Fields | When |
-| --- | --- | --- | --- |
-| Sidecar → Brain | `register` | agent_id, role, capabilities, cli, model | On connect |
-| Sidecar → Brain | `progress` | task_id, event_id, message | During execution |
-| Sidecar → Brain | `result` | task_id, event_id, output, source, session_id | Task complete |
-| Sidecar → Brain | `error` | task_id, event_id, error, retryable | Task failed |
-| Sidecar → Brain | `huddle_message` | task_id, event_id, content | Agent-to-Manager communication |
-| Sidecar → Brain | `pong` | — | Heartbeat response |
-| Brain → Sidecar | `task` | task_id, event_id, prompt, cwd, autoApprove, session_id | New task |
-| Brain → Sidecar | `cancel` | task_id | Cancel running task |
-| Brain → Sidecar | `ping` | — | Heartbeat |
+> **Full architecture details:** [docs/architecture.md](docs/architecture.md) -- WebSocket protocol, safety model, SDK table, integrations
 
 ## Agents
 
-| Agent | Role | Technology | Capabilities |
-| --- | --- | --- | --- |
-| **Brain** | Orchestrator | Vertex AI Pro (Gemini 3 Pro) | Cynefin classification, progressive skill loading, agent routing, feedback loop verification |
-| **Aligner** | Truth Maintenance | In-process Python + Vertex AI Flash | Telemetry processing, LLM signal analysis, anomaly-triggered event creation |
-| **Archivist** | Deep Memory | In-process Python + Flash | Event summarization, vector embedding (text-embedding-005), similarity search via Qdrant |
-| **Architect** | Strategy | CLI sidecar (configurable: `gemini` or `claude`) | Code review, structured plans with frontmatter YAML, risk assessment. NEVER executes. |
-| **SysAdmin** | Execution | CLI sidecar (configurable: `gemini` or `claude`) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
-| **Developer** | Implementation | CLI sidecar (configurable: `gemini` or `claude`) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
-| **QE** | Verification | CLI sidecar (configurable: `gemini` or `claude`) | Test writing, test execution, verification of Developer changes |
-| **Nightwatcher** | Shift Consolidation | In-process Python + Vertex AI Flash | Phase-gated escalation review (review/investigate/report), batch clustering, Smartsheet incident writing, Slack shift summaries |
-
-### Agent Dispatch (Reverse WebSocket)
-
-In reverse-WS mode (`AGENT_WS_MODE=reverse`), sidecars connect to the Brain and register their role. Brain dispatches tasks directly to individual agents:
-
-- Developer and QE are **separate first-class agents** dispatched independently by the Brain.
-- Brain decides which agent to route to based on the task mode (`execute`, `investigate`, `implement`, `test`).
-- Ephemeral agents (Tekton TaskRun) handle Headhunter and TimeKeeper events, with circuit breaker fallback to in-pod sidecars.
-
-## Progressive Skill System
-
-The Brain loads phase-specific skills (Markdown files) based on event state, replacing the monolithic system prompt. Skills are organized into phases with dependency resolution:
-
-```text
-src/agents/brain_skills/
-  always/         # Core identity, function rules, safety, control theory (loaded every call)
-  triage/         # Cynefin classification, deep memory consultation (early turns)
-  dispatch/       # Execution method, GitOps context (routing phase)
-  post-agent/     # Plan activation, recommendations, when-to-close (after agent returns)
-  waiting/        # Wait-for-user protocol (when paused for human input)
-  context/        # Cross-event awareness, architecture diagram, aligner observations
-  source/         # Source-specific rules (slack, chat, aligner, headhunter, timekeeper)
-  multi-user/     # Multi-participant conversation protocol
-```
-
-Each phase has a `_phase.yaml` with LLM parameters (thinking_level, temperature, priority). The `BrainSkillLoader` in `brain_skill_loader.py` handles discovery, frontmatter parsing, dependency resolution (BFS with cycle detection), and template variable substitution.
-
-Phase exclusions prevent conflicting skills from loading simultaneously (e.g., `post-agent` excludes `triage` and `dispatch`).
-
-## Structured Plan Tracking
-
-The Architect produces plans with a frontmatter YAML header for machine-readable step tracking:
-
-```yaml
----
-plan: Replace Native Confirm with Bootstrap Modal
-service: darwin-store
-repository: https://github.com/The-Darwin-Project/Store.git
-domain: CLEAR
-risk: low
-steps:
-  - id: 1
-    agent: developer
-    mode: implement
-    summary: "Add modal HTML and JS function"
-    status: pending
-  - id: 2
-    agent: developer
-    mode: implement
-    summary: "Update onclick handlers"
-    status: pending
----
-```
-
-The Brain reads the frontmatter `steps:` array, batches same-agent steps, and dispatches with the correct mode. The Developer team's Manager uses the frontmatter as a work tracker, updating `status` as steps complete. When `mode: implement` is used, the full team activates (Developer + QE + Manager).
-
-## Slack Integration
-
-Full bidirectional Slack integration via Socket Mode (`src/channels/slack.py`):
-
-- **`/darwin` slash command** -- Creates events from Slack, mirrors Brain conversation to the thread
-- **DM notifications** -- Brain calls `notify_user_slack(email, message)` to send targeted DMs
-- **Bidirectional threads** -- Recipients can reply in-thread; replies route back to the event conversation
-- **Source tagging** -- Every message is tagged with its origin (dashboard, slack) for Brain context
-- **Approve/reject via reactions** -- Thumbs up/down on plan messages
-- **Thinking indicators** -- Custom emoji shown while the Brain processes, replaced with the final result
-- **Thread ownership guard** -- Prevents notification DMs from hijacking existing event threads
-
-## Deep Memory (Archivist)
-
-The Archivist (`src/agents/archivist.py`) archives closed events into a Qdrant vector store for institutional memory:
-
-1. On event closure, summarizes the event via Flash LLM (symptom, root cause, fix, keywords)
-2. Embeds the summary using `text-embedding-005` (768 dimensions)
-3. Stores in Qdrant collection `darwin_events` with service/domain metadata
-4. Brain calls `consult_deep_memory()` before routing -- if a past event scores > 0.6 similarity, it skips investigation and acts on the prior fix
-
-The `VectorStore` class (`src/memory/vector_store.py`) is a lightweight async Qdrant REST wrapper (no SDK dependency).
-
-## Sidecar CLI Toolkit
-
-All three sidecar agents share the same base image with these CLIs pre-installed:
-
-| CLI | Purpose | Auth |
+| Agent | Role | Technology |
 | --- | --- | --- |
-| `git` | GitOps clone, modify, commit, push | GitHub App token + GitLab PAT |
-| `kubectl` | K8s investigation (get, describe, logs) | Pod ServiceAccount |
-| `oc` | OpenShift CLI (superset of kubectl) | Pod ServiceAccount |
-| `argocd` | ArgoCD app status, sync, diff | Admin password (Architect + SysAdmin) |
-| `kargo` | Kargo projects, stages, promotions | Admin password (Architect + SysAdmin) |
-| `tkn` | Tekton pipelines, runs, logs | Pod ServiceAccount |
-| `helm` | Chart validation (template, lint) | N/A |
-| `gh` | GitHub CLI (PRs, issues, releases) | GitHub App token |
-| `glab` | GitLab CLI (MRs, pipelines, API) | GitLab PAT |
-| `jq`/`yq` | JSON/YAML processing | N/A |
+| **Brain** | Orchestrator | Vertex AI Pro (Gemini), progressive skill loading, Cynefin framework |
+| **Aligner** | Truth Maintenance | In-process Python + Flash Lite, anomaly-triggered events |
+| **Archivist** | Deep Memory | Flash + Qdrant vector store, lessons extraction |
+| **Architect** | Strategy | CLI sidecar (gemini/claude), plans only, NEVER executes |
+| **SysAdmin** | Execution | CLI sidecar, GitOps changes, kubectl/oc investigation |
+| **Developer** | Implementation | CLI sidecar, source code changes, MR management |
+| **QE** | Verification | CLI sidecar, independent test verification |
+| **Headhunter** | MR Lifecycle | In-process Python + Flash Lite, GitLab todo automation |
+| **Nightwatcher** | Shift Consolidation | In-process Python + Flash, batch escalation review |
 
-Each sidecar also has 12 agent skills (`gemini-sidecar/skills/`) loaded automatically based on task context (plan template, code review, GitOps workflow, investigation, rollback, etc.).
+> **Agent details:** [docs/agents.md](docs/agents.md) -- dispatch modes, sidecar CLIs, MCP servers, skills
 
 ## Key Features
 
-- **Progressive Skill Loading** -- Phase-specific Markdown skills with dependency resolution, replacing monolithic prompts
-- **Conversation Queue** -- Shared event documents in Redis with append-only conversation turns
-- **WebSocket Communication** -- Real-time bidirectional streaming between Brain, agents, Dashboard, and Slack
-- **Cynefin Decision Framework** -- Brain classifies events into Clear/Complicated/Complex/Chaotic domains
-- **Deep Memory** -- Qdrant vector store for past event recall and pattern matching
-- **Structured Plan Tracking** -- Frontmatter YAML step assignments with team-level status tracking
-- **Cross-Platform Chat** -- Dashboard and Slack as unified event interfaces with source-aware behavior
-- **LLM Signal Analysis** -- Aligner uses Flash to interpret metrics patterns (anomaly-triggered, not polling-based)
-- **GitOps-Only Mutations** -- All changes go through git. kubectl is read-only.
-- **Agent Recommendation Injection** -- Agent recommendations promoted to system-level priority with temporal context
-- **Event Dedup + Defer** -- Prevents event spam, supports deferred re-processing up to 60 minutes
-- **Closed-Loop Verification** -- Brain verifies every change via Aligner before closing events
-- **ArgoCD/Kargo Integration** -- Agents inspect sync status, trigger syncs, read Kargo promotion pipelines
-- **Cross-Event Correlation** -- Brain sees all active events for the same service, avoids conflicting actions
-- **Multimodal Chat** -- Users can paste/upload images; Brain processes via Gemini multimodal API
-- **Agent Streaming Cards** -- Real-time per-agent Gemini CLI stdout in dedicated UI cards with floating windows
-- **AI Transparency** -- AI-generated actionable outputs tagged in Slack (execute, approval, close); all Dashboard messages tagged; user guide page, feedback mechanism
-- **User Feedback** -- POST `/feedback` endpoint stores ratings in Qdrant for quality tracking
-- **Auth Scaffolding** -- Dex OIDC identity ready (gated behind `DEX_ENABLED`, anonymous mode when off)
-- **TimeKeeper** -- Schedule one-shot or recurring tasks via Dashboard UI. LLM-powered instruction refinement aligns user intent with Brain capabilities. Observer fires when queue is idle (lowest priority). Events arrive as user requests with YAML frontmatter context
-- **Ephemeral Agents** -- On-demand Tekton TaskRun agents for Headhunter and TimeKeeper events. Circuit breaker falls back to sidecar after 2 infra failures. Prune trigger cleans up stuck TaskRuns via the same EventListener
-- **darwin.io Annotations** -- Service discovery via pod annotations (`darwin.io/monitored`, `darwin.io/service-name`, `darwin.io/icon`). Custom graph node icons per service. Aligner monitors annotated pods for anomalies including stuck Pending pods (>5min)
-- **Nightwatcher Shift Consolidation** -- End-of-shift agent that batch-processes Brain escalations. Phase-gated Flash LLM session (review -> investigate -> report) clusters events by root cause, dispatches ephemeral investigations, and writes deduplicated Smartsheet incidents. Two sweeps per day (06:00/18:00 UTC). Lease pattern (pending -> inflight -> commit/requeue) for crash safety. Orphan re-injection ensures no event is silently dropped.
+### Core Differentiators
 
-## Autonomous Remediation Examples
+- **Cynefin Decision Framework** -- Brain classifies events into Clear/Complicated/Complex/Chaotic domains, selecting the right response strategy for each
+- **Closed-Loop Verification** -- Brain verifies every change via Aligner before closing events; no change is assumed successful
+- **Progressive Skill Loading** -- Phase-specific Markdown skills with dependency resolution replace monolithic prompts ([docs/brain-skills.md](docs/brain-skills.md))
+- **Deep Memory** -- Qdrant vector store for past event recall, pattern matching, and lessons learned
+- **L4 Autonomous AI** -- Proactive propose-and-prompt workflow with human approval gates
 
-- [Over-Provisioned Scale-Down](docs/autonomous-remediation-example.md) -- 21-turn event: Detected over-provisioned service, discovered GitOps repo by reasoning from container image URL, scaled down via GitOps, verified outcome.
-- [OOMKilled Recovery](docs/oom-killed-remediation-example.md) -- 10-turn event: Detected OOMKilled pod, confirmed root cause via SysAdmin, increased memory limits via GitOps as preventive fix, verified recovery through Aligner.
+### Operational Capabilities
 
-## SDK
+- **GitOps-Only Mutations** -- All changes go through git; kubectl is read-only
+- **ArgoCD/Kargo Integration** -- Sync status, promotion pipelines, failure detection (KargoObserver)
+- **Ephemeral Agents** -- On-demand Tekton TaskRun agents with circuit breaker fallback
+- **Nightwatcher Shifts** -- End-of-shift batch processing of escalations into deduplicated incidents
+- **Google Search Grounding** -- Web search during triage/investigate for upstream outage verification
+- **Event History** -- Persisted reports with compound cursor pagination, facet filters, TanStack Table UI
 
-The Brain and Aligner use the `google-genai` SDK. Sidecar agents use either Gemini CLI or Claude Code CLI (configurable per agent via `sidecars.<role>.cliType` in Helm values).
+### Integration and UX
 
-| Component | SDK | Default Model |
-| --- | --- | --- |
-| Brain | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
-| Aligner | `google-genai` Python SDK | `gemini-3.1-flash-lite-preview` |
-| Archivist | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
-| Architect sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
-| SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
-| Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
-| QE sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
-| Nightwatcher | `google-genai` Python SDK | `gemini-3-flash-preview` |
+- **Cross-Platform Chat** -- Dashboard, Slack, and Release Console as unified event interfaces
+- **Agent Streaming Cards** -- Real-time per-agent CLI stdout in dedicated UI cards with floating windows
+- **AI Transparency** -- Generated content tagged in Slack and Dashboard; user guide and feedback mechanism
+- **Multimodal Chat** -- Image upload/paste processed via Gemini multimodal API
+- **darwin.io Annotations** -- Passive service discovery via pod annotations
+
+## Autonomous Operation Examples
+
+- [Over-Provisioned Scale-Down](docs/autonomous-remediation-example.md) -- 21-turn event: detected over-provisioned service, discovered GitOps repo, scaled down, verified outcome
+- [OOMKilled Recovery](docs/oom-killed-remediation-example.md) -- 10-turn event: detected OOMKilled pod, increased memory limits via GitOps, verified recovery
+- [Iterative Planning](docs/iterative-planning-example.md) -- 31-turn event: three plan revisions with user feedback, progressive simplification (Complex domain)
+- [Feature Delivery + Self-Healing](docs/autonomous-feature-delivery-example.md) -- concurrent feature implementation and infrastructure recovery
 
 ## Quick Start
 
 ### Local Development
 
 ```bash
-# Start Redis
-docker run -d --name redis -p 6379:6379 redis:7
-
-# Install dependencies
+docker compose up -d                          # Start Redis + Qdrant
 pip install -r requirements.txt
-
-# Set environment variables
-export REDIS_HOST=localhost
-export GCP_PROJECT=your-project-id
-export GCP_LOCATION=us-central1
-
-# Run the server
+export REDIS_HOST=localhost GCP_PROJECT=your-project-id GCP_LOCATION=us-central1
 uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Helm Deployment (OpenShift)
+### Helm Deployment
 
 ```bash
-helm install darwin-brain ./helm \
+helm install darwin-brain oci://ghcr.io/the-darwin-project/charts/darwin-brain \
+  --version 1.0.0 \
   --set gcp.project=your-project-id \
   --set gcp.existingSecret=gcp-sa-key
-
-# Verify -- should show 7 containers (brain, redis, architect, sysadmin, developer, qe, manager)
-kubectl get pods -l app=darwin-brain
 ```
 
-## API Endpoints
+> **Full deployment guide:** [docs/deployment.md](docs/deployment.md) -- all environment variables, CI/CD, passive discovery
 
-### Health & Info
+## Documentation
 
-```text
-GET /health         # {"status": "brain_online"}
-GET /info           # API information and available endpoints
-GET /api/agents     # Connected agents (AgentRegistry visibility for Dashboard)
-```
-
-### WebSocket (Real-time UI)
-
-```text
-WS /ws              # Bidirectional WebSocket for live conversation updates
-                    # Receives: turn, progress, event_created, event_closed, attachment
-                    # Sends: chat, approve, reject, user_message
-
-WS /agent/ws        # Agent WebSocket (reverse mode): sidecars connect here
-                    # See "WebSocket Message Protocol (Reverse Mode)" above
-```
-
-### Conversation Queue
-
-```text
-GET  /queue/active             # List active events with metadata
-GET  /queue/{event_id}         # Full event document with conversation
-POST /queue/{event_id}/approve # Approve a pending plan
-POST /queue/{event_id}/reject  # Reject a pending plan with reason
-GET  /queue/closed/list        # Recently closed events
-```
-
-### TimeKeeper (Scheduled Tasks, requires DEX auth)
-
-```text
-POST   /api/timekeeper         # Create schedule (auth required)
-GET    /api/timekeeper         # List all schedules
-GET    /api/timekeeper/{id}    # Get one schedule
-PUT    /api/timekeeper/{id}    # Update schedule (owner only)
-DELETE /api/timekeeper/{id}    # Delete schedule (owner only)
-PATCH  /api/timekeeper/{id}/toggle  # Enable/disable (owner only)
-POST   /api/timekeeper/refine  # LLM instruction refinement (auth required)
-```
-
-### Shifts (Nightwatcher)
-
-```text
-GET /shifts/list                # All shift reports (paginated)
-GET /shifts/{date}/{window}     # Single shift report detail (date=YYYY-MM-DD, window=morning|evening)
-GET /shifts/current             # Current or most recent shift report
-```
-
-### Chat
-
-```json
-POST /chat/
-{"message": "Scale darwin-store to 3 replicas", "service": "darwin-store"}
-
-// Response:
-{"event_id": "evt-abc123", "status": "created"}
-// Brain processes asynchronously -- track via WebSocket or GET /queue/{event_id}
-```
-
-### Feedback
-
-```json
-POST /feedback
-{"event_id": "evt-abc123", "turn_number": 5, "rating": "positive", "comment": "Accurate fix"}
-```
-
-### Telemetry
-
-```json
-POST /telemetry/
-{
-  "service": "darwin-store",
-  "version": "v52",
-  "metrics": {"cpu": 75.0, "memory": 60.0, "error_rate": 0.5},
-  "topology": {"dependencies": [{"target": "postgres", "type": "db"}]},
-  "gitops": {"repo": "The-Darwin-Project/Store", "helm_path": "helm/values.yaml"}
-}
-```
-
-### Topology & Metrics
-
-```text
-GET /topology/                 # JSON topology
-GET /topology/graph            # Cytoscape.js graph data
-GET /topology/mermaid          # Mermaid diagram
-GET /metrics/{service}         # Current metrics
-GET /metrics/chart             # Time-series chart data
-GET /events/                   # Architecture event timeline
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Default |
-| --- | --- | --- |
-| `REDIS_HOST` | Redis hostname | `localhost` |
-| `REDIS_PASSWORD` | Redis password | (empty) |
-| `GCP_PROJECT` | GCP project ID | (required) |
-| `GCP_LOCATION` | Vertex AI location | `global` |
-| `LLM_MODEL_BRAIN` | Brain model | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_MANAGER` | Manager (DevTeam) model | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-3.1-pro-preview` |
-| `LLM_MODEL_ARCHIVIST` | Archivist model | `gemini-3.1-pro-preview` |
-| `ARCHITECT_SIDECAR_URL` | Architect WebSocket | `http://localhost:9091` |
-| `SYSADMIN_SIDECAR_URL` | sysAdmin WebSocket | `http://localhost:9092` |
-| `DEVELOPER_SIDECAR_URL` | Developer WebSocket | `http://localhost:9093` |
-| `QDRANT_URL` | Qdrant vector store | `http://localhost:6333` |
-| `SLACK_BOT_TOKEN` | Slack bot OAuth token | (optional) |
-| `SLACK_APP_TOKEN` | Slack app-level token | (optional) |
-| `DEX_ENABLED` | Enable Dex OIDC auth | `false` |
-| `AGENT_WS_MODE` | WebSocket mode: `legacy` (Brain→sidecar) or `reverse` (sidecar→Brain) | `legacy` |
-| `BRAIN_PROGRESSIVE_SKILLS` | Enable progressive skills | `true` |
-| `TIMEKEEPER_ENABLED` | Enable TimeKeeper scheduled tasks (requires DEX) | `false` |
-| `TIMEKEEPER_POLL_INTERVAL` | TimeKeeper observer poll interval (seconds) | `30` |
-| `TIMEKEEPER_MAX_PER_USER` | Max schedules per authenticated user | `10` |
-| `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
-| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.1-flash-lite-preview` |
-| `NIGHTWATCHER_ENABLED` | Enable Nightwatcher shift consolidation | `false` |
-| `NIGHTWATCHER_SWEEP_CRON` | Cron schedule for sweeps | `0 6,18 * * *` |
-| `NIGHTWATCHER_MIN_PENDING` | Min pending escalations to trigger sweep | `1` |
-| `NIGHTWATCHER_DISPATCH_CAP` | Max ephemeral investigations per sweep | `3` |
-| `LLM_MODEL_NIGHTWATCHER` | Nightwatcher Flash model | `gemini-3-flash-preview` |
-| `LLM_TEMPERATURE_NIGHTWATCHER` | Nightwatcher LLM temperature | `0.3` |
-| `DEBUG` | Enable debug logging | `false` |
-
-## Safety
-
-### Air Gap (Soft Enforcement via GEMINI.md + Skills)
-
-| Agent | Can Do | Cannot Do |
-| --- | --- | --- |
-| Architect | Clone + read repos, argocd/kargo read, oc read | Commit, push, kubectl mutations, argocd sync |
-| sysAdmin | Git clone/push, kubectl/oc read, argocd sync, kargo read, helm | kubectl write, invent Helm sections |
-| Developer | Git clone/push, read Helm, read code | Modify infrastructure, kubectl scale, argocd |
-
-### Security Patterns
-
-- `FORBIDDEN_PATTERNS` in `security.py` blocks: `rm -rf`, `drop database`, `kubectl delete namespace`, `git push --force`, etc.
-- Dockerfile safety rules: agents can add `ARG/ENV/COPY/RUN` but cannot change `FROM/CMD/USER/WORKDIR`
-- Structural changes require user approval (Brain pauses for confirmation)
-- Agent concurrency locks prevent WebSocket `recv` conflicts
-- ArgoCD/Kargo passwords masked in logs
-- AI-generated content tagged in Dashboard (all messages) and Slack (actionable outputs only)
+| Document | Content |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | System topology, WebSocket protocol, safety model, SDK table |
+| [docs/agents.md](docs/agents.md) | Agent roster, dispatch modes, sidecar CLIs, MCP servers, skills |
+| [docs/api-reference.md](docs/api-reference.md) | All REST and WebSocket API endpoints |
+| [docs/deployment.md](docs/deployment.md) | Environment variables, Helm deployment, CI/CD, service discovery |
+| [docs/brain-skills.md](docs/brain-skills.md) | Progressive skill system, phases, tool gating |
+| [helm/README.md](helm/README.md) | Helm chart installation, values, integrations |
+| [ui/README.md](ui/README.md) | Dashboard pages, components, development |
+| [docs/README.md](docs/README.md) | External service access (ArgoCD, Kargo) |
 
 ## Project Structure
 
 ```text
 BlackBoard/
   src/
-    agents/
-      brain.py              # Brain orchestrator (Vertex AI Pro, function calling, progressive skills)
-      brain_skill_loader.py  # Filesystem-driven skill discovery, YAML frontmatter, dependency resolution
-      brain_skills/          # Phase-organized Markdown skills (always, triage, dispatch, post-agent, etc.)
-      aligner.py             # Aligner (telemetry, anomaly-triggered detection, Flash)
-      archivist.py           # Deep Memory (event summarization, vector embedding, Qdrant storage)
-      base_client.py         # Shared WebSocket agent client base class
-      architect.py           # Thin subclass
-      sysadmin.py            # Thin subclass
-      developer.py           # Thin subclass
-      agent_registry.py      # AgentRegistry + AgentConnection (reverse mode pool)
-      task_bridge.py         # TaskBridge (asyncio.Queue per task_id)
-      agent_ws_handler.py    # /agent/ws WebSocket handler
-      dispatch.py            # Unified dispatch_to_agent + send_cancel
-      ephemeral_provisioner.py  # Tekton TaskRun ephemeral agents with circuit breaker
-      llm/
-        gemini_client.py     # Gemini API client (streaming, thought_signature handling)
-        types.py             # Function declarations for Brain tools
-    channels/
-      slack.py               # Slack Socket Mode integration (slash commands, DMs, threads)
-    memory/
-      vector_store.py        # Async Qdrant REST wrapper (no SDK dependency)
-    state/
-      blackboard.py          # Redis state management (event queue, metrics, topology)
-    routes/
-      queue.py               # Event queue API (approve, reject, list)
-      chat.py                # Chat endpoint
-      events.py              # Architecture event timeline
-      feedback.py            # AI response quality feedback (stored in Qdrant)
-      metrics.py             # Service metrics endpoints
-      topology.py            # Topology graph and Mermaid diagram
-      telemetry.py           # Telemetry ingestion from services
-      reports.py             # Reports SPA serving
-      shifts.py              # Shifts API (list, detail, current) for Nightwatcher shift reports
-      timekeeper.py          # TimeKeeper CRUD + LLM refine (DEX auth required)
-    models.py                # Pydantic models (EventDocument, ConversationTurn, PlanStep)
-    auth.py                  # Dex OIDC identity + require_auth dependency
-    observers/
-      kubernetes.py          # K8s metrics observer (darwin.io annotations, pending pod detection)
-      timekeeper.py          # TimeKeeper observer (idle-gated, ZPOPMIN, YAML frontmatter)
-      nightwatcher.py        # Nightwatcher observer (cron, Flash tool-calling loop, phase gating)
-      nightwatcher_tools.py  # Tool handlers, NightwatcherContext, phase filtering
-      nightwatcher_prompt.py # System prompt: phases, consolidation rules, manifest table
-    main.py                  # FastAPI app, WebSocket endpoint, lifespan
-  gemini-sidecar/
-    Dockerfile               # Sidecar image (Node.js 22, CLI toolkit)
-    server.js                # HTTP + WebSocket wrapper for Gemini/Claude CLI
-    ws-client.js             # WebSocket client mode (reverse: connect to Brain /agent/ws)
-    rules/                   # Agent constitution files (architect.md, sysadmin.md, developer.md, qe.md)
-    skills/                  # 12 agent skills (plan-template, code-review, gitops, investigate, etc.)
-  helm/
-    values.yaml              # Helm values (sidecars, GCP, ArgoCD, Kargo, Slack, observer thresholds)
-    templates/               # Deployment, RBAC, secrets, ConfigMaps, PVC, EventListener (ephemeral agents + prune trigger)
-    files/                   # Agent rule copies for Helm .Files.Get
-  ui/
-    src/
-      components/            # 25 React components (Dashboard, ConversationFeed, AgentStreamCard, Reports, etc.)
-      contexts/              # WebSocketContext provider
-      hooks/                 # TanStack Query hooks (useQueue, useChat, useWebSocket)
-      api/                   # API client + TypeScript types
-  docs/                      # External service access docs, remediation examples
+    agents/              # Brain, Aligner, Archivist, Headhunter, sidecars, dispatch
+      brain_skills/      # Phase-organized Markdown skills (always, triage, dispatch, etc.)
+      llm/               # Gemini + Claude adapters, tool schemas, quota tracking
+    channels/            # Slack Socket Mode integration
+    memory/              # Qdrant vector store (async REST wrapper)
+    state/               # Redis state management (events, metrics, topology)
+    routes/              # REST API routers
+    observers/           # K8s, Kargo, TimeKeeper, Nightwatcher observers
+    adapters/            # Dashboard WS, Smartsheet, OIDC
+    models.py            # Pydantic domain models
+    auth.py              # Dex OIDC + trusted-proxy auth
+    main.py              # FastAPI app entry point
+  gemini-sidecar/        # Sidecar image: CLI toolkit + agent rules + skills
+  helm/                  # Helm chart (Deployment, RBAC, ConfigMaps, Tekton)
+  ui/                    # React Dashboard (Vite + TanStack Query)
+  docs/                  # Architecture docs, examples, integration contracts
+  tests/                 # pytest suite (Brain, agents, observers)
 ```
 
 ## Contributing
