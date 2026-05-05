@@ -389,6 +389,13 @@ export interface ReportMeta {
   turns: number;
   reason: string;
   closed_at: string;
+  indexed_at?: number;
+}
+
+export interface ReportSearchResponse {
+  items: ReportMeta[];
+  next_cursor: string | null;
+  has_more: boolean;
 }
 
 export interface ReportFull extends ReportMeta {

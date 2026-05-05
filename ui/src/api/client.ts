@@ -267,6 +267,32 @@ export async function getReport(eventId: string): Promise<ReportFull> {
   return fetchApi<ReportFull>(`/reports/${encodeURIComponent(eventId)}`);
 }
 
+export interface ReportSearchParams {
+  cursor?: string;
+  limit?: number;
+  start_time?: number;
+  end_time?: number;
+  service?: string;
+  source?: string;
+  domain?: string;
+  severity?: string;
+  q?: string;
+}
+
+export async function searchReports(params: ReportSearchParams = {}): Promise<import('./types').ReportSearchResponse> {
+  const qs = new URLSearchParams();
+  if (params.limit) qs.append('limit', params.limit.toString());
+  if (params.cursor) qs.append('cursor', params.cursor);
+  if (params.start_time !== undefined) qs.append('start_time', params.start_time.toString());
+  if (params.end_time !== undefined) qs.append('end_time', params.end_time.toString());
+  if (params.service) qs.append('service', params.service);
+  if (params.source) qs.append('source', params.source);
+  if (params.domain) qs.append('domain', params.domain);
+  if (params.severity) qs.append('severity', params.severity);
+  if (params.q) qs.append('q', params.q);
+  return fetchApi(`/reports/search?${qs.toString()}`);
+}
+
 // =============================================================================
 // Incidents API (Smartsheet)
 // =============================================================================

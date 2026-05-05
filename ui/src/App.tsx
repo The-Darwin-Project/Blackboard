@@ -16,6 +16,7 @@ import Layout from './components/Layout';
 import Dashboard from './components/Dashboard';
 import GuidePage from './components/GuidePage';
 import ReportsPage from './components/ReportsPage';
+import EventHistory from './components/EventHistory';
 import LoginPage from './components/LoginPage';
 import IncidentsPage from './components/IncidentsPage';
 import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
@@ -56,7 +57,11 @@ function AuthGate() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="topology" element={<TopologyView />} />
-          <Route path="reports" element={<ReportsPage />} />
+          <Route path="reports" element={
+            import.meta.env.VITE_EVENT_HISTORY_ENABLED === 'true'
+              ? <EventHistory />
+              : <ReportsPage />
+          } />
           <Route path="incidents" element={<IncidentsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="timekeeper" element={<TimeKeeperPage />} />
