@@ -20,7 +20,7 @@ import ActivityPanel from './ops/ActivityPanel';
 const BASE_TABS = [
   { id: '/', label: 'Streams' },
   { id: '/topology', label: 'Topology' },
-  { id: '/reports', label: 'Reports' },
+  { id: '/reports', label: 'Event History' },
   { id: '/incidents', label: 'Incidents' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },

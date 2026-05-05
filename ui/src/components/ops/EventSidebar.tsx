@@ -114,10 +114,7 @@ export default function EventSidebar() {
   const events = isDemoMode ? MOCK_EVENTS : activeEvents || [];
   const demoHH = isDemoMode ? MOCK_HH_TODOS : hhTodos;
   const closedSource = isDemoMode ? MOCK_CLOSED_EVENTS : (closedEvents || []);
-  const recentClosed = closedSource.filter((evt: { created?: string }) => {
-    if (!evt.created) return false;
-    return Date.now() - new Date(evt.created).getTime() < 30 * 60 * 1000;
-  });
+  const recentClosed = closedSource;
   const activeEvts = events.filter(e => e.status === 'active' || e.status === 'new');
   const waitingEvts = events.filter(e => e.status === 'waiting_approval');
   const deferredEvts = events.filter(e => e.status === 'deferred');
@@ -230,6 +227,9 @@ export default function EventSidebar() {
                       }}
                     />
                   ))}
+                  <a href="/reports" className="block px-4 py-1.5 text-[11px] text-accent hover:underline">
+                    View all in Event History &rarr;
+                  </a>
                 </TreeGroup>
               )}
             </TreeGroup>
