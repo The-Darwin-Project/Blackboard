@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
@@ -175,6 +176,15 @@ class SlackChannel:
                         user_name=display_name,
                     )
                     await self._blackboard.append_turn(event_id, turn)
+
+                    if event_doc.status != "closed" and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel_id:
+                        try:
+                            workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
+                            ts_nodot = event_doc.slack_thread_ts.replace(".", "")
+                            thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                            await say(f":white_check_mark: Message received. :point_right: <{thread_link}|Continue in #darwin-infra>")
+                        except Exception as e:
+                            logger.warning(f"Assistant DM ack failed for {event_id}: {e}")
 
                 self._assistant_context[event_id] = {
                     "channel": channel_id, "thread_ts": thread_ts,
@@ -369,6 +379,17 @@ class SlackChannel:
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
+            if event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
+                try:
+                    workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
+                    ts_nodot = event_doc.slack_thread_ts.replace(".", "")
+                    thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                    await client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=f":white_check_mark: Message received. :point_right: <{thread_link}|Continue in #darwin-infra>",
+                    )
+                except Exception as e:
+                    logger.warning(f"DM ack failed for {event_id}: {e}")
             logger.info(f"Slack DM reply on {event_id} from {display_name} ({user})")
 
         @self._app.action("darwin_approve")

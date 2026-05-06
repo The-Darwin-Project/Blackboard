@@ -35,9 +35,10 @@ create incident, then close.
 Before escalating a pipeline failure, consult Deep Memory with the error signature.
 If a proven fix exists (score >= 0.65, outcome "resolved" or "user_closed"):
 
-- In the **notify_user_slack** DM (authorization channel): include the fix as an
-  actionable proposal: "Pipeline failed due to {error}. I resolved this in {service}
-  by {fix}. Reply to authorize the same fix here."
+- In the **notify_user_slack** message (posted to #darwin-infra, DM contains a
+  pointer link): include the fix as an actionable proposal: "Pipeline failed
+  due to {error}. I resolved this in {service} by {fix}. Reply to authorize
+  the same fix here."
 - In the **report_incident** (offline record): include the fix in the "Proposed Fix"
   section of the incident description. This goes to Nightwatcher staging (when enabled)
   or directly to Smartsheet -- it is NOT the authorization channel.
@@ -48,10 +49,12 @@ If a proven fix exists (score >= 0.65, outcome "resolved" or "user_closed"):
 
 If no proven fix exists, escalate normally with evidence only (report_incident + close).
 
-Note: Slack notification DMs are reply-capable. Maintainer replies
-join the active event conversation. If the event is already closed,
-a follow-up event is created automatically. The incident row in
-Smartsheet is the offline tracking artifact.
+Note: Notifications post to the #darwin-infra thread (visible to the
+team) and each maintainer gets a DM with a link to the thread. Replies
+from either the DM or the infra thread reach the event conversation.
+If the event is already closed, a follow-up event is created
+automatically. The incident row in Smartsheet is the offline tracking
+artifact.
 
 For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
 
