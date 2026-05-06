@@ -6,6 +6,7 @@
 """Unit tests for Nightwatcher tool execution and phase gating."""
 from __future__ import annotations
 
+import os
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -14,6 +15,10 @@ from src.observers.nightwatcher_tools import (
     NightwatcherContext,
     execute_tool,
     get_phase_tools,
+    validate_cluster_plan,
+    build_report_tool,
+    build_summary_tool,
+    _handle_write_incident,
     _PHASE_TOOLS,
 )
 
@@ -37,6 +42,8 @@ def _make_ctx(**overrides) -> NightwatcherContext:
         dispatch_cap=3,
         created_incidents=[],
         investigations=[],
+        declared_clusters=[],
+        failed_cluster_events=[],
     )
     defaults.update(overrides)
     return NightwatcherContext(**defaults)
@@ -55,23 +62,22 @@ class TestPhaseGating:
         assert "consult_deep_memory" in names
         assert "search_journal" in names
         assert "dispatch_investigation" not in names
-        assert "create_issue" not in names
+        assert "write_incident" not in names
 
     def test_investigate_phase_adds_dispatch(self):
         tools = get_phase_tools("investigate")
         names = {t["name"] for t in tools}
         assert "dispatch_investigation" in names
         assert "get_event_report" in names
-        assert "create_issue" not in names
+        assert "write_incident" not in names
 
-    def test_report_phase_write_only(self):
+    def test_report_phase_declare_clusters_only(self):
         tools = get_phase_tools("report")
         names = {t["name"] for t in tools}
-        assert "create_issue" in names
-        assert "post_shift_summary" in names
+        assert names == {"declare_clusters"}
+        assert "write_incident" not in names
+        assert "post_shift_summary" not in names
         assert "get_event_report" not in names
-        assert "dispatch_investigation" not in names
-        assert "set_phase" not in names
 
     def test_unknown_phase_returns_empty(self):
         tools = get_phase_tools("nonexistent")
@@ -236,17 +242,17 @@ class TestDispatchInvestigation:
 
 
 # =========================================================================
-# create_issue
+# write_incident (called directly with cluster dict, not via execute_tool)
 # =========================================================================
 
-class TestCreateIncident:
+class TestWriteIncident:
     @pytest.mark.asyncio
     async def test_no_smartsheet_adapter(self):
         ctx = _make_ctx(smartsheet_adapter=None)
-        result = await execute_tool("create_issue", {
-            "platform": "Konflux", "summary": "test",
-            "affected_events": ["evt-1"],
-        }, ctx)
+        cluster = {"platform": "Konflux", "events": ["evt-1"], "root_cause": "test", "services": ["svc-a"]}
+        result = await _handle_write_incident(
+            {"summary": "test"}, ctx, cluster,
+        )
         assert "not configured" in result
         assert len(ctx.created_incidents) == 0
 
@@ -256,12 +262,12 @@ class TestCreateIncident:
         ctx.smartsheet_adapter.create_incident = AsyncMock(
             return_value={"row_id": 12345, "sheet_url": "https://ss.com/row/12345"},
         )
-        result = await execute_tool("create_issue", {
-            "platform": "Konflux", "summary": "Pipeline failures",
-            "description": "All s390x pipelines failing",
-            "priority": "Critical", "status": "New",
-            "affected_events": ["evt-1", "evt-2"],
-        }, ctx)
+        cluster = {"platform": "Konflux", "events": ["evt-1", "evt-2"], "root_cause": "s390x failures", "services": ["svc-a"]}
+        result = await _handle_write_incident(
+            {"summary": "Pipeline failures", "description": "All s390x pipelines failing",
+             "priority": "Critical", "status": "New"},
+            ctx, cluster,
+        )
         assert "Incident created" in result
         assert "12345" in result
         assert len(ctx.created_incidents) == 1
@@ -272,7 +278,7 @@ class TestCreateIncident:
 
     @pytest.mark.asyncio
     async def test_system_fields_populated(self):
-        """create_incident must add Labels, Components, Reporter from env."""
+        """write_incident must add Labels, Components, Reporter from env."""
         ctx = _make_ctx()
         captured_fields = {}
 
@@ -281,24 +287,27 @@ class TestCreateIncident:
             return {"row_id": 1, "sheet_url": ""}
 
         ctx.smartsheet_adapter.create_incident = capture_fields
-        await execute_tool("create_issue", {
-            "platform": "P", "summary": "S", "affected_events": ["e"],
-        }, ctx)
-        assert captured_fields["Labels"] == "darwin-auto, release-incident"
-        assert captured_fields["Components"] == "CNV CI and Release"
-        assert captured_fields["Issue Type"] == "Task"
+        cluster = {"platform": "P", "events": ["e"], "root_cause": "x", "services": ["svc"]}
+        await _handle_write_incident({"summary": "S"}, ctx, cluster)
+        assert captured_fields["Labels"] == os.environ.get("SMARTSHEET_INCIDENT_LABELS", "")
+        assert captured_fields["Components"] == os.environ.get("SMARTSHEET_INCIDENT_COMPONENTS", "")
+        assert captured_fields["Issue Type"] == os.environ.get("SMARTSHEET_INCIDENT_ISSUE_TYPE", "Task")
+        assert captured_fields["Platform"] == "P"
 
     @pytest.mark.asyncio
-    async def test_smartsheet_error_handled(self):
+    async def test_smartsheet_error_adds_to_failed_cluster_events(self):
         ctx = _make_ctx()
         ctx.smartsheet_adapter.create_incident = AsyncMock(
             side_effect=RuntimeError("API 500"),
         )
-        result = await execute_tool("create_issue", {
-            "platform": "P", "summary": "S", "affected_events": [],
-        }, ctx)
+        cluster = {"platform": "P", "events": ["evt-1", "evt-2"], "root_cause": "x", "services": ["svc"]}
+        result = await _handle_write_incident(
+            {"summary": "S"}, ctx, cluster,
+        )
         assert "Failed to create incident" in result
         assert len(ctx.created_incidents) == 0
+        assert "evt-1" in ctx.failed_cluster_events
+        assert "evt-2" in ctx.failed_cluster_events
 
 
 # =========================================================================
@@ -334,3 +343,135 @@ class TestPostShiftSummary:
             "post_shift_summary", {"summary": "text"}, ctx,
         )
         assert "failed" in result
+
+
+# =========================================================================
+# validate_cluster_plan
+# =========================================================================
+
+class TestValidateClusterPlan:
+    def test_happy_path(self):
+        """All events covered, no overlaps."""
+        clusters = [
+            {"events": ["evt-1", "evt-2"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+            {"events": ["evt-3"], "root_cause": "auth failure", "platform": "Kargo", "services": ["svc-b"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        assert ok is True
+        assert error == ""
+
+    def test_missing_events(self):
+        """Returns specific error listing missing event IDs."""
+        clusters = [
+            {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        assert ok is False
+        assert "evt-2" in error
+        assert "evt-3" in error
+
+    def test_duplicate_events(self):
+        """Event in 2 clusters rejected."""
+        clusters = [
+            {"events": ["evt-1", "evt-2"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+            {"events": ["evt-2", "evt-3"], "root_cause": "auth", "platform": "Kargo", "services": ["svc-b"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1", "evt-2", "evt-3"})
+        assert ok is False
+        assert "evt-2" in error
+        assert "multiple" in error.lower()
+
+    def test_empty_cluster(self):
+        """Empty events list rejected."""
+        clusters = [
+            {"events": [], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1"})
+        assert ok is False
+        assert "no events" in error.lower()
+
+    def test_unknown_event(self):
+        """Event not in manifest rejected."""
+        clusters = [
+            {"events": ["evt-1", "evt-unknown"], "root_cause": "CDN 404", "platform": "Konflux", "services": ["svc-a"]},
+        ]
+        ok, error = validate_cluster_plan(clusters, {"evt-1"})
+        assert ok is False
+        assert "evt-unknown" in error
+
+    def test_invalid_platform(self):
+        """Invalid platform enum rejected when VALID_PLATFORMS is populated."""
+        from src.agents.llm.types import VALID_PLATFORMS
+        old = list(VALID_PLATFORMS)
+        VALID_PLATFORMS.clear()
+        VALID_PLATFORMS.extend(["Konflux", "Kargo"])
+        try:
+            clusters = [
+                {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "InvalidPlatform", "services": ["svc-a"]},
+            ]
+            ok, error = validate_cluster_plan(clusters, {"evt-1"})
+            assert ok is False
+            assert "InvalidPlatform" in error
+            assert "invalid platform" in error.lower()
+        finally:
+            VALID_PLATFORMS.clear()
+            VALID_PLATFORMS.extend(old)
+
+    def test_platform_validation_skipped_when_empty(self):
+        """Platform validation skipped when VALID_PLATFORMS is empty (Smartsheet not configured)."""
+        from src.agents.llm.types import VALID_PLATFORMS
+        old = list(VALID_PLATFORMS)
+        VALID_PLATFORMS.clear()
+        try:
+            clusters = [
+                {"events": ["evt-1"], "root_cause": "CDN 404", "platform": "AnyPlatform", "services": ["svc-a"]},
+            ]
+            ok, error = validate_cluster_plan(clusters, {"evt-1"})
+            assert ok is True
+        finally:
+            VALID_PLATFORMS.clear()
+            VALID_PLATFORMS.extend(old)
+
+
+# =========================================================================
+# build_report_tool
+# =========================================================================
+
+class TestBuildReportTool:
+    def test_context_in_description(self):
+        """Dynamic description contains cluster info + receipt."""
+        cluster = {"root_cause": "CDN 404 s390x", "events": ["evt-1", "evt-2"], "platform": "Konflux", "services": ["svc-a"]}
+        completed = [{"index": 1, "summary": "Auth failure", "priority": "Critical", "affected_events": ["evt-3"]}]
+        tools = build_report_tool(cluster, 2, 3, completed)
+        assert len(tools) == 1
+        assert tools[0]["name"] == "write_incident"
+        desc = tools[0]["description"]
+        assert "2 of 3" in desc
+        assert "CDN 404 s390x" in desc
+        assert "Auth failure" in desc or "Critical" in desc
+        assert "input_schema" in tools[0]
+
+    def test_token_guard_truncation(self):
+        """Receipt truncated when description exceeds 4000 chars."""
+        cluster = {"root_cause": "test", "events": ["evt-1"], "platform": "Konflux", "services": ["svc"]}
+        long_reports = [
+            {"index": i, "summary": "A" * 200, "priority": "Major", "affected_events": [f"evt-{i}"]}
+            for i in range(1, 50)
+        ]
+        tools = build_report_tool(cluster, 50, 50, long_reports)
+        desc = tools[0]["description"]
+        assert len(desc) <= 5000
+
+
+# =========================================================================
+# build_summary_tool
+# =========================================================================
+
+class TestBuildSummaryTool:
+    def test_returns_post_shift_summary(self):
+        reports = [{"index": 1, "summary": "CDN 404", "priority": "Critical", "platform": "Konflux", "affected_events": ["evt-1"]}]
+        metrics = {"escalation_count": 5, "incident_count": 1, "noise_reduction_pct": 80.0}
+        tools = build_summary_tool(reports, metrics)
+        assert len(tools) == 1
+        assert tools[0]["name"] == "post_shift_summary"
+        assert "input_schema" in tools[0]

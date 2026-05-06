@@ -122,3 +122,57 @@ class TestBuildSystemPrompt:
         assert "CLEAR" in prompt
         assert "COMPLICATED" in prompt
         assert "CHAOTIC" in prompt
+
+    def test_report_phase_describes_clustering(self):
+        prompt = build_system_prompt([_make_escalation()], "s", "e")
+        assert "grouping events by shared root cause" in prompt
+        assert "create_issue" not in prompt
+
+
+# =========================================================================
+# build_manifest_table -- Staged (hrs ago) column
+# =========================================================================
+
+class TestManifestTableStagedHoursAgo:
+    def test_staged_hours_ago_column_present(self):
+        """Manifest table includes Staged (hrs ago) header and computed value."""
+        import time as _time
+        esc = StagedEscalation(
+            event_id="evt-test", service="svc-1", source="aligner",
+            reason="test", summary="test summary",
+            staged_at=_time.time() - 7200,
+        )
+        table = build_manifest_table([esc])
+        assert "Staged (hrs ago)" in table
+        assert "2.0h" in table
+
+
+# =========================================================================
+# build_report_iteration_prompt
+# =========================================================================
+
+class TestBuildReportIterationPrompt:
+    def test_carries_cluster_context_and_receipts(self):
+        from src.observers.nightwatcher_prompt import build_report_iteration_prompt
+        cluster = {"events": ["evt-1"], "platform": "Konflux", "root_cause": "CDN 404", "services": ["svc-a"]}
+        completed = [{"index": 1, "summary": "Auth fail", "priority": "Critical", "platform": "Kargo", "affected_events": ["evt-2"]}]
+        prompt = build_report_iteration_prompt(cluster, 2, 3, completed)
+        assert "Report 2 of 3" in prompt
+        assert "CDN 404" in prompt
+        assert "evt-1" in prompt
+        assert "Auth fail" in prompt
+
+
+# =========================================================================
+# build_summary_prompt
+# =========================================================================
+
+class TestBuildSummaryPrompt:
+    def test_includes_metrics_and_report_list(self):
+        from src.observers.nightwatcher_prompt import build_summary_prompt
+        reports = [{"index": 1, "summary": "CDN 404", "priority": "Critical", "status": "New", "platform": "Konflux", "affected_events": ["evt-1"]}]
+        metrics = {"escalation_count": 5, "incident_count": 1, "noise_reduction_pct": 80.0}
+        prompt = build_summary_prompt(reports, metrics)
+        assert "5" in prompt
+        assert "80.0%" in prompt
+        assert "CDN 404" in prompt

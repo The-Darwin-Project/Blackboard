@@ -67,12 +67,13 @@ def _get_adapter():
 
 @router.get("/list")
 async def list_incidents() -> list[dict]:
-    """List Darwin-created incidents from Smartsheet, filtered by darwin-auto label."""
+    """List Darwin-created incidents from Smartsheet, filtered by configured label."""
     adapter = _get_adapter()
     if not adapter:
         return []
     try:
-        rows = await adapter.list_incidents(label_filter="darwin-auto")
+        label = os.environ.get("SMARTSHEET_INCIDENT_LABEL_FILTER", "")
+        rows = await adapter.list_incidents(label_filter=label)
         return [_normalize_keys(row) for row in rows]
     except Exception as e:
         logger.warning("Failed to fetch incidents from Smartsheet: %s", e)

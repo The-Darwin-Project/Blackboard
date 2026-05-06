@@ -31,6 +31,7 @@ class SmartsheetIncidentAdapter:
         self._col_by_title: dict[str, int] = {}
         self._col_by_id: dict[int, str] = {}
         self._multi_picklist_cols: set[int] = set()
+        self._column_options: dict[str, list[str]] = {}
         self._permalink: str = ""
         self._rows_cache: list[dict] = []
         self._rows_cache_ts: float = 0.0
@@ -50,14 +51,21 @@ class SmartsheetIncidentAdapter:
             self._col_by_id[col["id"]] = col["title"]
             if col.get("options") and col.get("type") == "TEXT_NUMBER":
                 self._multi_picklist_cols.add(col["id"])
+            opts = col.get("options", [])
+            if opts:
+                self._column_options[col["title"]] = [str(o) for o in opts]
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{BASE_URL}/sheets/{self._sheet_id}?include=", headers=self._headers())
             if resp.status_code == 200:
                 self._permalink = resp.json().get("permalink", "")
         if not self._permalink:
             self._permalink = f"https://app.smartsheet.com/sheets/{self._sheet_id}"
-        logger.info("Smartsheet column cache loaded: %d columns (%d multi-picklist), permalink=%s",
-                     len(self._col_by_title), len(self._multi_picklist_cols), self._permalink)
+        logger.info("Smartsheet column cache loaded: %d columns (%d multi-picklist), %d columns with options, permalink=%s",
+                     len(self._col_by_title), len(self._multi_picklist_cols), len(self._column_options), self._permalink)
+
+    def get_column_options(self) -> dict[str, list[str]]:
+        """Return all column options fetched from Smartsheet schema."""
+        return self._column_options
 
     async def create_incident(self, fields: dict) -> dict:
         """Add an incident row. Returns {"row_id": ..., "sheet_url": ...}."""
@@ -85,7 +93,7 @@ class SmartsheetIncidentAdapter:
         self._rows_cache_ts = 0.0
         return {"row_id": row_id, "sheet_url": self._permalink}
 
-    async def list_incidents(self, label_filter: str = "darwin-auto") -> list[dict]:
+    async def list_incidents(self, label_filter: str = "") -> list[dict]:
         """Read incidents filtered by label. Uses 120s TTL cache."""
         now = time.time()
         if self._rows_cache and (now - self._rows_cache_ts) < _CACHE_TTL:

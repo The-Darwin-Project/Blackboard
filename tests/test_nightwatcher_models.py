@@ -118,12 +118,12 @@ class TestShiftIncident:
         assert inc.status == "New"
         assert inc.priority == "Normal"
 
-    def test_self_resolved_status(self):
+    def test_closed_status(self):
         inc = ShiftIncident(
             platform="Kargo", summary="Timeout resolved",
-            status="Self-Resolved",
+            status="Closed",
         )
-        assert inc.status == "Self-Resolved"
+        assert inc.status == "Closed"
 
     def test_empty_affected_events_default(self):
         inc = ShiftIncident(platform="p", summary="s")
@@ -201,3 +201,43 @@ class TestShiftReport:
         for field in ("shift_date", "window", "status", "manifest",
                       "incidents", "investigations", "metrics"):
             assert field in props, f"Missing field: {field}"
+
+
+# =========================================================================
+# NightwatcherContext (dataclass from nightwatcher_tools)
+# =========================================================================
+
+class TestNightwatcherContextNewFields:
+    def test_declared_clusters_default(self):
+        from unittest.mock import AsyncMock
+        from src.observers.nightwatcher_tools import NightwatcherContext
+        ctx = NightwatcherContext(
+            blackboard=AsyncMock(), archivist=AsyncMock(),
+            provisioner=AsyncMock(), registry=AsyncMock(),
+            bridge=AsyncMock(), smartsheet_adapter=AsyncMock(),
+            slack_notify=AsyncMock(),
+            manifest_services=set(), manifest_ids=set(),
+            dispatch_count=0, dispatch_cap=3,
+            created_incidents=[], investigations=[],
+        )
+        assert ctx.declared_clusters == []
+        assert ctx.failed_cluster_events == []
+
+    def test_declared_clusters_populated(self):
+        from unittest.mock import AsyncMock
+        from src.observers.nightwatcher_tools import NightwatcherContext
+        clusters = [{"events": ["evt-1"], "root_cause": "test", "platform": "P", "services": ["s"]}]
+        ctx = NightwatcherContext(
+            blackboard=AsyncMock(), archivist=AsyncMock(),
+            provisioner=AsyncMock(), registry=AsyncMock(),
+            bridge=AsyncMock(), smartsheet_adapter=AsyncMock(),
+            slack_notify=AsyncMock(),
+            manifest_services=set(), manifest_ids=set(),
+            dispatch_count=0, dispatch_cap=3,
+            created_incidents=[], investigations=[],
+            declared_clusters=clusters,
+            failed_cluster_events=["evt-fail"],
+        )
+        assert len(ctx.declared_clusters) == 1
+        assert ctx.declared_clusters[0]["root_cause"] == "test"
+        assert ctx.failed_cluster_events == ["evt-fail"]

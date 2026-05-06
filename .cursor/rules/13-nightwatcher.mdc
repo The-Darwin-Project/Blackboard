@@ -1,36 +1,53 @@
 ---
-description: Nightwatcher agent -- shift consolidation daemon, phase-gated LLM loop, lease safety
+description: Nightwatcher agent -- shift consolidation daemon, shopping cart report pattern, lease safety
 globs: "**/nightwatcher*.py"
 alwaysApply: false
 ---
 
 # Nightwatcher (Agent 6) -- Shift Consolidation
 
-The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Smartsheet incidents. It runs a phase-gated Gemini Flash tool-calling session on a cron schedule (default 06:00/18:00 UTC).
+The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Smartsheet incidents. It runs a phase-gated Gemini Flash session on a cron schedule (default 06:00/18:00 UTC).
 
-## Core Principle: LLM Decides, Code Executes
+## Core Principle: LLM Decides Clustering. Code Drives Combining. Tools Carry Context.
 
-The Nightwatcher contains ZERO routing or clustering logic. The Flash LLM session decides how to cluster events, which services to investigate, and what incidents to write. Code enforces mechanical safety: phase transitions, lease lifecycle, manifest accounting, and orphan re-injection.
+| Operation | Owner | Enforcement |
+|---|---|---|
+| **Clustering** (which events share a root cause) | LLM decides | `declare_clusters` tool -- LLM emits structured cluster plan |
+| **Combining** (one incident per cluster) | Code drives | Shopping cart loop -- one iteration per declared cluster |
+| **Status assessment** (New vs Closed) | LLM decides | Judgment field in `write_incident` tool, informed by manifest `staged_hours_ago` |
+
+Code contains ZERO clustering logic. The LLM decides how to group events. Code enforces mechanical safety: manifest validation, combining iteration, lease lifecycle, and partial failure recovery.
 
 ## File Structure
 
 | File | Responsibility |
 |---|---|
-| `nightwatcher.py` | Observer lifecycle (start/stop/cron), Flash tool-calling loop, phase gating, orphan re-injection |
-| `nightwatcher_tools.py` | Stateless tool handlers, `NightwatcherContext` dataclass, `get_phase_tools()` phase filter |
-| `nightwatcher_prompt.py` | System prompt builder: identity, phase lifecycle, consolidation rules, manifest table |
+| `nightwatcher.py` | Observer lifecycle (start/stop/cron), analysis loop (review/investigate), shopping cart report loop |
+| `nightwatcher_tools.py` | Stateless tool handlers, `NightwatcherContext` dataclass, `validate_cluster_plan()`, dynamic tool builders |
+| `nightwatcher_prompt.py` | System prompt builder, per-iteration report prompts, summary prompts, manifest table |
 
-## Phase-Gated Tool Availability
+## Sweep Lifecycle
 
-Tools are filtered by `get_phase_tools(current_phase)`. Phase transitions are strictly forward-only via `set_phase`:
+### Phase 1: REVIEW (LLM-driven)
 
-| Phase | Available Tools | Purpose |
-|---|---|---|
-| **review** | `set_phase`, `get_event_report`, `search_journal`, `consult_deep_memory` | Understand the shift -- read events, check history, identify clusters |
-| **investigate** | All review tools + `dispatch_investigation` | Verify clusters with live evidence via ephemeral agents |
-| **report** | `create_issue`, `post_shift_summary` | Write consolidated Smartsheet incidents and Slack summary |
+Multi-turn Flash tool-calling loop. LLM reads event reports, journals, and deep memory. Builds understanding of the shift.
 
-Phase transitions: `review` -> `investigate` -> `report`. Backward transitions are rejected.
+Tools: `set_phase`, `get_event_report`, `search_journal`, `consult_deep_memory`
+
+### Phase 2: INVESTIGATE (LLM-driven)
+
+LLM dispatches ephemeral agents for live cluster state when reports and journals are insufficient.
+
+Tools: All review tools + `dispatch_investigation` (capped at `NIGHTWATCHER_DISPATCH_CAP`)
+
+### Phase 3: REPORT (code-driven shopping cart)
+
+1. **Declare clusters**: LLM calls `declare_clusters` with structured JSON. Code validates manifest coverage before any writes.
+2. **Report loop** (N iterations, code drives): For each cluster, code generates a dynamic `write_incident` tool. LLM fills 4 judgment fields (summary, description, priority, status). Code combines judgment + pre-filled fields (platform, affected_events) = Smartsheet row.
+3. **Coverage gate**: Code checks all manifest events covered. Failed cluster events are restaged.
+4. **Shift summary**: LLM writes summary with full receipt of completed reports.
+
+Phase transitions: `review` -> `investigate` -> `report`. Backward transitions are rejected. Analysis loop capped at `MAX_ANALYSIS_ROUNDS`.
 
 ## Lease Pattern (Crash Safety)
 
@@ -42,25 +59,26 @@ pending  ->  inflight  ->  commit / requeue
 
 1. **Staging**: Brain's `report_incident` handler pushes to `darwin:nightwatcher:pending` when `NIGHTWATCHER_ENABLED=true`.
 2. **Lease**: `lease_pending_escalations()` atomically moves all pending items to `darwin:nightwatcher:inflight`.
-3. **Commit**: On success, `commit_inflight()` deletes the inflight set.
+3. **Commit**: On success, `commit_inflight()` deletes the inflight set. On partial success, commit only successful events.
 4. **Requeue**: On crash or error, `requeue_inflight()` moves items back to pending (called on `start()` and on sweep failure).
-
-## Orphan Re-Injection
-
-After the LLM emits its final text response (no more tool calls), code checks:
-
-1. Which manifest event IDs were covered by `create_issue` calls (`affected_events` field).
-2. Uncovered IDs are "orphans." Code re-injects a user turn forcing the LLM to account for them.
-3. Max `MAX_ORPHAN_REINJECTIONS` (default 2) attempts. Remaining orphans after that are re-staged to pending via `restage_orphans()`.
+5. **Restage**: On partial failure, `restage_orphans()` returns failed cluster events to pending for the next sweep.
 
 ## Tool Naming Convention
 
 | Context | Tool Name | Writes To |
 |---|---|---|
 | Brain (real-time) | `report_incident` | Redis staging area (`darwin:nightwatcher:pending`) |
-| Nightwatcher (batch) | `create_issue` | Smartsheet via `SmartsheetIncidentAdapter` |
+| Nightwatcher (declaration) | `declare_clusters` | In-memory `NightwatcherContext.declared_clusters` |
+| Nightwatcher (combining) | `write_incident` | Smartsheet via `SmartsheetIncidentAdapter` |
 
-The Brain's tool was renamed from `create_incident` to `report_incident` to avoid confusion -- Brain stages, Nightwatcher writes.
+Brain stages (`report_incident`). Nightwatcher writes (`write_incident`). Names are distinct to avoid collision.
+
+## Dynamic Tool Pattern
+
+The `write_incident` tool is generated per-iteration by `build_report_tool()`:
+- **Tool description** carries the contract only: "Cluster {i} of {N}. Write the incident report."
+- **Prompt** (user turn) carries context: cluster details, events, prior receipts, investigation findings
+- This follows the Brain's existing pattern: skills carry context, tool descriptions carry contract.
 
 ## Redis Keys
 
@@ -68,7 +86,7 @@ The Brain's tool was renamed from `create_incident` to `report_incident` to avoi
 |---|---|---|
 | `darwin:nightwatcher:pending` | Sorted Set | Staged escalations awaiting next sweep (score = timestamp) |
 | `darwin:nightwatcher:inflight` | Set | Escalations currently being processed by a sweep |
-| `darwin:nightwatcher:shift:{date}:{window}` | Hash | Persisted ShiftReport (JSON) for the Shifts UI |
+| `darwin:nightwatcher:shift:{date}:{window}` | String | Persisted ShiftReport (JSON) for the Shifts UI |
 
 ## Configuration
 
@@ -92,12 +110,14 @@ The Brain's tool was renamed from `create_incident` to `report_incident` to avoi
 
 ## Safety Invariants
 
-1. Every manifest event ID MUST appear in at least one `create_issue` call's `affected_events`. Orphans are mechanically re-injected or re-staged.
-2. `MAX_TOOL_ROUNDS = 50` caps the tool-calling loop as a safety net against infinite LLM loops.
+1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` enforces this before any Smartsheet writes.
+2. `MAX_ANALYSIS_ROUNDS = 30` caps the analysis loop (review + investigate phases). Report phase is bounded by N declared clusters.
 3. `requeue_inflight()` on startup recovers from prior crashes -- no data loss.
 4. Phase transitions are forward-only and single-step. LLM cannot skip phases.
 5. `dispatch_investigation` is capped at `NIGHTWATCHER_DISPATCH_CAP` per sweep.
 6. Ephemeral-only dispatch: Nightwatcher uses `EphemeralProvisioner` (Tekton TaskRun), never in-pod sidecars.
+7. Partial failure: if Smartsheet write fails for a cluster, cart continues with remaining clusters. Failed cluster events are restaged via `restage_orphans()`.
+8. Duplicates are structurally impossible: code drives exactly one `write_incident` call per declared cluster.
 
 ## Shifts API & UI
 

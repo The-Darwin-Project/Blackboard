@@ -535,7 +535,7 @@ class ShiftIncident(BaseModel):
     summary: str = Field(..., description="Consolidated root cause summary")
     description: str = Field("", description="Full consolidated description")
     priority: str = Field("Normal", description="Normal | Major | Critical")
-    status: str = Field("New", description="New | Self-Resolved")
+    status: str = Field("New", description="Smartsheet Status column value (e.g. New, Closed)")
     affected_events: list[str] = Field(default_factory=list, description="Event IDs consolidated into this incident")
     smartsheet_row_id: str = Field("", description="Smartsheet row ID after creation")
     smartsheet_url: str = Field("", description="Smartsheet permalink")

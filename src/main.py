@@ -302,6 +302,19 @@ async def lifespan(app: FastAPI):
         
         # === NIGHTWATCHER OBSERVER ===
         nightwatcher_enabled = os.getenv("NIGHTWATCHER_ENABLED", "false").lower() == "true"
+        smartsheet_adapter = brain._get_smartsheet_incident_adapter()
+        if smartsheet_adapter:
+            try:
+                await smartsheet_adapter._ensure_columns()
+                col_opts = smartsheet_adapter.get_column_options()
+                if col_opts:
+                    from .agents.llm.types import set_smartsheet_options
+                    set_smartsheet_options(col_opts)
+                else:
+                    logger.warning("Smartsheet columns have no options -- enum validation disabled")
+            except Exception:
+                logger.warning("Failed to load Smartsheet column options, enum validation disabled")
+
         nightwatcher_observer = None
         if nightwatcher_enabled:
             from .observers.nightwatcher import NightwatcherObserver
@@ -311,7 +324,7 @@ async def lifespan(app: FastAPI):
                 registry=agent_registry,
                 bridge=task_bridge,
                 provisioner=getattr(brain, '_ephemeral_provisioner', None),
-                smartsheet_adapter=brain._get_smartsheet_incident_adapter(),
+                smartsheet_adapter=smartsheet_adapter,
                 archivist=archivist,
                 slack_notify=slack_inst.post_nightwatcher_summary if slack_inst else None,
             )

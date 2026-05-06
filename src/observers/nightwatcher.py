@@ -1,11 +1,11 @@
 # BlackBoard/src/observers/nightwatcher.py
 # @ai-rules:
 # 1. [Pattern]: Follows TimeKeeperObserver lifecycle -- in-process daemon with start/stop/cron loop.
-# 2. [Pattern]: Flash tool-calling loop matches Brain.process_event -- multi-turn structured contents.
-# 3. [Pattern]: Phase gating: review -> investigate -> report. Tools filtered by current_phase.
-# 4. [Pattern]: Orphan re-injection: code detects missing events, re-injects into Flash session (LLM decides).
-# 5. [Constraint]: requeue_inflight() called on start() to recover from prior crash.
-# 6. [Constraint]: Max 50 tool rounds per sweep as safety cap. Max 2 orphan re-injections.
+# 2. [Pattern]: Analysis loop (review/investigate) is LLM-driven multi-turn. Report phase is code-driven shopping cart.
+# 3. [Pattern]: Shopping cart: declare_clusters -> validate -> code-driven N iterations -> coverage gate -> summary.
+# 4. [Constraint]: requeue_inflight() called on start() to recover from prior crash.
+# 5. [Constraint]: MAX_ANALYSIS_ROUNDS caps the analysis loop. Report loop bounded by N declared clusters.
+# 6. [Pattern]: Partial commit: successful events committed, failed cluster events restaged.
 """
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
@@ -32,12 +32,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 50
-MAX_ORPHAN_REINJECTIONS = 2
+MAX_ANALYSIS_ROUNDS = 30
+MAX_DECLARE_RETRIES = 2
+MAX_CART_RETRIES = 2
 NIGHTWATCHER_SWEEP_CRON = os.getenv("NIGHTWATCHER_SWEEP_CRON", "0 6,18 * * *")
 
-from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools
-from .nightwatcher_prompt import build_system_prompt
+from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_summary_tool, _handle_write_incident
+from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt
 
 
 class NightwatcherObserver:
@@ -157,9 +158,16 @@ class NightwatcherObserver:
 
         system_prompt = build_system_prompt(escalations, window_start, window_end)
         try:
-            await self._run_flash_loop(escalations, json_members, system_prompt,
-                                       window_start, window_end, shift_date, window,
-                                       sweep_start, pending_count)
+            contents, ctx = await self._run_analysis_loop(
+                escalations, json_members, system_prompt,
+                window_start, window_end, shift_date, window,
+                sweep_start, pending_count,
+            )
+            await self._run_report_cart(
+                ctx, contents, json_members, escalations, system_prompt,
+                shift_date, window, window_start, window_end,
+                sweep_start, pending_count,
+            )
         except Exception:
             logger.exception("Nightwatcher sweep failed, requeueing and persisting failed report")
             await self.blackboard.requeue_inflight()
@@ -170,11 +178,10 @@ class NightwatcherObserver:
             )
             await self.blackboard.persist_shift_report(failed_report)
 
-    async def _run_flash_loop(self, escalations, json_members, system_prompt,
-                              window_start, window_end, shift_date, window,
-                              sweep_start, pending_count):
-        """Flash tool-calling loop with phase gating and orphan re-injection."""
-        from ..models import ShiftReport
+    async def _run_analysis_loop(self, escalations, json_members, system_prompt,
+                                 window_start, window_end, shift_date, window,
+                                 sweep_start, pending_count):
+        """LLM-driven analysis loop: review + investigate phases."""
         adapter = await self._get_adapter()
         escalation_text = "\n\n".join(
             f"**{e.event_id}** | {e.service} | {e.platform} | {e.summary}\n{e.description[:300]}"
@@ -182,7 +189,6 @@ class NightwatcherObserver:
         )
         contents = [{"role": "user", "parts": [{"text": escalation_text}]}]
         current_phase = "review"
-        manifest_ids = {e.event_id for e in escalations}
         dispatch_cap = int(os.getenv("NIGHTWATCHER_DISPATCH_CAP", "3"))
 
         ctx = NightwatcherContext(
@@ -191,16 +197,17 @@ class NightwatcherObserver:
             bridge=self._bridge, smartsheet_adapter=self._smartsheet,
             slack_notify=self._slack_notify,
             manifest_services={e.service for e in escalations},
-            manifest_ids=manifest_ids, dispatch_count=0, dispatch_cap=dispatch_cap,
+            manifest_ids={e.event_id for e in escalations},
+            dispatch_count=0, dispatch_cap=dispatch_cap,
             created_incidents=[], investigations=[],
         )
 
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
         thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
-        reinjection_count = 0
+        text_nudge_count = 0
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        for _ in range(MAX_ANALYSIS_ROUNDS):
             tools = get_phase_tools(current_phase)
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
@@ -218,6 +225,8 @@ class NightwatcherObserver:
                     if new_idx == cur_idx + 1:
                         current_phase = new_phase
                         logger.info("Nightwatcher phase: %s -> %s (%s)", phases[cur_idx], new_phase, args.get("reasoning", ""))
+                        if new_phase == "report":
+                            return contents, ctx
                         tool_result = f"Phase: {current_phase.upper()}"
                     else:
                         tool_result = (
@@ -230,37 +239,132 @@ class NightwatcherObserver:
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": tool_result}]})
             else:
-                covered = set()
-                for inc in ctx.created_incidents:
-                    covered.update(inc.affected_events)
-                orphans = manifest_ids - covered
-                if orphans and reinjection_count < MAX_ORPHAN_REINJECTIONS:
-                    reinjection_count += 1
-                    orphan_list = ", ".join(sorted(orphans))
-                    logger.warning("Nightwatcher orphan re-injection #%d: %s", reinjection_count, orphan_list)
+                text_nudge_count += 1
+                if text_nudge_count <= 2:
+                    logger.info("Nightwatcher analysis nudge %d/2: LLM emitted text without tool call", text_nudge_count)
+                    contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                     contents.append({"role": "user", "parts": [{"text":
-                        f"You have not accounted for these events: [{orphan_list}]. "
-                        f"Every event in the manifest must appear in a create_issue call. "
-                        f"Create incidents for the remaining events now."}]})
-                    continue
-                if orphans:
-                    logger.warning("Nightwatcher: %d orphans after %d re-injections, re-staging", len(orphans), reinjection_count)
-                    orphan_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in orphans]
-                    await self.blackboard.restage_orphans(orphan_jsons)
-                break
+                        "You have finished your analysis. Call set_phase('report') to proceed to the report phase."}]})
+                else:
+                    logger.warning("Nightwatcher: forcing transition to report phase after %d nudges", text_nudge_count)
+                    return contents, ctx
 
-        await self.blackboard.commit_inflight(json_members)
+        logger.warning("Nightwatcher: MAX_ANALYSIS_ROUNDS exhausted, forcing transition to report phase")
+        return contents, ctx
+
+    async def _run_report_cart(self, ctx, contents, json_members, escalations,
+                               system_prompt, shift_date, window, window_start,
+                               window_end, sweep_start, pending_count):
+        """Code-driven shopping cart: declare clusters, then N isolated report iterations."""
+        from ..models import ShiftReport
+        from ..agents.llm.types import NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA
+        adapter = await self._get_adapter()
+        temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
+        thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
+
+        # Step 1: Declare clusters
+        for attempt in range(MAX_DECLARE_RETRIES + 1):
+            response = await adapter.generate(
+                system_prompt=system_prompt, contents=contents,
+                tools=NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA, temperature=temperature,
+                max_output_tokens=max_tokens, thinking_level=thinking,
+            )
+            if response.function_call and response.function_call.name == "declare_clusters":
+                from .nightwatcher_tools import _handle_declare_clusters
+                result = await _handle_declare_clusters(response.function_call.args, ctx)
+                if ctx.declared_clusters:
+                    logger.info("Nightwatcher: cluster plan accepted on attempt %d", attempt + 1)
+                    contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
+                    contents.append({"role": "user", "parts": [{"text": result}]})
+                    break
+                contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
+                contents.append({"role": "user", "parts": [{"text": result}]})
+                logger.warning("Nightwatcher: cluster plan rejected on attempt %d: %s", attempt + 1, result[:200])
+            else:
+                contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
+                contents.append({"role": "user", "parts": [{"text":
+                    "You must call declare_clusters with your cluster plan. Every manifest event must be assigned."}]})
+        else:
+            raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
+
+        # Step 2: Code-driven report loop
+        completed_reports: list[dict] = []
+        for i, cluster in enumerate(ctx.declared_clusters, 1):
+            report_prompt = build_report_iteration_prompt(cluster, i, len(ctx.declared_clusters), completed_reports)
+            report_tools = build_report_tool(cluster, i, len(ctx.declared_clusters), completed_reports)
+
+            for retry in range(MAX_CART_RETRIES + 1):
+                response = await adapter.generate(
+                    system_prompt=system_prompt,
+                    contents=[{"role": "user", "parts": [{"text": report_prompt}]}],
+                    tools=report_tools, temperature=temperature,
+                    max_output_tokens=max_tokens, thinking_level=thinking,
+                )
+                if response.function_call and response.function_call.name == "write_incident":
+                    result = await _handle_write_incident(response.function_call.args, ctx, cluster)
+                    logger.info("Nightwatcher report %d/%d: %s", i, len(ctx.declared_clusters), result[:200])
+                    report_record = {
+                        "index": i,
+                        "platform": cluster.get("platform", ""),
+                        "summary": response.function_call.args.get("summary", "")[:200],
+                        "priority": response.function_call.args.get("priority", "Normal"),
+                        "status": response.function_call.args.get("status", "New"),
+                        "affected_events": cluster.get("events", []),
+                    }
+                    completed_reports.append(report_record)
+                    break
+                else:
+                    if retry < MAX_CART_RETRIES:
+                        logger.warning("Nightwatcher: report %d/%d retry %d (no tool call)", i, len(ctx.declared_clusters), retry + 1)
+                    else:
+                        logger.error("Nightwatcher: report %d/%d failed after %d retries, marking cluster as failed", i, len(ctx.declared_clusters), MAX_CART_RETRIES + 1)
+                        ctx.failed_cluster_events.extend(cluster.get("events", []))
+
+        # Step 3: Coverage gate
+        if ctx.failed_cluster_events:
+            failed_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in set(ctx.failed_cluster_events)]
+            if failed_jsons:
+                await self.blackboard.restage_orphans(failed_jsons)
+                logger.warning("Nightwatcher: restaged %d failed cluster events", len(ctx.failed_cluster_events))
+
+        # Step 4: Summary
         noise_pct = round((1 - len(ctx.created_incidents) / max(pending_count, 1)) * 100, 1) if ctx.created_incidents else 0
+        metrics = {
+            "escalation_count": pending_count,
+            "incident_count": len(ctx.created_incidents),
+            "noise_reduction_pct": noise_pct,
+            "investigation_count": len(ctx.investigations),
+            "failed_cluster_count": len([c for c in ctx.declared_clusters if any(eid in ctx.failed_cluster_events for eid in c.get("events", []))]),
+            "sweep_duration_s": round(time.time() - sweep_start, 1),
+        }
+        summary_prompt = build_summary_prompt(completed_reports, metrics)
+        summary_tools = build_summary_tool(completed_reports, metrics)
+        response = await adapter.generate(
+            system_prompt=system_prompt,
+            contents=[{"role": "user", "parts": [{"text": summary_prompt}]}],
+            tools=summary_tools, temperature=temperature,
+            max_output_tokens=max_tokens, thinking_level=thinking,
+        )
+        if response.function_call and response.function_call.name == "post_shift_summary":
+            from .nightwatcher_tools import _handle_post_shift_summary
+            await _handle_post_shift_summary(response.function_call.args, ctx)
+        else:
+            logger.warning("Nightwatcher: summary LLM call did not produce post_shift_summary tool call")
+
+        # Step 5: Commit / restage
+        successful_event_ids = {eid for inc in ctx.created_incidents for eid in inc.affected_events}
+        successful_jsons = [jm for jm, e in zip(json_members, escalations) if e.event_id in successful_event_ids]
+        if successful_jsons:
+            await self.blackboard.commit_inflight(successful_jsons)
+
         report = ShiftReport(
             shift_date=shift_date, window=window,
             window_start=window_start, window_end=window_end,
             status="completed", manifest=escalations,
             incidents=ctx.created_incidents, investigations=ctx.investigations,
             summary_text=getattr(ctx, "_summary_text", ""),
-            metrics={"escalation_count": pending_count, "incident_count": len(ctx.created_incidents),
-                     "noise_reduction_pct": noise_pct, "investigation_count": len(ctx.investigations),
-                     "orphan_count": len(manifest_ids - {eid for inc in ctx.created_incidents for eid in inc.affected_events}),
-                     "sweep_duration_s": round(time.time() - sweep_start, 1)},
+            metrics=metrics,
             started_at=sweep_start, completed_at=time.time(),
         )
         await self.blackboard.persist_shift_report(report)

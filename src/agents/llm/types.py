@@ -78,6 +78,20 @@ class LLMPort(Protocol):
 
 
 # =============================================================================
+# Smartsheet column options (populated at boot via set_smartsheet_options)
+# =============================================================================
+# Empty defaults -- populated from Smartsheet column schema at startup.
+# When empty, validation is skipped (graceful degradation).
+
+VALID_PLATFORMS: list[str] = []
+VALID_STATUSES: list[str] = []
+VALID_PRIORITIES: list[str] = []
+VALID_ISSUE_TYPES: list[str] = []
+VALID_COMPONENTS: list[str] = []
+VALID_LABELS: list[str] = []
+
+
+# =============================================================================
 # Brain Tool Schemas (plain dicts, provider-agnostic)
 # =============================================================================
 # Phase-gated by brain.py. Skills in brain_skills/ are the canonical behavioral docs.
@@ -564,7 +578,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Report an incident to the tracking system. When Nightwatcher is enabled, "
             "this stages the escalation for consolidated batch processing. When disabled, "
-            "it writes directly to the CNV Release Incident tracking sheet. "
+            "it writes directly to the incident tracking sheet. "
             "Use when an automated event (headhunter, timekeeper) results in a persistent "
             "failure requiring team investigation. Systemic fields (reporter, "
             "date, status, labels, issue type, components) are auto-populated. You only "
@@ -575,12 +589,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "platform": {
                     "type": "string",
-                    "enum": [
-                        "CPaaS", "Konflux", "Kargo", "CNV2 Cluster",
-                        "QE-Smoke tests", "QE-Gating", "CVP", "GitLab CEE",
-                        "Quay", "Brew", "Errata", "Candidate-releases",
-                        "Downstream-Sync", "Jira",
-                    ],
+                    "enum": VALID_PLATFORMS,
                     "description": "Affected platform (infer from event evidence)",
                 },
                 "summary": {
@@ -600,7 +609,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "priority": {
                     "type": "string",
-                    "enum": ["Normal", "Minor", "Major", "Critical", "Blocker"],
+                    "enum": VALID_PRIORITIES,
                     "description": "Normal for transient retests, Major for persistent failures, Critical/Blocker for outages",
                 },
                 "affected_versions": {
@@ -867,27 +876,15 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
-        "name": "create_issue",
+        "name": "write_incident",
         "description": (
-            "(report only) Create a consolidated issue in the tracking sheet. "
-            "Call ONCE per distinct root cause cluster, not per event. "
-            "The affected_events array must contain all event IDs consolidated "
-            "into this issue. System fields (labels, components, reporter, date) "
-            "are auto-populated by the handler."
+            "Write a consolidated incident report to the tracking sheet. "
+            "Platform and affected events are pre-filled from your cluster plan. "
+            "Provide your analysis: summary, root cause description, priority, and status."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "platform": {
-                    "type": "string",
-                    "enum": [
-                        "CPaaS", "Konflux", "Kargo", "CNV2 Cluster",
-                        "QE-Smoke tests", "QE-Gating", "CVP", "GitLab CEE",
-                        "Quay", "Brew", "Errata", "Candidate-releases",
-                        "Downstream-Sync", "Jira",
-                    ],
-                    "description": "Affected platform (infer from escalation evidence)",
-                },
                 "summary": {
                     "type": "string",
                     "description": "One-line consolidated root cause summary (max 200 chars)",
@@ -901,29 +898,24 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
                 },
                 "priority": {
                     "type": "string",
-                    "enum": ["Normal", "Major", "Critical"],
+                    "enum": VALID_PRIORITIES,
                     "description": "Critical if deep_memory shows 3+ recurrences in 14 days or active crisis",
-                },
-                "affected_events": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "All event IDs consolidated into this incident",
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["New", "Self-Resolved"],
-                    "description": "New if still active at sweep time, Self-Resolved if probes confirmed recovery",
+                    "enum": VALID_STATUSES,
+                    "description": "New if still active at sweep time, Closed if probes confirmed recovery",
                 },
             },
-            "required": ["platform", "summary", "description", "priority", "affected_events"],
+            "required": ["summary", "description", "priority"],
         },
     },
     {
         "name": "post_shift_summary",
         "description": (
-            "(report only) Post the end-of-shift summary to the Slack infra channel. "
-            "Call once, after all incidents are created. Include: total escalations, "
-            "incident count, noise reduction percentage, critical findings."
+            "Post the end-of-shift summary to the Slack infra channel. "
+            "Include total escalations, incident count, noise reduction percentage, "
+            "and critical findings."
         ),
         "input_schema": {
             "type": "object",
@@ -937,3 +929,118 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
         },
     },
 ]
+
+
+_COLUMN_MAP = {
+    "Platform": VALID_PLATFORMS,
+    "Status": VALID_STATUSES,
+    "Priority": VALID_PRIORITIES,
+    "Issue Type": VALID_ISSUE_TYPES,
+    "Components": VALID_COMPONENTS,
+    "Labels": VALID_LABELS,
+}
+
+_SCHEMA_FIELD_MAP = {
+    "platform": VALID_PLATFORMS,
+    "status": VALID_STATUSES,
+    "priority": VALID_PRIORITIES,
+}
+
+
+def set_smartsheet_options(column_options: dict[str, list[str]]) -> None:
+    """Populate all Smartsheet column option lists from column schema at boot.
+
+    Also patches enum fields in BRAIN_TOOL_SCHEMAS and
+    NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA so LLM tool declarations
+    reflect the live Smartsheet values.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    for col_title, target_list in _COLUMN_MAP.items():
+        opts = column_options.get(col_title, [])
+        if opts:
+            target_list.clear()
+            target_list.extend(opts)
+            log.info("Smartsheet %s: %d options loaded", col_title, len(opts))
+    for schema_list in (BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS, NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA):
+        for tool in schema_list:
+            _patch_enum_fields(tool.get("input_schema", {}))
+
+
+def _patch_enum_fields(schema: dict) -> None:
+    """Recursively find enum fields in a JSON schema and patch from live Smartsheet values.
+
+    When the live list is populated, sets the enum. When empty, removes the
+    enum key so the LLM sees an unconstrained string (avoids empty enum arrays
+    which may be rejected by the provider).
+    """
+    props = schema.get("properties", {})
+    for key, prop in props.items():
+        if key in _SCHEMA_FIELD_MAP:
+            live = _SCHEMA_FIELD_MAP[key]
+            if live:
+                prop["enum"] = list(live)
+            elif "enum" in prop and not prop["enum"]:
+                del prop["enum"]
+        if prop.get("type") == "array" and "items" in prop:
+            _patch_enum_fields(prop["items"])
+        if prop.get("type") == "object":
+            _patch_enum_fields(prop)
+
+
+# =============================================================================
+# Nightwatcher Declare-Clusters Schema (cart declaration step)
+# =============================================================================
+# Used ONLY in the shopping cart's cluster declaration phase.
+# Code validates full manifest coverage before proceeding to write_incident calls.
+
+NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA: list[dict] = [
+    {
+        "name": "declare_clusters",
+        "description": (
+            "Declare your incident clusters. Each cluster groups events that share "
+            "a root cause. Every event in the manifest must be assigned to exactly "
+            "one cluster. Code validates coverage before any writes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "clusters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "events": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Event IDs from the manifest that share this root cause",
+                            },
+                            "root_cause": {
+                                "type": "string",
+                                "description": "One-line root cause summary for this cluster",
+                            },
+                            "platform": {
+                                "type": "string",
+                                "enum": VALID_PLATFORMS,
+                                "description": "Affected platform for this cluster",
+                            },
+                            "services": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Affected service names in this cluster",
+                            },
+                        },
+                        "required": ["events", "root_cause", "platform", "services"],
+                    },
+                    "description": "List of incident clusters covering all manifest events",
+                },
+            },
+            "required": ["clusters"],
+        },
+    },
+]
+
+# Strip empty enum arrays from initial schema state (before set_smartsheet_options runs)
+for _schema_list in (BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS, NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA):
+    for _tool in _schema_list:
+        _patch_enum_fields(_tool.get("input_schema", {}))
