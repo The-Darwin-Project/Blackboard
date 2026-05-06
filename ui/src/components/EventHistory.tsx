@@ -1,10 +1,10 @@
 // BlackBoard/ui/src/components/EventHistory.tsx
 // @ai-rules:
-// 1. [Pattern]: Master-detail layout. Table/grid on left, ReportContent on right (50% split).
+// 1. [Pattern]: Two-state layout. No selection: full table/grid. Selection: compact card strip + full-width report.
 // 2. [Pattern]: Feature-flag gated via VITE_EVENT_HISTORY_ENABLED in App.tsx, not here.
 // 3. [Pattern]: URL state via useSearchParams for shareable filter links.
-// 4. [Constraint]: Below 1024px, side panel renders full-width below the list.
-import { useState, useMemo, useCallback, useEffect } from 'react';
+// 4. [Pattern]: CompactCardStrip auto-scrolls selected card into view. Horizontal scroll for navigation.
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { getReport } from '../api/client';
@@ -121,73 +121,135 @@ export default function EventHistory() {
         sourceOptions={sourceOptions}
       />
 
-      <div className="flex-1 flex overflow-hidden max-lg:flex-col">
-        {/* List (table or grid) */}
-        <div className={`flex flex-col overflow-hidden ${selectedId ? 'w-1/2 max-lg:w-full max-lg:h-1/2' : 'w-full'}`}>
-          {isLoading ? (
-            <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
-              Loading events...
-            </div>
-          ) : isError ? (
-            <div className="flex-1 flex items-center justify-center text-red-400 text-sm">
-              Failed to load events.
-            </div>
-          ) : viewMode === 'table' ? (
-            <EventHistoryTable reports={allReports} selectedId={selectedId} onSelect={onSelect} />
-          ) : (
-            <EventHistoryGrid reports={allReports} selectedId={selectedId} onSelect={onSelect} />
-          )}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {selectedId ? (
+          <>
+            {/* Collapsed: horizontal card strip */}
+            <CompactCardStrip
+              reports={allReports}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              onClose={() => {
+                setSelectedId(null);
+                window.dispatchEvent(new CustomEvent('darwin:expandSidebar'));
+              }}
+            />
 
-          {/* Load more */}
-          {hasNextPage && (
-            <div className="p-3 border-t border-border-primary text-center">
-              <button
-                onClick={() => fetchNextPage()}
-                disabled={isFetchingNextPage}
-                className="text-xs text-accent hover:underline disabled:opacity-50"
-              >
-                {isFetchingNextPage ? 'Loading...' : `Load more (showing ${allReports.length} results)`}
-              </button>
-            </div>
-          )}
-          {!hasNextPage && allReports.length > 0 && (
-            <div className="p-2 text-center text-xs text-text-muted">
-              All {allReports.length} results
-            </div>
-          )}
-        </div>
-
-        {/* Side panel */}
-        {selectedId && (
-          <div className="w-1/2 max-lg:w-full max-lg:h-1/2 border-l max-lg:border-l-0 max-lg:border-t border-border-primary flex flex-col overflow-hidden">
-            <div className="px-3 py-2 border-b border-border-primary flex items-center gap-2 flex-shrink-0">
-              <button
-                onClick={() => {
-                  setSelectedId(null);
-                  window.dispatchEvent(new CustomEvent('darwin:expandSidebar'));
-                }}
-                className="text-xs bg-accent text-white rounded-md px-3 py-1 font-medium hover:bg-accent/80"
-              >
-                &#x2190; Close
-              </button>
-              {selectedReport && (
-                <span className="text-xs text-text-muted">
-                  {selectedReport.service} &middot; {selectedReport.event_id}
-                </span>
+            {/* Report detail -- full width, full remaining height */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {selectedReport ? (
+                <>
+                  <ReportContent report={selectedReport} />
+                  <ReportToolbar markdown={selectedReport.markdown} eventId={selectedReport.event_id} />
+                </>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-text-muted">
+                  Loading report...
+                </div>
               )}
             </div>
-            {selectedReport ? (
-              <>
-                <ReportContent report={selectedReport} />
-                <ReportToolbar markdown={selectedReport.markdown} eventId={selectedReport.event_id} />
-              </>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-text-muted">
-                Loading report...
+          </>
+        ) : (
+          <>
+            {/* Expanded: full table or grid */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {isLoading ? (
+                <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
+                  Loading events...
+                </div>
+              ) : isError ? (
+                <div className="flex-1 flex items-center justify-center text-red-400 text-sm">
+                  Failed to load events.
+                </div>
+              ) : viewMode === 'table' ? (
+                <EventHistoryTable reports={allReports} selectedId={selectedId} onSelect={onSelect} />
+              ) : (
+                <EventHistoryGrid reports={allReports} selectedId={selectedId} onSelect={onSelect} />
+              )}
+            </div>
+
+            {/* Load more */}
+            {hasNextPage && (
+              <div className="p-3 border-t border-border-primary text-center">
+                <button
+                  onClick={() => fetchNextPage()}
+                  disabled={isFetchingNextPage}
+                  className="text-xs text-accent hover:underline disabled:opacity-50"
+                >
+                  {isFetchingNextPage ? 'Loading...' : `Load more (showing ${allReports.length} results)`}
+                </button>
               </div>
             )}
-          </div>
+            {!hasNextPage && allReports.length > 0 && (
+              <div className="p-2 text-center text-xs text-text-muted">
+                All {allReports.length} results
+              </div>
+            )}
+          </>
         )}
+      </div>
+    </div>
+  );
+}
+
+import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
+import { extractReasonDisplay } from '../utils/eventFormat';
+
+function CompactCardStrip({ reports, selectedId, onSelect, onClose }: {
+  reports: import('../api/types').ReportMeta[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onClose: () => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const selectedRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    selectedRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  }, [selectedId]);
+
+  return (
+    <div className="flex-shrink-0 border-b border-border-primary bg-bg-secondary">
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <button
+          onClick={onClose}
+          className="flex-shrink-0 text-xs bg-accent text-white rounded-md px-2.5 py-1 font-medium hover:bg-accent/80"
+          title="Back to full list"
+        >
+          &#x2190;
+        </button>
+        <div ref={scrollRef} className="flex-1 flex gap-1.5 overflow-x-auto scrollbar-thin py-0.5">
+          {reports.map((r) => {
+            const isSelected = r.event_id === selectedId;
+            const domain = (r.domain || 'complicated') as keyof typeof DOMAIN_COLORS;
+            const dc = DOMAIN_COLORS[domain] || DOMAIN_COLORS.complicated;
+            const sc = SEVERITY_COLORS[r.severity] || SEVERITY_COLORS.info;
+            return (
+              <button
+                key={r.event_id}
+                ref={isSelected ? selectedRef : undefined}
+                onClick={() => onSelect(r.event_id)}
+                className={`flex-shrink-0 rounded-lg px-3 py-1.5 text-left transition-all outline-none ${
+                  isSelected ? 'ring-2 ring-accent bg-bg-tertiary' : 'bg-bg-primary hover:bg-bg-tertiary'
+                }`}
+                style={{ borderLeft: `3px solid ${dc.border}`, minWidth: 180, maxWidth: 240 }}
+              >
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="text-xs font-medium text-text-primary truncate">{r.service}</span>
+                  <span style={{ background: sc.bg, color: sc.text, padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 600 }}>
+                    {sc.label}
+                  </span>
+                </div>
+                <div className="text-[11px] text-text-muted truncate">
+                  {extractReasonDisplay(r.reason)}
+                </div>
+                <div className="text-[10px] text-text-muted mt-0.5">
+                  {new Date(r.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · {r.turns}t
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
