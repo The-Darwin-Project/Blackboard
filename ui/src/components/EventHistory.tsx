@@ -91,7 +91,12 @@ export default function EventHistory() {
 
   useEffect(syncParams, [syncParams]);
 
-  const onSelect = useCallback((id: string) => setSelectedId(id), []);
+  const onSelect = useCallback((id: string) => {
+    if (!selectedId) {
+      window.dispatchEvent(new CustomEvent('darwin:collapseSidebar'));
+    }
+    setSelectedId(id);
+  }, [selectedId]);
 
   const { data: selectedReport } = useQuery({
     queryKey: ['report', selectedId],
@@ -157,7 +162,10 @@ export default function EventHistory() {
           <div className="w-1/2 max-lg:w-full max-lg:h-1/2 border-l max-lg:border-l-0 max-lg:border-t border-border-primary flex flex-col overflow-hidden">
             <div className="px-3 py-2 border-b border-border-primary flex items-center gap-2 flex-shrink-0">
               <button
-                onClick={() => setSelectedId(null)}
+                onClick={() => {
+                  setSelectedId(null);
+                  window.dispatchEvent(new CustomEvent('darwin:expandSidebar'));
+                }}
                 className="text-xs bg-accent text-white rounded-md px-3 py-1 font-medium hover:bg-accent/80"
               >
                 &#x2190; Close

@@ -36,9 +36,17 @@ export default function EventSidebar() {
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
-    const handler = () => setCollapsed(c => !c);
-    window.addEventListener('darwin:toggleSidebar', handler);
-    return () => window.removeEventListener('darwin:toggleSidebar', handler);
+    const toggle = () => setCollapsed(c => !c);
+    const collapse = () => setCollapsed(true);
+    const expand = () => setCollapsed(false);
+    window.addEventListener('darwin:toggleSidebar', toggle);
+    window.addEventListener('darwin:collapseSidebar', collapse);
+    window.addEventListener('darwin:expandSidebar', expand);
+    return () => {
+      window.removeEventListener('darwin:toggleSidebar', toggle);
+      window.removeEventListener('darwin:collapseSidebar', collapse);
+      window.removeEventListener('darwin:expandSidebar', expand);
+    };
   }, []);
 
   const [width, setWidth] = useState(() => {
