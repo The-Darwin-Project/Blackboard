@@ -428,7 +428,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "user_email": {
                     "type": "string",
-                    "description": "Email address of the Slack user to notify (e.g., 'user@company.com')",
+                    "description": "Email address of the Slack user to notify. Use the maintainer email from evidence.gitlab_context.maintainer.emails when available.",
                 },
                 "message": {
                     "type": "string",
