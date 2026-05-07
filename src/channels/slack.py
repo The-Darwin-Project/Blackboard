@@ -99,7 +99,7 @@ class SlackChannel:
             f"Use it as your starting point -- review what was done and continue from there || What is the next step?",
             "",
         ]
-        evidence = getattr(event_doc.event, "evidence", None)
+        evidence = getattr(getattr(event_doc, "event", None), "evidence", None)
         if evidence:
             display = getattr(evidence, "display_text", str(evidence))
             parts.append(f"Original evidence: {display[:500]}")
