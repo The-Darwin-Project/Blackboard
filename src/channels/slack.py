@@ -653,7 +653,7 @@ class SlackChannel:
             if is_quiet:
                 turn_data = message.get("turn", {})
                 action = turn_data.get("action", "")
-                if action not in ("execute", "request_approval", "error"):
+                if action not in ("execute", "request_approval", "error", "wait", "close"):
                     return
             if is_assistant and event_id in self._stream_sessions:
                 await self._handle_assistant_turn(event_id, message)
