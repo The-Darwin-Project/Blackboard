@@ -96,7 +96,7 @@ class SlackChannel:
             f"This is a follow-up to event [{event_doc.id}] which closed {age_str} "
             f"({turns} turns, service: {event_doc.service}). "
             f"The closed event's context is attached below. "
-            f"Use it as your starting point -- do not re-investigate what was already resolved.",
+            f"Use it as your starting point -- review what was done and continue from there.",
             "",
         ]
         evidence = getattr(event_doc.event, "evidence", None)
