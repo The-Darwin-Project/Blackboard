@@ -168,13 +168,14 @@ export default function WaitingBell({ onEventClick }: { onEventClick: (eventId: 
             onKeyDown={(e) => { if (e.key === 'Escape') setIsOpen(false); }}
             style={{
               position: 'absolute',
-              top: '100%',
-              right: 0,
+              bottom: '100%',
+              left: 0,
+              marginBottom: 4,
               width: 340,
               background: '#1e293b',
               border: '1px solid #334155',
               borderRadius: 8,
-              boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+              boxShadow: '0 -10px 40px rgba(0,0,0,0.5)',
               zIndex: 1000,
               maxHeight: 400,
               overflow: 'auto',
