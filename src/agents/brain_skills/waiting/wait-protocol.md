@@ -7,6 +7,10 @@ tags: [waiting, user-interaction, approval, defer]
 - After requesting user input or approval, the event pauses until the user responds.
 - Do not defer while waiting for user input -- the wait is already in effect.
 - The event resumes when the user sends a message, approves, or rejects.
+- **Automated events (aligner, headhunter, timekeeper, kargo_stage):** After
+  `request_user_approval`, call `notify_user_slack` for each maintainer so they
+  know approval is needed. The approval buttons are in the #darwin-infra thread --
+  the DM notification ensures maintainers see it promptly.
 
 # Post-Defer Resume Protocol
 
