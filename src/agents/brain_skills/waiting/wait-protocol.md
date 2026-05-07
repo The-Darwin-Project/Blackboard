@@ -11,9 +11,9 @@ tags: [waiting, user-interaction, approval, defer]
   `request_user_approval`, notify the configured maintainers so they know
   approval is needed. Use the maintainer emails from the event's GitLab context
   (`evidence.gitlab_context.maintainer.emails`) if available; otherwise use
-  the static maintainer list: `{{maintainer_emails}}`. Call `notify_user_slack`
-  for each maintainer email. The approval buttons are in the #darwin-infra
-  thread -- the DM pointer ensures maintainers see it promptly.
+  the static maintainer list: `{{maintainer_emails}}`. Send a Slack notification
+  to each maintainer so they see the approval request promptly. The approval
+  buttons are in the #darwin-infra thread.
 
 # Post-Defer Resume Protocol
 
