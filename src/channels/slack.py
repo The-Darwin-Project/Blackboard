@@ -394,6 +394,8 @@ class SlackChannel:
                 )
                 return
 
+            is_channel_thread = channel_type != "im"
+
             await self._safe_react(client, channel, event["ts"], "eyes")
 
             from ..models import ConversationTurn
@@ -406,8 +408,11 @@ class SlackChannel:
                 user_name=display_name,
             )
             await self._blackboard.append_turn(event_id, turn)
-            self._brain.clear_waiting(event_id)
-            if event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
+            if is_channel_thread:
+                logger.info(f"Slack infra thread context: appended turn on {event_id} from {display_name} (observe-only, no Brain eval)")
+            else:
+                self._brain.clear_waiting(event_id)
+            if not is_channel_thread and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
                 try:
                     workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
                     ts_nodot = event_doc.slack_thread_ts.replace(".", "")
@@ -418,7 +423,8 @@ class SlackChannel:
                     )
                 except Exception as e:
                     logger.warning(f"DM ack failed for {event_id}: {e}")
-            logger.info(f"Slack DM reply on {event_id} from {display_name} ({user})")
+            if not is_channel_thread:
+                logger.info(f"Slack DM reply on {event_id} from {display_name} ({user})")
 
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
