@@ -118,6 +118,45 @@ class SlackChannel:
             parts.append(f"Last agent action: {last_action}")
         return "\n".join(parts)
 
+    async def _create_followup_event(
+        self, event_doc: Any, original_id: str, text: str,
+        channel: str, thread_ts: str, user_id: str, display_name: str,
+    ) -> str:
+        """Create a follow-up event from a closed event with prior context seeding.
+
+        Returns the new event ID. Caller handles UI-specific actions (set_title, react).
+        """
+        from ..models import ConversationTurn
+        prior_context = self._build_prior_context(event_doc)
+        new_event_id = await self._blackboard.create_event(
+            source="slack",
+            service=event_doc.service,
+            reason=f"Follow-up on {original_id}: {text[:200]}",
+            evidence=EventEvidence(
+                display_text=f"Follow-up on [{original_id}]: {text}",
+                source_type="slack",
+                triggered_by=display_name,
+                domain="disorder",
+                severity="info",
+            ),
+        )
+        await self._blackboard.update_event_slack_context(
+            new_event_id, channel, thread_ts, user_id,
+        )
+        await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
+        ctx_turn = ConversationTurn(
+            turn=1, actor="brain", action="context",
+            thoughts=prior_context, source="system",
+        )
+        await self._blackboard.append_turn(new_event_id, ctx_turn)
+        user_turn = ConversationTurn(
+            turn=2, actor="user", action="message",
+            thoughts=text, source="slack",
+            user_name=display_name,
+        )
+        await self._blackboard.append_turn(new_event_id, user_turn)
+        return new_event_id
+
     def _register_assistant_handlers(self) -> None:
         """Register Assistant middleware handlers for split-pane AI experience."""
 
@@ -181,45 +220,21 @@ class SlackChannel:
                     display_name = await self._resolve_display_name(client, user_id)
 
                     if event_doc.status == "closed":
-                        prior_context = self._build_prior_context(event_doc)
-                        event_id = await self._blackboard.create_event(
-                            source="slack",
-                            service=event_doc.service,
-                            reason=f"Follow-up on {event_id}: {text[:200]}",
-                            evidence=EventEvidence(
-                                display_text=f"Follow-up on [{event_id}]: {text}",
-                                source_type="slack",
-                                triggered_by=display_name,
-                                domain="disorder",
-                                severity="info",
-                            ),
+                        event_id = await self._create_followup_event(
+                            event_doc, event_id, text, channel_id, thread_ts, user_id, display_name,
                         )
-                        await self._blackboard.update_event_slack_context(
-                            event_id, channel_id, thread_ts, user_id,
-                        )
-                        await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
-                        ctx_turn = ConversationTurn(
-                            turn=1, actor="brain", action="context",
-                            thoughts=prior_context, source="system",
-                        )
-                        await self._blackboard.append_turn(event_id, ctx_turn)
                         await set_title(f"evt-{event_id}: {text[:50]}")
-                        logger.info(
-                            f"Assistant: smart-routed to new event {event_id} "
-                            f"(original was closed)"
-                        )
+                        logger.info(f"Assistant: smart-routed to new event {event_id} (original was closed)")
                     else:
+                        from ..models import ConversationTurn
+                        turn = ConversationTurn(
+                            turn=len(event_doc.conversation) + 1,
+                            actor="user", action="message",
+                            thoughts=text, source="slack",
+                            user_name=display_name,
+                        )
+                        await self._blackboard.append_turn(event_id, turn)
                         logger.info(f"Assistant: reply on {event_id} from {display_name}")
-
-                    turn = ConversationTurn(
-                        turn=2 if event_doc.status == "closed" else len(event_doc.conversation) + 1,
-                        actor="user",
-                        action="message",
-                        thoughts=text,
-                        source="slack",
-                        user_name=display_name,
-                    )
-                    await self._blackboard.append_turn(event_id, turn)
 
                     if event_doc.status != "closed" and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel_id:
                         try:
@@ -310,35 +325,9 @@ class SlackChannel:
                 event_doc = await self._blackboard.get_event(existing_event_id)
                 if event_doc and event_doc.status == "closed":
                     display_name = await self._resolve_display_name(client, user_id)
-                    prior_context = self._build_prior_context(event_doc)
-                    new_event_id = await self._blackboard.create_event(
-                        source="slack",
-                        service=event_doc.service,
-                        reason=f"Follow-up on {existing_event_id}: {text[:200]}",
-                        evidence=EventEvidence(
-                            display_text=f"Follow-up on [{existing_event_id}]: {text}",
-                            source_type="slack",
-                            triggered_by=display_name,
-                            domain="disorder",
-                            severity="info",
-                        ),
+                    new_event_id = await self._create_followup_event(
+                        event_doc, existing_event_id, text, channel, thread_ts, user_id, display_name,
                     )
-                    await self._blackboard.update_event_slack_context(
-                        new_event_id, channel, thread_ts, user_id,
-                    )
-                    await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
-                    from ..models import ConversationTurn
-                    ctx_turn = ConversationTurn(
-                        turn=1, actor="brain", action="context",
-                        thoughts=prior_context, source="system",
-                    )
-                    await self._blackboard.append_turn(new_event_id, ctx_turn)
-                    turn = ConversationTurn(
-                        turn=2, actor="user", action="message",
-                        thoughts=text, source="slack",
-                        user_name=display_name,
-                    )
-                    await self._blackboard.append_turn(new_event_id, turn)
                     await self._safe_react(client, channel, event["ts"], "brain")
                     logger.info(f"Slack @mention: smart-routed to new event {new_event_id} (original {existing_event_id} was closed)")
                     return
@@ -411,43 +400,11 @@ class SlackChannel:
             display_name = await self._resolve_display_name(client, user)
 
             if event_doc.status == "closed":
-                prior_context = self._build_prior_context(event_doc)
-                new_event_id = await self._blackboard.create_event(
-                    source="slack",
-                    service=event_doc.service,
-                    reason=f"Follow-up on {event_id}: {text[:200]}",
-                    evidence=EventEvidence(
-                        display_text=f"Follow-up on [{event_id}]: {text}",
-                        source_type="slack",
-                        triggered_by=display_name,
-                        domain="disorder",
-                        severity="info",
-                    ),
+                new_event_id = await self._create_followup_event(
+                    event_doc, event_id, text, channel, thread_ts, user, display_name,
                 )
-                await self._blackboard.update_event_slack_context(
-                    new_event_id, channel, thread_ts, user,
-                )
-                await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
-                from ..models import ConversationTurn
-                ctx_turn = ConversationTurn(
-                    turn=1, actor="brain", action="context",
-                    thoughts=prior_context, source="system",
-                )
-                await self._blackboard.append_turn(new_event_id, ctx_turn)
-                new_turn = ConversationTurn(
-                    turn=2,
-                    actor="user",
-                    action="message",
-                    thoughts=text,
-                    source="slack",
-                    user_name=display_name,
-                )
-                await self._blackboard.append_turn(new_event_id, new_turn)
                 await self._safe_react(client, channel, event["ts"], "brain")
-                logger.info(
-                    f"Slack DM reply: smart-routed to new event {new_event_id} "
-                    f"(original {event_id} was closed)"
-                )
+                logger.info(f"Slack DM reply: smart-routed to new event {new_event_id} (original {event_id} was closed)")
                 return
 
             is_channel_thread = channel_type != "im"
