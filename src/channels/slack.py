@@ -83,16 +83,39 @@ class SlackChannel:
     @staticmethod
     def _build_prior_context(event_doc: Any) -> str:
         """Extract evidence + last agent/close turn from a closed event for follow-up seeding."""
-        parts = [f"Prior event [{event_doc.id}] context:"]
+        from datetime import datetime, timezone
+        closed_at = getattr(event_doc, "closed_at", None)
+        if closed_at:
+            closed_dt = datetime.fromtimestamp(closed_at, tz=timezone.utc)
+            age = datetime.now(timezone.utc) - closed_dt
+            age_str = f"{int(age.total_seconds() // 3600)}h {int((age.total_seconds() % 3600) // 60)}m ago"
+        else:
+            age_str = "unknown time ago"
+        turns = len(event_doc.conversation)
+        parts = [
+            f"This is a follow-up to event [{event_doc.id}] which closed {age_str} "
+            f"({turns} turns, service: {event_doc.service}). "
+            f"The closed event's context is attached below. "
+            f"Use it as your starting point -- do not re-investigate what was already resolved.",
+            "",
+        ]
         evidence = getattr(event_doc.event, "evidence", None)
         if evidence:
             display = getattr(evidence, "display_text", str(evidence))
-            parts.append(f"Evidence: {display[:500]}")
+            parts.append(f"Original evidence: {display[:500]}")
+        close_reason = None
+        last_action = None
         for t in reversed(event_doc.conversation):
-            if t.actor != "user" and t.action in ("close", "execute", "plan", "investigate"):
-                content = t.result or t.thoughts or ""
-                parts.append(f"Last {t.actor}.{t.action}: {content[:500]}")
+            if t.action == "close" and not close_reason:
+                close_reason = t.thoughts or t.result or ""
+            elif t.actor != "user" and t.action in ("execute", "plan", "investigate") and not last_action:
+                last_action = f"{t.actor}.{t.action}: {(t.result or t.thoughts or '')[:500]}"
+            if close_reason and last_action:
                 break
+        if close_reason:
+            parts.append(f"Close reason: {close_reason[:500]}")
+        if last_action:
+            parts.append(f"Last agent action: {last_action}")
         return "\n".join(parts)
 
     def _register_assistant_handlers(self) -> None:
