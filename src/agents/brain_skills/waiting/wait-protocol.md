@@ -8,9 +8,12 @@ tags: [waiting, user-interaction, approval, defer]
 - Do not defer while waiting for user input -- the wait is already in effect.
 - The event resumes when the user sends a message, approves, or rejects.
 - **Automated events (aligner, headhunter, timekeeper, kargo_stage):** After
-  `request_user_approval`, call `notify_user_slack` for each maintainer so they
-  know approval is needed. The approval buttons are in the #darwin-infra thread --
-  the DM notification ensures maintainers see it promptly.
+  `request_user_approval`, notify the configured maintainers so they know
+  approval is needed. Use the maintainer emails from the event's GitLab context
+  (`evidence.gitlab_context.maintainer.emails`) if available; otherwise use
+  the static maintainer list: `{{maintainer_emails}}`. Call `notify_user_slack`
+  for each maintainer email. The approval buttons are in the #darwin-infra
+  thread -- the DM pointer ensures maintainers see it promptly.
 
 # Post-Defer Resume Protocol
 

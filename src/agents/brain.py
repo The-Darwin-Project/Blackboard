@@ -1471,7 +1471,7 @@ class Brain:
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
-        template_vars = {"event.source": event.source, "event.service": event.service}
+        template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv("HEADHUNTER_MAINTAINERS", "")}
         resolved_contents = self._skill_loader.resolve_dependencies(
             initial_paths, template_vars=template_vars
         )
