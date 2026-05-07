@@ -80,6 +80,21 @@ class SlackChannel:
             logger.warning(f"Failed to resolve display name for {user_id}: {e}")
             return user_id
 
+    @staticmethod
+    def _build_prior_context(event_doc: Any) -> str:
+        """Extract evidence + last agent/close turn from a closed event for follow-up seeding."""
+        parts = [f"Prior event [{event_doc.id}] context:"]
+        evidence = getattr(event_doc.event, "evidence", None)
+        if evidence:
+            display = getattr(evidence, "display_text", str(evidence))
+            parts.append(f"Evidence: {display[:500]}")
+        for t in reversed(event_doc.conversation):
+            if t.actor != "user" and t.action in ("close", "execute", "plan", "investigate"):
+                content = t.result or t.thoughts or ""
+                parts.append(f"Last {t.actor}.{t.action}: {content[:500]}")
+                break
+        return "\n".join(parts)
+
     def _register_assistant_handlers(self) -> None:
         """Register Assistant middleware handlers for split-pane AI experience."""
 
@@ -143,6 +158,7 @@ class SlackChannel:
                     display_name = await self._resolve_display_name(client, user_id)
 
                     if event_doc.status == "closed":
+                        prior_context = self._build_prior_context(event_doc)
                         event_id = await self._blackboard.create_event(
                             source="slack",
                             service=event_doc.service,
@@ -159,6 +175,11 @@ class SlackChannel:
                             event_id, channel_id, thread_ts, user_id,
                         )
                         await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
+                        ctx_turn = ConversationTurn(
+                            turn=1, actor="brain", action="context",
+                            thoughts=prior_context, source="system",
+                        )
+                        await self._blackboard.append_turn(event_id, ctx_turn)
                         await set_title(f"evt-{event_id}: {text[:50]}")
                         logger.info(
                             f"Assistant: smart-routed to new event {event_id} "
@@ -168,7 +189,7 @@ class SlackChannel:
                         logger.info(f"Assistant: reply on {event_id} from {display_name}")
 
                     turn = ConversationTurn(
-                        turn=1 if event_doc.status == "closed" else len(event_doc.conversation) + 1,
+                        turn=2 if event_doc.status == "closed" else len(event_doc.conversation) + 1,
                         actor="user",
                         action="message",
                         thoughts=text,
@@ -266,6 +287,7 @@ class SlackChannel:
                 event_doc = await self._blackboard.get_event(existing_event_id)
                 if event_doc and event_doc.status == "closed":
                     display_name = await self._resolve_display_name(client, user_id)
+                    prior_context = self._build_prior_context(event_doc)
                     new_event_id = await self._blackboard.create_event(
                         source="slack",
                         service=event_doc.service,
@@ -283,8 +305,13 @@ class SlackChannel:
                     )
                     await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
                     from ..models import ConversationTurn
+                    ctx_turn = ConversationTurn(
+                        turn=1, actor="brain", action="context",
+                        thoughts=prior_context, source="system",
+                    )
+                    await self._blackboard.append_turn(new_event_id, ctx_turn)
                     turn = ConversationTurn(
-                        turn=1, actor="user", action="message",
+                        turn=2, actor="user", action="message",
                         thoughts=text, source="slack",
                         user_name=display_name,
                     )
@@ -361,6 +388,7 @@ class SlackChannel:
             display_name = await self._resolve_display_name(client, user)
 
             if event_doc.status == "closed":
+                prior_context = self._build_prior_context(event_doc)
                 new_event_id = await self._blackboard.create_event(
                     source="slack",
                     service=event_doc.service,
@@ -378,8 +406,13 @@ class SlackChannel:
                 )
                 await self._blackboard.set_slack_mapping(channel, thread_ts, new_event_id)
                 from ..models import ConversationTurn
+                ctx_turn = ConversationTurn(
+                    turn=1, actor="brain", action="context",
+                    thoughts=prior_context, source="system",
+                )
+                await self._blackboard.append_turn(new_event_id, ctx_turn)
                 new_turn = ConversationTurn(
-                    turn=1,
+                    turn=2,
                     actor="user",
                     action="message",
                     thoughts=text,
