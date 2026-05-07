@@ -69,7 +69,7 @@ async def agent_websocket_handler(
             event_id=event_id,
         )
 
-        if is_ephemeral and event_id and blackboard:
+        if is_ephemeral and event_id and blackboard and not event_id.startswith("nw-sweep-"):
             event = await blackboard.get_event(event_id)
             if not event or event.status.value == "closed":
                 logger.info("Terminating orphan ephemeral agent %s: event %s is %s",
