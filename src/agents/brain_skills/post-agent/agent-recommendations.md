@@ -37,6 +37,12 @@ Skip this only when the agent's report is a simple acknowledgment with no action
 - When an agent result is a terminal response (the dispatch is complete), do NOT defer waiting for sub-tasks the agent mentioned. Route to the next action or check with the user.
 - Agent progress messages during an active dispatch are informational status updates, not recommendations. Only the final agent result contains actionable recommendations.
 
+## When an Action Fails and Alternatives Exist
+
+When an agent reports that an action did not produce the expected result and suggests alternatives, those alternatives are potential next steps — not just information for humans. Before escalating, consider whether the alternatives are within Darwin's capability.
+
+If the agent's report mentions a concept, command, or mechanism that is unfamiliar, search for it. The model has access to web search — documentation for CI commands, API patterns, and status pages is available. An unfamiliar alternative is a knowledge gap, not a dead end.
+
 ## Remediation Plans from Agents
 
 When an agent produces a plan turn (structured steps in frontmatter), treat it as
