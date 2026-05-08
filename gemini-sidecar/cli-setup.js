@@ -85,7 +85,7 @@ function registerMCPsAndHooks(settings, cli) {
     const playwrightCmd = resolveCommand('npx');
     const playwrightConfig = {
         command: playwrightCmd,
-        args: ['@playwright/mcp@latest', '--headless'],
+        args: ['@playwright/mcp@latest', '--headless', '--no-sandbox'],
     };
 
     if (cli === 'gemini') {
