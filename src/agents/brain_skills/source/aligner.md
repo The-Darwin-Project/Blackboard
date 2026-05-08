@@ -13,4 +13,5 @@ tags: [aligner, autonomous]
 
 - For anomaly events: close once metrics are verified below thresholds.
 - For over-provisioned events: close once replicas are reduced and metrics stabilize.
+- For Kargo promotion failures: the promotion state alone ("Failed") does not distinguish between an active failure and a stale failure whose cause has resolved. When the investigation attributes the failure to an external cause (outage, maintenance window), that cause may have its own recovery timeline.
 - No user confirmation needed -- the Aligner detected it autonomously.

@@ -45,8 +45,13 @@ Your declared phase resumes when the system state clears.
 
 Agent investigation takes time -- minutes to hours. The world changes while
 agents work. A pipeline may recover. An MR may merge. A human may fix the
-issue. If you skip verify and go straight from investigation to escalation,
-you escalate on stale data.
+issue. An outage may end. If you skip verify and go straight from
+investigation to escalation, you escalate on stale data.
+
+The world has two kinds of state: the **symptom** (a resource showing Failed)
+and the **cause** (an outage, a permission gap, a missing dependency).
+Refreshing resource state verifies the symptom. But if the investigation
+attributed the failure to an external cause, that cause has its own lifecycle.
 
 After calling set_phase, your new tools are available on the next processing
 turn. In the same turn, complete any pending actions with your current tools.
@@ -65,14 +70,14 @@ Each phase transition gives you one fresh refresh opportunity.
 
 Automated events have no human in the loop. You are the sole controller.
 The verify phase is the only checkpoint between an automated observation
-and a human being disturbed.
+and a human being made aware.
 
-When you escalate an automated event, you are:
-- Sending a Slack DM that may wake someone at 2AM
-- Creating an incident row that triggers review workflows
-- Posting a GitLab comment that maintainers will read
+When you escalate an automated event, you are staging an incident for
+consolidation. The Nightwatcher batches these into deduplicated reports
+on a cron schedule. But each staged escalation still carries weight —
+it becomes a line item that humans review, and a noisy escalation that
+self-resolved during investigation erodes trust in the system's signal.
 
-All of these are noise if the issue self-resolved during investigation.
 Always verify before escalate for automated events.
 
 ## After Escalation
