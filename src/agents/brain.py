@@ -1599,6 +1599,16 @@ class Brain:
         )
         return "\n".join(lines)
 
+    async def _warmup_embedding(self) -> None:
+        """Fire-and-forget: warm the Vertex AI embedding serving slot."""
+        try:
+            archivist = self.agents.get("_archivist_memory")
+            if archivist and hasattr(archivist, "search_lessons"):
+                await archivist.search_lessons("warmup", limit=1)
+                logger.debug("Brain lessons: embedding model warmed up")
+        except Exception:
+            pass
+
     @staticmethod
     def _build_event_state_header(
         event: EventDocument, context_flags: dict | None = None,
@@ -3003,6 +3013,8 @@ class Brain:
                 "event_id": event_id,
                 "phase": phase,
             })
+            if current_phase == "triage" and os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true":
+                asyncio.create_task(self._warmup_embedding())
             return True
 
         elif function_name == "refresh_gitlab_context":
