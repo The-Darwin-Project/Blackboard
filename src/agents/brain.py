@@ -27,7 +27,8 @@
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
-# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
+# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
+# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on post-agent/defer-wake phases. Gated by BRAIN_LESSON_ENRICHMENT env var (default false). 2s timeout on archivist call. Scores + latency logged at INFO.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
@@ -858,7 +859,7 @@ class Brain:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
             active_phases = self._match_phases(event, context_flags)
-            system_prompt = self._build_system_prompt(event, active_phases, context_flags)
+            system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
         else:
             system_prompt = BRAIN_SYSTEM_PROMPT
@@ -1152,7 +1153,7 @@ class Brain:
             "service": event.service or "",
         }
         active_phases = self._match_phases(event, ctx)
-        system_prompt = self._build_system_prompt(event, active_phases, ctx)
+        system_prompt = await self._build_system_prompt(event, active_phases, ctx)
         thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
         contents = await self._build_contents(event, context_cache=ctx)
         await self._broadcast({
@@ -1452,7 +1453,7 @@ class Brain:
 
         return active
 
-    def _build_system_prompt(
+    async def _build_system_prompt(
         self, event: EventDocument, active_phases: list[str],
         context_flags: dict | None = None,
     ) -> str:
@@ -1530,6 +1531,10 @@ class Brain:
                 f"or wait_for_user to ask the user what to do."
             )
 
+        lesson_block = await self._enrich_with_lessons(event, active_phases)
+        if lesson_block:
+            resolved_contents.append(lesson_block)
+
         prompt = "\n\n---\n\n".join(resolved_contents)
 
         total_tokens = len(prompt) // 4
@@ -1537,6 +1542,62 @@ class Brain:
         logger.info(f"Brain skills: [{phase_str}] ({total_tokens} tokens) for {event.id}")
 
         return prompt
+
+    async def _enrich_with_lessons(
+        self, event: EventDocument, active_phases: list[str],
+        score_threshold: float = 0.55, limit: int = 2,
+    ) -> str | None:
+        """Surface relevant lessons from darwin_lessons into the system prompt."""
+        if os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() != "true":
+            logger.debug(f"Brain lessons: skipped (reason=feature_off) for {event.id}")
+            return None
+
+        if not {"post-agent", "defer-wake"} & set(active_phases):
+            logger.debug(f"Brain lessons: skipped (reason=phase_gate) for {event.id}")
+            return None
+
+        archivist = self.agents.get("_archivist_memory")
+        if not archivist or not hasattr(archivist, "search_lessons"):
+            logger.debug(f"Brain lessons: skipped (reason=no_archivist) for {event.id}")
+            return None
+
+        thoughts = next(
+            (t.thoughts for t in reversed(event.conversation)
+             if t.actor == "brain" and t.thoughts),
+            "",
+        )
+        query = f"{thoughts[:200]} phase={event.brain_phase} source={event.source}"
+
+        t0 = time.time()
+        try:
+            results = await asyncio.wait_for(
+                archivist.search_lessons(query, limit=limit), timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Brain lessons: skipped (reason=timeout) for {event.id}")
+            return None
+        except Exception as e:
+            logger.warning(f"Brain lessons: skipped (reason=error: {e}) for {event.id}")
+            return None
+        latency_ms = int((time.time() - t0) * 1000)
+
+        hits = [r for r in results if float(r.get("score") or 0) >= score_threshold]
+        if not hits:
+            logger.debug(f"Brain lessons: skipped (reason=no_results) for {event.id}")
+            return None
+
+        lines = ["## RECALL", "The following patterns were learned from past events similar to this one."]
+        scores = []
+        for h in hits:
+            p = h.get("payload", {})
+            lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+            scores.append(f"{float(h.get('score') or 0):.2f}")
+
+        logger.info(
+            f"Brain lessons: {len(hits)} surfaced "
+            f"(scores: {', '.join(scores)}, latency={latency_ms}ms) for {event.id}"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _build_event_state_header(
