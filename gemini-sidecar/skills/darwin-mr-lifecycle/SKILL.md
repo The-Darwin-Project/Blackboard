@@ -43,12 +43,20 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 
 ## Merge MR
 
-Only merge when pipeline is green AND merge_status is `can_be_merged`. Merge the MR via the GitLab API.
+Before merging, perform these pre-merge checks IN ORDER:
+
+1. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to the Brain.
+2. **CI bot comments**: Read the last 5 MR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to the Brain.
+3. **Merge status**: Confirm `merge_status` is `can_be_merged`.
+
+Only merge when ALL three checks pass. Merge the MR via the GitLab API.
 
 ## Safety Rules
 
 - NEVER force-push to any branch
 - NEVER merge with a red/failed pipeline
+- NEVER merge when CI is pending approval (`waiting for /ok-to-test`) or has bot CAUTION warnings
+- NEVER merge when the latest pipeline is from a different commit than HEAD
 - NEVER auto-rebase -- if merge_status is `cannot_be_merged`, report conflicts to maintainer
 - NEVER delete branches after merge (let GitLab's auto-delete handle it)
 
@@ -75,8 +83,10 @@ Do NOT tag individual users (`@username`) in MR comments or anywhere else. Do NO
 Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
-- **Success**: "MR merged successfully."
+- **Merged**: "MR merged successfully."
+- **Retest triggered (non-terminal)**: "Retest triggered, pipeline is running/pending. Pipeline outcome is not yet known."
 - **Pipeline running**: "Pipeline triggered, currently running."
 - **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer with failure details."
+- **Merge blocked by CI**: "Cannot merge — CI bot reported warnings or pipeline has not run on HEAD. Details: {summary of CI comments}."
 - **Conflict (submodule)**: "Closed obsolete submodule MR -- newer update already merged to main."
 - **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer to rebase."
