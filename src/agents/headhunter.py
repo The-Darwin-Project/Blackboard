@@ -3,7 +3,7 @@
 # 1. [Pattern]: Follows Aligner pattern -- in-process daemon, lazy-loaded LLM adapter via _get_adapter().
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
 # 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
-# 4. [Pattern]: Two-tier triage: (1) _parse_bot_instructions reads ### Bot Instructions from mr_description -- deterministic, no LLM. (2) Flash Lite LLM analysis for all other MRs.
+# 4. [Pattern]: All MRs go through Flash LLM analysis for consistent evidence quality. Bot Instructions are LLM context, not a bypass. Emergency static fallback when LLM unavailable.
 # 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
 # 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
 # 7. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
@@ -50,6 +50,7 @@ ACTION_PRIORITY = {
 
 MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
+MAX_CI_NOTES = 5
 
 def _get_static_maintainer_emails() -> list[str]:
     """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
@@ -249,25 +250,32 @@ class Headhunter:
             context["pipeline_status"] = pipeline_status
             context["failed_job_log"] = failed_job_log
 
-            if action in ("directly_addressed", "mentioned"):
-                bot_username = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
-                notes_resp = await client.get(
-                    self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
-                    headers=headers,
-                    params={"sort": "desc", "per_page": "10"},
-                )
-                if notes_resp.is_success:
-                    allowed_authors = _get_allowed_mention_authors()
-                    for note in notes_resp.json():
-                        body = note.get("body", "")
-                        note_author = note.get("author", {}).get("username", "")
+            notes_resp = await client.get(
+                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
+                headers=headers,
+                params={"sort": "desc", "per_page": "10"},
+            )
+            if notes_resp.is_success:
+                all_notes = notes_resp.json()
+                ci_notes = []
+                for note in all_notes:
+                    if note.get("system"):
+                        continue
+                    body = note.get("body", "")
+                    note_author = note.get("author", {}).get("username", "")
+                    if action in ("directly_addressed", "mentioned"):
+                        bot_username = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
                         if f"@{bot_username}" in body:
+                            allowed_authors = _get_allowed_mention_authors()
                             if allowed_authors and note_author not in allowed_authors:
                                 logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
                                 continue
                             context["mention_comment"] = body
                             context["mention_author"] = note_author
-                            break
+                    if len(ci_notes) < MAX_CI_NOTES:
+                        ci_notes.append(f"[{note_author}]: {body[:500]}")
+                if ci_notes:
+                    context["recent_notes"] = ci_notes
 
         return context
 
@@ -276,16 +284,12 @@ class Headhunter:
     # =========================================================================
 
     async def analyze_and_plan(self, context: dict) -> tuple[str, str]:
-        """Two-tier MR triage: Bot Instructions parse -> LLM analysis -> emergency fallback.
+        """LLM-based MR triage with full context including CI notes.
 
-        Tier 1: Parse structured '### Bot Instructions' from mr_description (no LLM).
-        Tier 2: Flash Lite LLM analysis with full MR context.
-        Emergency: Static fallback plan when LLM is unavailable.
+        All MRs pass through Flash LLM analysis for consistent evidence quality.
+        Bot Instructions in the MR description are included in the LLM prompt
+        as context, not parsed as a bypass. Emergency fallback when LLM is unavailable.
         """
-        parsed = self._parse_bot_instructions(context)
-        if parsed:
-            return parsed
-
         adapter = await self._get_adapter()
         if not adapter:
             logger.warning(f"Emergency fallback plan for !{context.get('mr_title', '?')}")
@@ -381,6 +385,8 @@ class Headhunter:
             parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
             parts.append(f"First failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
+        if context.get("recent_notes"):
+            parts.append(f"Recent MR comments (newest first):\n" + "\n".join(context["recent_notes"]))
         if context.get("mention_comment"):
             parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
