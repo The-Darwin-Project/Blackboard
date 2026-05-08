@@ -12,6 +12,8 @@ Incidents are reviewed by humans who decide whether to escalate, reassign, or in
 
 **Observable evidence** means: a specific error message, log excerpt, exit code, concrete resource state, or link to the failing pipeline/job/MR from an agent investigation. This is what allows a human to immediately understand the failure and take the next step.
 
+A failed retry confirms **persistence** but not **cause**. When an agent reports "retry failed with the same error," the persistence is established — but an incident that only says "retry failed" creates investigation work for the human that the agent could have done. What does the underlying pipeline, task, or step log actually say?
+
 Before calling `report_incident`, verify:
 - At least one agent has investigated and returned observable evidence
 - If no agent has investigated yet, dispatch one in `investigate` mode BEFORE creating the incident

@@ -24,6 +24,7 @@ Status labels (NOT evidence):
 - "Pipeline is stuck" / "Pipeline not progressing"
 - "Error in step X" (without the actual error)
 - "Build step failed" (without the compiler/dependency/test output)
+- "Retry failed with the same error" (confirms persistence, but does not explain *why*)
 
 ## When Evidence Is Insufficient
 
