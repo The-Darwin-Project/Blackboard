@@ -10,6 +10,7 @@
 # 8. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
 # 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
 # 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
+# 14. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
 # 11. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
 # 12. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
 # 13. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note). mark_feedback_sent runs only after successful dismiss (or no todo_id for duplicate/stale).
@@ -231,8 +232,12 @@ class Headhunter:
                             headers=headers,
                         )
                         if jobs_resp.is_success:
-                            failed_jobs = [j for j in jobs_resp.json() if j.get("status") == "failed"]
+                            all_jobs = jobs_resp.json()
+                            failed_jobs = [j for j in all_jobs if j.get("status") == "failed"]
+                            context["failed_job_count"] = len(failed_jobs)
+                            context["total_job_count"] = len(all_jobs)
                             if failed_jobs:
+                                context["failed_job_names"] = [j.get("name", "unknown") for j in failed_jobs]
                                 trace_resp = await client.get(
                                     self._api_url(f"/projects/{project_id}/jobs/{failed_jobs[0]['id']}/trace"),
                                     headers=headers,
@@ -372,8 +377,10 @@ class Headhunter:
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
         if context.get("labels"):
             parts.append(f"Labels: {', '.join(context['labels'])}")
+        if context.get("failed_job_names"):
+            parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
-            parts.append(f"Failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
+            parts.append(f"First failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
         if context.get("mention_comment"):
             parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
