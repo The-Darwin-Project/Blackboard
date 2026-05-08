@@ -1571,7 +1571,7 @@ class Brain:
         t0 = time.time()
         try:
             results = await asyncio.wait_for(
-                archivist.search_lessons(query, limit=limit), timeout=2.0,
+                archivist.search_lessons(query, limit=limit), timeout=5.0,
             )
         except asyncio.TimeoutError:
             logger.warning(f"Brain lessons: skipped (reason=timeout) for {event.id}")
