@@ -821,6 +821,10 @@ class SlackChannel:
         if turn.actor == "user" and turn.source == "slack":
             return
 
+        if turn.actor == "brain" and turn.action == "wait" and event_doc.slack_user_id:
+            if turn.thoughts and f"<@{event_doc.slack_user_id}>" not in turn.thoughts:
+                turn.thoughts = f"<@{event_doc.slack_user_id}> {turn.thoughts}"
+
         thinking = self._thinking_msg.pop(event_id, None)
         if thinking:
             await self._update_turn_in_thread(thinking, event_doc, turn)
