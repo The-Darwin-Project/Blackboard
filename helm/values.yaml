@@ -413,6 +413,11 @@ timekeeper:
 googleSearch:
   enabled: false # Set to true to enable Google Search grounding in triage/investigate phases
 # =============================================================================
+# Lesson Enrichment (RECALL block injection on post-agent/defer-wake phases)
+# =============================================================================
+lessonEnrichment:
+  enabled: false # Set to true to auto-surface darwin_lessons into Brain system prompt
+# =============================================================================
 # Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
 # =============================================================================
 nightwatcher:
