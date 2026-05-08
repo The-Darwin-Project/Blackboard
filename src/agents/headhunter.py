@@ -50,7 +50,7 @@ ACTION_PRIORITY = {
 
 MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
-MAX_CI_NOTES = 5
+MAX_CI_NOTES = 10
 
 def _get_static_maintainer_emails() -> list[str]:
     """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
@@ -250,10 +250,11 @@ class Headhunter:
             context["pipeline_status"] = pipeline_status
             context["failed_job_log"] = failed_job_log
 
+            darwin_bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
             notes_resp = await client.get(
                 self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
                 headers=headers,
-                params={"sort": "desc", "per_page": "10"},
+                params={"sort": "desc", "per_page": "25"},
             )
             if notes_resp.is_success:
                 all_notes = notes_resp.json()
@@ -264,14 +265,15 @@ class Headhunter:
                     body = note.get("body", "")
                     note_author = note.get("author", {}).get("username", "")
                     if action in ("directly_addressed", "mentioned"):
-                        bot_username = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
-                        if f"@{bot_username}" in body:
+                        if f"@{darwin_bot}" in body:
                             allowed_authors = _get_allowed_mention_authors()
                             if allowed_authors and note_author not in allowed_authors:
                                 logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
                                 continue
                             context["mention_comment"] = body
                             context["mention_author"] = note_author
+                    if note_author == darwin_bot:
+                        continue
                     if len(ci_notes) < MAX_CI_NOTES:
                         ci_notes.append(f"[{note_author}]: {body[:500]}")
                 if ci_notes:
