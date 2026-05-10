@@ -1,15 +1,15 @@
 // BlackBoard/ui/src/components/cortex/CortexGraph.tsx
 // @ai-rules:
 // 1. [Pattern]: SigmaContainer + useLoadGraph + useRegisterEvents from @react-sigma/core.
-// 2. [Constraint]: Knowledge neurons positioned left via ForceAtlas2, executive neurons fixed right.
-// 3. [Gotcha]: Sigma node reducers run per-frame -- keep isGlowing check cheap (Map lookup).
-// 4. [Pattern]: Node click dispatches onSelectNeuron callback for drill-down.
-// 5. [Pattern]: Structural edges (white, thin) added at load; activity edges (event-colored) added from liveBatches.
-// 6. [Gotcha]: Save executive positions BEFORE ForceAtlas2, restore AFTER -- FA2 moves all nodes.
+// 2. [Pattern]: useWorkerLayoutForceAtlas2 for CONTINUOUS force simulation on knowledge nodes.
+// 3. [Constraint]: Executive + event nodes have fixed:true -- FA2 worker ignores them.
+// 4. [Gotcha]: FA2 worker runs in background WebWorker. Start on mount, stop on unmount.
+// 5. [Pattern]: Structural edges (white, thin) permanent. Activity edges (event-colored) fade over 10s.
+// 6. [Pattern]: Force model inspired by update-graph D3 simulation (repulsion + collision + gravity).
 import { useEffect, useRef, useCallback, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
+import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
 import Graph from 'graphology';
-import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { NodeSquareProgram } from '@sigma/node-square';
 import '@react-sigma/core/lib/style.css';
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
@@ -29,7 +29,7 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 }
 
 function getNeuronSize(heat: number, type: string): number {
-  const base = type === 'agent' ? 12 : type === 'phase' ? 10 : type === 'tool' ? 8 : 3;
+  const base = type === 'agent' ? 12 : type === 'phase' ? 10 : type === 'tool' ? 8 : type === 'event' ? 14 : 3;
   return base + Math.min(heat * 0.3, 12);
 }
 
@@ -40,13 +40,21 @@ interface GraphLoaderProps {
   liveBatches: PulseBatch[];
 }
 
+const FA2_SETTINGS = {
+  gravity: 0.5,
+  scalingRatio: 30,
+  strongGravityMode: false,
+  barnesHutOptimize: true,
+  slowDown: 5,
+  edgeWeightInfluence: 0,
+};
+
 const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches }) => {
   const loadGraph = useLoadGraph();
   const sigma = useSigma();
   const graphRef = useRef<Graph | null>(null);
   const activityTimersRef = useRef<Map<string, number>>(new Map());
 
-  // Build graph on neuron / activeEvents change
   useEffect(() => {
     const graph = new Graph();
     const executive = getExecutiveNeurons();
@@ -63,13 +71,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       let x: number, y: number;
 
       if (isKnowledge) {
-        x = HEMISPHERE_X.knowledge + (Math.random() - 0.5) * 300;
-        y = (Math.random() - 0.5) * 400;
+        x = HEMISPHERE_X.knowledge + (Math.random() - 0.5) * 400;
+        y = (Math.random() - 0.5) * 500;
       } else if (n.type === 'tool') {
         const group = (n.payload?.group as string) ?? 'observation';
         const groupY = TOOL_GROUP_Y[group] ?? 0;
-        x = HEMISPHERE_X.executive + (Math.random() - 0.5) * 80;
-        y = groupY + (Math.random() - 0.5) * 30;
+        x = HEMISPHERE_X.executive + (Math.random() - 0.5) * 60;
+        y = groupY + (Math.random() - 0.5) * 20;
       } else if (n.type === 'phase') {
         const phases = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
         const idx = phases.indexOf(n.payload?.label as string ?? '');
@@ -88,43 +96,11 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         color: getNeuronColor(n),
         label: (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id,
         type: 'circle',
+        fixed: !isKnowledge,
       });
     }
 
-    // Run ForceAtlas2 on a SEPARATE graph containing ONLY knowledge nodes
-    // This prevents executive/event nodes from being pulled into the cluster
-    const knowledgeNodes = allNeurons.filter(n => n.type === 'lesson' || n.type === 'memory');
-    if (knowledgeNodes.length > 1) {
-      const knowledgeGraph = new Graph();
-      for (const n of knowledgeNodes) {
-        if (graph.hasNode(n.id)) {
-          knowledgeGraph.addNode(n.id, {
-            x: graph.getNodeAttribute(n.id, 'x'),
-            y: graph.getNodeAttribute(n.id, 'y'),
-          });
-        }
-      }
-      forceAtlas2.assign(knowledgeGraph, {
-        iterations: 80,
-        settings: {
-          gravity: 0.5,
-          scalingRatio: 20,
-          strongGravityMode: true,
-          barnesHutOptimize: knowledgeNodes.length > 50,
-        },
-      });
-      // Apply positions back to main graph, locked to left hemisphere
-      for (const n of knowledgeNodes) {
-        if (knowledgeGraph.hasNode(n.id) && graph.hasNode(n.id)) {
-          const kx = knowledgeGraph.getNodeAttribute(n.id, 'x') as number;
-          const ky = knowledgeGraph.getNodeAttribute(n.id, 'y') as number;
-          graph.setNodeAttribute(n.id, 'x', HEMISPHERE_X.knowledge + kx * 0.5);
-          graph.setNodeAttribute(n.id, 'y', ky * 0.5);
-        }
-      }
-    }
-
-    // Add event hub nodes (square shape, center position)
+    // Event hub nodes -- fixed in center column
     for (let i = 0; i < activeEvents.length; i++) {
       const evt = activeEvents[i];
       if (!graph.hasNode(evt.id)) {
@@ -135,11 +111,12 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
           type: 'square',
+          fixed: true,
         });
       }
     }
 
-    // Add structural edges (thin, low opacity, permanent)
+    // Structural edges
     for (const edge of getStructuralEdges()) {
       if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
         const edgeId = `struct:${edge.source}:${edge.target}`;
@@ -178,7 +155,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           size = 3;
         } else if (pulse.neuron_type === 'lesson' || pulse.neuron_type === 'memory') {
           size = 1;
-          // Find last tool in batch to use as source
           const lastTool = [...batch.pulses].reverse().find(p => p.neuron_type === 'tool');
           if (lastTool && graph.hasNode(lastTool.neuron_id)) source = lastTool.neuron_id;
         } else if (pulse.neuron_type === 'agent') {
@@ -194,7 +170,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           opacity: 1.0,
         });
 
-        // Schedule fade-out
         const fadeStart = Date.now();
         const timer = window.setInterval(() => {
           if (!graph.hasEdge(edgeId)) { clearInterval(timer); return; }
@@ -211,17 +186,15 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         activityTimersRef.current.set(edgeId, timer);
       }
     }
-
     sigma.refresh();
   }, [liveBatches, sigma]);
 
-  // Cleanup timers on unmount
   useEffect(() => {
     const timers = activityTimersRef.current;
     return () => { for (const t of timers.values()) clearInterval(t); };
   }, []);
 
-  // Glow effect + edge reducer via node/edge reducers
+  // Node glow + edge opacity reducers
   useEffect(() => {
     if (!sigma.getGraph()) return;
 
@@ -248,6 +221,19 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
     sigma.refresh();
   }, [glowingIds, sigma]);
+
+  return null;
+};
+
+const FA2Controller: FC = () => {
+  const { start, stop } = useWorkerLayoutForceAtlas2({
+    settings: FA2_SETTINGS,
+  });
+
+  useEffect(() => {
+    start();
+    return () => stop();
+  }, [start, stop]);
 
   return null;
 };
@@ -304,6 +290,7 @@ export default function CortexGraph({
           activeEvents={activeEvents}
           liveBatches={liveBatches}
         />
+        <FA2Controller />
         {onClickNeuron && <ClickHandler onClick={onClickNeuron} />}
       </SigmaContainer>
     </div>
