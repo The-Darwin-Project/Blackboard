@@ -2725,14 +2725,26 @@ class Brain:
                 await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             else:
                 try:
+                    event_doc = await self.blackboard.get_event(event_id)
                     if "@" in user_email:
                         user_info = await slack_channel._app.client.users_lookupByEmail(email=user_email)
                         slack_user_id = user_info["user"]["id"]
-                    else:
+                    elif user_email.startswith("U") and user_email.isalnum():
                         slack_user_id = user_email
+                    elif event_doc and event_doc.slack_user_id:
+                        logger.warning(f"notify_user_slack: invalid user_email '{user_email}', falling back to event slack_user_id {event_doc.slack_user_id}")
+                        slack_user_id = event_doc.slack_user_id
+                    else:
+                        result_text = f"Invalid user identifier: '{user_email}'. Provide an email address or Slack user ID (U...)."
+                        turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor="brain", action="notify",
+                            thoughts=result_text, response_parts=response_parts,
+                        )
+                        await self._append_and_broadcast(event_id, turn)
+                        return True
                     dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
                     dm_channel = dm["channel"]["id"]
-                    event_doc = await self.blackboard.get_event(event_id)
                     is_bidirectional = (
                         event_doc
                         and not event_doc.slack_thread_ts
