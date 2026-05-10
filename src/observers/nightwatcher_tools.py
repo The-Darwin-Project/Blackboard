@@ -210,7 +210,9 @@ async def _handle_search_journal(args: dict, ctx: NightwatcherContext) -> str:
 
 async def _handle_consult_deep_memory(args: dict, ctx: NightwatcherContext) -> str:
     query = args.get("query", "")
-    results = await ctx.archivist.search(query, limit=5)
+    from ..memory.pulse import PulseContext
+    pulse_ctx = PulseContext(event_id=None, turn=None, event_elapsed_s=0)
+    results = await ctx.archivist.search(query, limit=5, context=pulse_ctx)
     if not results:
         return "No matching events in deep memory."
     lines = []

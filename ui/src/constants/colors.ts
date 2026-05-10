@@ -49,6 +49,22 @@ export const PHASE_COLORS: Record<string, { bg: string; text: string; border: st
   close:       { bg: '#1c1917', text: '#a8a29e', border: '#57534e', label: 'Close' },
 };
 
+/** Cortex neuron type colors (used by Sigma.js graph renderer) */
+export const NEURON_COLORS: Record<string, string> = {
+  lesson: '#22c55e',   // green -- stable knowledge
+  memory: '#6b7280',   // slate -- past event memories
+  tool:   '#64748b',   // slate -- executive tools
+  phase:  '#6366f1',   // indigo -- lifecycle phases
+  agent:  '#8b5cf6',   // violet -- default; overridden per agent below
+};
+
+export const AGENT_NEURON_COLORS: Record<string, string> = {
+  architect: '#3b82f6', // blue
+  sysadmin:  '#22c55e', // green
+  developer: '#f59e0b', // amber
+  qe:        '#a855f7', // purple
+};
+
 export const SHIFT_STATUS_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {
   empty:     { bg: '#33415515', text: '#64748b', border: '#334155', label: 'Empty' },
   completed: { bg: '#22c55e15', text: '#4ade80', border: '#22c55e', label: 'Completed' },

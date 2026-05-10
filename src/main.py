@@ -27,10 +27,11 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_kargo_observer, set_registry_and_bridge
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_kargo_observer, set_pulse_tracker, set_registry_and_bridge
 from .models import FlowMetricsResponse, HealthResponse
 from .routes import (
     chat_router,
+    cognitive_graph_router,
     dex_proxy_router,
     events_router,
     feedback_router,
@@ -149,6 +150,36 @@ async def lifespan(app: FastAPI):
         brain.register_channel(dashboard_adapter)
         app.state.dashboard_adapter = dashboard_adapter
         logger.info("Brain orchestrator initialized with Dashboard WS adapter")
+
+        # === PULSE TRACKING (Cognitive Recall Graph -- Layer 1) ===
+        if os.getenv("PULSE_TRACKING_ENABLED", "false").lower() == "true":
+            from .memory.pulse_tracker import PulseTracker
+            pulse_tracker = PulseTracker(redis=redis, broadcast=brain._broadcast)
+            archivist.pulse_port = pulse_tracker
+            brain.pulse_port = pulse_tracker
+            app.state.pulse_tracker = pulse_tracker
+            set_pulse_tracker(pulse_tracker)
+            logger.info("PulseTracker enabled (cognitive recall graph Layer 1)")
+
+            # === CORTEX OBSERVER (Cognitive Recall Graph -- Layer 2) ===
+            if os.getenv("SYSTEM2_ENABLED", "false").lower() == "true":
+                from .adapters.live_api_adapter import LiveAPIAdapter
+                live_adapter = LiveAPIAdapter(
+                    blackboard=blackboard,
+                    archivist=archivist,
+                    pulse_tracker=pulse_tracker,
+                    broadcast=dashboard_adapter,
+                    brain=brain,
+                )
+                pulse_tracker.add_observer(live_adapter)
+                app.state.live_adapter = live_adapter
+                asyncio.create_task(live_adapter.start())
+                logger.info("Cortex observer enabled (System 2, shadow=%s)",
+                            os.getenv("SYSTEM2_SHADOW", "true"))
+            else:
+                logger.info("Cortex observer disabled (SYSTEM2_ENABLED=false)")
+        else:
+            logger.info("PulseTracker disabled (PULSE_TRACKING_ENABLED=false)")
         
         # Initialize Agent Registry + TaskBridge (Phase A -- additive, no dispatch changes yet)
         agent_registry = AgentRegistry()
@@ -377,6 +408,12 @@ async def lifespan(app: FastAPI):
         await timekeeper_observer.stop()
         logger.info("TimeKeeperObserver stopped")
     
+    # Stop Cortex observer
+    live_adapter = getattr(app.state, "live_adapter", None)
+    if live_adapter:
+        await live_adapter.stop()
+        logger.info("Cortex observer stopped")
+
     # Stop Nightwatcher observer
     if redis and nightwatcher_observer:
         await nightwatcher_observer.stop()
@@ -589,6 +626,7 @@ async def list_agents() -> list[dict]:
 app.include_router(telemetry_router)
 app.include_router(topology_router)
 app.include_router(queue_router)
+app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
 app.include_router(metrics_router)
 app.include_router(chat_router)

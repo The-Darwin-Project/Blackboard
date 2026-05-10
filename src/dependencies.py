@@ -148,3 +148,16 @@ def set_registry_and_bridge(registry: AgentRegistry, bridge: TaskBridge) -> None
 def get_registry_and_bridge() -> tuple[AgentRegistry | None, TaskBridge | None]:
     """Get AgentRegistry and TaskBridge from module-level state (set by main.py lifespan)."""
     return _registry, _bridge
+
+
+# PulseTracker (set by main.py lifespan when PULSE_TRACKING_ENABLED=true)
+_pulse_tracker = None
+
+
+def set_pulse_tracker(tracker) -> None:
+    global _pulse_tracker
+    _pulse_tracker = tracker
+
+
+async def get_pulse_tracker():
+    return _pulse_tracker

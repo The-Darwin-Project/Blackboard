@@ -609,3 +609,22 @@ export async function getShiftDetail(date: string, window: string): Promise<Shif
 export async function getCurrentShift(): Promise<ShiftCurrentStatus> {
   return fetchApi<ShiftCurrentStatus>('/shifts/current');
 }
+
+// -- Cortex (Cognitive Recall Graph) -----------------------------------------
+
+import type { CognitiveGraphResponse, PulseBatch } from '../components/cortex/types';
+
+export async function getCognitiveGraph(): Promise<CognitiveGraphResponse> {
+  return fetchApi<CognitiveGraphResponse>('/api/cognitive-graph');
+}
+
+export async function getRecentPulses(sinceSeconds: number): Promise<PulseBatch[]> {
+  const since = (Date.now() / 1000 - sinceSeconds).toFixed(0);
+  const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/pulses?since=${since}`);
+  return resp.batches;
+}
+
+export async function getEventPulses(eventId: string): Promise<PulseBatch[]> {
+  const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/pulses?event_id=${encodeURIComponent(eventId)}`);
+  return resp.batches;
+}

@@ -7,9 +7,10 @@
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
 # 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
 # 7. [Pattern]: correct_memory() overwrites a contaminated event memory with corrected root_cause/fix_action. Uses same deterministic uuid5 point ID.
-# 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key).
+# 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key). Payload includes channel (stable|fast|candidate), verification_count, related_lesson_ids for recall graph.
 # 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
 # 10. [Pattern]: extract_lessons() uses Claude adapter (not Gemini) for document analysis. Only Claude-compatible kwargs (no thinking_level, no top_p).
+# 11. [Pattern]: pulse_port (PulsePort | None) emits Pulse events on search/search_lessons. Null-guarded. context param (PulseContext | None) is backward-compatible 3rd arg.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -89,6 +90,7 @@ class Archivist:
         self._initialized = False
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
+        self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
 
     async def _ensure_initialized(self) -> bool:
         """Lazy-init google-genai client and vector store."""
@@ -241,17 +243,17 @@ class Archivist:
         except Exception as e:
             logger.warning(f"Archivist failed for event {event.id} (non-fatal): {e}")
 
-    async def search(self, query: str, limit: int = 5) -> list[dict]:
+    async def search(self, query: str, limit: int = 5, context=None) -> list[dict]:
         """
         Search deep memory for similar past events.
         
         Returns list of {score, payload} dicts.
+        context: PulseContext | None -- caller-provided pulse context for neuron firing.
         """
         try:
             if not await self._ensure_initialized():
                 return []
 
-            # Generate query embedding
             embed_response = await self._client.aio.models.embed_content(
                 model=EMBEDDING_MODEL,
                 contents=query,
@@ -263,6 +265,10 @@ class Archivist:
                 vector=vector,
                 limit=limit,
             )
+
+            if self.pulse_port and results:
+                await self._emit_pulses(results, COLLECTION_NAME, context)
+
             return results
 
         except Exception as e:
@@ -384,6 +390,9 @@ class Archivist:
         anti_pattern: str = "",
         keywords: list[str] | None = None,
         event_references: list[str] | None = None,
+        channel: str = "stable",
+        verification_count: int = 0,
+        related_lesson_ids: list[str] | None = None,
     ) -> str | None:
         """Store a human-authored lesson in darwin_lessons. Returns lesson_id or None."""
         try:
@@ -398,6 +407,9 @@ class Archivist:
                 "anti_pattern": anti_pattern,
                 "keywords": keywords or [],
                 "event_references": event_references or [],
+                "channel": channel,
+                "verification_count": verification_count,
+                "related_lesson_ids": related_lesson_ids or [],
                 "created_at": time.time(),
             }
             embed_text = (
@@ -423,8 +435,11 @@ class Archivist:
             logger.warning(f"store_lesson failed: {e}")
             return None
 
-    async def search_lessons(self, query: str, limit: int = 3) -> list[dict]:
-        """Search darwin_lessons for relevant patterns. Returns list of {score, payload}."""
+    async def search_lessons(self, query: str, limit: int = 3, context=None) -> list[dict]:
+        """Search darwin_lessons for relevant patterns. Returns list of {score, payload}.
+
+        context: PulseContext | None -- caller-provided pulse context for neuron firing.
+        """
         try:
             if not await self._ensure_initialized():
                 return []
@@ -434,14 +449,48 @@ class Archivist:
                 contents=query,
             )
             vector = embed_response.embeddings[0].values
-            return await self._vector_store.search(
+            results = await self._vector_store.search(
                 collection=LESSONS_COLLECTION,
                 vector=vector,
                 limit=limit,
             )
+
+            if self.pulse_port and results:
+                await self._emit_pulses(results, LESSONS_COLLECTION, context)
+
+            return results
         except Exception as e:
             logger.warning(f"Lesson search failed (non-fatal): {e}")
             return []
+
+    async def _emit_pulses(self, results: list[dict], collection: str, context) -> None:
+        """Emit pulse batch for search results. Non-fatal. Skips if no event context (e.g. warmup)."""
+        try:
+            from ..memory.pulse import Pulse, PulseBatch, PulseContext
+
+            ctx = context if isinstance(context, PulseContext) else None
+            if not ctx or not ctx.event_id:
+                return
+
+            neuron_type = "lesson" if collection == LESSONS_COLLECTION else "memory"
+            pulses = [
+                Pulse(
+                    neuron_id=f"{neuron_type}:{r.get('id', '')}",
+                    neuron_type=neuron_type,
+                    score=float(r.get("score", 0)),
+                    injected=False,
+                )
+                for r in results
+            ]
+            batch = PulseBatch(
+                event_id=ctx.event_id or "",
+                pulses=pulses,
+                turn=ctx.turn or 0,
+                event_elapsed_s=ctx.event_elapsed_s,
+            )
+            await self.pulse_port.on_pulse_batch(batch)
+        except Exception as e:
+            logger.debug(f"Pulse emission failed (non-fatal): {e}")
 
     async def list_memories(self, limit: int = 200) -> list[dict]:
         """List all event memories from Qdrant (single-page scroll, capped)."""
@@ -453,6 +502,17 @@ class Archivist:
         except Exception as e:
             logger.warning(f"list_memories failed: {e}")
             return []
+
+    async def get_lesson(self, lesson_id: str) -> dict | None:
+        """Get a single lesson by lesson_id."""
+        try:
+            if not await self._ensure_initialized():
+                return None
+            results = await self._vector_store.get_points(LESSONS_COLLECTION, [lesson_id])
+            return results[0] if results else None
+        except Exception as e:
+            logger.warning(f"get_lesson failed for {lesson_id}: {e}")
+            return None
 
     async def get_memory(self, event_id: str) -> dict | None:
         """Get a single event memory by event_id."""

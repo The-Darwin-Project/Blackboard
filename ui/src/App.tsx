@@ -23,6 +23,7 @@ import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
 import TopologyView from './components/ops/TopologyView';
 import MemoryPage from './components/memory/MemoryPage';
 import ShiftsPage from './components/ShiftsPage';
+import CortexPage from './components/cortex/CortexPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -67,6 +68,7 @@ function AuthGate() {
           <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="shifts" element={<ShiftsPage />} />
           <Route path="memory" element={<MemoryPage />} />
+          <Route path="cortex" element={<CortexPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

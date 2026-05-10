@@ -25,6 +25,7 @@ const BASE_TABS = [
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
   { id: '/guide', label: 'Guide' },
+  { id: '/cortex', label: 'Cortex' },
 ];
 
 function LayoutInner() {
