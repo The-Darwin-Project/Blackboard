@@ -53,6 +53,7 @@ class SlackChannel:
         self._brain = brain
         self._handler: AsyncSocketModeHandler | None = None
         self._user_name_cache: dict[str, tuple[str, float]] = {}
+        self._user_email_cache: dict[str, str] = {}
         self._USER_CACHE_TTL = 3600
         self._thinking_msg: dict[str, tuple[str, str]] = {}  # event_id -> (channel, msg_ts)
         self._assistant_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id}
@@ -74,11 +75,18 @@ class SlackChannel:
             info = await client.users_info(user=user_id)
             profile = info["user"]["profile"]
             name = profile.get("display_name") or info["user"].get("real_name", user_id)
+            email = profile.get("email", "")
             self._user_name_cache[user_id] = (name, time.time())
+            if email:
+                self._user_email_cache[user_id] = email
             return name
         except Exception as e:
             logger.warning(f"Failed to resolve display name for {user_id}: {e}")
             return user_id
+
+    def _get_cached_email(self, user_id: str) -> str:
+        """Return cached email for a Slack user_id, or empty string."""
+        return self._user_email_cache.get(user_id, "")
 
     @staticmethod
     def _build_prior_context(event_doc: Any) -> str:
@@ -193,6 +201,7 @@ class SlackChannel:
 
                 if not event_id:
                     display_name = await self._resolve_display_name(client, user_id)
+                    user_email = self._get_cached_email(user_id)
                     event_id = await self._blackboard.create_event(
                         source="slack",
                         service="general",
@@ -204,6 +213,7 @@ class SlackChannel:
                             domain="disorder",
                             severity="info",
                         ),
+                        created_by_email=user_email or None,
                     )
                     await self._blackboard.update_event_slack_context(
                         event_id, channel_id, thread_ts, user_id,
