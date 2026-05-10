@@ -4,6 +4,7 @@
 # 2. [Pattern]: PulsePort is a Protocol -- implementors (PulseTracker) live in separate modules.
 # 3. [Pattern]: PulseContext is caller-provided; PulseBatch is emitter-constructed.
 # 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "tool", "phase", "agent".
+# 5. [Semantic]: Tool pulse scores: 1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
 """
 Pulse data models for the Cognitive Recall Graph.
 

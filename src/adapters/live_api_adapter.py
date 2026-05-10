@@ -95,7 +95,8 @@ Pulse stream format:
     {neuron_id} ({score})                      -- repeat mentions are ID only
 
 Neuron ID prefixes:
-  tool:*     -- Brain called a function tool (score always 1.0)
+  tool:*     -- Brain called a function tool
+               score 1.0 = success, 0.3 = completed with error, 0.0 = infra failure
   phase:*    -- Brain declared a phase transition (score always 1.0)
   agent:*    -- Brain dispatched an agent (score always 1.0)
   lesson:*   -- Qdrant lesson recalled by similarity search (score 0-1)

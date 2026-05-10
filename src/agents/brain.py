@@ -2148,17 +2148,30 @@ class Brain:
     # =========================================================================
 
     async def _emit_executive_pulse(
-        self, event_id: str, pulses_data: list[tuple[str, str]],
+        self, event_id: str, pulses_data: list[tuple[str, str]] | list[tuple[str, str, float]],
     ) -> None:
-        """Emit executive hemisphere pulses (tool/phase/agent). Non-fatal."""
+        """Emit executive hemisphere pulses (tool/phase/agent). Non-fatal.
+
+        pulses_data items can be (neuron_id, neuron_type) -- defaults score to 1.0,
+        or (neuron_id, neuron_type, score) for explicit outcome scoring:
+          1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
+        """
         if not self.pulse_port:
             return
         try:
             from ..memory.pulse import Pulse, PulseBatch
+            pulses = []
+            for item in pulses_data:
+                if len(item) == 3:
+                    nid, ntype, score = item
+                else:
+                    nid, ntype = item
+                    score = 1.0
+                pulses.append(Pulse(nid, ntype, score, injected=score >= 0.5))
             ev = await self.blackboard.get_event(event_id)
             batch = PulseBatch(
                 event_id=event_id,
-                pulses=[Pulse(nid, ntype, 1.0, injected=True) for nid, ntype in pulses_data],
+                pulses=pulses,
                 turn=len(ev.conversation) if ev else 0,
                 event_elapsed_s=int(time.time() - ev.conversation[0].timestamp) if ev and ev.conversation else 0,
             )
@@ -2276,6 +2289,7 @@ class Brain:
                 self._active_tasks[event_id] = asyncio.create_task(task_coro)
             else:
                 logger.error(f"Agent '{agent_name}' not found in agents dict")
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             return False
 
         elif function_name == "reply_to_agent":
@@ -2300,8 +2314,10 @@ class Brain:
                     logger.info(f"Brain reply_to_agent -> {agent_id} ({len(message)} chars)")
                 except Exception as e:
                     logger.warning(f"Failed to send reply_to_agent to {agent_id}: {e}")
+                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
             else:
                 logger.warning(f"reply_to_agent: agent {agent_id} not found or disconnected")
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -2345,6 +2361,7 @@ class Brain:
                             logger.info(f"Brain message_agent -> {agent_name} (busy, inbox) ({len(message)} chars)")
                         except Exception as e:
                             logger.warning(f"Failed to send message to {agent_name}: {e}")
+                            await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
                 return False
 
             agent_conn = await registry.get_available(agent_name) if registry else None
@@ -2365,6 +2382,7 @@ class Brain:
                     logger.info(f"Brain message_agent -> {agent_name} ({label}) ({len(message)} chars)")
                 else:
                     logger.warning(f"message_agent: no agent class for role {agent_name}")
+                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             else:
                 if registry:
                     busy_conn = await registry.get_by_role(agent_name)
@@ -2378,8 +2396,10 @@ class Brain:
                             logger.info(f"Brain message_agent -> {agent_name} (busy fallback, inbox) ({len(message)} chars)")
                         except Exception as e:
                             logger.warning(f"Failed to send message to {agent_name}: {e}")
+                            await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
                     else:
                         logger.warning(f"message_agent: no WS connection for {agent_name}, message dropped")
+                        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             return False
 
         elif function_name == "close_event":
@@ -2699,8 +2719,10 @@ class Brain:
             slack_channel = self._get_slack_channel()
             if not slack_channel:
                 result_text = "Slack integration not available. Cannot send notification."
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             elif not user_email or not message:
                 result_text = "Missing user_email or message parameter."
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             else:
                 try:
                     if "@" in user_email:
@@ -2793,6 +2815,7 @@ class Brain:
                 except Exception as e:
                     result_text = f"Failed to send Slack DM to {user_email}: {e}"
                     logger.warning(f"Slack notification failed for {user_email}: {e}")
+                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
 
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -2812,6 +2835,7 @@ class Brain:
                 gl_ctx = getattr(ev, "gitlab_context", None) if hasattr(ev, "gitlab_context") else None
             if not gl_ctx:
                 result_text = "Cannot notify GitLab: no gitlab_context in event evidence. This tool is for headhunter-sourced events only."
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
             else:
                 project_id = args.get("project_id", gl_ctx.get("project_id"))
                 mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
@@ -2838,6 +2862,7 @@ class Brain:
             event_doc = await self.blackboard.get_event(event_id)
             if not event_doc:
                 result_text = f"Event {event_id} not found. Cannot create incident."
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
