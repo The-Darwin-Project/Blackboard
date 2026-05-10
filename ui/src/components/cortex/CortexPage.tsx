@@ -138,7 +138,7 @@ const CortexPage: FC = () => {
             )}
 
             {/* Live Feed -- always visible, scrollable */}
-            <div className={`min-h-0 overflow-y-auto ${selectedEventId ? 'h-48 flex-shrink-0' : 'flex-1'}`}>
+            <div className={`overflow-y-auto ${selectedEventId ? 'max-h-48 flex-shrink-0' : 'flex-1 min-h-0'}`}>
               <CortexLiveFeed
                 entries={thinkingEntries}
                 className="h-full"
