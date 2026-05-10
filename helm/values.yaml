@@ -418,6 +418,15 @@ googleSearch:
 lessonEnrichment:
   enabled: false # Set to true to auto-surface darwin_lessons into Brain system prompt
 # =============================================================================
+# Cortex (Cognitive Recall Graph -- meta-cognitive observation layer)
+# =============================================================================
+cortex:
+  pulseTracking: true # Emit pulse events on Qdrant search, tool calls, phase/agent changes
+  system2:
+    enabled: true # Start Cortex observer (Gemini Live API session)
+    shadow: true # true = interventions saved but not delivered to Brain; false = live
+    model: "" # Empty = use code default (gemini-live-2.5-flash). Override for newer models.
+# =============================================================================
 # Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
 # =============================================================================
 nightwatcher:

@@ -329,6 +329,21 @@ spec:
             - name: BRAIN_LESSON_ENRICHMENT
               value: "{{ .Values.lessonEnrichment.enabled }}"
             {{- end }}
+            {{- if .Values.cortex }}
+            # Cortex (Cognitive Recall Graph -- meta-cognitive observation)
+            - name: PULSE_TRACKING_ENABLED
+              value: "{{ .Values.cortex.pulseTracking }}"
+            {{- if .Values.cortex.system2 }}
+            - name: SYSTEM2_ENABLED
+              value: "{{ .Values.cortex.system2.enabled }}"
+            - name: SYSTEM2_SHADOW
+              value: "{{ .Values.cortex.system2.shadow }}"
+            {{- if .Values.cortex.system2.model }}
+            - name: LLM_MODEL_SYSTEM2
+              value: "{{ .Values.cortex.system2.model }}"
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.nightwatcher }}
             # Nightwatcher (shift consolidation agent)
             - name: NIGHTWATCHER_ENABLED
