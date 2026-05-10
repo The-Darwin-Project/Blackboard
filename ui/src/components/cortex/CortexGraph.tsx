@@ -17,6 +17,7 @@ import '@react-sigma/core/lib/style.css';
 const NodeBorderedCircle = createNodeBorderProgram({
   borders: [
     { size: { value: 0.15 }, color: { attribute: 'borderColor' } },
+    { size: { fill: true }, color: { attribute: 'color' } },
   ],
 });
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
