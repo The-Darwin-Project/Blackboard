@@ -9,7 +9,7 @@
 import { useEffect, useRef, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
-import Graph from 'graphology';
+import { MultiGraph } from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
 import { createNodeBorderProgram } from '@sigma/node-border';
 import '@react-sigma/core/lib/style.css';
@@ -61,11 +61,11 @@ const FA2_SETTINGS = {
 const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches }) => {
   const loadGraph = useLoadGraph();
   const sigma = useSigma();
-  const graphRef = useRef<Graph | null>(null);
+  const graphRef = useRef<MultiGraph | null>(null);
   const activityTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    const graph = new Graph();
+    const graph = new MultiGraph();
     const executive = getExecutiveNeurons();
     const allNeurons = [...neurons, ...executive];
     const heatMap = new Map(neurons.map(n => [n.id, n.heat]));
@@ -168,7 +168,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
       // Dynamically add event node if it arrived via pulse but isn't in activeEvents yet
       if (!graph.hasNode(evtId)) {
-        const existingEvents = graph.nodes().filter(n => {
+        const existingEvents = graph.nodes().filter((n: string) => {
           try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
         });
         graph.addNode(evtId, {
