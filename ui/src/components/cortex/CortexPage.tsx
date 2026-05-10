@@ -106,24 +106,24 @@ const CortexPage: FC = () => {
       </div>
 
       {/* Right panel: collapsible Cortex Live Feed + Event drill-down */}
-      <div className={`flex flex-col border-l border-border transition-all duration-300 overflow-hidden ${
-        feedOpen ? 'w-96' : 'w-8'
+      <div className={`flex-shrink-0 flex flex-col border-l border-border transition-all duration-300 ${
+        feedOpen ? 'w-96' : 'w-10'
       }`}>
-        {/* Collapse toggle */}
+        {/* Collapse toggle -- sticky header */}
         <button
           onClick={() => setFeedOpen(prev => !prev)}
-          className="flex-shrink-0 flex items-center gap-1 px-2 py-1.5 text-text-muted hover:text-text-primary transition-colors border-b border-border/50"
+          className="flex-shrink-0 z-10 flex items-center gap-1.5 px-3 py-2 bg-bg-primary text-text-muted hover:text-text-primary transition-colors border-b border-border"
           title={feedOpen ? 'Collapse Cortex panel' : 'Expand Cortex panel'}
         >
-          {feedOpen ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
-          {feedOpen && <span className="text-[10px] font-semibold uppercase tracking-wider">Cortex</span>}
+          {feedOpen ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+          {feedOpen && <span className="text-[11px] font-semibold uppercase tracking-wider">Cortex</span>}
         </button>
 
         {feedOpen && (
-          <>
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {/* Event drill-down (when selected) */}
             {selectedEventId && (
-              <div className="flex-1 min-h-0 overflow-hidden border-b border-border">
+              <div className="flex-1 min-h-0 overflow-y-auto border-b border-border">
                 <EventDrillDown
                   eventId={selectedEventId}
                   allNeurons={neurons}
@@ -137,14 +137,14 @@ const CortexPage: FC = () => {
               </div>
             )}
 
-            {/* Live Feed -- always visible */}
-            <div className={`overflow-hidden ${selectedEventId ? 'h-48 flex-shrink-0' : 'flex-1'}`}>
+            {/* Live Feed -- always visible, scrollable */}
+            <div className={`min-h-0 overflow-y-auto ${selectedEventId ? 'h-48 flex-shrink-0' : 'flex-1'}`}>
               <CortexLiveFeed
                 entries={thinkingEntries}
                 className="h-full"
               />
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>
