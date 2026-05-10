@@ -255,13 +255,21 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const res = { ...data };
       const opacity = (data as Record<string, unknown>).opacity as number | undefined;
       if (opacity !== undefined && opacity < 1.0) {
-        const baseColor = (data.color as string) ?? '#1e293b';
-        // Append hex alpha to #rrggbb -> #rrggbbaa
-        const alpha = Math.round(opacity * 255).toString(16).padStart(2, '0');
-        res.color = baseColor.startsWith('#') && baseColor.length === 7
-          ? `${baseColor}${alpha}`
-          : baseColor;
-        res.size = ((data.size as number) ?? 2) * opacity;
+        // Sigma v3 WebGL can't reliably parse #RRGGBBAA.
+        // Fade via size reduction + color dimming toward background.
+        res.size = Math.max(0.5, ((data.size as number) ?? 2) * opacity);
+        // Blend color toward background (#030712) based on opacity
+        const base = data.color as string ?? '#1e293b';
+        if (base.startsWith('#') && base.length === 7) {
+          const r = parseInt(base.slice(1, 3), 16);
+          const g = parseInt(base.slice(3, 5), 16);
+          const b = parseInt(base.slice(5, 7), 16);
+          const br = 3, bg = 7, bb = 18; // #030712 background
+          const mr = Math.round(r * opacity + br * (1 - opacity));
+          const mg = Math.round(g * opacity + bg * (1 - opacity));
+          const mb = Math.round(b * opacity + bb * (1 - opacity));
+          res.color = `#${mr.toString(16).padStart(2,'0')}${mg.toString(16).padStart(2,'0')}${mb.toString(16).padStart(2,'0')}`;
+        }
       }
       return res;
     });
