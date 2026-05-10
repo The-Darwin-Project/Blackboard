@@ -423,18 +423,20 @@ class LiveAPIAdapter:
             or (hasattr(msg, "tool_call") and msg.tool_call)
         )
         if should_flush and self._text_buffer:
-            full_text = "".join(self._text_buffer)
+            full_text = "".join(self._text_buffer).strip()
             self._text_buffer = []
-            try:
-                await self._broadcast({
-                    "type": "cortex_thinking",
-                    "event_id": eid,
-                    "content_type": "text",
-                    "text": full_text,
-                    "timestamp": time.time(),
-                })
-            except Exception:
-                pass
+            # Skip broadcasting noise responses (watching, ok, etc.)
+            if full_text and full_text.lower() not in ("watching", "watching.", "ok", "ok."):
+                try:
+                    await self._broadcast({
+                        "type": "cortex_thinking",
+                        "event_id": eid,
+                        "content_type": "text",
+                        "text": full_text,
+                        "timestamp": time.time(),
+                    })
+                except Exception:
+                    pass
 
         if hasattr(msg, "tool_call") and msg.tool_call:
             for fc in msg.tool_call.function_calls:
