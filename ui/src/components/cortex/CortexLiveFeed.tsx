@@ -21,12 +21,13 @@ const TYPE_STYLES: Record<string, { color: string; icon: typeof Brain }> = {
 };
 
 const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], className }) => {
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const hasWhispers = whispers.length > 0;
   const mode = hasWhispers ? 'live' : 'shadow';
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = containerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [entries.length, whispers.length]);
 
   if (entries.length === 0 && whispers.length === 0) {
@@ -39,7 +40,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], class
   }
 
   return (
-    <div className={`overflow-y-auto text-xs font-mono space-y-0.5 ${className ?? ''}`}>
+    <div ref={containerRef} className={`overflow-y-auto text-xs font-mono space-y-0.5 ${className ?? ''}`}>
       {/* Mode indicator */}
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/50 mb-1">
         {mode === 'shadow' ? (
@@ -74,7 +75,6 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], class
           </div>
         );
       })}
-      <div ref={bottomRef} />
     </div>
   );
 };

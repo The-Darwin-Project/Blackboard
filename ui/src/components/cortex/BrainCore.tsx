@@ -3,6 +3,7 @@
 // 1. [Pattern]: Three.js canvas as background layer (z-0) behind Sigma graph (z-10).
 // 2. [Constraint]: Uses alpha:true for transparent background so Sigma nodes render on top.
 // 3. [Gotcha]: Two WebGL contexts -- Three.js and Sigma. Keep Three.js minimal to avoid GPU contention.
+// 4. [Pattern]: Uses THREE.Timer (not deprecated Clock) -- call timer.update() before timer.getElapsed().
 // 4. [Pattern]: brain.glb loaded from /brain.glb (public dir). Fallback: empty scene.
 import { useEffect, useRef, type FC } from 'react';
 
@@ -105,13 +106,14 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
         // brain.glb not available -- render orbs only
       }
 
-      const clock = new THREE.Clock();
+      const timer = new THREE.Timer();
       let animId = 0;
 
       function animate() {
         if (disposed) return;
         animId = requestAnimationFrame(animate);
-        const t = clock.getElapsedTime();
+        timer.update();
+        const t = timer.getElapsed();
 
         if (brainModel) {
           brainModel.rotation.y += 0.002;
