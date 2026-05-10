@@ -11,7 +11,14 @@ import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@reac
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
 import Graph from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
+import { createNodeBorderProgram } from '@sigma/node-border';
 import '@react-sigma/core/lib/style.css';
+
+const NodeBorderedCircle = createNodeBorderProgram({
+  borders: [
+    { size: { value: 0.15 }, color: { attribute: 'borderColor' } },
+  ],
+});
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor,
@@ -75,9 +82,14 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         y = (Math.random() - 0.5) * 500;
       } else if (n.type === 'tool') {
         const group = (n.payload?.group as string) ?? 'observation';
-        const groupY = TOOL_GROUP_Y[group] ?? 0;
-        x = HEMISPHERE_X.executive + (Math.random() - 0.5) * 60;
-        y = groupY + (Math.random() - 0.5) * 20;
+        const groupTools = Object.entries(TOOL_GROUP_Y).find(([g]) => g === group);
+        const groupY = groupTools ? groupTools[1] : 0;
+        const toolsInGroup = allNeurons.filter(
+          t => t.type === 'tool' && (t.payload?.group as string) === group
+        );
+        const toolIdx = toolsInGroup.indexOf(n);
+        x = HEMISPHERE_X.executive + toolIdx * 50;
+        y = groupY;
       } else if (n.type === 'phase') {
         const phases = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
         const idx = phases.indexOf(n.payload?.label as string ?? '');
@@ -94,8 +106,9 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: getNeuronColor(n),
+        borderColor: '#94a3b8',
         label: (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id,
-        type: 'circle',
+        type: 'bordered',
         fixed: !isKnowledge,
       });
     }
@@ -125,8 +138,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const edgeId = `struct:${edge.source}:${edge.target}`;
         if (!graph.hasEdge(edgeId)) {
           graph.addEdgeWithKey(edgeId, edge.source, edge.target, {
-            color: 'rgba(148, 163, 184, 0.15)',
-            size: 0.5,
+            color: 'rgba(148, 163, 184, 0.08)',
+            size: 0.3,
             structural: true,
           });
         }
@@ -205,7 +218,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const res = { ...data };
       if (glowingIds.has(node)) {
         res.color = '#fbbf24';
-        res.size = (data.size ?? 4) * 1.5;
+        res.borderColor = '#f59e0b';
+        res.size = (data.size ?? 4) * 1.8;
       }
       return res;
     });
@@ -303,7 +317,10 @@ export default function CortexGraph({
           labelRenderedSizeThreshold: 4,
           renderLabels: true,
           enableEdgeEvents: false,
-          nodeProgramClasses: { square: NodeSquareProgram },
+          nodeProgramClasses: {
+            bordered: NodeBorderedCircle,
+            square: NodeSquareProgram,
+          },
           ...(dimmedIds ? {
             nodeReducer: (node: string, data: Record<string, unknown>) => {
               if (dimmedIds.has(node)) return { ...data, color: '#1e293b', size: 2, label: '' };
