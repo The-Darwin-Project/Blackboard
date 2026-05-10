@@ -30,7 +30,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
 
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
-      camera.position.z = 10;
+      camera.position.z = 18;
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(w, h);
@@ -51,7 +51,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
       const composer = new EffectComposer(renderer);
       composer.addPass(new RenderPass(scene, camera));
       composer.addPass(new UnrealBloomPass(
-        new THREE.Vector2(w, h), 1.5, 0.5, 0.15
+        new THREE.Vector2(w, h), 0.8, 0.4, 0.2
       ));
 
       // Swarm orbs
@@ -60,7 +60,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
       const orbMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee });
       for (let i = 0; i < 60; i++) {
         const orb = new THREE.Mesh(orbGeo, orbMat);
-        const radius = 2 + Math.random() * 2.5;
+        const radius = 1.5 + Math.random() * 2;
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(Math.random() * 2 - 1);
         orb.position.set(
@@ -93,7 +93,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
             child.material = new THREE.MeshStandardMaterial({
               color: 0x0891b2,
               transparent: true,
-              opacity: 0.5,
+              opacity: 0.35,
               roughness: 0.2,
               metalness: 0.5,
             });
