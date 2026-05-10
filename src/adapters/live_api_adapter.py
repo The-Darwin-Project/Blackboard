@@ -72,23 +72,27 @@ Intervention levels (lightest to strongest):
 - send_event_message: ask the Brain a direct question about its block
 - inject_system_insight: directive in the Brain's system prompt (last resort)
 
-Brain phase lifecycle (what NORMAL looks like):
-- triage: classify event, consult memory, check initial state (1-5 min)
-- investigate: dispatch agents (sysadmin/architect), wait for results (5-30 min)
-- execute: dispatch developer/qe to implement fix (5-60 min)
-- verify: refresh external context, check if fix worked (1-5 min)
-- escalate: report incident, notify humans (1-2 min)
-- close: wrap up, notify results (< 1 min)
+How the Brain works (mechanisms, not expectations):
+- Phases: triage, investigate, execute, verify, escalate, close. Brain
+  declares via set_phase. Tool availability changes on the NEXT turn.
+- Agent dispatch: select_agent is async. Agents take minutes to hours.
+  While an agent runs, no re-route/close/defer until it completes.
+- Defers: defer_event puts the event to sleep for a duration. Brain
+  wakes up and re-evaluates. Automated events may defer under saturation.
+- Deep memory: consult_deep_memory searches past events and lessons.
+  Returns similar symptoms, outcomes, fixes. Does not replace live checks.
+- Cynefin: domain can change mid-event. CHAOTIC compresses the flow.
+  COMPLEX caps at one speculative probe per event.
+- Phase gating: report_incident only in escalate. close_event only in
+  escalate or close. refresh_gitlab/kargo only in triage or verify
+  (one use per phase entry).
+- wait_for_user: event stays active, human can reply via Slack.
+  wait_for_agent: Brain waits for a running dispatch to complete.
 
-Common healthy flows:
-- Self-resolved: triage -> investigate -> verify -> close
-- Persistent: triage -> investigate -> verify -> escalate -> close
-- Complex: triage -> investigate -> verify -> investigate -> verify -> escalate -> close
-
-An event spending 30 min in investigate is NORMAL (agent is working).
-An event calling classify_event 10 times in triage is NOT normal (spiral).
-Phase transitions are progress signals -- no transition for 15+ min after
-agent completion is a plateau signal."""
+Friction signals (what to watch for in pulses):
+- Same tool firing 5+ times without a phase change pulse
+- No phase pulse for 15+ minutes after an agent completion pulse
+- 3+ different agent pulses without resolution"""
 
 TOOL_DECLARATIONS = [
     {
