@@ -10,7 +10,7 @@ import { useQuery } from '@tanstack/react-query';
 import { X, Clock, Layers, Zap, AlertTriangle } from 'lucide-react';
 import { getEventPulses } from '../../api/client';
 import { PHASE_COLORS, ACTOR_COLORS } from '../../constants/colors';
-// CortexGraph removed from drill-down to reduce GPU load (single graph in main view)
+import BrainCore from './BrainCore';
 import PulseTimeline from './PulseTimeline';
 import CortexLiveFeed from './CortexLiveFeed';
 import { useFrictionIndicators } from '../../hooks/useCortexData';
@@ -159,6 +159,11 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         <button onClick={onClose} className="text-text-muted hover:text-text-secondary">
           <X size={14} />
         </button>
+      </div>
+
+      {/* 3D Brain visualization */}
+      <div className="h-36 flex-shrink-0 relative">
+        <BrainCore className="rounded-none" />
       </div>
 
       {/* Details */}
