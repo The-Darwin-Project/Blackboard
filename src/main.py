@@ -173,8 +173,7 @@ async def lifespan(app: FastAPI):
                 )
                 pulse_tracker.add_observer(live_adapter)
                 app.state.live_adapter = live_adapter
-                asyncio.create_task(live_adapter.start())
-                logger.info("Cortex observer enabled (System 2, shadow=%s)",
+                logger.info("Cortex observer registered (on-demand, will activate on first pulse, shadow=%s)",
                             os.getenv("SYSTEM2_SHADOW", "true"))
             else:
                 logger.info("Cortex observer disabled (SYSTEM2_ENABLED=false)")

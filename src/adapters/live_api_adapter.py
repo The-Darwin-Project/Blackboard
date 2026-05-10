@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Shadow flag gates ALL write tools. Read tools always active.
 # 2. [Pattern]: PulseObserver protocol -- receives PulseBatch from PulseTracker.add_observer().
-# 3. [Gotcha]: Live API session is stateful WebSocket. Reconnect with summary on disconnect.
+# 3. [Gotcha]: Live API session is on-demand. Lazy-connects on first pulse, closes after 5min idle.
 # 4. [Pattern]: Rate limit: max 1 intervention per 10 Brain turns per event.
 # 5. [Constraint]: google.genai Client with vertexai=True. Model from LLM_MODEL_SYSTEM2 env var.
 # 6. [Gotcha]: Text output from Cortex is NOT visible to the Brain. Only tool calls reach it.
@@ -10,9 +10,10 @@
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
-Maintains a long-lived WebSocket session to Gemini Live API. Receives pulse
-batches from PulseTracker, formats them as text turns, and streams them to
-the LLM. The LLM detects cognitive friction and intervenes via 7 declared tools.
+On-demand lifecycle: starts idle, lazy-connects on first pulse, closes after
+5 minutes of no pulses. Receives pulse batches from PulseTracker, formats them
+as text turns, and streams them to the LLM. The LLM detects cognitive friction
+and intervenes via 7 declared tools.
 """
 from __future__ import annotations
 
@@ -180,23 +181,25 @@ class LiveAPIAdapter:
         self._seen_neurons: set[str] = set()
         self._neuron_labels: dict[str, str] = {}
         self._last_pulse_event_id: str | None = None
+        self._last_pulse_time: float = 0
         self._text_buffer: list[str] = []
         self._receive_task: asyncio.Task | None = None
-        self._keepalive_task: asyncio.Task | None = None
+        self._idle_watchdog_task: asyncio.Task | None = None
         self._running = False
         self._client = None
 
-    async def start(self) -> None:
-        """Connect Live API session with system instruction + 7 tools."""
+    async def _connect(self) -> None:
+        """Lazy-connect Live API session. Called on first pulse after idle."""
         try:
             from google import genai
             from google.genai import types
 
-            self._client = genai.Client(
-                vertexai=True,
-                project=self._project,
-                location=self._location,
-            )
+            if not self._client:
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=self._project,
+                    location=self._location,
+                )
 
             config = types.LiveConnectConfig(
                 response_modalities=[types.Modality.TEXT],
@@ -217,25 +220,30 @@ class LiveAPIAdapter:
             if self._receive_task and not self._receive_task.done():
                 self._receive_task.cancel()
             self._receive_task = asyncio.create_task(self._receive_loop())
-            if self._keepalive_task and not self._keepalive_task.done():
-                self._keepalive_task.cancel()
-            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            if self._idle_watchdog_task and not self._idle_watchdog_task.done():
+                self._idle_watchdog_task.cancel()
+            self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
             await self._load_neuron_labels()
             logger.info(
-                "Cortex Live API session connected (model=%s, shadow=%s, labels=%d)",
+                "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                 self._model, self._shadow, len(self._neuron_labels),
             )
         except Exception as e:
-            logger.error("Cortex Live API failed to start: %s", e)
+            logger.error("Cortex Live API failed to connect: %s", e)
             self._session = None
 
     async def stop(self) -> None:
-        """Graceful close."""
+        """Graceful shutdown -- called during app teardown."""
         self._running = False
-        if self._keepalive_task and not self._keepalive_task.done():
-            self._keepalive_task.cancel()
+        await self._disconnect()
+        logger.info("Cortex Live API stopped")
+
+    async def _disconnect(self) -> None:
+        """Gracefully close the Live API session. Returns to idle state."""
+        if self._idle_watchdog_task and not self._idle_watchdog_task.done():
+            self._idle_watchdog_task.cancel()
             try:
-                await self._keepalive_task
+                await self._idle_watchdog_task
             except asyncio.CancelledError:
                 pass
         if self._receive_task and not self._receive_task.done():
@@ -249,25 +257,30 @@ class LiveAPIAdapter:
                 ctx = getattr(self, "_session_ctx", None)
                 if ctx:
                     await ctx.__aexit__(None, None, None)
-                else:
-                    await self._session.close()
             except Exception:
                 pass
             self._session = None
             self._session_ctx = None
-        logger.info("Cortex Live API session closed")
+        self._seen_neurons.clear()
+        self._text_buffer.clear()
+        logger.info("Cortex session closed (idle)")
 
     async def send_pulse(self, batch: PulseBatch) -> None:
-        """PulseObserver implementation. Format batch as compact text and send to session."""
+        """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
         self._last_pulse_event_id = batch.event_id
+        self._last_pulse_time = time.time()
+
+        if not self._session:
+            await self._connect()
         if not self._session:
             return
+
         try:
             text = self._format_pulse(batch)
             await self._session.send(input=text, end_of_turn=True)
         except Exception as e:
             logger.debug("Cortex send_pulse failed (non-fatal): %s", e)
-            await self._try_reconnect()
+            self._session = None
 
     async def _load_neuron_labels(self) -> None:
         """Pre-load titles for knowledge neurons so first-mention pulses include context."""
@@ -749,36 +762,32 @@ class LiveAPIAdapter:
     # Session lifecycle
     # -------------------------------------------------------------------------
 
-    async def _keepalive_loop(self) -> None:
-        """Send periodic ping to prevent Live API idle timeout."""
-        while self._running:
-            await asyncio.sleep(300)
-            if self._session and self._running:
-                try:
-                    await self._session.send(input="[KEEPALIVE] System 2 monitoring active.", end_of_turn=True)
-                    logger.debug("Cortex keepalive sent")
-                except Exception as e:
-                    logger.debug("Cortex keepalive failed: %s", e)
-                    await self._try_reconnect()
-                    break
+    async def _idle_watchdog(self) -> None:
+        """Close session after 5 minutes of no pulses."""
+        while self._running and self._session:
+            await asyncio.sleep(60)
+            if self._last_pulse_time and (time.time() - self._last_pulse_time) > 300:
+                logger.info("Cortex idle for 5 minutes -- closing session")
+                await self._disconnect()
+                break
 
     async def _try_reconnect(self) -> None:
-        """Exponential backoff reconnect."""
+        """Fast reconnect if recent pulse activity, otherwise stay idle."""
         if not self._running:
             return
         self._session = None
-        for delay in (30, 60, 120):
-            logger.info("Cortex reconnecting in %ds...", delay)
-            await asyncio.sleep(delay)
-            if not self._running:
-                return
-            try:
-                await self.start()
-                if self._session:
+        if self._last_pulse_time and (time.time() - self._last_pulse_time) < 300:
+            for delay in (5, 15, 30):
+                await asyncio.sleep(delay)
+                if not self._running:
                     return
-            except Exception as e:
-                logger.warning("Cortex reconnect failed: %s", e)
-        logger.error("Cortex reconnect exhausted -- giving up")
+                try:
+                    await self._connect()
+                    if self._session:
+                        return
+                except Exception as e:
+                    logger.warning("Cortex reconnect failed: %s", e)
+        logger.info("Cortex: no recent activity, staying idle until next pulse")
 
     async def _rotate_session(self) -> None:
         """Ask for summary, close, reconnect with summary as first turn."""
@@ -803,8 +812,8 @@ class LiveAPIAdapter:
             logger.warning("Cortex rotation summary failed: %s", e)
             summary = "(session rotated, previous context unavailable)"
 
-        await self.stop()
-        await self.start()
+        await self._disconnect()
+        await self._connect()
 
         if self._session and summary:
             try:
