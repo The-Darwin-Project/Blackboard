@@ -145,8 +145,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const edgeId = `struct:${edge.source}:${edge.target}`;
         if (!graph.hasEdge(edgeId)) {
           graph.addEdgeWithKey(edgeId, edge.source, edge.target, {
-            color: 'rgba(148, 163, 184, 0.08)',
-            size: 0.3,
+            color: 'rgba(148, 163, 184, 0.25)',
+            size: 1,
             structural: true,
           });
         }
@@ -188,13 +188,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         if (graph.hasEdge(edgeId) || !graph.hasNode(pulse.neuron_id)) continue;
 
         let source = evtId;
-        let size = 2;
+        let size = 4;
         let color = eventColor(evtId);
 
         if (pulse.neuron_type === 'phase') {
-          size = 3;
+          size = 6;
         } else if (pulse.neuron_type === 'lesson' || pulse.neuron_type === 'memory') {
-          size = 1;
+          size = 2;
           const lastTool = [...batch.pulses].reverse().find(p => p.neuron_type === 'tool');
           if (lastTool && graph.hasNode(lastTool.neuron_id)) source = lastTool.neuron_id;
         } else if (pulse.neuron_type === 'agent') {
