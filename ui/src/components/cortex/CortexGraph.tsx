@@ -145,7 +145,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const edgeId = `struct:${edge.source}:${edge.target}`;
         if (!graph.hasEdge(edgeId)) {
           graph.addEdgeWithKey(edgeId, edge.source, edge.target, {
-            color: 'rgba(148, 163, 184, 0.25)',
+            color: '#334155',
             size: 1,
             structural: true,
           });
@@ -256,9 +256,12 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const opacity = (data as Record<string, unknown>).opacity as number | undefined;
       if (opacity !== undefined && opacity < 1.0) {
         const baseColor = (data.color as string) ?? '#1e293b';
-        res.color = baseColor.includes('rgba')
-          ? baseColor
-          : `${baseColor}${Math.round(opacity * 255).toString(16).padStart(2, '0')}`;
+        // Append hex alpha to #rrggbb -> #rrggbbaa
+        const alpha = Math.round(opacity * 255).toString(16).padStart(2, '0');
+        res.color = baseColor.startsWith('#') && baseColor.length === 7
+          ? `${baseColor}${alpha}`
+          : baseColor;
+        res.size = ((data.size as number) ?? 2) * opacity;
       }
       return res;
     });
