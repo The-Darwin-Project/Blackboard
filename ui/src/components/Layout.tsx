@@ -20,12 +20,12 @@ import ActivityPanel from './ops/ActivityPanel';
 const BASE_TABS = [
   { id: '/', label: 'Streams' },
   { id: '/topology', label: 'Topology' },
+  { id: '/cortex', label: 'Cortex' },
   { id: '/reports', label: 'Event History' },
   { id: '/incidents', label: 'Incidents' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
   { id: '/guide', label: 'Guide' },
-  { id: '/cortex', label: 'Cortex' },
 ];
 
 function LayoutInner() {
