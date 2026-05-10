@@ -70,7 +70,25 @@ When you have nothing to report, respond with a single word: "watching"
 Intervention levels (lightest to strongest):
 - surface_context: share information the Brain may not have
 - send_event_message: ask the Brain a direct question about its block
-- inject_system_insight: directive in the Brain's system prompt (last resort)"""
+- inject_system_insight: directive in the Brain's system prompt (last resort)
+
+Brain phase lifecycle (what NORMAL looks like):
+- triage: classify event, consult memory, check initial state (1-5 min)
+- investigate: dispatch agents (sysadmin/architect), wait for results (5-30 min)
+- execute: dispatch developer/qe to implement fix (5-60 min)
+- verify: refresh external context, check if fix worked (1-5 min)
+- escalate: report incident, notify humans (1-2 min)
+- close: wrap up, notify results (< 1 min)
+
+Common healthy flows:
+- Self-resolved: triage -> investigate -> verify -> close
+- Persistent: triage -> investigate -> verify -> escalate -> close
+- Complex: triage -> investigate -> verify -> investigate -> verify -> escalate -> close
+
+An event spending 30 min in investigate is NORMAL (agent is working).
+An event calling classify_event 10 times in triage is NOT normal (spiral).
+Phase transitions are progress signals -- no transition for 15+ min after
+agent completion is a plateau signal."""
 
 TOOL_DECLARATIONS = [
     {
