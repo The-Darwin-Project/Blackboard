@@ -181,6 +181,7 @@ class LiveAPIAdapter:
         self._neuron_labels: dict[str, str] = {}
         self._last_pulse_event_id: str | None = None
         self._receive_task: asyncio.Task | None = None
+        self._keepalive_task: asyncio.Task | None = None
         self._running = False
         self._client = None
 
@@ -213,6 +214,7 @@ class LiveAPIAdapter:
             self._session = await self._session_ctx.__aenter__()
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop())
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
             await self._load_neuron_labels()
             logger.info(
                 "Cortex Live API session connected (model=%s, shadow=%s, labels=%d)",
@@ -225,6 +227,12 @@ class LiveAPIAdapter:
     async def stop(self) -> None:
         """Graceful close."""
         self._running = False
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
             try:
@@ -726,6 +734,19 @@ class LiveAPIAdapter:
     # -------------------------------------------------------------------------
     # Session lifecycle
     # -------------------------------------------------------------------------
+
+    async def _keepalive_loop(self) -> None:
+        """Send periodic ping to prevent Live API idle timeout."""
+        while self._running:
+            await asyncio.sleep(300)
+            if self._session and self._running:
+                try:
+                    await self._session.send(input="[KEEPALIVE] System 2 monitoring active.", end_of_turn=True)
+                    logger.debug("Cortex keepalive sent")
+                except Exception as e:
+                    logger.debug("Cortex keepalive failed: %s", e)
+                    await self._try_reconnect()
+                    break
 
     async def _try_reconnect(self) -> None:
         """Exponential backoff reconnect."""

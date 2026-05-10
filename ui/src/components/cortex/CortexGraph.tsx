@@ -102,11 +102,20 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         y = -150 + idx * 100;
       }
 
+      let label = '';
+      if (n.type === 'memory') {
+        const symptom = n.payload?.symptom as string;
+        const service = n.payload?.service as string;
+        label = symptom ? symptom.slice(0, 30) : service ? service : n.id.slice(0, 12);
+      } else {
+        label = (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id.slice(0, 15);
+      }
+
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: getNeuronColor(n),
-        label: (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id,
+        label,
         type: 'circle',
       });
     }
@@ -197,6 +206,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           structural: false,
           opacity: 1.0,
         });
+        sigma.refresh();
 
         // 5s solid at full opacity, then 5s fade (0.1 every 0.5s)
         const createdAt = Date.now();
@@ -348,6 +358,7 @@ export default function CortexGraph({
           labelRenderedSizeThreshold: 4,
           renderLabels: true,
           enableEdgeEvents: false,
+          stagePadding: 0,
           nodeProgramClasses: {
             square: NodeSquareProgram,
           },
