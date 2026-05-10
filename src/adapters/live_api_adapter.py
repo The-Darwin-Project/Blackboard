@@ -180,6 +180,7 @@ class LiveAPIAdapter:
         self._seen_neurons: set[str] = set()
         self._neuron_labels: dict[str, str] = {}
         self._last_pulse_event_id: str | None = None
+        self._text_buffer: list[str] = []
         self._receive_task: asyncio.Task | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._running = False
@@ -328,17 +329,26 @@ class LiveAPIAdapter:
 
         eid = self._last_pulse_event_id
 
+        # Buffer text fragments until turn_complete, then broadcast as one message
         if hasattr(msg, "text") and msg.text:
-            try:
-                await self._broadcast({
-                    "type": "cortex_thinking",
-                    "event_id": eid,
-                    "content_type": "text",
-                    "text": msg.text,
-                    "timestamp": time.time(),
-                })
-            except Exception:
-                pass
+            if not hasattr(self, "_text_buffer"):
+                self._text_buffer = []
+            self._text_buffer.append(msg.text)
+
+        if hasattr(msg, "server_content") and getattr(msg.server_content, "turn_complete", False):
+            if hasattr(self, "_text_buffer") and self._text_buffer:
+                full_text = "".join(self._text_buffer)
+                self._text_buffer = []
+                try:
+                    await self._broadcast({
+                        "type": "cortex_thinking",
+                        "event_id": eid,
+                        "content_type": "text",
+                        "text": full_text,
+                        "timestamp": time.time(),
+                    })
+                except Exception:
+                    pass
 
         if hasattr(msg, "tool_call") and msg.tool_call:
             for fc in msg.tool_call.function_calls:
