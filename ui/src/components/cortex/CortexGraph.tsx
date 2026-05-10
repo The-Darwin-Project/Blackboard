@@ -50,12 +50,13 @@ interface GraphLoaderProps {
 }
 
 const FA2_SETTINGS = {
-  gravity: 0.5,
-  scalingRatio: 30,
-  strongGravityMode: false,
+  gravity: 3,
+  scalingRatio: 15,
+  strongGravityMode: true,
   barnesHutOptimize: true,
-  slowDown: 5,
-  edgeWeightInfluence: 0,
+  slowDown: 20,
+  edgeWeightInfluence: 1,
+  linLogMode: false,
 };
 
 const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches }) => {
@@ -116,7 +117,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         borderColor: '#94a3b8',
         label: (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id,
         type: 'bordered',
-        fixed: !isKnowledge,
       });
     }
 
@@ -134,7 +134,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
           type: 'square',
-          fixed: true,
         });
       }
     }
@@ -179,7 +178,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           borderColor: '#94a3b8',
           label: evtId.slice(0, 12),
           type: 'square',
-          fixed: true,
         });
       }
 
