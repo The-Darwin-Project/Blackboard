@@ -29,8 +29,8 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 }
 
 function getNeuronSize(heat: number, type: string): number {
-  const base = type === 'agent' ? 12 : type === 'phase' ? 10 : type === 'tool' ? 8 : type === 'event' ? 14 : 3;
-  return base + Math.min(heat * 0.3, 12);
+  const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'tool' ? 4 : type === 'event' ? 8 : 3;
+  return base + Math.min(heat * 0.2, 6);
 }
 
 interface GraphLoaderProps {
@@ -81,13 +81,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       } else if (n.type === 'phase') {
         const phases = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
         const idx = phases.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 150;
-        y = -200 + idx * 80;
+        x = HEMISPHERE_X.executive + 200;
+        y = -250 + idx * 100;
       } else {
         const agents = ['architect', 'sysadmin', 'developer', 'qe'];
         const idx = agents.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 280;
-        y = -90 + idx * 70;
+        x = HEMISPHERE_X.executive + 350;
+        y = -150 + idx * 100;
       }
 
       graph.addNode(n.id, {
@@ -107,7 +107,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         graph.addNode(evt.id, {
           x: HEMISPHERE_X.events + (Math.random() - 0.5) * 30,
           y: i * 80 - (activeEvents.length * 40),
-          size: 14,
+          size: 8,
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
           type: 'square',
