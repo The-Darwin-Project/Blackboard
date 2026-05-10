@@ -151,9 +151,10 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   }, [neurons, activeEvents, loadGraph]);
 
   // Activity edges from liveBatches
+  // Re-runs when liveBatches change OR when graph rebuilds (neurons dep)
   useEffect(() => {
     const graph = graphRef.current;
-    if (!graph) return;
+    if (!graph || graph.order === 0) return;
 
     for (const batch of liveBatches) {
       const evtId = batch.event_id;
@@ -223,7 +224,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
     }
     sigma.refresh();
-  }, [liveBatches, sigma]);
+  }, [liveBatches, neurons, sigma]); // neurons dep ensures re-run after graph rebuild
 
   useEffect(() => {
     const timers = activityTimersRef.current;
