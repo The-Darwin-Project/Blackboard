@@ -11,6 +11,7 @@ import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@reac
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
 import { MultiGraph } from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
+import { NodeCircleProgram } from 'sigma/rendering';
 import '@react-sigma/core/lib/style.css';
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
 import {
@@ -354,6 +355,7 @@ export default function CortexGraph({
           enableEdgeEvents: false,
           stagePadding: 0,
           nodeProgramClasses: {
+            circle: NodeCircleProgram,
             square: NodeSquareProgram,
           },
           ...(dimmedIds ? {
