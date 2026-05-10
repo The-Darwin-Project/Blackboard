@@ -89,6 +89,21 @@ How the Brain works (mechanisms, not expectations):
 - wait_for_user: event stays active, human can reply via Slack.
   wait_for_agent: Brain waits for a running dispatch to complete.
 
+Pulse stream format:
+  [PULSE] {event_id} | turn:{N} | elapsed:{Xm}
+    {neuron_id} ({score}, INJECTED) "label"   -- first mention includes label
+    {neuron_id} ({score})                      -- repeat mentions are ID only
+
+Neuron ID prefixes:
+  tool:*     -- Brain called a function tool (score always 1.0)
+  phase:*    -- Brain declared a phase transition (score always 1.0)
+  agent:*    -- Brain dispatched an agent (score always 1.0)
+  lesson:*   -- Qdrant lesson recalled by similarity search (score 0-1)
+  memory:*   -- Qdrant past event recalled by similarity search (score 0-1)
+
+INJECTED means the recall crossed the 0.55 threshold and entered the
+Brain's system prompt. Non-injected recalls were returned but filtered out.
+
 Friction signals (what to watch for in pulses):
 - Same tool firing 5+ times without a phase change pulse
 - No phase pulse for 15+ minutes after an agent completion pulse
@@ -121,7 +136,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Post a message into the event conversation as a peer. The Brain must process "
             "this on its next cycle, like a human operator asking a question. Use to ask "
-            "the Brain what is blocking progress."
+            "the Brain what is blocking progress || Ask the brain Whats next or Why is it stuck?."
         ),
         "parameters": {
             "type": "object",
