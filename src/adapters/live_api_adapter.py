@@ -346,26 +346,27 @@ class LiveAPIAdapter:
 
         eid = self._last_pulse_event_id
 
-        # Buffer text fragments until turn_complete, then broadcast as one message
+        # Buffer text fragments, flush on turn_complete OR tool_call (natural turn boundaries)
         if hasattr(msg, "text") and msg.text:
-            if not hasattr(self, "_text_buffer"):
-                self._text_buffer = []
             self._text_buffer.append(msg.text)
 
-        if hasattr(msg, "server_content") and getattr(msg.server_content, "turn_complete", False):
-            if hasattr(self, "_text_buffer") and self._text_buffer:
-                full_text = "".join(self._text_buffer)
-                self._text_buffer = []
-                try:
-                    await self._broadcast({
-                        "type": "cortex_thinking",
-                        "event_id": eid,
-                        "content_type": "text",
-                        "text": full_text,
-                        "timestamp": time.time(),
-                    })
-                except Exception:
-                    pass
+        should_flush = (
+            (hasattr(msg, "server_content") and getattr(msg.server_content, "turn_complete", False))
+            or (hasattr(msg, "tool_call") and msg.tool_call)
+        )
+        if should_flush and self._text_buffer:
+            full_text = "".join(self._text_buffer)
+            self._text_buffer = []
+            try:
+                await self._broadcast({
+                    "type": "cortex_thinking",
+                    "event_id": eid,
+                    "content_type": "text",
+                    "text": full_text,
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
 
         if hasattr(msg, "tool_call") and msg.tool_call:
             for fc in msg.tool_call.function_calls:
