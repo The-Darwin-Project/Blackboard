@@ -151,24 +151,23 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     loadGraph(graph);
   }, [neurons, activeEvents, loadGraph]);
 
-  // Activity edges from liveBatches
-  // Re-runs when liveBatches change OR when graph rebuilds (neurons dep)
+  // Activity edges from liveBatches -- mutate Sigma's LIVE graph directly
   useEffect(() => {
-    const graph = graphRef.current;
+    const graph = sigma.getGraph();
     if (!graph || graph.order === 0) return;
 
     for (const batch of liveBatches) {
       const evtId = batch.event_id;
       if (!evtId) continue;
 
-      // Dynamically add event node if it arrived via pulse but isn't in activeEvents yet
+      // Dynamically add event node if needed
       if (!graph.hasNode(evtId)) {
-        const existingEvents = graph.nodes().filter((n: string) => {
+        const evtCount = graph.nodes().filter((n: string) => {
           try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
-        });
+        }).length;
         graph.addNode(evtId, {
-          x: 600 * Math.cos(existingEvents.length * 1.5),
-          y: 600 * Math.sin(existingEvents.length * 1.5),
+          x: 600 * Math.cos(evtCount * 1.5),
+          y: 600 * Math.sin(evtCount * 1.5),
           size: 8,
           color: eventColor(evtId),
           label: evtId.slice(0, 12),
@@ -200,31 +199,28 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           color,
           size,
           structural: false,
-          opacity: 1.0,
         });
-        sigma.refresh();
 
-        // 5s solid at full opacity, then 5s fade (0.1 every 0.5s)
+        // 5s solid, then 5s fade
         const createdAt = Date.now();
         const timer = window.setInterval(() => {
           if (!graph.hasEdge(edgeId)) { clearInterval(timer); return; }
           const elapsed = (Date.now() - createdAt) / 1000;
-          if (elapsed < 5) return; // hold solid for 5s
+          if (elapsed < 5) return;
           const fadeElapsed = elapsed - 5;
           const linearOpacity = Math.max(0, 1.0 - fadeElapsed / 5);
-          const opacity = linearOpacity * linearOpacity; // quadratic ease-out: visible longer, then vanishes
+          const opacity = linearOpacity * linearOpacity;
           if (opacity <= 0) {
             graph.dropEdge(edgeId);
             clearInterval(timer);
             activityTimersRef.current.delete(edgeId);
           } else {
-            graph.setEdgeAttribute(edgeId, 'opacity', opacity);
+            graph.setEdgeAttribute(edgeId, 'size', Math.max(0.5, size * opacity));
           }
         }, 500);
         activityTimersRef.current.set(edgeId, timer);
       }
     }
-    sigma.refresh();
   }, [liveBatches, sigma]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
