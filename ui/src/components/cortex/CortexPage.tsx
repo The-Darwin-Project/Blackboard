@@ -137,13 +137,15 @@ const CortexPage: FC = () => {
               </div>
             )}
 
-            {/* Live Feed -- always visible, scrollable */}
-            <div className={`overflow-y-auto ${selectedEventId ? 'max-h-48 flex-shrink-0' : 'flex-1 min-h-0'}`}>
-              <CortexLiveFeed
-                entries={thinkingEntries}
-                className="h-full"
-              />
-            </div>
+            {/* Live Feed -- only when no event selected (drill-down has its own) */}
+            {!selectedEventId && (
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <CortexLiveFeed
+                  entries={thinkingEntries}
+                  className="h-full"
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
