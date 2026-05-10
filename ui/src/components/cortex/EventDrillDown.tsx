@@ -259,7 +259,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
                 <div key={`s-${i}`} className="text-[10px] text-amber-400/80 bg-amber-900/10 px-2 py-1 rounded">
                   <span className="bg-amber-500/20 text-amber-400 text-[9px] px-1 py-0.5 rounded mr-1">[shadow]</span>
                   <span className="font-semibold">{s.tool}</span>{' '}
-                  {JSON.stringify(s.args).slice(0, 120)}
+                  {(s.args?.message as string) ?? (s.args?.context as string) ?? (s.args?.insight as string) ?? JSON.stringify(s.args)}
                 </div>
               ))}
               {eventWhispers.map((w, i) => (
