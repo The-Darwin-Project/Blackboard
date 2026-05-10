@@ -39,7 +39,7 @@ interface EventDrillDownProps {
 }
 
 const EventDrillDown: FC<EventDrillDownProps> = ({
-  eventId, liveBatches, thinkingEntries, shadowEntries, whisperEntries, onClose,
+  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, onClose,
 }) => {
   const { data: historicalBatches } = useQuery({
     queryKey: ['event-pulses', eventId],
@@ -210,12 +210,19 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
           <section>
             <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Co-firing Clusters</h4>
             <div className="space-y-0.5">
-              {coFiring.map((cf, i) => (
+              {coFiring.map((cf, i) => {
+                const neuronLabel = (id: string) => {
+                  const n = allNeurons.find(n => n.id === id);
+                  if (n?.payload?.title) return (n.payload.title as string).slice(0, 25);
+                  if (n?.payload?.symptom) return (n.payload.symptom as string).slice(0, 25);
+                  return id.split(':')[1]?.slice(0, 8) ?? id;
+                };
+                return (
                 <div key={i} className="text-[10px] text-text-secondary">
-                  <span className="font-mono text-emerald-400">{cf.pair.map(p => p.split(':')[1]?.slice(0, 8)).join(' + ')}</span>
+                  <span className="text-emerald-400">{cf.pair.map(neuronLabel).join(' + ')}</span>
                   <span className="text-text-muted ml-1">fired {cf.count}x together</span>
-                </div>
-              ))}
+                </div>);
+              })}
             </div>
           </section>
         )}
