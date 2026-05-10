@@ -15,7 +15,6 @@ import '@react-sigma/core/lib/style.css';
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor,
-  HEMISPHERE_X, TOOL_GROUP_Y,
 } from './cortex-constants';
 import type { ActiveEvent } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
@@ -67,39 +66,33 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       if (heatMap.has(execN.id)) execN.heat = heatMap.get(execN.id)!;
     }
 
+    // Concentric ring layout: brain core -> executive (ring 1) -> knowledge (ring 2) -> events (ring 3)
+    const RING = { executive: 120, knowledge: { min: 280, max: 500 }, events: 600 };
+
+    // Count executive nodes for even distribution
+    const toolNodes = allNeurons.filter(n => n.type === 'tool');
+    const phaseNodes = allNeurons.filter(n => n.type === 'phase');
+    const agentNodes = allNeurons.filter(n => n.type === 'agent');
+    const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length;
+    let execIdx = 0;
+
     for (const n of allNeurons) {
       if (graph.hasNode(n.id)) continue;
       const isKnowledge = n.type === 'lesson' || n.type === 'memory';
       let x: number, y: number;
 
       if (isKnowledge) {
-        // Spawn in a ring around the center, keeping distance from the core
+        // Ring 2: knowledge nodes in a ring around executive core
         const angle = Math.random() * Math.PI * 2;
-        const minRadius = 200;
-        const maxRadius = 500;
-        const radius = minRadius + Math.random() * (maxRadius - minRadius);
+        const radius = RING.knowledge.min + Math.random() * (RING.knowledge.max - RING.knowledge.min);
         x = radius * Math.cos(angle);
         y = radius * Math.sin(angle);
-      } else if (n.type === 'tool') {
-        const group = (n.payload?.group as string) ?? 'observation';
-        const groupTools = Object.entries(TOOL_GROUP_Y).find(([g]) => g === group);
-        const groupY = groupTools ? groupTools[1] : 0;
-        const toolsInGroup = allNeurons.filter(
-          t => t.type === 'tool' && (t.payload?.group as string) === group
-        );
-        const toolIdx = toolsInGroup.indexOf(n);
-        x = HEMISPHERE_X.executive + toolIdx * 50;
-        y = groupY;
-      } else if (n.type === 'phase') {
-        const phases = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
-        const idx = phases.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 200;
-        y = -250 + idx * 100;
       } else {
-        const agents = ['architect', 'sysadmin', 'developer', 'qe'];
-        const idx = agents.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 350;
-        y = -150 + idx * 100;
+        // Ring 1: executive nodes distributed evenly around inner ring
+        const angle = (execIdx / Math.max(execTotal, 1)) * 2 * Math.PI - Math.PI / 2;
+        x = RING.executive * Math.cos(angle);
+        y = RING.executive * Math.sin(angle);
+        execIdx++;
       }
 
       let label = '';
@@ -122,16 +115,15 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       });
     }
 
-    // Event hub nodes -- orbit around the knowledge cluster perimeter
+    // Ring 3: Event nodes on the outermost ring
     const eventCount = activeEvents.length;
     for (let i = 0; i < eventCount; i++) {
       const evt = activeEvents[i];
       if (!graph.hasNode(evt.id)) {
         const angle = (i / Math.max(eventCount, 1)) * 2 * Math.PI - Math.PI / 2;
-        const orbitRadius = 350;
         graph.addNode(evt.id, {
-          x: HEMISPHERE_X.knowledge + orbitRadius * Math.cos(angle),
-          y: orbitRadius * Math.sin(angle),
+          x: RING.events * Math.cos(angle),
+          y: RING.events * Math.sin(angle),
           size: 8,
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
@@ -173,8 +165,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
         });
         graph.addNode(evtId, {
-          x: HEMISPHERE_X.knowledge + 350 * Math.cos(existingEvents.length * 1.5),
-          y: 350 * Math.sin(existingEvents.length * 1.5),
+          x: 600 * Math.cos(existingEvents.length * 1.5),
+          y: 600 * Math.sin(existingEvents.length * 1.5),
           size: 8,
           color: eventColor(evtId),
           label: evtId.slice(0, 12),
