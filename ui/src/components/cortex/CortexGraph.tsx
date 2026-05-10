@@ -6,7 +6,7 @@
 // 4. [Gotcha]: FA2 worker runs in background WebWorker. Start on mount, stop on unmount.
 // 5. [Pattern]: Structural edges (white, thin) permanent. Activity edges (event-colored) fade over 10s.
 // 6. [Pattern]: Force model inspired by update-graph D3 simulation (repulsion + collision + gravity).
-import { useEffect, useRef, useCallback, type FC } from 'react';
+import { useEffect, useRef, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
 import Graph from 'graphology';
@@ -238,13 +238,38 @@ const FA2Controller: FC = () => {
   return null;
 };
 
-const ClickHandler: FC<{ onClick: (id: string) => void }> = ({ onClick }) => {
+const DragHandler: FC<{ onClick?: (id: string) => void }> = ({ onClick }) => {
   const registerEvents = useRegisterEvents();
-  const cb = useCallback(
-    (event: { node: string }) => onClick(event.node),
-    [onClick],
-  );
-  useEffect(() => { registerEvents({ clickNode: cb }); }, [registerEvents, cb]);
+  const sigma = useSigma();
+  const dragStateRef = useRef<{ node: string; dragged: boolean } | null>(null);
+
+  useEffect(() => {
+    registerEvents({
+      downNode: (e) => {
+        dragStateRef.current = { node: e.node, dragged: false };
+        const graph = sigma.getGraph();
+        graph.setNodeAttribute(e.node, 'fixed', true);
+        sigma.getCamera().disable();
+      },
+      mousemove: (e) => {
+        if (!dragStateRef.current) return;
+        dragStateRef.current.dragged = true;
+        const pos = sigma.viewportToGraph(e);
+        const graph = sigma.getGraph();
+        graph.setNodeAttribute(dragStateRef.current.node, 'x', pos.x);
+        graph.setNodeAttribute(dragStateRef.current.node, 'y', pos.y);
+      },
+      mouseup: () => {
+        if (!dragStateRef.current) return;
+        const { node, dragged } = dragStateRef.current;
+        // If not dragged, treat as click
+        if (!dragged && onClick) onClick(node);
+        dragStateRef.current = null;
+        sigma.getCamera().enable();
+      },
+    });
+  }, [registerEvents, sigma, onClick]);
+
   return null;
 };
 
@@ -291,7 +316,7 @@ export default function CortexGraph({
           liveBatches={liveBatches}
         />
         <FA2Controller />
-        {onClickNeuron && <ClickHandler onClick={onClickNeuron} />}
+        <DragHandler onClick={onClickNeuron} />
       </SigmaContainer>
     </div>
   );
