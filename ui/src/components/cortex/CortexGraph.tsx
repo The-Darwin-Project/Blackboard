@@ -18,7 +18,7 @@ import {
 } from './cortex-constants';
 import type { ActiveEvent } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
-import BrainCore from './BrainCore';
+// import BrainCore from './BrainCore'; // disabled -- needs its own dedicated view
 
 function getNeuronColor(neuron: { type: string; id: string }): string {
   if (neuron.type === 'agent') {
@@ -341,9 +341,8 @@ export default function CortexGraph({
 }: CortexGraphProps) {
   return (
     <div className={`relative ${className ?? ''}`} style={{ background: '#030712' }}>
-      <BrainCore />
       <SigmaContainer
-        style={{ width: '100%', height: '100%', background: 'transparent', position: 'relative', zIndex: 1 }}
+        style={{ width: '100%', height: '100%', background: 'transparent' }}
         settings={{
           defaultNodeColor: '#475569',
           defaultEdgeColor: '#1e293b',
