@@ -95,85 +95,113 @@ Friction signals (what to watch for in pulses):
 - 3+ different agent pulses without resolution"""
 
 TOOL_DECLARATIONS = [
+    # --- Intervention tools (primary purpose) ---
     {
-        "name": "list_active_events",
-        "description": "List all currently active events with their phase, elapsed time, turn count, and pulse batch count.",
-        "parameters": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "view_event_blackboard",
-        "description": "View the current state and last 10 conversation turns of an event. Use to investigate before intervening.",
+        "name": "inject_system_insight",
+        "description": (
+            "Deliver a corrective observation directly into the Brain's next system prompt. "
+            "The Brain sees this as a high-authority directive. Use when the pulse pattern "
+            "shows clear, sustained friction that the Brain has not self-corrected."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "event_id": {"type": "string", "description": "The event ID to examine"},
+                "event_id": {"type": "string"},
+                "insight": {"type": "string", "description": "What you observed and why it matters (max 500 chars)"},
+                "severity": {
+                    "type": "string",
+                    "enum": ["nudge", "course_correct", "alert"],
+                },
+            },
+            "required": ["event_id", "insight", "severity"],
+        },
+    },
+    {
+        "name": "send_event_message",
+        "description": (
+            "Post a message into the event conversation as a peer. The Brain must process "
+            "this on its next cycle, like a human operator asking a question. Use to ask "
+            "the Brain what is blocking progress."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "message": {"type": "string", "description": "A direct question or observation (max 500 chars)"},
+            },
+            "required": ["event_id", "message"],
+        },
+    },
+    {
+        "name": "surface_context",
+        "description": (
+            "Add supplementary information to an event that the Brain may not have. "
+            "The Brain sees this as evidence, not a directive. Use to share cross-event "
+            "patterns or neuron insights."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "context": {"type": "string", "description": "Factual context to surface (max 800 chars)"},
+            },
+            "required": ["event_id", "context"],
+        },
+    },
+    # --- Investigation tools (gather evidence before intervening) ---
+    {
+        "name": "get_pulse_history",
+        "description": (
+            "Retrieve aggregated pulse statistics for an event: how many times each neuron "
+            "fired, which tools were called, whether phases changed. Use to quantify a "
+            "suspected friction pattern before investigating further."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "last_n_minutes": {"type": "integer", "description": "Time window (default 10)"},
             },
             "required": ["event_id"],
         },
     },
     {
-        "name": "get_pulse_history",
-        "description": "Get aggregated pulse statistics for an event over a time window. Shows neuron fire counts, phase changes, and tool trail.",
+        "name": "view_event_blackboard",
+        "description": (
+            "Read the event's current state and recent conversation turns. Shows phase, "
+            "turn count, elapsed time, and what the Brain and agents have been doing. "
+            "Use AFTER get_pulse_history confirms a friction pattern."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "event_id": {"type": "string", "description": "The event ID"},
-                "last_n_minutes": {"type": "integer", "description": "Time window in minutes (default 10)"},
+                "event_id": {"type": "string"},
             },
             "required": ["event_id"],
         },
     },
     {
         "name": "get_neuron_details",
-        "description": "Get full details about a specific neuron: its content, channel, verification count, and global heat.",
+        "description": (
+            "Look up the full content of a specific lesson or memory neuron. Shows the "
+            "pattern text, keywords, channel status, and how often it has been recalled "
+            "globally. Use when a neuron fires repeatedly and you need to understand why."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "neuron_id": {"type": "string", "description": "The neuron ID (e.g. lesson:abc, memory:def)"},
+                "neuron_id": {"type": "string", "description": "e.g. lesson:abc-uuid or memory:def-uuid"},
             },
             "required": ["neuron_id"],
         },
     },
     {
-        "name": "surface_context",
-        "description": "Surface additional context the Brain may not have. Lightest intervention -- informational enrichment.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string", "description": "The event ID"},
-                "context": {"type": "string", "description": "The context to surface (max 800 chars)"},
-            },
-            "required": ["event_id", "context"],
-        },
-    },
-    {
-        "name": "send_event_message",
-        "description": "Send a direct message into the event conversation. Medium intervention -- the Brain must respond.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string", "description": "The event ID"},
-                "message": {"type": "string", "description": "The message to send (max 500 chars)"},
-            },
-            "required": ["event_id", "message"],
-        },
-    },
-    {
-        "name": "inject_system_insight",
-        "description": "Inject a directive into the Brain's system prompt. Strongest intervention -- system-level authority.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string", "description": "The event ID"},
-                "insight": {"type": "string", "description": "The insight to inject (max 500 chars)"},
-                "severity": {
-                    "type": "string",
-                    "enum": ["nudge", "course_correct", "alert"],
-                    "description": "Severity level of the insight",
-                },
-            },
-            "required": ["event_id", "insight", "severity"],
-        },
+        "name": "list_active_events",
+        "description": (
+            "Get a snapshot of all events currently being processed: their IDs, phases, "
+            "elapsed time, and turn counts. Use for situational awareness."
+        ),
+        "parameters": {"type": "object", "properties": {}},
     },
 ]
 
