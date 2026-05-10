@@ -10,7 +10,7 @@ import { useQuery } from '@tanstack/react-query';
 import { X, Clock, Layers, Zap, AlertTriangle } from 'lucide-react';
 import { getEventPulses } from '../../api/client';
 import { PHASE_COLORS, ACTOR_COLORS } from '../../constants/colors';
-import CortexGraph from './CortexGraph';
+// CortexGraph removed from drill-down to reduce GPU load (single graph in main view)
 import PulseTimeline from './PulseTimeline';
 import CortexLiveFeed from './CortexLiveFeed';
 import { useFrictionIndicators } from '../../hooks/useCortexData';
@@ -39,7 +39,7 @@ interface EventDrillDownProps {
 }
 
 const EventDrillDown: FC<EventDrillDownProps> = ({
-  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, glowingIds, onClose,
+  eventId, liveBatches, thinkingEntries, shadowEntries, whisperEntries, onClose,
 }) => {
   const { data: historicalBatches } = useQuery({
     queryKey: ['event-pulses', eventId],
@@ -58,21 +58,11 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
     return deduped.sort((a, b) => a.timestamp - b.timestamp);
   }, [historicalBatches, liveBatches, eventId]);
 
-  // Neurons that fired during this event
-  const firedIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const batch of eventBatches) {
-      for (const p of batch.pulses) ids.add(p.neuron_id);
-    }
-    return ids;
+  void useMemo(() => {
+    // placeholder -- firedIds available for future use
+    return eventBatches.length;
   }, [eventBatches]);
 
-  // Dimmed = all neurons NOT fired
-  const dimmedIds = useMemo(() => {
-    const all = new Set(allNeurons.map(n => n.id));
-    for (const id of firedIds) all.delete(id);
-    return all;
-  }, [allNeurons, firedIds]);
 
   // Tool trail
   const toolTrail = useMemo(() => {
@@ -170,14 +160,6 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
           <X size={14} />
         </button>
       </div>
-
-      {/* Dimmed graph */}
-      <CortexGraph
-        neurons={allNeurons}
-        glowingIds={glowingIds}
-        dimmedIds={dimmedIds}
-        className="h-48 flex-shrink-0"
-      />
 
       {/* Details */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
