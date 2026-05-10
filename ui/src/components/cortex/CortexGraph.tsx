@@ -67,7 +67,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     }
 
     // Concentric ring layout: brain core -> executive (ring 1) -> knowledge (ring 2) -> events (ring 3)
-    const RING = { executive: 120, knowledge: { min: 280, max: 500 }, events: 600 };
+    const RING = { executive: 250, knowledge: { min: 400, max: 650 }, events: 800 };
 
     // Count executive nodes for even distribution
     const toolNodes = allNeurons.filter(n => n.type === 'tool');
