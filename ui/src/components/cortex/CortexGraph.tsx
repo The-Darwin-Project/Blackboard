@@ -338,8 +338,10 @@ export default function CortexGraph({
           labelRenderedSizeThreshold: 4,
           renderLabels: true,
           enableEdgeEvents: false,
+          defaultNodeType: 'bordered',
           nodeProgramClasses: {
             bordered: NodeBorderedCircle,
+            circle: NodeBorderedCircle,
             square: NodeSquareProgram,
           },
           ...(dimmedIds ? {
