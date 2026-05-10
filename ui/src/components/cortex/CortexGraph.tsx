@@ -73,13 +73,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       } else if (n.type === 'phase') {
         const phases = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
         const idx = phases.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 120;
-        y = -150 + idx * 60;
+        x = HEMISPHERE_X.executive + 150;
+        y = -200 + idx * 80;
       } else {
         const agents = ['architect', 'sysadmin', 'developer', 'qe'];
         const idx = agents.indexOf(n.payload?.label as string ?? '');
-        x = HEMISPHERE_X.executive + 200;
-        y = -60 + idx * 50;
+        x = HEMISPHERE_X.executive + 280;
+        y = -90 + idx * 70;
       }
 
       graph.addNode(n.id, {
@@ -91,34 +91,36 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       });
     }
 
-    // Save executive positions BEFORE ForceAtlas2
-    const savedPositions = new Map<string, { x: number; y: number }>();
-    for (const n of allNeurons) {
-      if (n.type !== 'lesson' && n.type !== 'memory' && graph.hasNode(n.id)) {
-        savedPositions.set(n.id, {
-          x: graph.getNodeAttribute(n.id, 'x') as number,
-          y: graph.getNodeAttribute(n.id, 'y') as number,
-        });
+    // Run ForceAtlas2 on a SEPARATE graph containing ONLY knowledge nodes
+    // This prevents executive/event nodes from being pulled into the cluster
+    const knowledgeNodes = allNeurons.filter(n => n.type === 'lesson' || n.type === 'memory');
+    if (knowledgeNodes.length > 1) {
+      const knowledgeGraph = new Graph();
+      for (const n of knowledgeNodes) {
+        if (graph.hasNode(n.id)) {
+          knowledgeGraph.addNode(n.id, {
+            x: graph.getNodeAttribute(n.id, 'x'),
+            y: graph.getNodeAttribute(n.id, 'y'),
+          });
+        }
       }
-    }
-
-    const knowledgeIds = allNeurons.filter(n => n.type === 'lesson' || n.type === 'memory').map(n => n.id);
-    if (knowledgeIds.length > 1) {
-      forceAtlas2.assign(graph, {
-        iterations: 50,
+      forceAtlas2.assign(knowledgeGraph, {
+        iterations: 80,
         settings: {
-          gravity: 1,
-          scalingRatio: 10,
-          barnesHutOptimize: knowledgeIds.length > 50,
+          gravity: 0.5,
+          scalingRatio: 20,
+          strongGravityMode: true,
+          barnesHutOptimize: knowledgeNodes.length > 50,
         },
       });
-    }
-
-    // Restore executive positions AFTER ForceAtlas2
-    for (const [id, pos] of savedPositions) {
-      if (graph.hasNode(id)) {
-        graph.setNodeAttribute(id, 'x', pos.x);
-        graph.setNodeAttribute(id, 'y', pos.y);
+      // Apply positions back to main graph, locked to left hemisphere
+      for (const n of knowledgeNodes) {
+        if (knowledgeGraph.hasNode(n.id) && graph.hasNode(n.id)) {
+          const kx = knowledgeGraph.getNodeAttribute(n.id, 'x') as number;
+          const ky = knowledgeGraph.getNodeAttribute(n.id, 'y') as number;
+          graph.setNodeAttribute(n.id, 'x', HEMISPHERE_X.knowledge + kx * 0.5);
+          graph.setNodeAttribute(n.id, 'y', ky * 0.5);
+        }
       }
     }
 
@@ -127,7 +129,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const evt = activeEvents[i];
       if (!graph.hasNode(evt.id)) {
         graph.addNode(evt.id, {
-          x: (Math.random() - 0.5) * 50,
+          x: HEMISPHERE_X.events + (Math.random() - 0.5) * 30,
           y: i * 80 - (activeEvents.length * 40),
           size: 14,
           color: eventColor(evt.id),

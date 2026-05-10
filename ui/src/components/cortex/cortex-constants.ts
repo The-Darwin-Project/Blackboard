@@ -61,18 +61,19 @@ export function getExecutiveNeurons(): Neuron[] {
   return neurons;
 }
 
-/** X position bias: knowledge neurons left, executive right */
+/** X position bias: knowledge left, events center, executive right. Wide separation prevents mixing. */
 export const HEMISPHERE_X = {
-  knowledge: -200,
-  executive: 200,
+  knowledge: -500,
+  events: 0,
+  executive: 500,
 } as const;
 
 export const TOOL_GROUP_Y: Record<string, number> = {
-  observation: -150,
-  classification: -50,
-  routing: 50,
-  lifecycle: 150,
-  communication: 250,
+  observation: -200,
+  classification: -80,
+  routing: 40,
+  lifecycle: 160,
+  communication: 280,
 };
 
 /** Deterministic color from event ID hash */
