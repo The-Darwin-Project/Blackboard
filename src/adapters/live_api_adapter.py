@@ -172,6 +172,7 @@ class LiveAPIAdapter:
         self._broadcast = broadcast
         self._brain = brain
         self._session = None
+        self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
         self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
         self._project = os.getenv("GCP_PROJECT", "")
@@ -205,10 +206,11 @@ class LiveAPIAdapter:
                 ])],
             )
 
-            self._session = await self._client.aio.live.connect(
+            self._session_ctx = self._client.aio.live.connect(
                 model=self._model,
                 config=config,
             )
+            self._session = await self._session_ctx.__aenter__()
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop())
             await self._load_neuron_labels()
@@ -231,10 +233,15 @@ class LiveAPIAdapter:
                 pass
         if self._session:
             try:
-                await self._session.close()
+                ctx = getattr(self, "_session_ctx", None)
+                if ctx:
+                    await ctx.__aexit__(None, None, None)
+                else:
+                    await self._session.close()
             except Exception:
                 pass
             self._session = None
+            self._session_ctx = None
         logger.info("Cortex Live API session closed")
 
     async def send_pulse(self, batch: PulseBatch) -> None:
