@@ -1558,8 +1558,9 @@ class Brain:
             logger.debug(f"Brain lessons: skipped (reason=feature_off) for {event.id}")
             return None
 
-        if not {"post-agent", "defer-wake", "dispatch"} & set(active_phases):
-            logger.debug(f"Brain lessons: skipped (reason=phase_gate) for {event.id}")
+        brain_phase = event.brain_phase or "triage"
+        if brain_phase == "triage":
+            logger.debug(f"Brain lessons: skipped (reason=triage_phase) for {event.id}")
             return None
 
         archivist = self.agents.get("_archivist_memory")
