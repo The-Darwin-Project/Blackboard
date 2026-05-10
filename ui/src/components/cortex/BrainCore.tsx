@@ -31,7 +31,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
 
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
-      camera.position.set(0, 0, 8);
+      camera.position.set(0, -0.5, 10);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(w, h);
