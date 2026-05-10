@@ -50,13 +50,13 @@ interface GraphLoaderProps {
 }
 
 const FA2_SETTINGS = {
-  gravity: 3,
-  scalingRatio: 15,
-  strongGravityMode: true,
+  gravity: 0.3,
+  scalingRatio: 50,
+  strongGravityMode: false,
   barnesHutOptimize: true,
-  slowDown: 20,
+  slowDown: 30,
   edgeWeightInfluence: 1,
-  linLogMode: false,
+  linLogMode: true,
 };
 
 const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches }) => {
