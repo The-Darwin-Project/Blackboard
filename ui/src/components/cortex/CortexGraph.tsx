@@ -100,13 +100,16 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       });
     }
 
-    // Event hub nodes -- fixed in center column
-    for (let i = 0; i < activeEvents.length; i++) {
+    // Event hub nodes -- orbit around the knowledge cluster perimeter
+    const eventCount = activeEvents.length;
+    for (let i = 0; i < eventCount; i++) {
       const evt = activeEvents[i];
       if (!graph.hasNode(evt.id)) {
+        const angle = (i / Math.max(eventCount, 1)) * 2 * Math.PI - Math.PI / 2;
+        const orbitRadius = 350;
         graph.addNode(evt.id, {
-          x: HEMISPHERE_X.events + (Math.random() - 0.5) * 30,
-          y: i * 80 - (activeEvents.length * 40),
+          x: HEMISPHERE_X.knowledge + orbitRadius * Math.cos(angle),
+          y: orbitRadius * Math.sin(angle),
           size: 8,
           color: eventColor(evt.id),
           label: evt.id.slice(0, 12),
