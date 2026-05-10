@@ -210,11 +210,14 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           opacity: 1.0,
         });
 
-        const fadeStart = Date.now();
+        // 5s solid at full opacity, then 5s fade (0.1 every 0.5s)
+        const createdAt = Date.now();
         const timer = window.setInterval(() => {
           if (!graph.hasEdge(edgeId)) { clearInterval(timer); return; }
-          const elapsed = (Date.now() - fadeStart) / 1000;
-          const opacity = Math.max(0, 1.0 - elapsed / 10);
+          const elapsed = (Date.now() - createdAt) / 1000;
+          if (elapsed < 5) return; // hold solid for 5s
+          const fadeElapsed = elapsed - 5;
+          const opacity = Math.max(0, 1.0 - fadeElapsed / 5);
           if (opacity <= 0) {
             graph.dropEdge(edgeId);
             clearInterval(timer);
@@ -222,7 +225,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           } else {
             graph.setEdgeAttribute(edgeId, 'opacity', opacity);
           }
-        }, 1000);
+        }, 500);
         activityTimersRef.current.set(edgeId, timer);
       }
     }
