@@ -30,8 +30,8 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
       const h = container.clientHeight;
 
       const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
-      camera.position.set(0, -0.5, 10);
+      const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
+      camera.position.set(0, -0.3, 6);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(w, h);
