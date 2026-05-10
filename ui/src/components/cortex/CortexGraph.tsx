@@ -111,12 +111,14 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         label = (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id.slice(0, 15);
       }
 
+      const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent';
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: getNeuronColor(n),
         label,
         type: 'circle',
+        fixed: isExecutive,
       });
     }
 
