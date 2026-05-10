@@ -534,7 +534,7 @@ class LiveAPIAdapter:
             if event.queued_at:
                 elapsed_m = int((time.time() - event.queued_at) / 60)
             turns = len(event.conversation)
-            phase = getattr(event, "phase", "unknown")
+            phase = event.brain_phase or "triage"
             service = getattr(event, "service", "?")
             lines.append(
                 f"  {eid} | {phase} | {elapsed_m}m | {service} | {turns} turns"
@@ -550,13 +550,14 @@ class LiveAPIAdapter:
         elapsed_m = 0
         if event.queued_at:
             elapsed_m = int((time.time() - event.queued_at) / 60)
-        phase = getattr(event, "phase", "unknown")
-        domain = getattr(event, "domain", "unknown")
-        source = getattr(event, "source", "unknown")
-        service = getattr(event, "service", "?")
-        status = getattr(event, "status", "unknown")
+        phase = event.brain_phase or "triage"
+        evidence = event.event.evidence if event.event else None
+        domain = (evidence.brain_domain or evidence.domain) if evidence else "unknown"
+        source = event.source or "unknown"
+        service = event.service or "?"
+        status = event.status.value if event.status else "unknown"
         turns = len(event.conversation)
-        defers = getattr(event, "defer_count", 0)
+        defers = sum(1 for t in event.conversation if t.actor == "brain" and t.action == "defer")
         header = (
             f"Event: {event_id}\n"
             f"Status: {status} | Phase: {phase} | Domain: {domain}\n"

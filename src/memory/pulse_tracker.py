@@ -61,7 +61,7 @@ class PulseTracker:
             )
             await pipe.execute()
         except Exception as e:
-            logger.debug(f"Pulse Redis write failed (non-fatal): {e}")
+            logger.warning(f"Pulse Redis write failed (non-fatal): {e}")
 
         batch_dict = batch.to_dict()
 
@@ -69,7 +69,7 @@ class PulseTracker:
             try:
                 await self._broadcast({"type": "pulse_batch", "batch": batch_dict})
             except Exception as e:
-                logger.debug(f"Pulse broadcast failed (non-fatal): {e}")
+                logger.warning(f"Pulse broadcast failed (non-fatal): {e}")
 
         for obs in self._observers:
             asyncio.create_task(self._safe_observer_send(obs, batch))
@@ -79,7 +79,7 @@ class PulseTracker:
         try:
             await obs.send_pulse(batch)
         except Exception as e:
-            logger.debug(f"Pulse observer failed (non-fatal): {e}")
+            logger.warning(f"Pulse observer failed (non-fatal): {e}")
 
         n = len(batch.pulses)
         top_id = batch.pulses[0].neuron_id if batch.pulses else "?"
