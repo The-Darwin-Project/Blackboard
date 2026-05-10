@@ -217,7 +217,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           const elapsed = (Date.now() - createdAt) / 1000;
           if (elapsed < 5) return; // hold solid for 5s
           const fadeElapsed = elapsed - 5;
-          const opacity = Math.max(0, 1.0 - fadeElapsed / 5);
+          const linearOpacity = Math.max(0, 1.0 - fadeElapsed / 5);
+          const opacity = linearOpacity * linearOpacity; // quadratic ease-out: visible longer, then vanishes
           if (opacity <= 0) {
             graph.dropEdge(edgeId);
             clearInterval(timer);
