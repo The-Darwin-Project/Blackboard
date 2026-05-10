@@ -4,7 +4,7 @@
 // 2. [Pattern]: Active events bar at bottom of left panel. Click event -> opens drill-down.
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
 import { useState, useMemo, useCallback, type FC } from 'react';
-import { Loader2, Brain } from 'lucide-react';
+import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import CortexGraph from './CortexGraph';
@@ -22,6 +22,7 @@ const CortexPage: FC = () => {
   const { data: activeEvents } = useActiveEvents();
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [feedOpen, setFeedOpen] = useState(true);
 
   const neurons: Neuron[] = graphData?.neurons ?? [];
 
@@ -56,8 +57,8 @@ const CortexPage: FC = () => {
 
   return (
     <div className="h-full flex overflow-hidden">
-      {/* Left panel: Global topology + Cortex stream */}
-      <div className={`flex flex-col overflow-hidden transition-all ${selectedEventId ? 'w-1/2' : 'w-full'}`}>
+      {/* Center: Graph + events bar */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <CortexGraph
           neurons={neurons}
           glowingIds={glowingIds}
@@ -66,14 +67,6 @@ const CortexPage: FC = () => {
             // Future: neuron detail tooltip
           }}
         />
-
-        {/* Cortex Live Feed -- always visible */}
-        <div className="flex-shrink-0 h-48 border-t border-border overflow-hidden">
-          <CortexLiveFeed
-            entries={thinkingEntries}
-            className="h-full"
-          />
-        </div>
 
         {/* Active events bar */}
         <div className="flex-shrink-0 border-t border-border px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto">
@@ -110,21 +103,48 @@ const CortexPage: FC = () => {
         </div>
       </div>
 
-      {/* Right panel: Event drill-down */}
-      {selectedEventId && (
-        <div className="w-1/2 border-l border-border overflow-hidden">
-          <EventDrillDown
-            eventId={selectedEventId}
-            allNeurons={neurons}
-            liveBatches={liveBatches}
-            thinkingEntries={thinkingEntries}
-            shadowEntries={shadowEntries}
-            whisperEntries={whisperEntries}
-            glowingIds={glowingIds}
-            onClose={() => setSelectedEventId(null)}
-          />
-        </div>
-      )}
+      {/* Right panel: collapsible Cortex Live Feed + Event drill-down */}
+      <div className={`flex flex-col border-l border-border transition-all duration-300 overflow-hidden ${
+        feedOpen ? 'w-96' : 'w-8'
+      }`}>
+        {/* Collapse toggle */}
+        <button
+          onClick={() => setFeedOpen(prev => !prev)}
+          className="flex-shrink-0 flex items-center gap-1 px-2 py-1.5 text-text-muted hover:text-text-primary transition-colors border-b border-border/50"
+          title={feedOpen ? 'Collapse Cortex panel' : 'Expand Cortex panel'}
+        >
+          {feedOpen ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
+          {feedOpen && <span className="text-[10px] font-semibold uppercase tracking-wider">Cortex</span>}
+        </button>
+
+        {feedOpen && (
+          <>
+            {/* Event drill-down (when selected) */}
+            {selectedEventId && (
+              <div className="flex-1 min-h-0 overflow-hidden border-b border-border">
+                <EventDrillDown
+                  eventId={selectedEventId}
+                  allNeurons={neurons}
+                  liveBatches={liveBatches}
+                  thinkingEntries={thinkingEntries}
+                  shadowEntries={shadowEntries}
+                  whisperEntries={whisperEntries}
+                  glowingIds={glowingIds}
+                  onClose={() => setSelectedEventId(null)}
+                />
+              </div>
+            )}
+
+            {/* Live Feed -- always visible */}
+            <div className={`overflow-hidden ${selectedEventId ? 'h-48 flex-shrink-0' : 'flex-1'}`}>
+              <CortexLiveFeed
+                entries={thinkingEntries}
+                className="h-full"
+              />
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 };
