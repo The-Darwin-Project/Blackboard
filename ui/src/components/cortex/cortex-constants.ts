@@ -83,7 +83,15 @@ export function eventColor(eventId: string): string {
     hash = ((hash << 5) - hash + eventId.charCodeAt(i)) | 0;
   }
   const h = Math.abs(hash) % 360;
-  return `hsl(${h}, 70%, 60%)`;
+  // Convert HSL to hex -- Sigma WebGL only understands hex colors
+  const s = 0.7, l = 0.6;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * c).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
 }
 
 interface StructuralEdge {
