@@ -11,15 +11,7 @@ import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@reac
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
 import { MultiGraph } from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
-import { createNodeBorderProgram } from '@sigma/node-border';
 import '@react-sigma/core/lib/style.css';
-
-const NodeBorderedCircle = createNodeBorderProgram({
-  borders: [
-    { size: { value: 0.15 }, color: { attribute: 'borderColor' } },
-    { size: { fill: true }, color: { attribute: 'color' } },
-  ],
-});
 import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor,
@@ -114,9 +106,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: getNeuronColor(n),
-        borderColor: '#94a3b8',
         label: (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id,
-        type: 'bordered',
+        type: 'circle',
       });
     }
 
@@ -175,7 +166,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           y: 350 * Math.sin(existingEvents.length * 1.5),
           size: 8,
           color: eventColor(evtId),
-          borderColor: '#94a3b8',
           label: evtId.slice(0, 12),
           type: 'square',
         });
@@ -244,7 +234,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const res = { ...data };
       if (glowingIds.has(node)) {
         res.color = '#fbbf24';
-        res.borderColor = '#f59e0b';
         res.size = (data.size ?? 4) * 1.8;
       }
       return res;
@@ -359,10 +348,7 @@ export default function CortexGraph({
           labelRenderedSizeThreshold: 4,
           renderLabels: true,
           enableEdgeEvents: false,
-          defaultNodeType: 'bordered',
           nodeProgramClasses: {
-            bordered: NodeBorderedCircle,
-            circle: NodeBorderedCircle,
             square: NodeSquareProgram,
           },
           ...(dimmedIds ? {
