@@ -26,6 +26,7 @@ import {
 } from './cortex-constants';
 import type { ActiveEvent } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
+import BrainCore from './BrainCore';
 
 function getNeuronColor(neuron: { type: string; id: string }): string {
   if (neuron.type === 'agent') {
@@ -78,8 +79,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       let x: number, y: number;
 
       if (isKnowledge) {
-        x = HEMISPHERE_X.knowledge + (Math.random() - 0.5) * 400;
-        y = (Math.random() - 0.5) * 500;
+        // Spawn in a ring around the center, keeping distance from the core
+        const angle = Math.random() * Math.PI * 2;
+        const minRadius = 200;
+        const maxRadius = 500;
+        const radius = minRadius + Math.random() * (maxRadius - minRadius);
+        x = radius * Math.cos(angle);
+        y = radius * Math.sin(angle);
       } else if (n.type === 'tool') {
         const group = (n.payload?.group as string) ?? 'observation';
         const groupTools = Object.entries(TOOL_GROUP_Y).find(([g]) => g === group);
@@ -326,9 +332,10 @@ export default function CortexGraph({
   dimmedIds, onClickNeuron, className,
 }: CortexGraphProps) {
   return (
-    <div className={`relative ${className ?? ''}`}>
+    <div className={`relative ${className ?? ''}`} style={{ background: '#030712' }}>
+      <BrainCore />
       <SigmaContainer
-        style={{ width: '100%', height: '100%', background: '#030712' }}
+        style={{ width: '100%', height: '100%', background: 'transparent', position: 'relative', zIndex: 1 }}
         settings={{
           defaultNodeColor: '#475569',
           defaultEdgeColor: '#1e293b',
