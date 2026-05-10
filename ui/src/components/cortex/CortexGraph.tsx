@@ -258,13 +258,14 @@ const FA2Controller: FC = () => {
 const DragHandler: FC<{ onClick?: (id: string) => void }> = ({ onClick }) => {
   const registerEvents = useRegisterEvents();
   const sigma = useSigma();
-  const dragStateRef = useRef<{ node: string; dragged: boolean } | null>(null);
+  const dragStateRef = useRef<{ node: string; dragged: boolean; wasFixed: boolean } | null>(null);
 
   useEffect(() => {
     registerEvents({
       downNode: (e) => {
-        dragStateRef.current = { node: e.node, dragged: false };
         const graph = sigma.getGraph();
+        const wasFixed = graph.getNodeAttribute(e.node, 'fixed') as boolean ?? false;
+        dragStateRef.current = { node: e.node, dragged: false, wasFixed };
         graph.setNodeAttribute(e.node, 'fixed', true);
         sigma.getCamera().disable();
       },
@@ -278,8 +279,11 @@ const DragHandler: FC<{ onClick?: (id: string) => void }> = ({ onClick }) => {
       },
       mouseup: () => {
         if (!dragStateRef.current) return;
-        const { node, dragged } = dragStateRef.current;
-        // If not dragged, treat as click
+        const { node, dragged, wasFixed } = dragStateRef.current;
+        const graph = sigma.getGraph();
+        // Restore original fixed state -- knowledge nodes go back to unfixed
+        // so FA2 worker pulls connected nodes toward new position
+        graph.setNodeAttribute(node, 'fixed', wasFixed);
         if (!dragged && onClick) onClick(node);
         dragStateRef.current = null;
         sigma.getCamera().enable();
