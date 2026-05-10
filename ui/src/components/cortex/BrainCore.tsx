@@ -30,8 +30,8 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
       const h = container.clientHeight;
 
       const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(35, w / h, 0.1, 100);
-      camera.position.set(0, 0, 22);
+      const camera = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
+      camera.position.set(0, 0, 8);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(w, h);
@@ -100,7 +100,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
             });
           }
         });
-        brainModel.scale.setScalar(0.7);
+        brainModel.scale.setScalar(1.0);
         scene.add(brainModel);
       } catch {
         // brain.glb not available -- render orbs only
