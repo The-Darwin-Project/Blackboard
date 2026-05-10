@@ -214,7 +214,11 @@ class LiveAPIAdapter:
             )
             self._session = await self._session_ctx.__aenter__()
             self._running = True
+            if self._receive_task and not self._receive_task.done():
+                self._receive_task.cancel()
             self._receive_task = asyncio.create_task(self._receive_loop())
+            if self._keepalive_task and not self._keepalive_task.done():
+                self._keepalive_task.cancel()
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
             await self._load_neuron_labels()
             logger.info(
