@@ -379,6 +379,7 @@ class Brain:
         self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
+        self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
         # Progressive skill loading (feature flag)
@@ -1535,6 +1536,11 @@ class Brain:
         if lesson_block:
             resolved_contents.append(lesson_block)
 
+        # Cortex (System 2) insight injection -- GETDEL is atomic, no race
+        cortex_block = await self._get_pending_cortex_insight(event.id)
+        if cortex_block:
+            resolved_contents.append(cortex_block)
+
         prompt = "\n\n---\n\n".join(resolved_contents)
 
         total_tokens = len(prompt) // 4
@@ -1552,7 +1558,7 @@ class Brain:
             logger.debug(f"Brain lessons: skipped (reason=feature_off) for {event.id}")
             return None
 
-        if not {"post-agent", "defer-wake"} & set(active_phases):
+        if not {"post-agent", "defer-wake", "dispatch"} & set(active_phases):
             logger.debug(f"Brain lessons: skipped (reason=phase_gate) for {event.id}")
             return None
 
@@ -1568,10 +1574,17 @@ class Brain:
         )
         query = f"{thoughts[:200]} phase={event.brain_phase} source={event.source}"
 
+        from ..memory.pulse import PulseContext
+        pulse_ctx = PulseContext(
+            event_id=event.id,
+            turn=len(event.conversation),
+            event_elapsed_s=int(time.time() - event.conversation[0].timestamp) if event.conversation else 0,
+        )
+
         t0 = time.time()
         try:
             results = await asyncio.wait_for(
-                archivist.search_lessons(query, limit=limit), timeout=10.0,
+                archivist.search_lessons(query, limit=limit, context=pulse_ctx), timeout=10.0,
             )
         except asyncio.TimeoutError:
             logger.warning(f"Brain lessons: fallback hint (reason=timeout) for {event.id}")
@@ -1598,6 +1611,34 @@ class Brain:
             f"(scores: {', '.join(scores)}, latency={latency_ms}ms) for {event.id}"
         )
         return "\n".join(lines)
+
+    async def _get_pending_cortex_insight(self, event_id: str) -> str | None:
+        """Read and clear any pending Cortex insight for this event (GETDEL = atomic)."""
+        try:
+            redis = self.blackboard.redis
+            raw = await redis.getdel(f"darwin:whisper:{event_id}")
+            if not raw:
+                return None
+            import json as _json
+            data = _json.loads(raw)
+            insight = data.get("insight", "")
+            severity = data.get("severity", "nudge")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="cortex",
+                action="insight",
+                thoughts=f"[{severity}] {insight}",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info(f"Cortex insight consumed for {event_id} (severity={severity})")
+            return (
+                f"## CORTEX INSIGHT\n"
+                f"Severity: {severity}\n\n"
+                f"{insight}"
+            )
+        except Exception as e:
+            logger.debug(f"Cortex insight check failed (non-fatal): {e}")
+            return None
 
     async def _warmup_embedding(self) -> None:
         """Fire-and-forget: warm the Vertex AI embedding serving slot."""
@@ -2105,6 +2146,25 @@ class Brain:
     # Function Call Dispatcher
     # =========================================================================
 
+    async def _emit_executive_pulse(
+        self, event_id: str, pulses_data: list[tuple[str, str]],
+    ) -> None:
+        """Emit executive hemisphere pulses (tool/phase/agent). Non-fatal."""
+        if not self.pulse_port:
+            return
+        try:
+            from ..memory.pulse import Pulse, PulseBatch
+            ev = await self.blackboard.get_event(event_id)
+            batch = PulseBatch(
+                event_id=event_id,
+                pulses=[Pulse(nid, ntype, 1.0, injected=True) for nid, ntype in pulses_data],
+                turn=len(ev.conversation) if ev else 0,
+                event_elapsed_s=int(time.time() - ev.conversation[0].timestamp) if ev and ev.conversation else 0,
+            )
+            await self.pulse_port.on_pulse_batch(batch)
+        except Exception as e:
+            logger.debug(f"Executive pulse emission failed (non-fatal): {e}")
+
     async def _execute_function_call(
         self,
         event_id: str,
@@ -2133,6 +2193,9 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
             response_parts = None
+
+        # Emit tool pulse for every function call
+        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
 
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
@@ -2181,6 +2244,7 @@ class Brain:
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
+            await self._emit_executive_pulse(event_id, [(f"agent:{agent_name}", "agent")])
             await self.blackboard.record_event(
                 EventType.BRAIN_AGENT_ROUTED,
                 {"event_id": event_id, "agent": agent_name},
@@ -2535,9 +2599,17 @@ class Brain:
             memory_text = f"## Deep Memory: \"{query}\"\n\n"
             has_results = False
 
+            from ..memory.pulse import PulseContext
+            ev_for_ctx = ev or await self.blackboard.get_event(event_id)
+            pulse_ctx = PulseContext(
+                event_id=event_id,
+                turn=len(ev_for_ctx.conversation) if ev_for_ctx else 0,
+                event_elapsed_s=int(time.time() - ev_for_ctx.conversation[0].timestamp) if ev_for_ctx and ev_for_ctx.conversation else 0,
+            )
+
             # Search lessons learned first (classification guidance)
             if archivist and hasattr(archivist, "search_lessons"):
-                lessons = await archivist.search_lessons(query, limit=3)
+                lessons = await archivist.search_lessons(query, limit=3, context=pulse_ctx)
                 if lessons:
                     has_results = True
                     memory_text += "### Lessons Learned\n"
@@ -2553,7 +2625,7 @@ class Brain:
 
             # Search past events (pattern first, temporal data preserved)
             if archivist and hasattr(archivist, "search"):
-                results = await archivist.search(query, limit=5)
+                results = await archivist.search(query, limit=5, context=pulse_ctx)
                 if results:
                     has_results = True
                     memory_text += "### Past Events\n"
@@ -3013,6 +3085,7 @@ class Brain:
                 "event_id": event_id,
                 "phase": phase,
             })
+            await self._emit_executive_pulse(event_id, [(f"phase:{phase}", "phase")])
             if current_phase == "triage" and os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true":
                 asyncio.create_task(self._warmup_embedding())
             return True
