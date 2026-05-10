@@ -8,6 +8,7 @@ import { Loader2, Brain } from 'lucide-react';
 import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import CortexGraph from './CortexGraph';
+import CortexLiveFeed from './CortexLiveFeed';
 import EventDrillDown from './EventDrillDown';
 import type { Neuron } from './types';
 
@@ -55,16 +56,24 @@ const CortexPage: FC = () => {
 
   return (
     <div className="h-full flex overflow-hidden">
-      {/* Left panel: Global topology */}
+      {/* Left panel: Global topology + Cortex stream */}
       <div className={`flex flex-col overflow-hidden transition-all ${selectedEventId ? 'w-1/2' : 'w-full'}`}>
         <CortexGraph
           neurons={neurons}
           glowingIds={glowingIds}
-          className="flex-1"
+          className="flex-1 min-h-0"
           onClickNeuron={(_id) => {
             // Future: neuron detail tooltip
           }}
         />
+
+        {/* Cortex Live Feed -- always visible */}
+        <div className="flex-shrink-0 h-48 border-t border-border overflow-hidden">
+          <CortexLiveFeed
+            entries={thinkingEntries}
+            className="h-full"
+          />
+        </div>
 
         {/* Active events bar */}
         <div className="flex-shrink-0 border-t border-border px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto">
