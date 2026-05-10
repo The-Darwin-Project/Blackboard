@@ -157,7 +157,24 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
     for (const batch of liveBatches) {
       const evtId = batch.event_id;
-      if (!graph.hasNode(evtId)) continue;
+      if (!evtId) continue;
+
+      // Dynamically add event node if it arrived via pulse but isn't in activeEvents yet
+      if (!graph.hasNode(evtId)) {
+        const existingEvents = graph.nodes().filter(n => {
+          try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
+        });
+        graph.addNode(evtId, {
+          x: HEMISPHERE_X.knowledge + 350 * Math.cos(existingEvents.length * 1.5),
+          y: 350 * Math.sin(existingEvents.length * 1.5),
+          size: 8,
+          color: eventColor(evtId),
+          borderColor: '#94a3b8',
+          label: evtId.slice(0, 12),
+          type: 'square',
+          fixed: true,
+        });
+      }
 
       for (const pulse of batch.pulses) {
         const edgeId = `activity:${evtId}:${pulse.neuron_id}:${batch.timestamp}`;

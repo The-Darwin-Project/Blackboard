@@ -30,6 +30,15 @@ export function useRecentPulses() {
 
 export function usePulseStream() {
   const [batches, setBatches] = useState<PulseBatch[]>([]);
+  const initialLoaded = useRef(false);
+
+  // Load recent pulses on first mount (catch up on active events)
+  if (!initialLoaded.current) {
+    initialLoaded.current = true;
+    getRecentPulses(300).then(recent => {
+      if (recent.length > 0) setBatches(recent);
+    }).catch(() => {});
+  }
 
   useWSMessage(useCallback((msg) => {
     if (msg.type === 'pulse_batch' && msg.batch) {
