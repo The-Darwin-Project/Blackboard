@@ -62,6 +62,8 @@ const CortexPage: FC = () => {
         <CortexGraph
           neurons={neurons}
           glowingIds={glowingIds}
+          activeEvents={activeEvents ?? []}
+          liveBatches={liveBatches}
           className="flex-1 min-h-0"
           onClickNeuron={(_id) => {
             // Future: neuron detail tooltip
