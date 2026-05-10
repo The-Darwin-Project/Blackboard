@@ -225,7 +225,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
     }
     sigma.refresh();
-  }, [liveBatches, neurons, sigma]); // neurons dep ensures re-run after graph rebuild
+  }, [liveBatches, sigma]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const timers = activityTimersRef.current;
