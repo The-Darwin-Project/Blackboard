@@ -762,7 +762,8 @@ class LiveAPIAdapter:
             "tool": tool,
             "args": args,
             "timestamp": time.time(),
-            "shadow": True,
+            "shadow": self._shadow,
+            "delivered": not self._shadow,
         })
         try:
             await redis.rpush(f"{SHADOW_KEY_PREFIX}{event_id}", entry)

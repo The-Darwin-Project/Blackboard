@@ -43,18 +43,28 @@ async def get_cognitive_graph():
     neurons = []
     for p in lessons:
         nid = f"lesson:{p.get('id', '')}"
+        payload = p.get("payload", {})
+        title = payload.get("title", "")
+        channel = payload.get("channel", "")
+        label = f"{title} [{channel}]" if title and channel else title
         neurons.append({
             "id": nid,
             "type": "lesson",
-            "payload": p.get("payload", {}),
+            "label": label,
+            "payload": payload,
             "heat": heat.get(nid, 0),
         })
     for p in memories:
         nid = f"memory:{p.get('id', '')}"
+        payload = p.get("payload", {})
+        symptom = payload.get("symptom", "")
+        service = payload.get("service", "")
+        label = f"{service}: {symptom}" if service and symptom else symptom
         neurons.append({
             "id": nid,
             "type": "memory",
-            "payload": p.get("payload", {}),
+            "label": label,
+            "payload": payload,
             "heat": heat.get(nid, 0),
         })
 
