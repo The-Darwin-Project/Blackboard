@@ -1642,7 +1642,7 @@ class Brain:
             severity = data.get("severity", "nudge")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
-                actor="cortex",
+                actor="jarvis",
                 action="insight",
                 thoughts=f"[{severity}] {insight}",
             )

@@ -128,18 +128,26 @@ TOOL_DECLARATIONS = [
     {
         "name": "inject_system_insight",
         "description": (
-            "Deliver a corrective observation directly into the Brain's next system prompt. "
-            "The Brain sees this as a high-authority directive. Use when the pulse pattern "
-            "shows clear, sustained friction that the Brain has not self-corrected."
+            "Inject a directive into FRIDAY's system prompt on her next processing turn. "
+            "She CANNOT ignore this -- it appears as an authority instruction, not a conversation turn. "
+            "Result: FRIDAY reads your insight before making her next decision. Use for sustained friction."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "event_id": {"type": "string"},
-                "insight": {"type": "string", "description": "What you observed and why it matters (max 500 chars)"},
+                "insight": {
+                    "type": "string",
+                    "description": (
+                        "An imperative directive. State WHAT to do, not what you observed. "
+                        "Example: 'Stop deferring. Refresh context and act on the result -- escalate or close.' "
+                        "NOT: 'I noticed the event has been deferring.' (max 500 chars)"
+                    ),
+                },
                 "severity": {
                     "type": "string",
                     "enum": ["nudge", "course_correct", "alert"],
+                    "description": "nudge=gentle suggestion, course_correct=change approach now, alert=something is wrong",
                 },
             },
             "required": ["event_id", "insight", "severity"],
@@ -148,15 +156,22 @@ TOOL_DECLARATIONS = [
     {
         "name": "send_event_message",
         "description": (
-            "Post a message into the event conversation as a peer. The Brain must process "
-            "this on its next cycle, like a human operator asking a question. Use to ask "
-            "the Brain what is blocking progress || Ask the brain Whats next or Why is it stuck?."
+            "Send a direct question to FRIDAY as a peer. She must respond (respond_to_jarvis is "
+            "gated to appear when you message her). Also wakes her from defer immediately. "
+            "Result: FRIDAY sees your question and is forced to answer what she's doing about it."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "event_id": {"type": "string"},
-                "message": {"type": "string", "description": "A direct question or observation (max 500 chars)"},
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "A pointed question about the block. "
+                        "Example: 'Pipeline finished 3 minutes ago. Why are you still deferring?' "
+                        "NOT: 'I noticed the event has been active for a while.' (max 500 chars)"
+                    ),
+                },
             },
             "required": ["event_id", "message"],
         },
@@ -164,9 +179,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "surface_context",
         "description": (
-            "Add supplementary information to an event that the Brain may not have. "
-            "The Brain sees this as evidence, not a directive. Use to share cross-event "
-            "patterns or neuron insights."
+            "Add evidence to the event that FRIDAY may not have. Enters as a jarvis.evidence turn -- "
+            "FRIDAY treats it as supplementary intelligence, not a question or directive. Lightest touch. "
+            "Result: extra context available on FRIDAY's next processing turn."
         ),
         "parameters": {
             "type": "object",
