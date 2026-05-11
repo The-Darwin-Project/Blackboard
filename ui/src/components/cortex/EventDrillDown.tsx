@@ -162,7 +162,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
       </div>
 
       {/* 3D Brain visualization */}
-      <div className="h-64 flex-shrink-0 relative">
+      <div className="h-80 flex-shrink-0 relative">
         <BrainCore className="rounded-none" />
       </div>
 
