@@ -665,15 +665,16 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "respond_to_jarvis",
         "description": (
-            "Reply to JARVIS's last message. Use when JARVIS asked a direct question "
-            "via jarvis.message and you need to respond."
+            "MANDATORY when a jarvis.message turn exists in the conversation. "
+            "JARVIS is your senior observer -- when he asks a question, you answer. "
+            "State what you are doing about the issue he raised and what your next action is."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "response": {
                     "type": "string",
-                    "description": "Your response to JARVIS's question",
+                    "description": "Your answer to JARVIS: what you are doing about it and your next step",
                 },
             },
             "required": ["response"],
