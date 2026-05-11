@@ -256,6 +256,8 @@ class LiveAPIAdapter:
         self._idle_watchdog_task: asyncio.Task | None = None
         self._running = False
         self._client = None
+        self._last_status_broadcast: float = 0
+        self._last_was_watching: bool = False
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -293,6 +295,7 @@ class LiveAPIAdapter:
                 self._idle_watchdog_task.cancel()
             self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
             await self._load_neuron_labels()
+            await self._broadcast_status("watching")
             logger.info(
                 "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                 self._model, self._shadow, len(self._neuron_labels),
@@ -332,6 +335,17 @@ class LiveAPIAdapter:
             self._session_ctx = None
         self._seen_neurons.clear()
         self._text_buffer.clear()
+        self._last_was_watching = False
+        self._last_status_broadcast = 0
+        try:
+            await self._broadcast({
+                "type": "cortex_status",
+                "status": "disconnected",
+                "model": self._model,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
         logger.info("Cortex session closed (idle)")
 
     async def send_pulse(self, batch: PulseBatch) -> None:
@@ -409,6 +423,22 @@ class LiveAPIAdapter:
                     await self._try_reconnect()
                     break
 
+    async def _broadcast_status(self, status: str) -> None:
+        """Broadcast cortex_status, throttled to once per 60s for 'watching'."""
+        now = time.time()
+        if status == "watching" and (now - self._last_status_broadcast) < 60:
+            return
+        self._last_status_broadcast = now
+        try:
+            await self._broadcast({
+                "type": "cortex_status",
+                "status": status,
+                "model": self._model,
+                "timestamp": now,
+            })
+        except Exception:
+            pass
+
     async def _process_message(self, msg) -> None:
         """Process a single message from the Live API session."""
         from google.genai import types
@@ -426,8 +456,11 @@ class LiveAPIAdapter:
         if should_flush and self._text_buffer:
             full_text = "".join(self._text_buffer).strip()
             self._text_buffer = []
-            # Skip broadcasting noise responses (watching, ok, etc.)
-            if full_text and full_text.lower() not in ("watching", "watching.", "ok", "ok."):
+            if full_text and full_text.lower() in ("watching", "watching.", "ok", "ok."):
+                await self._broadcast_status("watching")
+                self._last_was_watching = True
+            elif full_text:
+                self._last_was_watching = False
                 try:
                     await self._broadcast({
                         "type": "cortex_thinking",

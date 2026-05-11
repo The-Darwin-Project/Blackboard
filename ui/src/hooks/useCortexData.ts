@@ -9,7 +9,7 @@ import { useWSMessage } from '../contexts/WebSocketContext';
 import { getCognitiveGraph, getRecentPulses } from '../api/client';
 import type {
   CognitiveGraphResponse, PulseBatch, CortexThinkingMessage,
-  CortexShadowMessage, WhisperMessage, FrictionIndicator,
+  CortexShadowMessage, CortexStatusMessage, WhisperMessage, FrictionIndicator,
 } from '../components/cortex/types';
 
 export function useCortexGraph() {
@@ -95,6 +95,18 @@ export function usePulseGlow() {
   }, [glowTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { isGlowing, glowTick };
+}
+
+export function useCortexStatus() {
+  const [status, setStatus] = useState<CortexStatusMessage | null>(null);
+
+  useWSMessage(useCallback((msg) => {
+    if (msg.type === 'cortex_status') {
+      setStatus(msg as unknown as CortexStatusMessage);
+    }
+  }, []));
+
+  return status;
 }
 
 export function useCortexWhispers() {

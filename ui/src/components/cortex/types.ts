@@ -41,6 +41,13 @@ export interface CortexThinkingMessage {
   result_preview?: string;
 }
 
+export interface CortexStatusMessage {
+  type: 'cortex_status';
+  status: 'watching' | 'disconnected';
+  model: string;
+  timestamp: number;
+}
+
 export interface CortexShadowMessage {
   type: 'cortex_shadow';
   event_id: string;

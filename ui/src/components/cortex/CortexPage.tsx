@@ -5,7 +5,7 @@
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
 import { useState, useMemo, useCallback, type FC } from 'react';
 import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers } from '../../hooks/useCortexData';
+import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import CortexGraph from './CortexGraph';
 import CortexLiveFeed from './CortexLiveFeed';
@@ -19,6 +19,7 @@ const CortexPage: FC = () => {
   const thinkingEntries = useCortexThinking();
   const shadowEntries = useCortexShadow();
   const whisperEntries = useCortexWhispers();
+  const cortexStatus = useCortexStatus();
   const { data: activeEvents } = useActiveEvents();
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -142,6 +143,7 @@ const CortexPage: FC = () => {
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <CortexLiveFeed
                   entries={thinkingEntries}
+                  cortexStatus={cortexStatus}
                   className="h-full"
                 />
               </div>

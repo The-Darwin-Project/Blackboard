@@ -6,11 +6,12 @@
 // 4. [Pattern]: Mode indicator derived from whisper presence -- [shadow] if no whispers, [live] if whispers exist.
 import { useEffect, useRef, type FC } from 'react';
 import { Brain, Wrench, CheckCircle, Shield, Zap } from 'lucide-react';
-import type { CortexThinkingMessage, WhisperMessage } from './types';
+import type { CortexThinkingMessage, CortexStatusMessage, WhisperMessage } from './types';
 
 interface CortexLiveFeedProps {
   entries: CortexThinkingMessage[];
   whispers?: WhisperMessage[];
+  cortexStatus?: CortexStatusMessage | null;
   className?: string;
 }
 
@@ -20,7 +21,7 @@ const TYPE_STYLES: Record<string, { color: string; icon: typeof Brain }> = {
   tool_result: { color: 'text-emerald-400',  icon: CheckCircle },
 };
 
-const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], className }) => {
+const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], cortexStatus, className }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const hasWhispers = whispers.length > 0;
   const mode = hasWhispers ? 'live' : 'shadow';
@@ -31,10 +32,20 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], class
   }, [entries.length, whispers.length]);
 
   if (entries.length === 0 && whispers.length === 0) {
+    const isWatching = cortexStatus?.status === 'watching';
     return (
-      <div className={`flex items-center justify-center text-text-muted text-xs py-6 ${className ?? ''}`}>
-        <Brain size={14} className="mr-2 opacity-50" />
-        No Cortex observer active
+      <div className={`flex items-center justify-center py-6 ${className ?? ''}`}>
+        {isWatching ? (
+          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-emerald-500/40 bg-emerald-500/15 text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-medium">Watching</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-border bg-bg-tertiary text-text-muted">
+            <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+            <span className="font-medium">Inactive</span>
+          </div>
+        )}
       </div>
     );
   }
