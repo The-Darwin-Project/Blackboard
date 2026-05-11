@@ -31,27 +31,31 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
     if (el) el.scrollTop = el.scrollHeight;
   }, [entries.length, whispers.length]);
 
+  const isWatching = cortexStatus?.status === 'watching';
+  const statusBar = (
+    <div className={`w-full py-1.5 px-3 text-[11px] font-medium border-b ${
+      isWatching
+        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+        : 'border-border bg-bg-tertiary text-text-muted'
+    }`}>
+      <div className="flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full ${isWatching ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+        <span>{isWatching ? 'Cortex Watching' : 'Cortex Inactive'}</span>
+      </div>
+    </div>
+  );
+
   if (entries.length === 0 && whispers.length === 0) {
-    const isWatching = cortexStatus?.status === 'watching';
     return (
-      <div className={`flex items-center justify-center py-6 ${className ?? ''}`}>
-        {isWatching ? (
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-emerald-500/40 bg-emerald-500/15 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="font-medium">Watching</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1 px-2 py-0.5 rounded-full border text-[11px] border-border bg-bg-tertiary text-text-muted">
-            <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-            <span className="font-medium">Inactive</span>
-          </div>
-        )}
+      <div className={`flex flex-col ${className ?? ''}`}>
+        {statusBar}
       </div>
     );
   }
 
   return (
-    <div ref={containerRef} className={`overflow-y-auto text-xs font-mono space-y-0.5 ${className ?? ''}`}>
+    <div ref={containerRef} className={`flex flex-col overflow-y-auto text-xs font-mono space-y-0.5 ${className ?? ''}`}>
+      {statusBar}
       {/* Mode indicator */}
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/50 mb-1">
         {mode === 'shadow' ? (
