@@ -7,7 +7,7 @@
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
 # 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
 # 7. [Pattern]: correct_memory() overwrites a contaminated event memory with corrected root_cause/fix_action. Uses same deterministic uuid5 point ID.
-# 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key). Payload includes channel (stable|fast|candidate), verification_count, related_lesson_ids for recall graph.
+# 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key). Payload includes channel (external|experience), verification_count, related_lesson_ids for recall graph. Score weighting: experience lessons get 0.6x multiplier. Promotion: experience → external when verification_count >= 3.
 # 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
 # 10. [Pattern]: extract_lessons() uses Claude adapter (not Gemini) for document analysis. Only Claude-compatible kwargs (no thinking_level, no top_p).
 # 11. [Pattern]: pulse_port (PulsePort | None) emits Pulse events on search/search_lessons. Null-guarded. context param (PulseContext | None) is backward-compatible 3rd arg.
@@ -390,11 +390,17 @@ class Archivist:
         anti_pattern: str = "",
         keywords: list[str] | None = None,
         event_references: list[str] | None = None,
-        channel: str = "stable",
+        channel: str = "external",
         verification_count: int = 0,
         related_lesson_ids: list[str] | None = None,
     ) -> str | None:
-        """Store a human-authored lesson in darwin_lessons. Returns lesson_id or None."""
+        """Store a lesson in darwin_lessons. Returns lesson_id or None.
+
+        Channel values:
+            "external"   — Human-authored, imported docs, manual corrections (1.0x trust).
+            "experience" — System 2 session reports, observed patterns (0.6x trust).
+                           Promoted to "external" when verification_count >= 3.
+        """
         try:
             if not await self._ensure_initialized():
                 return None
@@ -438,6 +444,9 @@ class Archivist:
     async def search_lessons(self, query: str, limit: int = 3, context=None) -> list[dict]:
         """Search darwin_lessons for relevant patterns. Returns list of {score, payload}.
 
+        Score weighting: "experience" channel lessons get 0.6x score multiplier so they
+        rank lower than "external" (human-taught) lessons. Results re-sorted after weighting.
+
         context: PulseContext | None -- caller-provided pulse context for neuron firing.
         """
         try:
@@ -454,6 +463,13 @@ class Archivist:
                 vector=vector,
                 limit=limit,
             )
+
+            for r in results:
+                payload = r.get("payload", {})
+                if payload.get("channel") == "experience":
+                    r["score"] = r.get("score", 0) * 0.6
+
+            results.sort(key=lambda r: r.get("score", 0), reverse=True)
 
             if self.pulse_port and results:
                 await self._emit_pulses(results, LESSONS_COLLECTION, context)
@@ -547,6 +563,55 @@ class Archivist:
             return True
         except Exception as e:
             logger.warning(f"delete_lesson failed for {lesson_id}: {e}")
+            return False
+
+    async def promote_lesson(self, lesson_id: str) -> bool:
+        """Promote an experience lesson to external when verification_count >= 3.
+
+        Returns True if promoted, False if ineligible or failed.
+        """
+        try:
+            if not await self._ensure_initialized():
+                return False
+
+            points = await self._vector_store.get_points(LESSONS_COLLECTION, [lesson_id])
+            if not points:
+                logger.warning(f"promote_lesson: {lesson_id} not found")
+                return False
+
+            payload = points[0].get("payload", {})
+            if payload.get("channel") != "experience":
+                logger.info(f"promote_lesson: {lesson_id} not eligible (channel={payload.get('channel')})")
+                return False
+
+            if payload.get("verification_count", 0) < 3:
+                logger.info(f"promote_lesson: {lesson_id} not eligible (verification_count={payload.get('verification_count', 0)})")
+                return False
+
+            payload["channel"] = "external"
+            payload["promoted_at"] = time.time()
+
+            embed_text = (
+                f"{payload.get('title', '')} {payload.get('pattern', '')} "
+                f"{payload.get('anti_pattern', '')} {' '.join(payload.get('keywords', []))}"
+            )
+            embed_response = await self._client.aio.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=embed_text,
+            )
+            vector = embed_response.embeddings[0].values
+
+            await self._vector_store.upsert(
+                collection=LESSONS_COLLECTION,
+                point_id=lesson_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Lesson promoted: {lesson_id} (experience -> external)")
+            return True
+
+        except Exception as e:
+            logger.warning(f"promote_lesson failed for {lesson_id}: {e}")
             return False
 
     # =========================================================================

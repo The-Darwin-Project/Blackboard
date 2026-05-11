@@ -39,6 +39,7 @@ interface GraphLoaderProps {
   glowingIds: Set<string>;
   activeEvents: ActiveEvent[];
   liveBatches: PulseBatch[];
+  dimmedIds?: Set<string>;
 }
 
 const FA2_SETTINGS = {
@@ -51,13 +52,14 @@ const FA2_SETTINGS = {
   linLogMode: true,
 };
 
-const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches }) => {
+const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches, dimmedIds }) => {
   const loadGraph = useLoadGraph();
   const sigma = useSigma();
-  const graphRef = useRef<MultiGraph | null>(null);
   const activityTimersRef = useRef<Map<string, number>>(new Map());
+  const processedBatchesRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    processedBatchesRef.current.clear();
     const graph = new MultiGraph();
     const executive = getExecutiveNeurons();
     const allNeurons = [...neurons, ...executive];
@@ -147,7 +149,6 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
     }
 
-    graphRef.current = graph;
     loadGraph(graph);
   }, [neurons, activeEvents, loadGraph]);
 
@@ -157,6 +158,14 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     if (!graph || graph.order === 0) return;
 
     for (const batch of liveBatches) {
+      const batchId = batch._stream_id || `${batch.event_id}:${batch.timestamp}`;
+      if (processedBatchesRef.current.has(batchId)) continue;
+      processedBatchesRef.current.add(batchId);
+      if (processedBatchesRef.current.size > 500) {
+        const entries = [...processedBatchesRef.current];
+        processedBatchesRef.current = new Set(entries.slice(-200));
+      }
+
       const evtId = batch.event_id;
       if (!evtId) continue;
 
@@ -187,7 +196,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           size = 6;
         } else if (pulse.neuron_type === 'lesson' || pulse.neuron_type === 'memory') {
           size = 2;
-          const lastTool = [...batch.pulses].reverse().find(p => p.neuron_type === 'tool');
+          const lastTool = batch.pulses.findLast(p => p.neuron_type === 'tool');
           if (lastTool && graph.hasNode(lastTool.neuron_id)) source = lastTool.neuron_id;
         } else if (pulse.neuron_type === 'agent') {
           source = 'tool:select_agent';
@@ -221,51 +230,27 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         activityTimersRef.current.set(edgeId, timer);
       }
     }
-  }, [liveBatches, sigma]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [liveBatches, sigma]);
 
   useEffect(() => {
     const timers = activityTimersRef.current;
     return () => { for (const t of timers.values()) clearInterval(t); };
   }, []);
 
-  // Node glow + edge opacity reducers
+  // Merged nodeReducer: dimmed + glow in one pass
   useEffect(() => {
     if (!sigma.getGraph()) return;
 
     sigma.setSetting('nodeReducer', (node, data) => {
-      const res = { ...data };
+      if (dimmedIds?.has(node)) return { ...data, color: '#1e293b', size: 2, label: '' };
       if (glowingIds.has(node)) {
-        res.color = '#fbbf24';
-        res.size = (data.size ?? 4) * 1.8;
+        return { ...data, color: '#fbbf24', size: (data.size ?? 4) * 1.8 };
       }
-      return res;
-    });
-
-    sigma.setSetting('edgeReducer', (_edge, data) => {
-      const res = { ...data };
-      const opacity = (data as Record<string, unknown>).opacity as number | undefined;
-      if (opacity !== undefined && opacity < 1.0) {
-        // Sigma v3 WebGL can't reliably parse #RRGGBBAA.
-        // Fade via size reduction + color dimming toward background.
-        res.size = Math.max(0.5, ((data.size as number) ?? 2) * opacity);
-        // Blend color toward background (#030712) based on opacity
-        const base = data.color as string ?? '#1e293b';
-        if (base.startsWith('#') && base.length === 7) {
-          const r = parseInt(base.slice(1, 3), 16);
-          const g = parseInt(base.slice(3, 5), 16);
-          const b = parseInt(base.slice(5, 7), 16);
-          const br = 3, bg = 7, bb = 18; // #030712 background
-          const mr = Math.round(r * opacity + br * (1 - opacity));
-          const mg = Math.round(g * opacity + bg * (1 - opacity));
-          const mb = Math.round(b * opacity + bb * (1 - opacity));
-          res.color = `#${mr.toString(16).padStart(2,'0')}${mg.toString(16).padStart(2,'0')}${mb.toString(16).padStart(2,'0')}`;
-        }
-      }
-      return res;
+      return data;
     });
 
     sigma.refresh();
-  }, [glowingIds, sigma]);
+  }, [glowingIds, dimmedIds, sigma]);
 
   return null;
 };
@@ -356,12 +341,6 @@ export default function CortexGraph({
             circle: NodeCircleProgram,
             square: NodeSquareProgram,
           },
-          ...(dimmedIds ? {
-            nodeReducer: (node: string, data: Record<string, unknown>) => {
-              if (dimmedIds.has(node)) return { ...data, color: '#1e293b', size: 2, label: '' };
-              return data;
-            },
-          } : {}),
         }}
       >
         <GraphLoader
@@ -369,6 +348,7 @@ export default function CortexGraph({
           glowingIds={glowingIds}
           activeEvents={activeEvents}
           liveBatches={liveBatches}
+          dimmedIds={dimmedIds}
         />
         <FA2Controller />
         <DragHandler onClick={onClickNeuron} />

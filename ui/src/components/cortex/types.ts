@@ -17,6 +17,7 @@ export interface PulseBatch {
   turn: number;
   event_elapsed_s: number;
   timestamp: number;
+  _stream_id?: string;
 }
 
 export interface Neuron {

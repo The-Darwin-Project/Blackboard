@@ -6,7 +6,7 @@
 # 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
 # 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
 # 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
-# 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to stable/0.
+# 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to external/0.
 """
 Conversation Queue API - Event document management.
 
@@ -501,15 +501,15 @@ async def create_lesson(req: LessonRequest):
     return {"status": "stored", "lesson_id": lesson_id}
 
 
-CHANNEL_DEMOTION = {"stable": "fast", "fast": "candidate"}
+CHANNEL_DEMOTION = {"external": "experience"}
 
 
 @router.patch("/admin/lessons/{lesson_id}/demote")
 async def demote_lesson(lesson_id: str):
-    """Move a lesson one channel down: stable -> fast -> candidate.
+    """Demote a lesson: external -> experience.
 
-    Returns 409 if already at candidate (lowest).
-    Missing channel field on legacy lessons defaults to 'stable'.
+    Returns 409 if already at experience (lowest).
+    Missing channel field on legacy lessons defaults to 'external'.
     """
     try:
         archivist = await get_archivist()
@@ -527,7 +527,7 @@ async def demote_lesson(lesson_id: str):
         raise HTTPException(404, f"Lesson {lesson_id} not found")
 
     payload = points[0].get("payload", {})
-    current_channel = payload.get("channel", "stable")
+    current_channel = payload.get("channel", "external")
     new_channel = CHANNEL_DEMOTION.get(current_channel)
     if not new_channel:
         raise HTTPException(409, f"Lesson already at lowest channel ({current_channel})")

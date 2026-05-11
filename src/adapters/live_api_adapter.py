@@ -373,7 +373,7 @@ class LiveAPIAdapter:
                 nid = f"lesson:{p.get('id', '')}"
                 payload = p.get("payload", {})
                 title = payload.get("title", "")
-                channel = payload.get("channel", "stable")
+                channel = payload.get("channel", "external")
                 if title:
                     self._neuron_labels[nid] = f"{title} [{channel}]"
             memories = await self._archivist.list_memories(limit=500)
@@ -664,7 +664,7 @@ class LiveAPIAdapter:
             return (
                 f"Neuron: {neuron_id}\n"
                 f"Collection: darwin_lessons\n"
-                f"Channel: {payload.get('channel', 'stable')} | Verified: {payload.get('verification_count', 0)} times\n"
+                f"Channel: {payload.get('channel', 'external')} | Verified: {payload.get('verification_count', 0)} times\n"
                 f"Title: {payload.get('title', '?')}\n"
                 f"Pattern: {payload.get('pattern', '?')}\n"
                 f"Anti-pattern: {payload.get('anti_pattern', 'N/A')}\n"

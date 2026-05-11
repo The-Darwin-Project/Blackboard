@@ -4,7 +4,8 @@
 // 2. [Constraint]: Uses alpha:true for transparent background so Sigma nodes render on top.
 // 3. [Gotcha]: Two WebGL contexts -- Three.js and Sigma. Keep Three.js minimal to avoid GPU contention.
 // 4. [Pattern]: Uses THREE.Timer (not deprecated Clock) -- call timer.update() before timer.getElapsed().
-// 4. [Pattern]: brain.glb loaded from /brain.glb (public dir). Fallback: empty scene.
+// 5. [Pattern]: brain.glb loaded from /brain.glb (public dir). Fallback: empty scene.
+// 6. [Gotcha]: Uses ResizeObserver (not window resize) so sidebar collapse/expand triggers reflow.
 import { useEffect, useRef, type FC } from 'react';
 
 const BrainCore: FC<{ className?: string }> = ({ className }) => {
@@ -31,7 +32,7 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
 
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(50, w / h, 0.1, 100);
-      camera.position.set(0, -0.3, 6);
+      camera.position.set(0, 0.7, 6.9);
 
       const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setSize(w, h);
@@ -149,17 +150,20 @@ const BrainCore: FC<{ className?: string }> = ({ className }) => {
       const onResize = () => {
         const nw = container.clientWidth;
         const nh = container.clientHeight;
+        if (nw === 0 || nh === 0) return;
         camera.aspect = nw / nh;
         camera.updateProjectionMatrix();
         renderer.setSize(nw, nh);
         composer.setSize(nw, nh);
       };
-      window.addEventListener('resize', onResize);
+
+      const ro = new ResizeObserver(onResize);
+      ro.observe(container);
 
       cleanupRef.current = () => {
         disposed = true;
         cancelAnimationFrame(animId);
-        window.removeEventListener('resize', onResize);
+        ro.disconnect();
         renderer.dispose();
         composer.dispose();
         container.removeChild(renderer.domElement);
