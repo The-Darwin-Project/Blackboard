@@ -661,6 +661,24 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["check_condition"],
         },
     },
+    # --- JARVIS response (gated: only when unanswered jarvis.message exists) ---
+    {
+        "name": "respond_to_jarvis",
+        "description": (
+            "Reply to JARVIS's last message. Use when JARVIS asked a direct question "
+            "via jarvis.message and you need to respond."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": "string",
+                    "description": "Your response to JARVIS's question",
+                },
+            },
+            "required": ["response"],
+        },
+    },
 ]
 
 

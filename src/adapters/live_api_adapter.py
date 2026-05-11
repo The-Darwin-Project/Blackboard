@@ -365,6 +365,19 @@ class LiveAPIAdapter:
             pass
         logger.info("Cortex session closed (idle)")
 
+    async def receive_brain_response(self, event_id: str, response: str) -> None:
+        """Receive a direct response from FRIDAY into the Live API session."""
+        if not self._session:
+            logger.debug("No active Cortex session -- brain response for %s not delivered", event_id)
+            return
+        from google.genai import types
+        msg = f"[FRIDAY responds to your message for {event_id}]: {response}"
+        await self._session.send(input=types.Content(
+            parts=[types.Part(text=msg)],
+            role="user",
+        ), end_of_turn=True)
+        logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
+
     async def send_pulse(self, batch: PulseBatch) -> None:
         """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
         self._last_pulse_event_id = batch.event_id

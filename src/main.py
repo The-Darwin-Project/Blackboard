@@ -172,6 +172,7 @@ async def lifespan(app: FastAPI):
                     brain=brain,
                 )
                 pulse_tracker.add_observer(live_adapter)
+                brain._live_adapter = live_adapter
                 app.state.live_adapter = live_adapter
                 logger.info("Cortex observer registered (on-demand, will activate on first pulse, shadow=%s)",
                             os.getenv("SYSTEM2_SHADOW", "true"))

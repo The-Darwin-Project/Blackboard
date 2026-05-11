@@ -88,6 +88,10 @@
 # 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/investigate).
 #     Brain calls adapter.set_search_enabled() before/after generate_stream via try/finally. hasattr guard for Claude.
 #     Grounding metadata formatted as evidence, not thoughts. Graceful fallback if search unavailable.
+# 37. [Pattern]: respond_to_jarvis tool is conversation-gated: only available when the most recent
+#     jarvis.message turn has no subsequent brain.respond_jarvis turn. Handler appends turn AND
+#     sends response to LiveAPIAdapter.receive_brain_response() for real-time delivery.
+#     _live_adapter set by main.py when SYSTEM2_ENABLED=true.
 # 34. [Pattern]: Event loop scan blank-event guard uses processing_started_at with queued_at
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
@@ -382,6 +386,7 @@ class Brain:
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
+        self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
         self._skill_loader = None
@@ -957,6 +962,17 @@ class Brain:
                 chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "report_incident", "set_phase"}
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
+
+        # === JARVIS response gate: only when unanswered jarvis.message exists ===
+        has_unanswered_jarvis = False
+        for t in reversed(event.conversation):
+            if t.actor == "jarvis" and t.action == "message":
+                has_unanswered_jarvis = True
+                break
+            if t.actor == "brain" and t.action == "respond_jarvis":
+                break
+        if not has_unanswered_jarvis:
+            active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
 
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
@@ -3260,6 +3276,24 @@ class Brain:
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "respond_to_jarvis":
+            response_text = args.get("response", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="respond_jarvis",
+                thoughts=response_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            if self._live_adapter:
+                try:
+                    await self._live_adapter.receive_brain_response(event_id, response_text)
+                except Exception as e:
+                    logger.warning(f"Failed to deliver response to JARVIS for {event_id}: {e}")
+            logger.info(f"Responded to JARVIS for {event_id}")
             return True
 
         else:
