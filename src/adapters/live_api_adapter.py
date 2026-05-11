@@ -783,7 +783,7 @@ class LiveAPIAdapter:
         from ..models import ConversationTurn
         turn = ConversationTurn(
             turn=current_turn + 1,
-            actor="cortex",
+            actor="jarvis",
             action="evidence",
             evidence=context,
             thoughts="Cortex context enrichment",
@@ -810,7 +810,7 @@ class LiveAPIAdapter:
         from ..models import ConversationTurn
         turn = ConversationTurn(
             turn=current_turn + 1,
-            actor="cortex",
+            actor="jarvis",
             action="message",
             thoughts=message,
         )
@@ -860,7 +860,7 @@ class LiveAPIAdapter:
         from ..models import ConversationTurn
         turn = ConversationTurn(
             turn=current_turn + 1,
-            actor="cortex",
+            actor="jarvis",
             action="insight",
             thoughts=insight,
         )
