@@ -77,6 +77,13 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
         const text = entry.text ?? entry.tool ?? entry.result_preview ?? '';
         const isShadow = entry.content_type === 'tool_call';
 
+        const argsSummary = entry.content_type === 'tool_call' && entry.args
+          ? Object.entries(entry.args as Record<string, unknown>)
+              .filter(([k]) => k !== 'event_id')
+              .map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`)
+              .join(' | ')
+          : '';
+
         return (
           <div key={`t-${i}`} className={`flex items-start gap-1.5 px-2 py-0.5 ${style.color}`}>
             <Icon size={11} className="mt-0.5 flex-shrink-0" />
@@ -85,6 +92,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
                 <span className="text-blue-300 font-semibold">{entry.tool} </span>
               )}
               {text}
+              {argsSummary && <span className="text-slate-400 ml-1">{argsSummary}</span>}
               {isShadow && <span className="ml-1 text-amber-500/60">[shadow]</span>}
             </span>
           </div>
