@@ -363,6 +363,13 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("NightwatcherObserver disabled (NIGHTWATCHER_ENABLED=false)")
     
+        # === BACKFILL MISSED ARCHIVES (non-blocking, fire-and-forget) ===
+        async def _backfill_on_startup():
+            await asyncio.sleep(10)
+            await archivist.backfill_archives(blackboard)
+
+        asyncio.create_task(_backfill_on_startup())
+
     logger.info("Darwin Blackboard ready")
     
     yield  # Application runs here

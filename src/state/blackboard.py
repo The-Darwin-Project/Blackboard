@@ -1668,6 +1668,10 @@ class BlackboardState:
 
         return tickets
 
+    async def get_closed_event_ids(self, limit: int = 500) -> list[str]:
+        """Get closed event IDs from the ZSET (most recent first, capped)."""
+        return await self.redis.zrevrange(self.EVENT_CLOSED, 0, limit - 1)
+
     async def get_recent_closed_for_service(
         self, service: str, minutes: int = 15
     ) -> list[tuple[str, float, str]]:

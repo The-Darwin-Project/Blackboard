@@ -173,6 +173,7 @@ route:
   # host: darwin-brain.apps.example.com  # Leave empty for auto-generated
   annotations:
     haproxy.router.openshift.io/timeout: 300s
+    haproxy.router.openshift.io/timeout-tunnel: 3600s
   tls:
     enabled: true
     termination: edge # edge, passthrough, or reencrypt

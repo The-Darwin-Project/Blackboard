@@ -4,6 +4,9 @@
 // 2. [Pattern]: Reconnect signal fires on onopen when retryRef > 0 (not initial connect).
 // 3. [Gotcha]: subscribersRef and reconnectSubscribersRef are Sets -- never recreate, only mutate.
 // 4. [Pattern]: onclose code 4001 = auth rejection -- triggers logout via getWSAuthFailureCallback(), skips reconnect.
+// 5. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections. Heartbeat cleared on unmount.
+// 6. [Pattern]: Visibility change listener reconnects immediately when tab regains focus.
+// 7. [Constraint]: Max backoff is 5s (not 30s) for fast recovery.
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -55,6 +58,8 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const subscribersRef = useRef<Set<MessageHandler>>(new Set());
   const reconnectSubscribersRef = useRef<Set<ReconnectHandler>>(new Set());
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastMessageTimeRef = useRef<number>(Date.now());
   const { getAccessToken } = useAuth();
   const getAccessTokenRef = useRef(getAccessToken);
   getAccessTokenRef.current = getAccessToken;
@@ -88,13 +93,28 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         setConnected(true);
         setReconnecting(false);
         retryRef.current = 0;
+        lastMessageTimeRef.current = Date.now();
+
+        // Start heartbeat -- detects HAProxy idle drops
+        if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+        heartbeatRef.current = setInterval(() => {
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+            console.log('[WS] Heartbeat: not OPEN -- triggering reconnect');
+            if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+            heartbeatRef.current = null;
+            if (wsRef.current) wsRef.current.close();
+            return;
+          }
+          wsRef.current.send(JSON.stringify({ type: 'ping' }));
+        }, 30_000);
+
         console.log('[WS] Connected');
       };
 
       ws.onmessage = (event) => {
+        lastMessageTimeRef.current = Date.now();
         try {
           const msg = JSON.parse(event.data) as WSMessage;
-          // Fan out to all subscribers
           subscribersRef.current.forEach((handler) => {
             try {
               handler(msg);
@@ -115,7 +135,7 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           getWSAuthFailureCallback()?.();
           return;
         }
-        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 30000);
+        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 5000);
         retryRef.current++;
         setReconnecting(true);
         console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
@@ -133,7 +153,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     connect();
     return () => {
-      // Clear pending reconnect timer to prevent zombie connections after unmount
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -142,6 +165,23 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
         wsRef.current.close();
       }
     };
+  }, [connect]);
+
+  // Reconnect immediately when tab regains focus
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && !wsRef.current) {
+        console.log('[WS] Tab visible -- reconnecting');
+        retryRef.current = 0;
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        connect();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [connect]);
 
   const send = useCallback((data: object) => {

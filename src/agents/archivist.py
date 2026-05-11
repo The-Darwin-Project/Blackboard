@@ -11,6 +11,7 @@
 # 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
 # 10. [Pattern]: extract_lessons() uses Claude adapter (not Gemini) for document analysis. Only Claude-compatible kwargs (no thinking_level, no top_p).
 # 11. [Pattern]: pulse_port (PulsePort | None) emits Pulse events on search/search_lessons. Null-guarded. context param (PulseContext | None) is backward-compatible 3rd arg.
+# 12. [Pattern]: backfill_archives() is a startup hook that scans Redis closed events missing from Qdrant and re-archives them. Non-fatal, batch get_points check, runs once on startup via fire-and-forget task.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -242,6 +243,42 @@ class Archivist:
 
         except Exception as e:
             logger.warning(f"Archivist failed for event {event.id} (non-fatal): {e}")
+
+    async def backfill_archives(self, blackboard) -> int:
+        """Scan Redis for closed events missing from Qdrant. Returns count backfilled."""
+        try:
+            if not await self._ensure_initialized():
+                return 0
+
+            event_ids = await blackboard.get_closed_event_ids(limit=200)
+            if not event_ids:
+                return 0
+
+            point_ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"darwin:{eid}")) for eid in event_ids]
+            existing = await self._vector_store.get_points(COLLECTION_NAME, point_ids)
+            existing_ids = {p.get("id") for p in existing}
+
+            missing = [
+                (eid, pid) for eid, pid in zip(event_ids, point_ids)
+                if pid not in existing_ids
+            ]
+            if not missing:
+                return 0
+
+            backfilled = 0
+            for eid, _ in missing:
+                event = await blackboard.get_event(eid)
+                if event:
+                    logger.info(f"Backfill: archiving missed event {eid}")
+                    await self.archive_event(event)
+                    backfilled += 1
+
+            if backfilled:
+                logger.info(f"Backfill complete: {backfilled} events archived")
+            return backfilled
+        except Exception as e:
+            logger.warning(f"Backfill failed (non-fatal): {e}")
+            return 0
 
     async def search(self, query: str, limit: int = 5, context=None) -> list[dict]:
         """
