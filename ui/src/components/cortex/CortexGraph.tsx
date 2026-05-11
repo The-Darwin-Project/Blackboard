@@ -337,7 +337,7 @@ export default function CortexGraph({
   dimmedIds, onClickNeuron, className,
 }: CortexGraphProps) {
   return (
-    <div className={`relative ${className ?? ''}`} style={{ background: '#030712' }}>
+    <div className={`relative ${className ?? ''}`} style={{ background: '#030712', width: '100%', height: '100%' }}>
       <SigmaContainer
         style={{ width: '100%', height: '100%', background: 'transparent' }}
         settings={{
