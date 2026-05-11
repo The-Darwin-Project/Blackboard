@@ -75,7 +75,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
         const style = TYPE_STYLES[entry.content_type] ?? TYPE_STYLES.text;
         const Icon = style.icon;
         const text = entry.text ?? entry.tool ?? entry.result_preview ?? '';
-        const isShadow = !!(entry as Record<string, unknown>).shadow;
+        const isShadow = !!((entry as unknown) as Record<string, unknown>).shadow;
 
         const argsSummary = entry.content_type === 'tool_call' && entry.args
           ? Object.entries(entry.args as Record<string, unknown>)
