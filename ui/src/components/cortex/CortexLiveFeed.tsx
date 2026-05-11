@@ -54,8 +54,9 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
   }
 
   return (
-    <div ref={containerRef} className={`flex flex-col overflow-y-auto text-xs font-mono space-y-0.5 ${className ?? ''}`}>
-      {statusBar}
+    <div className={`flex flex-col ${className ?? ''}`}>
+      <div className="flex-shrink-0">{statusBar}</div>
+      <div ref={containerRef} className="flex-1 overflow-y-auto text-xs font-mono space-y-0.5">
       {/* Mode indicator */}
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/50 mb-1">
         {mode === 'shadow' ? (
@@ -98,6 +99,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
           </div>
         );
       })}
+      </div>
     </div>
   );
 };
