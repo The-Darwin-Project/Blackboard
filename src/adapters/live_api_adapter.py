@@ -832,9 +832,13 @@ class LiveAPIAdapter:
             thoughts=message,
         )
         await self._blackboard.append_turn(event_id, turn)
-        # Clear waiting so Brain picks up the message
+        # Wake FRIDAY: clear in-memory wait + transition deferred->active
         if hasattr(self, "_brain") and self._brain:
             self._brain.clear_waiting(event_id)
+        from ..models import EventStatus
+        await self._blackboard.transition_event_status(
+            event_id, from_status="deferred", to_status=EventStatus.ACTIVE,
+        )
         await self._write_shadow(event_id, "send_event_message", {"message": message})
         return f"Message delivered to {event_id} as turn {current_turn + 1}"
 
