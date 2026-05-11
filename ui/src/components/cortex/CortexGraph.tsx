@@ -339,8 +339,10 @@ export default function CortexGraph({
   return (
     <div className={`relative ${className ?? ''}`} style={{ background: '#030712', width: '100%', height: '100%' }}>
       <SigmaContainer
+        graph={MultiGraph}
         style={{ width: '100%', height: '100%', background: 'transparent' }}
         settings={{
+          allowInvalidContainer: true,
           defaultNodeColor: '#475569',
           defaultEdgeColor: '#1e293b',
           labelColor: { color: '#94a3b8' },
