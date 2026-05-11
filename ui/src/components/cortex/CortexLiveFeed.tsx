@@ -80,7 +80,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
         const argsSummary = entry.content_type === 'tool_call' && entry.args
           ? Object.entries(entry.args as Record<string, unknown>)
               .filter(([k]) => k !== 'event_id')
-              .map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`)
+              .map(([k, v]) => `${k}: ${String(v)}`)
               .join(' | ')
           : '';
 
