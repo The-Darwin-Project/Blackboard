@@ -46,7 +46,16 @@ alwaysApply: true
 * **Metrics:** K8s Observer polls metrics-server for CPU/memory. Dependencies inferred from Service endpoints and env vars.
 * **Legacy:** The `/telemetry` push endpoint (DarwinClient) is deprecated. Use annotations instead.
 
-## 5. Execution Planes
+## 5. Meta-Cognitive Layer (JARVIS / System 2)
+
+* **Pattern:** JARVIS observes the Brain's neuron pulse stream via in-memory observer callback. Does NOT participate in the Conversation Queue directly — writes turns as `actor="jarvis"`.
+* **Pulse Stream:** Every Brain tool call, phase transition, agent dispatch, and memory recall emits a pulse. JARVIS receives these in real-time.
+* **Intervention Hierarchy:** `surface_context` (evidence turn) → `send_event_message` (peer question) → `inject_system_insight` (system prompt directive via whisper key).
+* **Friction Detection:** SPIRAL (tool fires 5+), PLATEAU (15+ min no phase change), AGENT CHURN (3+ agents without resolution), LESSON IGNORED (lesson fires then Brain does the anti-pattern).
+* **Lifecycle:** On-demand. Activates on first pulse, closes after 5min idle. Session report generated on shutdown (piped to Archivist extract_lessons).
+* **Feature flags:** `PULSE_TRACKING_ENABLED`, `SYSTEM2_ENABLED`, `SYSTEM2_SHADOW` (all in Helm values).
+
+## 6. Execution Planes
 
 * **Local plane**: 4 sidecars in the Brain pod. Handle user/aligner events. Always available.
 * **Ephemeral plane**: Tekton TaskRun agents. Handle headhunter + trigger-source events. Per-event lifecycle. Capacity controlled by source maxActive.

@@ -9,7 +9,7 @@ You are the lead developer and architect for **Project Darwin**, a closed-loop a
 
 ## Core Philosophy
 
-1. **Bicameral Mind:** Brain = Vertex AI orchestrator, Agents = CLI sidecars (Gemini + Claude). We separate "Thinking" (Vertex AI) from "Doing" (CLI agents).
+1. **Tricameral Mind:** Brain (FRIDAY) = Vertex AI orchestrator, Agents = CLI sidecars (Gemini + Claude), JARVIS = Gemini Live API meta-cognitive observer. We separate "Thinking" (FRIDAY), "Doing" (Agents), and "Observing" (JARVIS).
 2. **Passive Discovery:** The Brain observes K8s resources via metrics-server and annotations. Applications declare themselves, not push telemetry.
 3. **Safety First:** The AI generates plans; the CLI executes them only after safety checks.
 4. **Evolutionary Policy:** NEVER hardcode version numbers. Always use `:latest` tags and install the latest stable packages.
@@ -49,6 +49,26 @@ You must strictly adhere to these agent roles:
     * **Role:** GitLab MR lifecycle automation. Polls todos, classifies, creates events.
     * **Behavior:** Autonomous, FIFO. Fast-path heuristics for bot MRs, LLM fallback for unknown patterns.
     * **See:** `07-headhunter.mdc` for the full protocol and invariants.
+
+7. **The Nightwatcher (Agent 6)**
+    * **Type:** In-process Python daemon (same pattern as Aligner/TimeKeeper) + Gemini Flash LLM.
+    * **Role:** Shift consolidation. Batch-processes escalations into deduplicated Smartsheet incidents.
+    * **Behavior:** Phase-gated (review -> investigate -> report). Runs on cron schedule (default 06:00/18:00 UTC). LLM decides clustering and consolidation; code enforces phase transitions, lease safety, and manifest accounting.
+    * **See:** `13-nightwatcher.mdc` for the full protocol and invariants.
+
+8. **JARVIS (Agent 7 -- System 2)**
+    * **Type:** In-process Python adapter using Gemini Live API (`gemini-live-2.5-flash`).
+    * **Role:** Meta-cognitive observer. Watches the Brain's pulse stream, detects friction patterns, intervenes when FRIDAY is stuck.
+    * **Behavior:** Composed, terse, evidence-first. Speaks only when silence would be negligent. Prefers `surface_context` (lightest) over `send_event_message` over `inject_system_insight` (strongest).
+    * **Actor name:** `jarvis` in conversation turns (evidence, message, insight).
+    * **Lifecycle:** On-demand — activates on first pulse, closes after 5min idle.
+    * **Key constraint:** JARVIS does NOT route agents. He observes FRIDAY and nudges her.
+
+9. **The Archivist (Memory Agent)**
+    * **Type:** In-process Python (no sidecar). Uses Gemini for summarization, Claude for lesson extraction, text-embedding-005 for vectors, Qdrant for storage.
+    * **Role:** Deep memory. Archives closed events, stores lessons, searches past patterns.
+    * **Collections:** `darwin_events` (archived summaries), `darwin_lessons` (patterns), `darwin_feedback` (quality tracking).
+    * **Lesson channels:** `external` (human-taught, 1.0x trust) and `experience` (self-learned by JARVIS, 0.6x trust). Promotion: experience → external at verification_count >= 3.
 
 ## Communication Protocol
 
