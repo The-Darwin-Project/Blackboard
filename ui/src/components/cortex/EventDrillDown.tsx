@@ -14,7 +14,7 @@ import BrainCore from './BrainCore';
 import PulseTimeline from './PulseTimeline';
 import CortexLiveFeed from './CortexLiveFeed';
 import { useFrictionIndicators } from '../../hooks/useCortexData';
-import type { Neuron, PulseBatch, CortexThinkingMessage, CortexShadowMessage, WhisperMessage } from './types';
+import type { Neuron, PulseBatch, CortexThinkingMessage, CortexShadowMessage, CortexStatusMessage, WhisperMessage } from './types';
 
 const WHISPER_COLORS: Record<string, string> = {
   nudge: 'bg-slate-500/20 text-slate-400',
@@ -34,12 +34,13 @@ interface EventDrillDownProps {
   thinkingEntries: CortexThinkingMessage[];
   shadowEntries: CortexShadowMessage[];
   whisperEntries: WhisperMessage[];
+  cortexStatus?: CortexStatusMessage | null;
   glowingIds: Set<string>;
   onClose: () => void;
 }
 
 const EventDrillDown: FC<EventDrillDownProps> = ({
-  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, onClose,
+  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, cortexStatus, onClose,
 }) => {
   const { data: historicalBatches } = useQuery({
     queryKey: ['event-pulses', eventId],
@@ -272,7 +273,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         {/* Live feed */}
         <section>
           <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Cortex Live Feed</h4>
-          <CortexLiveFeed entries={eventThinking} className="max-h-40 bg-bg-tertiary rounded p-1" />
+          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} className="max-h-40 bg-bg-tertiary rounded p-1" />
         </section>
       </div>
     </div>

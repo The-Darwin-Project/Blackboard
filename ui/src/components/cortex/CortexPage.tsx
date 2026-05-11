@@ -132,6 +132,7 @@ const CortexPage: FC = () => {
                   thinkingEntries={thinkingEntries}
                   shadowEntries={shadowEntries}
                   whisperEntries={whisperEntries}
+                  cortexStatus={cortexStatus}
                   glowingIds={glowingIds}
                   onClose={() => setSelectedEventId(null)}
                 />
