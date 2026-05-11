@@ -4,7 +4,7 @@
 // 2. [Constraint]: getCognitiveGraph and getPulses are fetched via fetchApi pattern from client.ts.
 // 3. [Pattern]: usePulseStream accumulates batches in a ref to avoid re-renders on every pulse.
 import { useQuery } from '@tanstack/react-query';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWSMessage } from '../contexts/WebSocketContext';
 import { getCognitiveGraph, getRecentPulses } from '../api/client';
 import type {
@@ -99,6 +99,22 @@ export function usePulseGlow() {
 
 export function useCortexStatus() {
   const [status, setStatus] = useState<CortexStatusMessage | null>(null);
+
+  useEffect(() => {
+    fetch('/api/cortex/status')
+      .then(r => r.json())
+      .then((data: { status?: string; model?: string }) => {
+        if (data.status && data.status !== 'disabled') {
+          setStatus({
+            type: 'cortex_status',
+            status: data.status as 'watching' | 'disconnected',
+            model: data.model ?? '',
+            timestamp: Date.now() / 1000,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useWSMessage(useCallback((msg) => {
     if (msg.type === 'cortex_status') {

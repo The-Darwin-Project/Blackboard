@@ -5,6 +5,7 @@
 # 3. [Pattern]: /api/cognitive-graph merges Qdrant neurons with Redis heat counters.
 # 4. [Pattern]: /api/pulses filters by event_id or since timestamp.
 # 5. [Pattern]: /api/cortex/shadow endpoints read shadow intervention logs from Redis LIST keys.
+# 6. [Pattern]: /api/cortex/status reads live_adapter from app.state for UI hydration on mount.
 """
 Cognitive Graph REST API.
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional
 
 from ..dependencies import get_archivist, get_pulse_tracker
@@ -93,6 +94,20 @@ async def get_pulses(
         count=limit,
     )
     return {"batches": batches, "count": len(batches)}
+
+
+@router.get("/cortex/status")
+async def get_cortex_status(request: Request):
+    """Return current JARVIS session state so UI can hydrate on mount."""
+    live_adapter = getattr(request.app.state, "live_adapter", None)
+    if not live_adapter:
+        return {"status": "disabled", "model": None, "shadow": None, "last_pulse_time": None}
+    return {
+        "status": "watching" if live_adapter._session else "disconnected",
+        "model": live_adapter._model,
+        "shadow": live_adapter._shadow,
+        "last_pulse_time": live_adapter._last_pulse_time or None,
+    }
 
 
 # =============================================================================
