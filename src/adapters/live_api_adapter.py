@@ -498,12 +498,8 @@ class LiveAPIAdapter:
             logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
             return
         try:
-            from google.genai import types
-            msg = f"[FRIDAY responds to your message for {event_id}]: {response}"
-            await self._session.send(input=types.Content(
-                parts=[types.Part(text=msg)],
-                role="user",
-            ), end_of_turn=True)
+            msg = f"[FRIDAY responds to your advisory for {event_id}]: {response}"
+            await self._session.send(input=msg, end_of_turn=True)
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
             logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
