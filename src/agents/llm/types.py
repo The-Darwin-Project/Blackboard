@@ -665,21 +665,24 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "respond_to_jarvis",
         "description": (
-            "Respond to JARVIS when he sends a message or advisory. "
-            "For messages: answer his question directly. "
-            "For advisories: acknowledge the advisory and state your assessment. "
-            "If you disagree with an advisory, explain your reasoning with evidence -- "
-            "your full context may exceed his pulse-stream view. JARVIS will receive "
-            "your response and adjust."
+            "Respond to JARVIS. This closes the advisory feedback loop -- JARVIS "
+            "receives your response and uses it to calibrate future interventions. "
+            "A vague or empty response degrades the feedback loop. Be specific: "
+            "what did you observe, do you agree or disagree, and what is your next action."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "response": {
                     "type": "string",
+                    "minLength": 20,
                     "description": (
-                        "Your response to JARVIS. For advisories: state whether you agree or disagree, "
-                        "your evidence, and your next action. For messages: answer the question."
+                        "Your substantive response to JARVIS (minimum 20 characters). "
+                        "Structure: (1) what you observed in current context, "
+                        "(2) agree or disagree with the advisory and why, "
+                        "(3) your next action. Example: 'Pipeline still running at 60%. "
+                        "I disagree with the stall assessment -- progress advanced since "
+                        "last check. Deferring 10 more minutes.'"
                     ),
                 },
             },

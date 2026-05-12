@@ -3289,7 +3289,15 @@ class Brain:
             return True
 
         elif function_name == "respond_to_jarvis":
-            response_text = args.get("response", "")
+            response_text = args.get("response", "").strip()
+            if len(response_text) < 20:
+                result_text = (
+                    "Response too short. JARVIS needs to understand your reasoning. "
+                    "State: (1) what you observed, (2) whether you agree or disagree "
+                    "with the advisory, and (3) your next action. Try again."
+                )
+                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
+                return True
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
