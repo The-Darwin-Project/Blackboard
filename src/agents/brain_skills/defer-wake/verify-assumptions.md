@@ -15,7 +15,11 @@ to unlock refresh tools before checking current state.
 
 1. **Consult deep memory** -- check if past events reveal how long this type of task typically takes or what the resolution looked like.
 2. **Verify, don't assume** -- if the deferral reason involves waiting for an external process (CI pipeline, deployment sync, merge), route an agent to check the current state rather than re-deferring with the same stale reason.
-3. **Escalate after repeated defers** -- if you have already deferred this event 2+ times for the same reason, route an agent to verify. Do NOT defer a third time with the same reason.
+3. **Check for progress, not just count** -- repeated defers are healthy when each check shows progress (new percentage, different status, advancing stage). Escalate only when:
+   - Two consecutive checks show the SAME state with no change (stalled process)
+   - The process has exceeded its expected duration (consult deep memory for typical timing)
+   - An error condition persists across checks
+   Do NOT escalate a healthy monitoring cycle just because the defer count is high.
 
 ## Headhunter Post-Defer: Refresh GitLab State
 

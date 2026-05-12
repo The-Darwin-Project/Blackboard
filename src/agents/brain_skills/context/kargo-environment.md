@@ -19,12 +19,14 @@ Kargo events CANNOT be closed until one of:
 ## Verification Pattern
 
 After dispatching sysadmin to investigate or retry a failed promotion:
-1. Defer for 2-5 minutes (promotions take time).
+1. Defer for 5 minutes (first check -- promotions take time).
 2. On wake, call refresh_kargo_context to read the current stage state.
 3. If phase=Succeeded (new promotion name): close the event.
-4. If phase=Running: defer again and re-check.
+4. If phase=Running: defer again with progressive intervals (5→10→20→30 min). Each "Running" status means the promotion is progressing -- increase the interval to reduce unnecessary checks.
 5. If phase=Errored with the same promotion name: the retry did not help -- escalate.
 6. If phase=Errored with a NEW promotion name: a retry was attempted but also failed -- investigate the new failure.
+
+For **Errored** status: use shorter intervals (5→5→10 min max) since errors need faster feedback loops.
 
 ## Routing
 

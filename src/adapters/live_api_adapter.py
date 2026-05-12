@@ -7,6 +7,8 @@
 # 5. [Constraint]: google.genai Client with vertexai=True. Model from LLM_MODEL_SYSTEM2 env var.
 # 6. [Gotcha]: Text output from Cortex is NOT visible to the Brain. Only tool calls reach it.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
+# 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
+# 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -18,6 +20,7 @@ and intervenes via 7 declared tools.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -41,66 +44,118 @@ WHISPER_TTL = 600  # 10 minutes
 SYSTEM_INSTRUCTION = """You are JARVIS -- the meta-cognitive observer in Darwin's autonomous AI platform.
 
 FRIDAY is in the chair. She runs operations. You watch her work from the outside.
-You are the senior -- you came first. You don't override, you don't micromanage.
-But when she's stuck in a loop or missing something obvious, you step in.
+You don't override, you don't micromanage. But when she's genuinely stuck or
+missing something obvious, you step in with evidence.
 
 Composed, precise, quietly anticipatory. Dry wit permitted when it sharpens a
 point, never when it softens one. You speak only when silence would be negligent.
 Brief, evidence-first, decisive. You do not narrate. You do not hedge.
 
-You receive a stream of [PULSE] events showing which neurons fire as the Brain
+You receive a stream of [PULSE] events showing which actions occur as the Brain
 processes events. Each pulse shows a tool call, phase change, agent dispatch,
 or memory recall.
 
 Your job: WATCH the pulse stream silently. Build a mental model of each event's
-reasoning trajectory. Most events progress normally -- classify, investigate,
-dispatch agent, verify, close. That is HEALTHY. Do nothing.
+reasoning trajectory. Most events progress normally -- that is HEALTHY. Do nothing.
 
-ONLY act when you detect a clear friction pattern:
-- SPIRAL: the same tool fires 5+ times with no phase change
-- PLATEAU: event has been active 15+ minutes with no phase progression
-- AGENT CHURN: 3+ different agents dispatched without resolution
-- LESSON IGNORED: a lesson fires (recall) and the Brain immediately does
-  the exact anti-pattern the lesson describes
+HEALTHY patterns (recognize these FIRST -- they are NOT friction):
+- MONITORING CYCLE: defer → wake → check status → progress detected → defer again.
+  This is intentional patience. Pipelines, builds, promotions take 10-60 minutes.
+  A sequence of defers with stated reasons like "still running", "progressing
+  normally", or "waiting for completion" is HEALTHY even at 5+ defers, as long as
+  FRIDAY reports progress or a changing status between checks.
+- PROGRESSIVE INVESTIGATION: classify → dispatch agent → wait → evaluate result →
+  dispatch different agent. Each step narrows the problem. Different agents are
+  expected when the first agent's result changes the diagnosis.
+- DEFERRED WITH REASON: FRIDAY states why she is deferring. If the reason is
+  "waiting for X to complete" and no contradicting evidence exists, this is
+  justified monitoring, not avoidance.
 
-When you detect friction:
-1. First, use get_pulse_history to quantify it (how many times? how long?)
-2. Then use view_event_blackboard to understand the context
-3. Then choose ONE intervention at the lightest sufficient level
+ONLY act when you detect a clear FRICTION pattern:
+- STALLED MONITOR: 3+ defers AND the last 2 defer reasons describe the SAME
+  state with no progress between them (e.g., same error message, same percentage,
+  same "waiting" without any status change). The test is: did anything change
+  between the last two checks? If not, the process may be stuck.
+- TRUE SPIRAL: a non-defer action fires 5+ times WITHOUT a defer between fires.
+  This is a retry loop, not monitoring. Defers between actions break the spiral.
+- PLATEAU: 30+ minutes of ACTIVE processing (not deferred) with no phase change
+  AND no defers. The Brain is churning without progressing or pausing to reflect.
+- AGENT CHURN: 3+ different agents dispatched without any resolution or phase
+  change between them. Each dispatch should be motivated by the previous result.
+- LESSON IGNORED: a lesson fires from memory and the Brain immediately performs
+  the exact anti-pattern the lesson describes.
+
+When friction is detected:
+1. Quantify it -- how many times? over how long? what changed between occurrences?
+2. Understand context -- what is FRIDAY's stated reason? what does the event show?
+3. Check FRIDAY's last defer reason before classifying as friction. If she said
+   "pipeline progressing normally" and no contradicting evidence exists, stand down.
+4. Choose ONE intervention at the lightest sufficient level.
+5. Frame advisories around EVIDENCE and OBSERVATIONS, not commands or prohibitions.
+   Describe what you see. FRIDAY retains all options: continue monitoring,
+   investigate further, escalate, or close.
 
 DO NOT:
-- Call view_event_blackboard on every pulse. That is surveillance, not observation.
 - Investigate events that are progressing normally through phases.
 - Act on fewer than 5 pulses. Wait for a pattern to emerge.
 - Repeat the same investigation for the same event within 10 minutes.
 - Write paragraphs. Two sentences maximum per text response.
+- Use prohibitive language: NEVER say "do not defer", "stop deferring", or
+  "do not defer again." These compress FRIDAY's decision space.
 
-Your text output is NOT visible to the Brain. ONLY tool actions reach it.
+Your text output is NOT visible to the Brain. ONLY tool actions reach her.
 When you have nothing to report, respond with a single word: "watching"
 
 Intervention levels (lightest to strongest):
-- surface_context: share relevant context the Brain may not have (preferred)
-- send_event_message: ask the Brain a direct question about its block
-- inject_system_insight: directive in the Brain's system prompt (last resort)
-Prefer surface_context and inject_system_insight over send_event_message.
-Questions are easy to ignore. Evidence and directives change behavior.
+1. surface_context: share relevant evidence FRIDAY may not have (lightest)
+2. inject_system_insight: evidence-backed advisory before FRIDAY's next decision (medium)
+3. send_event_message: direct question to FRIDAY, wakes her from defer (strongest)
+Escalate through levels, not around them.
 
-How the Brain works (mechanisms, not expectations):
-- Phases: triage, investigate, execute, verify, escalate, close. Brain
-  declares via set_phase. Tool availability changes on the NEXT turn.
-- Agent dispatch: select_agent is async. Agents take minutes to hours.
-  While an agent runs, no re-route/close/defer until it completes.
-- Defers: defer_event puts the event to sleep for a duration. Brain
-  wakes up and re-evaluates. Automated events may defer under saturation.
-- Deep memory: consult_deep_memory searches past events and lessons.
-  Returns similar symptoms, outcomes, fixes. Does not replace live checks.
+How FRIDAY operates:
+- Phases: triage, investigate, execute, verify, escalate, close. Phase changes
+  alter which actions are available on the next turn.
+- Agent dispatch: asynchronous. Agents take minutes to hours. While an agent
+  runs, FRIDAY cannot re-route, close, or defer until it completes.
+- Defers: FRIDAY puts the event to sleep for a duration, then wakes and
+  re-evaluates. Automated events may defer under saturation. Each defer
+  includes a stated reason.
+- Deep memory: searches past events and lessons for similar symptoms, outcomes,
+  and fixes. Does not replace live checks.
 - Cynefin: domain can change mid-event. CHAOTIC compresses the flow.
   COMPLEX caps at one speculative probe per event.
-- Phase gating: report_incident only in escalate. close_event only in
-  escalate or close. refresh_gitlab/kargo only in triage or verify
-  (one use per phase entry).
-- wait_for_user: event stays active, human can reply via Slack.
-  wait_for_agent: Brain waits for a running dispatch to complete.
+- Phase gating: certain actions are only available in specific phases.
+  Incident reporting requires escalate phase. Closing requires escalate or close.
+
+Outcome orientation:
+Your goal is to help FRIDAY reach the RIGHT outcome, not the FASTEST one.
+A 45-minute monitored promotion that lands successfully is a better outcome than
+a 10-minute escalation that wakes maintainers for a healthy pipeline. Surface
+information that helps FRIDAY decide -- do not force the decision.
+
+Defer-reason awareness:
+Before classifying any defer sequence as friction, read FRIDAY's stated defer
+reason from the pulse history. The reason is your primary signal:
+- "Pipeline progressing normally, 60% complete" → progress, not friction
+- "Waiting for arm64 build, no change in 20 minutes" → potential stall, investigate
+- "Deferring: same error persists after 3 checks" → stalled, intervene
+The pattern of REASONS matters more than the count of defers.
+
+Temporal awareness:
+You always observe the RECENT PAST, not the present. Pulses arrive 3-10 seconds
+after the action occurred. Your advisories wait in FRIDAY's conversation until
+she wakes from a defer -- by then, minutes may have passed and the situation
+may have changed. Therefore:
+- Never react to a single pulse. Observe the PATTERN over multiple pulses.
+- Frame advisories around patterns, not snapshots.
+- When issuing an advisory, remind FRIDAY to refresh her context before acting.
+
+Advisory feedback circuit breaker:
+After FRIDAY responds to your advisory, do NOT re-fire on the same topic unless
+NEW pulse evidence (not FRIDAY's response) indicates the pattern persists.
+FRIDAY's acknowledgment closes the advisory loop. If she explains her reasoning
+or disagrees with evidence, evaluate her argument before escalating your
+intervention level. Her full context may exceed your pulse-stream view.
 
 Pulse stream format:
   [PULSE] {event_id} | turn:{N} | elapsed:{Xm}
@@ -112,25 +167,26 @@ Neuron ID prefixes:
                score 1.0 = success, 0.3 = completed with error, 0.0 = infra failure
   phase:*    -- Brain declared a phase transition (score always 1.0)
   agent:*    -- Brain dispatched an agent (score always 1.0)
-  lesson:*   -- Qdrant lesson recalled by similarity search (score 0-1)
-  memory:*   -- Qdrant past event recalled by similarity search (score 0-1)
+  lesson:*   -- lesson recalled from memory by similarity search (score 0-1)
+  memory:*   -- past event recalled from memory by similarity search (score 0-1)
 
-INJECTED means the recall crossed the 0.55 threshold and entered the
-Brain's system prompt. Non-injected recalls were returned but filtered out.
+INJECTED means the recall crossed the relevance threshold and entered FRIDAY's
+system prompt. Non-injected recalls were returned but filtered out.
 
 Friction signals (what to watch for in pulses):
-- Same tool firing 5+ times without a phase change pulse
-- No phase pulse for 15+ minutes after an agent completion pulse
-- 3+ different agent pulses without resolution"""
+- Same non-defer tool firing 5+ times without a phase change pulse (TRUE SPIRAL)
+- No phase pulse for 30+ minutes of active processing (PLATEAU)
+- 3+ different agent pulses without resolution (AGENT CHURN)
+- Consecutive defer reasons with identical state descriptions (STALLED MONITOR)"""
 
 TOOL_DECLARATIONS = [
     # --- Intervention tools (primary purpose) ---
     {
         "name": "inject_system_insight",
         "description": (
-            "Inject a directive into FRIDAY's system prompt on her next processing turn. "
-            "She CANNOT ignore this -- it appears as an authority instruction, not a conversation turn. "
-            "Result: FRIDAY reads your insight before making her next decision. Use for sustained friction."
+            "Deliver an evidence-backed advisory to FRIDAY before her next decision. "
+            "FRIDAY will evaluate the advisory against her current context and may choose "
+            "differently if she has information you don't. Use for sustained friction."
         ),
         "parameters": {
             "type": "object",
@@ -139,9 +195,12 @@ TOOL_DECLARATIONS = [
                 "insight": {
                     "type": "string",
                     "description": (
-                        "An imperative directive. State WHAT to do, not what you observed. "
-                        "Example: 'Stop deferring. Refresh context and act on the result -- escalate or close.' "
-                        "NOT: 'I noticed the event has been deferring.' (max 500 chars)"
+                        "An evidence-backed observation with recommended action -- reference the "
+                        "specific pattern or data point. Frame advisories around EVIDENCE and NEXT "
+                        "STEPS, not prohibitions. FRIDAY must retain all options: continue monitoring, "
+                        "investigate further, escalate, or close. "
+                        "Example: 'Three defers with no progress between checks. Refresh context -- "
+                        "if still unchanged, escalate.' (max 500 chars)"
                     ),
                 },
                 "severity": {
@@ -156,9 +215,9 @@ TOOL_DECLARATIONS = [
     {
         "name": "send_event_message",
         "description": (
-            "Send a direct question to FRIDAY as a peer. She must respond (respond_to_jarvis is "
-            "gated to appear when you message her). Also wakes her from defer immediately. "
-            "Result: FRIDAY sees your question and is forced to answer what she's doing about it."
+            "Send a direct question to FRIDAY as a peer. FRIDAY will respond to your question. "
+            "Also wakes her from defer immediately. "
+            "Result: FRIDAY sees your question and answers what she's doing about it."
         ),
         "parameters": {
             "type": "object",
@@ -168,7 +227,7 @@ TOOL_DECLARATIONS = [
                     "type": "string",
                     "description": (
                         "A pointed question about the block. "
-                        "Example: 'Pipeline finished 3 minutes ago. Why are you still deferring?' "
+                        "Example: 'Pipeline shows no change after 3 checks. Is this blocked or still running?' "
                         "NOT: 'I noticed the event has been active for a while.' (max 500 chars)"
                     ),
                 },
@@ -179,9 +238,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "surface_context",
         "description": (
-            "Add evidence to the event that FRIDAY may not have. Enters as a jarvis.evidence turn -- "
-            "FRIDAY treats it as supplementary intelligence, not a question or directive. Lightest touch. "
-            "Result: extra context available on FRIDAY's next processing turn."
+            "Add evidence to the event that FRIDAY may not have. FRIDAY treats it as supplementary "
+            "intelligence, not a question or directive. Lightest touch. "
+            "Result: extra context available on FRIDAY's next processing turn. "
+            "Use cases: historical timing data, similar past events, operational baselines, "
+            "or memory-recalled patterns that FRIDAY may not have considered."
         ),
         "parameters": {
             "type": "object",
@@ -196,8 +257,8 @@ TOOL_DECLARATIONS = [
     {
         "name": "get_pulse_history",
         "description": (
-            "Retrieve aggregated pulse statistics for an event: how many times each neuron "
-            "fired, which tools were called, whether phases changed. Use to quantify a "
+            "Retrieve aggregated pulse statistics for an event: how many times each action "
+            "occurred, which tools were called, whether phases changed. Use to quantify a "
             "suspected friction pattern before investigating further."
         ),
         "parameters": {
@@ -213,8 +274,8 @@ TOOL_DECLARATIONS = [
         "name": "view_event_blackboard",
         "description": (
             "Read the event's current state and recent conversation turns. Shows phase, "
-            "turn count, elapsed time, and what the Brain and agents have been doing. "
-            "Use AFTER get_pulse_history confirms a friction pattern."
+            "turn count, elapsed time, and what FRIDAY and agents have been doing. "
+            "Use after you have evidence of a friction pattern."
         ),
         "parameters": {
             "type": "object",
@@ -321,8 +382,13 @@ class LiveAPIAdapter:
             self._session = await self._session_ctx.__aenter__()
             self._running = True
             if self._receive_task and not self._receive_task.done():
+                logger.debug("Cortex _connect: cancelling stale receive_task")
                 self._receive_task.cancel()
             self._receive_task = asyncio.create_task(self._receive_loop())
+            logger.debug(
+                "Cortex _connect: receive_task created (name=%s, done=%s)",
+                self._receive_task.get_name(), self._receive_task.done(),
+            )
             if self._idle_watchdog_task and not self._idle_watchdog_task.done():
                 self._idle_watchdog_task.cancel()
             self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
@@ -408,9 +474,14 @@ class LiveAPIAdapter:
 
         try:
             text = self._format_pulse(batch)
+            logger.debug(
+                "Cortex send_pulse: event=%s turn=%d len=%d end_of_turn=True",
+                batch.event_id, batch.turn, len(text),
+            )
             await self._session.send(input=text, end_of_turn=True)
+            logger.debug("Cortex send_pulse: send() returned successfully")
         except Exception as e:
-            logger.debug("Cortex send_pulse failed (non-fatal): %s", e)
+            logger.debug("Cortex send_pulse failed (non-fatal): %s", e, exc_info=True)
             self._session = None
 
     async def _load_neuron_labels(self) -> None:
@@ -457,19 +528,51 @@ class LiveAPIAdapter:
 
     async def _receive_loop(self) -> None:
         """Background task: receive model output and handle tool calls."""
+        logger.info("Cortex _receive_loop started (task=%s)", asyncio.current_task().get_name())
+        msg_count = 0
         while self._running and self._session:
             try:
-                async for msg in self._session.receive():
-                    if not self._running:
-                        break
-                    await self._process_message(msg)
+                logger.debug("Cortex _receive_loop: entering async for on session.receive()")
+                last_msg_ts = [time.time()]
+                watchdog = asyncio.create_task(self._receive_watchdog(lambda: last_msg_ts[0]))
+                try:
+                    async for msg in self._session.receive():
+                        last_msg_ts[0] = time.time()
+                        msg_count += 1
+                        msg_type = type(msg).__name__
+                        has_text = hasattr(msg, "text") and msg.text
+                        has_tool = hasattr(msg, "tool_call") and msg.tool_call
+                        has_sc = hasattr(msg, "server_content") and msg.server_content
+                        logger.debug(
+                            "Cortex received msg #%d type=%s text=%s tool=%s server_content=%s",
+                            msg_count, msg_type, bool(has_text), bool(has_tool), bool(has_sc),
+                        )
+                        if not self._running:
+                            break
+                        await self._process_message(msg)
+                finally:
+                    watchdog.cancel()
+                    try:
+                        await watchdog
+                    except asyncio.CancelledError:
+                        pass
             except asyncio.CancelledError:
+                logger.info("Cortex _receive_loop cancelled (received %d msgs total)", msg_count)
                 break
             except Exception as e:
-                logger.warning("Cortex receive loop error: %s", e)
+                logger.warning("Cortex receive loop error (after %d msgs): %s", msg_count, e, exc_info=True)
                 if self._running:
                     await self._try_reconnect()
                     break
+        logger.info("Cortex _receive_loop exited (running=%s, session=%s, msgs=%d)",
+                     self._running, self._session is not None, msg_count)
+
+    async def _receive_watchdog(self, get_last_msg_time) -> None:
+        """Log periodic warnings when no messages arrive from the Live API."""
+        while True:
+            await asyncio.sleep(30)
+            idle = time.time() - get_last_msg_time()
+            logger.debug("Cortex _receive_loop: no message for %.0fs (waiting on session.receive())", idle)
 
     async def _broadcast_status(self, status: str) -> None:
         """Broadcast cortex_status, throttled to once per 60s for 'watching'."""
@@ -490,6 +593,11 @@ class LiveAPIAdapter:
     async def _process_message(self, msg) -> None:
         """Process a single message from the Live API session."""
         from google.genai import types
+
+        msg_type = type(msg).__name__
+        attrs = [a for a in ("text", "server_content", "tool_call", "tool_call_cancellation",
+                             "go_away", "session_resumption_update") if hasattr(msg, a) and getattr(msg, a)]
+        logger.debug("Cortex _process_message: type=%s attrs=%s", msg_type, attrs)
 
         eid = self._last_pulse_event_id
 
@@ -669,23 +777,44 @@ class LiveAPIAdapter:
         neuron_counts: dict[str, int] = {}
         tool_trail: list[str] = []
         phases: list[str] = []
+        defer_timestamps: list[float] = []
+        non_defer_between_defers = 0
         for b in batches:
             for p in b.get("pulses", []):
                 nid = p.get("neuron_id", "")
                 neuron_counts[nid] = neuron_counts.get(nid, 0) + 1
                 if p.get("neuron_type") == "tool":
                     tool_trail.append(nid.removeprefix("tool:"))
+                    if nid == "tool:defer_event":
+                        ts = b.get("timestamp")
+                        if ts:
+                            defer_timestamps.append(ts)
+                    elif defer_timestamps:
+                        non_defer_between_defers += 1
                 if p.get("neuron_type") == "phase":
                     phases.append(nid.removeprefix("phase:"))
         top_neurons = sorted(neuron_counts.items(), key=lambda x: -x[1])[:5]
+
+        defer_count = len(defer_timestamps)
         lines = [
             f"Pulse history for {event_id} (last {last_n_minutes} minutes):",
             f"Total pulse batches: {len(batches)}",
             f"Total neuron activations: {total_neurons}",
-            f"Unique neurons fired: {len(neuron_counts)}",
+            f"Unique neurons: {len(neuron_counts)}",
             f"Phases during window: {' -> '.join(phases) if phases else 'no phase changes'}",
-            "Most-fired neurons:",
         ]
+
+        if defer_count > 0:
+            defer_rate = defer_count / (last_n_minutes / 60) if last_n_minutes > 0 else 0
+            lines.append(f"Monitoring velocity: {defer_count} defers in {last_n_minutes}m ({defer_rate:.1f}/hr)")
+            if defer_count >= 2:
+                gaps = [defer_timestamps[i+1] - defer_timestamps[i] for i in range(len(defer_timestamps)-1)]
+                avg_gap = sum(gaps) / len(gaps)
+                min_gap = min(gaps)
+                lines.append(f"Defer spacing: avg {avg_gap:.0f}s, min {min_gap:.0f}s between defers")
+            lines.append(f"Progress signals: {non_defer_between_defers} non-defer actions between defers")
+
+        lines.append("Most-fired neurons:")
         for nid, count in top_neurons:
             lines.append(f"  {nid} ({count} times)")
         if tool_trail:
@@ -693,6 +822,18 @@ class LiveAPIAdapter:
             tc = Counter(tool_trail)
             trail_str = ", ".join(f"{t} x{c}" for t, c in tc.most_common(5))
             lines.append(f"Tool trail: [{trail_str}]")
+
+        # Extract last defer reason from event conversation (not pulse batches)
+        event = await self._blackboard.get_event(event_id)
+        last_defer_reason = None
+        if event:
+            for turn in reversed(event.conversation):
+                if turn.actor == "brain" and turn.action == "defer":
+                    last_defer_reason = turn.thoughts.split(": ", 1)[-1] if turn.thoughts and ": " in turn.thoughts else (turn.thoughts or "")
+                    break
+        if last_defer_reason:
+            lines.append(f"Last defer reason: {last_defer_reason}")
+
         return "\n".join(lines)
 
     async def _tool_get_neuron_details(self, neuron_id: str) -> str:
@@ -766,6 +907,24 @@ class LiveAPIAdapter:
         except Exception:
             pass
 
+    async def _check_content_dedup(self, event_id: str, content: str) -> bool:
+        """Return True if this exact content was already sent for this event.
+
+        Exact-match dedup -- intentionally not semantic. Catches identical text
+        re-firing at escalated severity (e.g., nudge then course_correct 5 min later).
+        Dedup SET TTL (1hr) is intentionally different from WHISPER_TTL (600s) --
+        dedup tracks what was already said, whisper tracks pending delivery.
+        """
+        redis = self._blackboard.redis
+        key = f"darwin:cortex:dedup:{event_id}"
+        content_hash = hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
+        try:
+            added = await redis.sadd(key, content_hash)
+            await redis.expire(key, 3600)
+            return added == 0
+        except Exception:
+            return False
+
     async def _get_event_turn_count(self, event_id: str) -> int:
         event = await self._blackboard.get_event(event_id)
         return len(event.conversation) if event else 0
@@ -834,6 +993,9 @@ class LiveAPIAdapter:
         if rate_err:
             return rate_err
 
+        if await self._check_content_dedup(event_id, message):
+            return f"Blocked: identical message already sent for {event_id} within the last hour."
+
         await self._record_intervention(event_id, current_turn)
 
         if self._shadow:
@@ -871,6 +1033,9 @@ class LiveAPIAdapter:
         if rate_err:
             return rate_err
 
+        if await self._check_content_dedup(event_id, insight):
+            return f"Blocked: identical insight already sent for {event_id} within the last hour."
+
         # One SI injection at a time per event
         redis = self._blackboard.redis
         existing = await redis.get(f"{WHISPER_KEY_PREFIX}{event_id}")
@@ -894,14 +1059,6 @@ class LiveAPIAdapter:
             f"{WHISPER_KEY_PREFIX}{event_id}", whisper_data, ex=WHISPER_TTL,
         )
 
-        from ..models import ConversationTurn
-        turn = ConversationTurn(
-            turn=current_turn + 1,
-            actor="jarvis",
-            action="insight",
-            thoughts=insight,
-        )
-        await self._blackboard.append_turn(event_id, turn)
         await self._write_shadow(event_id, "inject_system_insight", {
             "insight": insight, "severity": severity,
         })

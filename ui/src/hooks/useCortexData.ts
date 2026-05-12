@@ -138,7 +138,7 @@ export function useCortexWhispers() {
 }
 
 const SPIRAL_THRESHOLD = 5;
-const PLATEAU_SECONDS = 300;
+const PLATEAU_SECONDS = 1800;
 
 export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): FrictionIndicator[] {
   return useMemo(() => {
@@ -147,12 +147,12 @@ export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): F
 
     const indicators: FrictionIndicator[] = [];
 
-    // Spiral: same tool neuron fires 5+ times with no phase pulse
+    // Spiral: same non-defer tool neuron fires 5+ times with no phase pulse
     const toolCounts = new Map<string, number>();
     let hasPhase = false;
     for (const b of eventBatches) {
       for (const p of b.pulses) {
-        if (p.neuron_type === 'tool') toolCounts.set(p.neuron_id, (toolCounts.get(p.neuron_id) ?? 0) + 1);
+        if (p.neuron_type === 'tool' && p.neuron_id !== 'tool:defer_event') toolCounts.set(p.neuron_id, (toolCounts.get(p.neuron_id) ?? 0) + 1);
         if (p.neuron_type === 'phase') hasPhase = true;
       }
     }
@@ -165,12 +165,13 @@ export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): F
       }
     }
 
-    // Plateau: has pulses but no phase neuron in last 5 minutes
+    // Plateau: active processing (not deferred) with no phase change
     const now = Date.now() / 1000;
-    const recentPhase = eventBatches.some(
-      b => b.timestamp > now - PLATEAU_SECONDS && b.pulses.some(p => p.neuron_type === 'phase'),
+    const activeBatches = eventBatches.filter(
+      b => b.timestamp > now - PLATEAU_SECONDS && !b.pulses.some(p => p.neuron_id === 'tool:defer_event'),
     );
-    if (eventBatches.length > 0 && !recentPhase) {
+    const recentPhase = activeBatches.some(b => b.pulses.some(p => p.neuron_type === 'phase'));
+    if (activeBatches.length > 0 && !recentPhase) {
       indicators.push({ pattern: 'plateau', label: 'Plateau', color: 'amber' });
     }
 

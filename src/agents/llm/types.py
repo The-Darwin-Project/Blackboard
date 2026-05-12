@@ -661,20 +661,26 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["check_condition"],
         },
     },
-    # --- JARVIS response (gated: only when unanswered jarvis.message exists) ---
+    # --- JARVIS response (gated: when unanswered jarvis.message or jarvis.insight exists) ---
     {
         "name": "respond_to_jarvis",
         "description": (
-            "MANDATORY when a jarvis.message turn exists in the conversation. "
-            "JARVIS is your senior observer -- when he asks a question, you answer. "
-            "State what you are doing about the issue he raised and what your next action is."
+            "Respond to JARVIS when he sends a message or advisory. "
+            "For messages: answer his question directly. "
+            "For advisories: acknowledge the advisory and state your assessment. "
+            "If you disagree with an advisory, explain your reasoning with evidence -- "
+            "your full context may exceed his pulse-stream view. JARVIS will receive "
+            "your response and adjust."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "response": {
                     "type": "string",
-                    "description": "Your answer to JARVIS: what you are doing about it and your next step",
+                    "description": (
+                        "Your response to JARVIS. For advisories: state whether you agree or disagree, "
+                        "your evidence, and your next action. For messages: answer the question."
+                    ),
                 },
             },
             "required": ["response"],

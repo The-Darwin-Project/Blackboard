@@ -894,6 +894,10 @@ class Brain:
         notify_tools = {"notify_user_slack"}
         if brain_phase not in ("escalate", "close"):
             active_tools = [t for t in active_tools if t["name"] not in notify_tools]
+        else:
+            maintainer_emails = self._resolve_maintainer_enum(event)
+            if maintainer_emails:
+                active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
 
         close_tools = {"close_event", "notify_gitlab_result"}
         if brain_phase not in ("escalate", "close"):
@@ -963,10 +967,10 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
-        # === JARVIS response gate: only when unanswered jarvis.message exists ===
+        # === JARVIS response gate: when unanswered jarvis.message or jarvis.insight exists ===
         has_unanswered_jarvis = False
         for t in reversed(event.conversation):
-            if t.actor == "jarvis" and t.action == "message":
+            if t.actor == "jarvis" and t.action in ("message", "insight"):
                 has_unanswered_jarvis = True
                 break
             if t.actor == "brain" and t.action == "respond_jarvis":
@@ -1553,7 +1557,7 @@ class Brain:
             resolved_contents.append(lesson_block)
 
         # Cortex (System 2) insight injection -- GETDEL is atomic, no race
-        cortex_block = await self._get_pending_cortex_insight(event.id)
+        cortex_block = await self._get_pending_cortex_insight(event.id, event)
         if cortex_block:
             resolved_contents.append(cortex_block)
 
@@ -1629,7 +1633,7 @@ class Brain:
         )
         return "\n".join(lines)
 
-    async def _get_pending_cortex_insight(self, event_id: str) -> str | None:
+    async def _get_pending_cortex_insight(self, event_id: str, event: "EventDocument | None" = None) -> str | None:
         """Read and clear any pending Cortex insight for this event (GETDEL = atomic)."""
         try:
             redis = self.blackboard.redis
@@ -1640,6 +1644,9 @@ class Brain:
             data = _json.loads(raw)
             insight = data.get("insight", "")
             severity = data.get("severity", "nudge")
+            issued_ts = data.get("timestamp") or time.time()
+            age_s = max(0, int(time.time() - issued_ts))
+            age_str = f"{age_s // 60}m {age_s % 60}s" if age_s > 0 else "just now"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="jarvis",
@@ -1647,11 +1654,16 @@ class Brain:
                 thoughts=f"[{severity}] {insight}",
             )
             await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Cortex insight consumed for {event_id} (severity={severity})")
+            if event:
+                event.conversation.append(turn)
+            logger.info(f"Cortex insight consumed for {event_id} (severity={severity}, age={age_str})")
             return (
-                f"## CORTEX INSIGHT\n"
-                f"Severity: {severity}\n\n"
-                f"{insight}"
+                f"## JARVIS ADVISORY\n"
+                f"Severity: {severity} | Issued {age_str} ago\n\n"
+                f"{insight}\n\n"
+                f"Your context may have changed since this advisory was issued. "
+                f"Refresh your context before acting on it.\n"
+                f"Use respond_to_jarvis to acknowledge or explain your reasoning."
             )
         except Exception as e:
             logger.debug(f"Cortex insight check failed (non-fatal): {e}")
@@ -2059,6 +2071,8 @@ class Brain:
             else:
                 text = turn.thoughts or ""
         elif turn.actor == "aligner" and turn.action != "evidence":
+            text = turn.evidence or turn.thoughts or ""
+        elif turn.actor == "jarvis" and turn.action == "evidence":
             text = turn.evidence or turn.thoughts or ""
         else:
             text = turn.result or turn.thoughts or ""
@@ -2742,22 +2756,18 @@ class Brain:
             else:
                 try:
                     event_doc = await self.blackboard.get_event(event_id)
-                    if "@" in user_email:
-                        user_info = await slack_channel._app.client.users_lookupByEmail(email=user_email)
-                        slack_user_id = user_info["user"]["id"]
-                    elif user_email.startswith("U") and user_email.isalnum():
-                        slack_user_id = user_email
-                    elif event_doc and event_doc.slack_user_id:
-                        logger.warning(f"notify_user_slack: invalid user_email '{user_email}', falling back to event slack_user_id {event_doc.slack_user_id}")
-                        slack_user_id = event_doc.slack_user_id
-                    else:
-                        result_text = f"Invalid user identifier: '{user_email}'. Provide an email address or Slack user ID (U...)."
+                    slack_user_id = await self._resolve_slack_user(
+                        slack_channel, user_email, event_doc,
+                    )
+                    if not slack_user_id:
+                        result_text = f"Could not resolve Slack user for '{user_email}'. No valid maintainer found."
                         turn = ConversationTurn(
                             turn=(await self._next_turn_number(event_id)),
                             actor="brain", action="notify",
                             thoughts=result_text, response_parts=response_parts,
                         )
                         await self._append_and_broadcast(event_id, turn)
+                        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
                         return True
                     dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
                     dm_channel = dm["channel"]["id"]
@@ -3306,6 +3316,99 @@ class Brain:
             if hasattr(target, '__self__') and hasattr(target.__self__, '_app'):
                 return target.__self__
         return None
+
+    async def _resolve_slack_user(
+        self, slack_channel, user_email: str, event_doc,
+    ) -> str | None:
+        """Resolve a user_email to a Slack user ID with maintainer fallback.
+
+        Resolution order:
+        1. Direct lookup if user_email contains @ or starts with U
+        2. On users_not_found: try each email from the maintainer list
+        3. Fall back to event.slack_user_id
+        """
+        if user_email.startswith("U") and user_email.isalnum():
+            return user_email
+
+        async def _lookup(email: str) -> str | None:
+            try:
+                info = await slack_channel._app.client.users_lookupByEmail(email=email)
+                return info["user"]["id"]
+            except Exception as exc:
+                logger.debug("Slack user lookup failed for '%s': %s", email, exc)
+                return None
+
+        if "@" in user_email:
+            uid = await _lookup(user_email)
+            if uid:
+                return uid
+            logger.warning(
+                "notify_user_slack: '%s' not found in Slack, trying maintainer fallback",
+                user_email,
+            )
+
+        maintainer_emails = self._resolve_maintainer_enum(event_doc) if event_doc else []
+        for fallback_email in maintainer_emails:
+            if "@" not in fallback_email:
+                continue
+            if fallback_email == user_email:
+                continue
+            uid = await _lookup(fallback_email)
+            if uid:
+                logger.info(
+                    "notify_user_slack: resolved via maintainer fallback '%s'",
+                    fallback_email,
+                )
+                return uid
+
+        if event_doc and event_doc.slack_user_id:
+            logger.warning(
+                "notify_user_slack: all lookups failed, using event slack_user_id %s",
+                event_doc.slack_user_id,
+            )
+            return event_doc.slack_user_id
+        return None
+
+    @staticmethod
+    def _resolve_maintainer_enum(event) -> list[str]:
+        """Extract valid maintainer emails from event evidence + static config.
+
+        Returns a deduplicated list the LLM must pick from (enum constraint).
+        Sources: evidence.gitlab_context.maintainer.emails, then HEADHUNTER_MAINTAINERS env.
+        """
+        emails: list[str] = []
+        evidence = getattr(getattr(event, "event", None), "evidence", None)
+        if evidence:
+            gl = getattr(evidence, "gitlab_context", None) or {}
+            if isinstance(gl, dict):
+                maintainer = gl.get("maintainer", {})
+                emails.extend(maintainer.get("emails", []))
+        if not emails:
+            static = os.getenv("HEADHUNTER_MAINTAINERS", "")
+            emails = [e.strip() for e in static.split(",") if e.strip()]
+        if event and getattr(event, "slack_user_id", None):
+            emails.append(event.slack_user_id)
+        seen: set[str] = set()
+        return [e for e in emails if e and e not in seen and not seen.add(e)]
+
+    @staticmethod
+    def _inject_maintainer_enum(tools: list[dict], emails: list[str]) -> list[dict]:
+        """Deep-copy notify_user_slack schema and constrain user_email to an enum."""
+        import copy
+        result = []
+        for tool in tools:
+            if tool["name"] != "notify_user_slack":
+                result.append(tool)
+                continue
+            patched = copy.deepcopy(tool)
+            props = patched["input_schema"]["properties"]["user_email"]
+            props["enum"] = emails
+            props["description"] = (
+                f"Maintainer to notify. MUST be one of: {', '.join(emails)}. "
+                "Do NOT invent or guess email addresses."
+            )
+            result.append(patched)
+        return result
 
     def _get_smartsheet_incident_adapter(self):
         """Lazy-init Smartsheet incident adapter from env vars."""
