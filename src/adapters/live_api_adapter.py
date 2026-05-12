@@ -10,8 +10,11 @@
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
-#     best-effort. All errors non-fatal. _idle_watchdog uses _close_session() (not _disconnect())
-#     to avoid self-await deadlock. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
+#     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
+# 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
+#     handoff (events active -> detach old session, _connect() new one, report on old, close old).
+#     Handoff nulls _idle_watchdog_task BEFORE _connect() to prevent self-cancellation.
+#     _generating_report is always cleared via try/finally, even if _connect() fails.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -1102,26 +1105,84 @@ class LiveAPIAdapter:
     # -------------------------------------------------------------------------
 
     async def _idle_watchdog(self) -> None:
-        """Close session after 5 minutes of no pulses. Generates report before closing."""
+        """Two paths: handoff (events active) or shift-end (no events)."""
         while self._running and self._session:
             await asyncio.sleep(60)
-            if self._last_pulse_time and (time.time() - self._last_pulse_time) > 300:
-                logger.info("Cortex idle for 5 minutes -- generating session report")
+            if not self._last_pulse_time or (time.time() - self._last_pulse_time) <= 300:
+                continue
+
+            try:
+                active_ids = await self._blackboard.get_active_events()
+            except Exception as e:
+                logger.warning("get_active_events failed (retrying next cycle): %s", e)
+                continue
+
+            if not active_ids:
+                # --- SHIFT END: no events, clock out ---
+                logger.info("Cortex idle + 0 active events -- shift end")
                 try:
                     if self._session_report_enabled:
                         await self._generate_session_report()
                 except Exception as e:
-                    logger.warning("Session report failed (non-fatal): %s", e)
+                    logger.warning("Shift-end report failed (non-fatal): %s", e)
                 finally:
-                    logger.info("Cortex session report complete -- closing session")
                     await self._close_session()
                 break
 
+            # --- HANDOFF: events still active, swap sessions ---
+            logger.info(
+                "Cortex session handoff: %d active events, starting new session",
+                len(active_ids),
+            )
+            old_session = self._session
+            old_ctx = self._session_ctx
+            old_receive = self._receive_task
+
+            # F-2: Set flag BEFORE detach to block pulses immediately
+            self._generating_report = True
+
+            if old_receive and not old_receive.done():
+                old_receive.cancel()
+                try:
+                    await old_receive
+                except asyncio.CancelledError:
+                    pass
+
+            # Detach old session so _connect() doesn't close it
+            self._session = None
+            self._session_ctx = None
+            self._receive_task = None
+            self._idle_watchdog_task = None
+            self._seen_neurons.clear()
+            self._text_buffer.clear()
+
+            try:
+                await self._connect()
+            except Exception as e:
+                logger.error("Handoff _connect() failed: %s -- attempting recovery", e)
+            finally:
+                self._generating_report = False
+
+            # F-3: try/finally ensures old_ctx cleanup even on CancelledError
+            try:
+                if self._session_report_enabled and old_session:
+                    try:
+                        await self._generate_session_report_on(old_session)
+                    except Exception as e:
+                        logger.warning("Handoff report failed (non-fatal): %s", e)
+            finally:
+                if old_ctx:
+                    try:
+                        await old_ctx.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+            logger.info("Session handoff complete")
+            break
+
     async def _generate_session_report(self) -> None:
-        """Ask the Live LLM for a session observation report, pipe to Archivist."""
+        """Wrapper: generate report on self._session. Manages _generating_report flag."""
         if not self._session:
             return
-
         self._generating_report = True
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
@@ -1129,13 +1190,19 @@ class LiveAPIAdapter:
                 await self._receive_task
             except asyncio.CancelledError:
                 pass
+        try:
+            await self._generate_session_report_on(self._session)
+        finally:
+            self._generating_report = False
 
+    async def _generate_session_report_on(self, session: object) -> None:
+        """Generate report on a specific session (may differ from self._session during handoff)."""
         report = ""
         try:
-            await self._session.send(input=SESSION_REPORT_PROMPT, end_of_turn=True)
+            await session.send(input=SESSION_REPORT_PROMPT, end_of_turn=True)
             parts: list[str] = []
             async with asyncio.timeout(45):
-                async for msg in self._session.receive():
+                async for msg in session.receive():
                     if hasattr(msg, "text") and msg.text:
                         parts.append(msg.text)
                     if hasattr(msg, "server_content") and getattr(
@@ -1146,16 +1213,15 @@ class LiveAPIAdapter:
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            logger.warning("Cortex session report timed out (45s)")
+            logger.warning("Session report timed out (45s)")
         except Exception as e:
-            logger.warning("Cortex session report generation failed: %s", e)
+            logger.warning("Session report generation failed: %s", e)
 
         if not report or report.lower().startswith("no significant"):
-            logger.info("Cortex session report: nothing noteworthy")
+            logger.info("Session report: nothing noteworthy")
             return
 
-        logger.info("Cortex session report generated (%d chars)", len(report))
-
+        logger.info("Session report generated (%d chars)", len(report))
         try:
             await self._broadcast({
                 "type": "cortex_session_report",
@@ -1164,7 +1230,6 @@ class LiveAPIAdapter:
             })
         except Exception:
             pass
-
         await self._process_session_report(report)
 
     async def _process_session_report(self, report: str) -> None:
@@ -1261,7 +1326,7 @@ class LiveAPIAdapter:
 
     async def _try_reconnect(self) -> None:
         """Fast reconnect if recent pulse activity, otherwise stay idle."""
-        if not self._running:
+        if not self._running or self._generating_report:
             return
         self._session = None
         if self._last_pulse_time and (time.time() - self._last_pulse_time) < 300:
