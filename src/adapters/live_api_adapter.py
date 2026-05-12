@@ -392,6 +392,7 @@ class LiveAPIAdapter:
         self._last_status_broadcast: float = 0
         self._last_was_watching: bool = False
         self._session_report_enabled = os.getenv("SYSTEM2_SESSION_REPORT", "true").lower() == "true"
+        self._generating_report = False
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -461,36 +462,8 @@ class LiveAPIAdapter:
                 await self._idle_watchdog_task
             except asyncio.CancelledError:
                 pass
-        if self._receive_task and not self._receive_task.done():
-            self._receive_task.cancel()
-            try:
-                await self._receive_task
-            except asyncio.CancelledError:
-                pass
-        if self._session:
-            try:
-                ctx = getattr(self, "_session_ctx", None)
-                if ctx:
-                    await ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
-            self._session = None
-            self._session_ctx = None
-        self._seen_neurons.clear()
-        self._text_buffer.clear()
-        self._last_was_watching = False
-        self._last_status_broadcast = 0
-        try:
-            await self._broadcast({
-                "type": "cortex_status",
-                "status": "disconnected",
-                "model": self._model,
-                "shadow": self._shadow,
-                "timestamp": time.time(),
-            })
-        except Exception:
-            pass
-        logger.info("Cortex session closed (idle)")
+        await self._cleanup_session_state()
+        logger.info("Cortex session disconnected")
 
     async def receive_brain_response(self, event_id: str, response: str) -> None:
         """Receive a direct response from FRIDAY into the Live API session."""
@@ -509,6 +482,8 @@ class LiveAPIAdapter:
         self._last_pulse_event_id = batch.event_id
         self._last_pulse_time = time.time()
 
+        if self._generating_report:
+            return
         if not self._session:
             await self._connect()
         if not self._session:
@@ -799,7 +774,6 @@ class LiveAPIAdapter:
         recent = event.conversation[-10:]
         action_lines = []
         for t in recent:
-            ts_str = ""
             action_lines.append(
                 f"  [{t.actor}.{t.action}] {(t.thoughts or t.result or '')[:120]}"
             )
@@ -1142,6 +1116,7 @@ class LiveAPIAdapter:
         if not self._session:
             return
 
+        self._generating_report = True
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
             try:
@@ -1240,13 +1215,8 @@ class LiveAPIAdapter:
         except Exception as e:
             logger.warning("Session report processing failed (non-fatal): %s", e)
 
-    async def _close_session(self) -> None:
-        """Close the Live API session without cancelling _idle_watchdog_task.
-
-        Used by _idle_watchdog to avoid self-await deadlock -- _disconnect()
-        cancels and awaits the watchdog task, which deadlocks when called
-        from inside the watchdog itself.
-        """
+    async def _cleanup_session_state(self) -> None:
+        """Shared session teardown: cancel receive, close ctx, reset state, broadcast."""
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
             try:
@@ -1266,6 +1236,7 @@ class LiveAPIAdapter:
         self._text_buffer.clear()
         self._last_was_watching = False
         self._last_status_broadcast = 0
+        self._generating_report = False
         try:
             await self._broadcast({
                 "type": "cortex_status",
@@ -1276,6 +1247,10 @@ class LiveAPIAdapter:
             })
         except Exception:
             pass
+
+    async def _close_session(self) -> None:
+        """Close session from within _idle_watchdog (avoids self-await deadlock)."""
+        await self._cleanup_session_state()
         logger.info("Cortex session closed (idle)")
 
     async def _try_reconnect(self) -> None:
