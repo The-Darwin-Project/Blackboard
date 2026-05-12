@@ -3,7 +3,7 @@
 // 1. [Pattern]: Scrolling log of cortex_thinking WS messages. Auto-scrolls to bottom.
 // 2. [Constraint]: Color-coded by content_type: text=gray, tool_call=blue, tool_result=green.
 // 3. [Pattern]: Shows placeholder when System 2 is not active (no entries received).
-// 4. [Pattern]: Mode indicator derived from whisper presence -- [shadow] if no whispers, [live] if whispers exist.
+// 4. [Pattern]: Mode indicator derived from cortexStatus prop. Per-entry [shadow] badge from backend payload.
 import { useEffect, useRef, type FC } from 'react';
 import { Brain, Wrench, CheckCircle, Shield, Zap } from 'lucide-react';
 import type { CortexThinkingMessage, CortexStatusMessage, WhisperMessage } from './types';
@@ -23,8 +23,7 @@ const TYPE_STYLES: Record<string, { color: string; icon: typeof Brain }> = {
 
 const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], cortexStatus, className }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const hasWhispers = whispers.length > 0;
-  const mode = hasWhispers ? 'live' : 'shadow';
+  const isLive = cortexStatus?.shadow === false || whispers.length > 0;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -59,15 +58,15 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
       <div ref={containerRef} className="flex-1 overflow-y-auto text-xs font-mono space-y-0.5">
       {/* Mode indicator */}
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/50 mb-1">
-        {mode === 'shadow' ? (
-          <>
-            <Shield size={10} className="text-amber-500" />
-            <span className="text-amber-500/80 text-[10px]">[shadow] Observing only</span>
-          </>
-        ) : (
+        {isLive ? (
           <>
             <Zap size={10} className="text-blue-400" />
             <span className="text-blue-400/80 text-[10px]">[live] Active interventions</span>
+          </>
+        ) : (
+          <>
+            <Shield size={10} className="text-amber-500" />
+            <span className="text-amber-500/80 text-[10px]">[shadow] Observing only</span>
           </>
         )}
       </div>

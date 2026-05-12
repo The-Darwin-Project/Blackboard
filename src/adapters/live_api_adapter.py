@@ -9,6 +9,9 @@
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
+# 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
+#     best-effort. All errors non-fatal. _idle_watchdog uses _close_session() (not _disconnect())
+#     to avoid self-await deadlock. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -179,6 +182,47 @@ Friction signals (what to watch for in pulses):
 - 3+ different agent pulses without resolution (AGENT CHURN)
 - Consecutive defer reasons with identical state descriptions (STALLED MONITOR)"""
 
+SESSION_REPORT_PROMPT = """Your session is ending. Before closing, produce a structured
+observation report documenting what you saw during this session.
+
+## Format
+
+### Events Observed
+List each event you tracked: event_id, phase progression, elapsed time,
+and whether it resolved or is still active.
+
+### Friction Patterns Detected
+For each friction pattern you detected (spiral, plateau, agent churn):
+- Event ID
+- Pattern type and evidence (e.g., "tool:set_phase fired 7 times in 4 minutes")
+- Whether the friction resolved on its own or required intervention
+
+### Interventions Attempted
+For each intervention you made or considered:
+- Event ID
+- Tool used (surface_context / send_event_message / inject_system_insight)
+- What you observed that triggered it
+- Perceived impact (did the Brain's behavior change afterward?)
+- If shadow mode: what you WOULD have done and why
+
+### Suggested Lessons
+New patterns worth remembering for future sessions:
+- Title (short, abstract -- no event IDs or service names)
+- Pattern: what the correct reasoning looks like
+- Anti-pattern: what the incorrect reasoning looks like
+- Keywords: 3-5 abstract terms
+
+### Memory Corrections
+Events where the Brain's classification or approach seemed wrong:
+- Event ID
+- What the Brain concluded (root_cause, fix_action)
+- What you believe the correct classification should be
+- Why (evidence from pulses)
+
+Respond with the full report as plain text. Do NOT use tool calls.
+If you observed nothing noteworthy, say "No significant observations."
+"""
+
 TOOL_DECLARATIONS = [
     # --- Intervention tools (primary purpose) ---
     {
@@ -347,6 +391,7 @@ class LiveAPIAdapter:
         self._client = None
         self._last_status_broadcast: float = 0
         self._last_was_watching: bool = False
+        self._session_report_enabled = os.getenv("SYSTEM2_SESSION_REPORT", "true").lower() == "true"
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -440,6 +485,7 @@ class LiveAPIAdapter:
                 "type": "cortex_status",
                 "status": "disconnected",
                 "model": self._model,
+                "shadow": self._shadow,
                 "timestamp": time.time(),
             })
         except Exception:
@@ -585,6 +631,7 @@ class LiveAPIAdapter:
                 "type": "cortex_status",
                 "status": status,
                 "model": self._model,
+                "shadow": self._shadow,
                 "timestamp": now,
             })
         except Exception:
@@ -1079,13 +1126,161 @@ class LiveAPIAdapter:
     # -------------------------------------------------------------------------
 
     async def _idle_watchdog(self) -> None:
-        """Close session after 5 minutes of no pulses."""
+        """Close session after 5 minutes of no pulses. Generates report before closing."""
         while self._running and self._session:
             await asyncio.sleep(60)
             if self._last_pulse_time and (time.time() - self._last_pulse_time) > 300:
-                logger.info("Cortex idle for 5 minutes -- closing session")
-                await self._disconnect()
+                logger.info("Cortex idle for 5 minutes -- generating session report")
+                try:
+                    if self._session_report_enabled:
+                        await self._generate_session_report()
+                except Exception as e:
+                    logger.warning("Session report failed (non-fatal): %s", e)
+                finally:
+                    logger.info("Cortex session report complete -- closing session")
+                    await self._close_session()
                 break
+
+    async def _generate_session_report(self) -> None:
+        """Ask the Live LLM for a session observation report, pipe to Archivist."""
+        if not self._session:
+            return
+
+        if self._receive_task and not self._receive_task.done():
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError:
+                pass
+
+        report = ""
+        try:
+            await self._session.send(input=SESSION_REPORT_PROMPT, end_of_turn=True)
+            parts: list[str] = []
+            async with asyncio.timeout(45):
+                async for msg in self._session.receive():
+                    if hasattr(msg, "text") and msg.text:
+                        parts.append(msg.text)
+                    if hasattr(msg, "server_content") and getattr(
+                        msg.server_content, "turn_complete", False
+                    ):
+                        break
+            report = "".join(parts).strip()
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning("Cortex session report timed out (45s)")
+        except Exception as e:
+            logger.warning("Cortex session report generation failed: %s", e)
+
+        if not report or report.lower().startswith("no significant"):
+            logger.info("Cortex session report: nothing noteworthy")
+            return
+
+        logger.info("Cortex session report generated (%d chars)", len(report))
+
+        try:
+            await self._broadcast({
+                "type": "cortex_session_report",
+                "report": report[:2000],
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+
+        await self._process_session_report(report)
+
+    async def _process_session_report(self, report: str) -> None:
+        """Pipe session report through Archivist extraction pipeline."""
+        try:
+            async with asyncio.timeout(120):
+                result = await self._archivist.extract_lessons(
+                    document=report[:50_000],
+                    context_notes="Auto-generated session observation report from Cortex (System 2). "
+                                 "Lessons should be stored as channel=experience (self-learned, 0.6x trust).",
+                )
+                if "error" in result:
+                    logger.warning("Session report extraction failed: %s", result["error"])
+                    return
+
+                lessons = result.get("lessons", [])
+                corrections = result.get("corrections", [])
+
+                stored = 0
+                for lesson in lessons:
+                    if not lesson.get("title") or not lesson.get("pattern"):
+                        continue
+                    lid = await self._archivist.store_lesson(
+                        title=lesson.get("title", ""),
+                        pattern=lesson.get("pattern", ""),
+                        anti_pattern=lesson.get("anti_pattern", ""),
+                        keywords=lesson.get("keywords", []),
+                        event_references=lesson.get("event_references", []),
+                        channel="experience",
+                    )
+                    if lid:
+                        stored += 1
+
+                corrected = 0
+                for c in corrections:
+                    ok = await self._archivist.correct_memory(
+                        event_id=c.get("event_id", ""),
+                        corrected_root_cause=c.get("corrected_root_cause", ""),
+                        corrected_fix_action=c.get("corrected_fix_action", ""),
+                        correction_note=c.get("correction_note", "Cortex session report"),
+                    )
+                    if ok:
+                        corrected += 1
+
+                logger.info(
+                    "Session report processed: %d/%d lessons stored (experience), "
+                    "%d/%d corrections applied",
+                    stored, len(lessons), corrected, len(corrections),
+                )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning("Session report processing timed out (120s, non-fatal)")
+        except Exception as e:
+            logger.warning("Session report processing failed (non-fatal): %s", e)
+
+    async def _close_session(self) -> None:
+        """Close the Live API session without cancelling _idle_watchdog_task.
+
+        Used by _idle_watchdog to avoid self-await deadlock -- _disconnect()
+        cancels and awaits the watchdog task, which deadlocks when called
+        from inside the watchdog itself.
+        """
+        if self._receive_task and not self._receive_task.done():
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError:
+                pass
+        if self._session:
+            try:
+                ctx = getattr(self, "_session_ctx", None)
+                if ctx:
+                    await ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._session = None
+            self._session_ctx = None
+        self._seen_neurons.clear()
+        self._text_buffer.clear()
+        self._last_was_watching = False
+        self._last_status_broadcast = 0
+        try:
+            await self._broadcast({
+                "type": "cortex_status",
+                "status": "disconnected",
+                "model": self._model,
+                "shadow": self._shadow,
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+        logger.info("Cortex session closed (idle)")
 
     async def _try_reconnect(self) -> None:
         """Fast reconnect if recent pulse activity, otherwise stay idle."""

@@ -96,6 +96,24 @@ async def get_pulses(
     return {"batches": batches, "count": len(batches)}
 
 
+@router.get("/cortex/activity")
+async def get_cortex_activity(
+    event_id: Optional[str] = Query(None, description="Filter by event ID"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Return recent pulse batches for UI backfill on mount/reconnect."""
+    pulse_tracker = await get_pulse_tracker()
+    if not pulse_tracker:
+        raise HTTPException(503, "PulseTracker not enabled (PULSE_TRACKING_ENABLED=false)")
+
+    batches = await pulse_tracker.get_batches(
+        event_id=event_id,
+        count=limit,
+        latest=True,
+    )
+    return {"batches": batches, "count": len(batches)}
+
+
 @router.get("/cortex/status")
 async def get_cortex_status(request: Request):
     """Return current JARVIS session state so UI can hydrate on mount."""

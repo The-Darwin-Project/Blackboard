@@ -46,6 +46,7 @@ export interface CortexStatusMessage {
   type: 'cortex_status';
   status: 'watching' | 'disconnected';
   model: string;
+  shadow: boolean;
   timestamp: number;
 }
 

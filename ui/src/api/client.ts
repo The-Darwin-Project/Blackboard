@@ -628,3 +628,9 @@ export async function getEventPulses(eventId: string): Promise<PulseBatch[]> {
   const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/pulses?event_id=${encodeURIComponent(eventId)}`);
   return resp.batches;
 }
+
+export async function getCortexActivity(eventId?: string): Promise<PulseBatch[]> {
+  const params = eventId ? `?event_id=${encodeURIComponent(eventId)}` : '';
+  const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/cortex/activity${params}`);
+  return resp.batches;
+}

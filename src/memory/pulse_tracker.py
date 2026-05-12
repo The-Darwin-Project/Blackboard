@@ -103,11 +103,21 @@ class PulseTracker:
         event_id: str | None = None,
         since: str | None = None,
         count: int = 200,
+        latest: bool = False,
     ) -> list[dict]:
-        """Read pulse log entries, optionally filtered by event_id or timestamp."""
+        """Read pulse log entries, optionally filtered by event_id or timestamp.
+
+        Args:
+            latest: If True, return the most recent `count` entries (uses XREVRANGE).
+                    If False (default), return entries from `since` forward (XRANGE).
+        """
         try:
-            start = since or "-"
-            entries = await self._redis.xrange(LOG_KEY, min=start, max="+", count=count)
+            if latest:
+                entries = await self._redis.xrevrange(LOG_KEY, max="+", min="-", count=count)
+                entries.reverse()
+            else:
+                start = since or "-"
+                entries = await self._redis.xrange(LOG_KEY, min=start, max="+", count=count)
             result = []
             for entry_id, fields in entries:
                 batch = json.loads(fields.get("batch", "{}"))

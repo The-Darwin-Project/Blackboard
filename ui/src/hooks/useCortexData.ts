@@ -5,8 +5,8 @@
 // 3. [Pattern]: usePulseStream accumulates batches in a ref to avoid re-renders on every pulse.
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useWSMessage } from '../contexts/WebSocketContext';
-import { getCognitiveGraph, getRecentPulses } from '../api/client';
+import { useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
+import { getCognitiveGraph, getCortexActivity, getRecentPulses } from '../api/client';
 import type {
   CognitiveGraphResponse, PulseBatch, CortexThinkingMessage,
   CortexShadowMessage, CortexStatusMessage, WhisperMessage, FrictionIndicator,
@@ -30,19 +30,42 @@ export function useRecentPulses() {
 
 export function usePulseStream() {
   const [batches, setBatches] = useState<PulseBatch[]>([]);
-  const initialLoaded = useRef(false);
+  const seenIds = useRef<Set<string>>(new Set());
 
-  // Load recent pulses on first mount (catch up on active events)
-  if (!initialLoaded.current) {
-    initialLoaded.current = true;
-    getRecentPulses(300).then(recent => {
-      if (recent.length > 0) setBatches(recent);
+  const backfill = useCallback(() => {
+    getCortexActivity().then(recent => {
+      if (recent.length === 0) return;
+      setBatches(prev => {
+        const merged = [...prev];
+        for (const b of recent) {
+          const id = b._stream_id || `${b.event_id}:${b.timestamp}`;
+          if (!seenIds.current.has(id)) {
+            seenIds.current.add(id);
+            merged.push(b);
+          }
+        }
+        if (seenIds.current.size > 500) {
+          const entries = [...seenIds.current];
+          seenIds.current = new Set(entries.slice(-300));
+        }
+        return merged.slice(-200);
+      });
     }).catch(() => {});
-  }
+  }, []);
+
+  // Backfill on mount
+  useEffect(() => { backfill(); }, [backfill]);
+
+  // Backfill on WS reconnect
+  useWSReconnect(backfill);
 
   useWSMessage(useCallback((msg) => {
     if (msg.type === 'pulse_batch' && msg.batch) {
-      setBatches(prev => [...prev.slice(-200), msg.batch as PulseBatch]);
+      const batch = msg.batch as PulseBatch;
+      const id = batch._stream_id || `${batch.event_id}:${batch.timestamp}`;
+      if (seenIds.current.has(id)) return;
+      seenIds.current.add(id);
+      setBatches(prev => [...prev.slice(-200), batch]);
     }
   }, []));
 
@@ -103,12 +126,13 @@ export function useCortexStatus() {
   useEffect(() => {
     fetch('/api/cortex/status')
       .then(r => r.json())
-      .then((data: { status?: string; model?: string }) => {
+      .then((data: { status?: string; model?: string; shadow?: boolean }) => {
         if (data.status && data.status !== 'disabled') {
           setStatus({
             type: 'cortex_status',
             status: data.status as 'watching' | 'disconnected',
             model: data.model ?? '',
+            shadow: data.shadow ?? false,
             timestamp: Date.now() / 1000,
           });
         }
