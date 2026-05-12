@@ -50,6 +50,12 @@ export interface CortexStatusMessage {
   timestamp: number;
 }
 
+export interface CortexHeartbeatMessage {
+  type: 'cortex_heartbeat';
+  heartbeat: 'spike' | 'wave';
+  timestamp: number;
+}
+
 export interface CortexShadowMessage {
   type: 'cortex_shadow';
   event_id: string;

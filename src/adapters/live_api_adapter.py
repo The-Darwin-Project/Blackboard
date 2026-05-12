@@ -632,6 +632,12 @@ class LiveAPIAdapter:
             self._text_buffer = []
             if full_text and full_text.lower() in ("watching", "watching.", "ok", "ok."):
                 await self._broadcast_status("watching")
+                heartbeat_type = "spike" if full_text.lower().startswith("ok") else "wave"
+                await self._broadcast({
+                    "type": "cortex_heartbeat",
+                    "heartbeat": heartbeat_type,
+                    "timestamp": time.time(),
+                })
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False

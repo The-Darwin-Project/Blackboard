@@ -5,7 +5,7 @@
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
 import { useState, useMemo, useCallback, type FC } from 'react';
 import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus } from '../../hooks/useCortexData';
+import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import CortexGraph from './CortexGraph';
 import CortexLiveFeed from './CortexLiveFeed';
@@ -20,6 +20,7 @@ const CortexPage: FC = () => {
   const shadowEntries = useCortexShadow();
   const whisperEntries = useCortexWhispers();
   const cortexStatus = useCortexStatus();
+  const { heartbeatType, tick: heartbeatTick } = useHeartbeat();
   const { data: activeEvents } = useActiveEvents();
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
@@ -133,6 +134,8 @@ const CortexPage: FC = () => {
                   shadowEntries={shadowEntries}
                   whisperEntries={whisperEntries}
                   cortexStatus={cortexStatus}
+                  heartbeatType={heartbeatType}
+                  heartbeatTick={heartbeatTick}
                   glowingIds={glowingIds}
                   onClose={() => setSelectedEventId(null)}
                 />
@@ -145,6 +148,8 @@ const CortexPage: FC = () => {
                 <CortexLiveFeed
                   entries={thinkingEntries}
                   cortexStatus={cortexStatus}
+                  heartbeatType={heartbeatType}
+                  heartbeatTick={heartbeatTick}
                   className="h-full"
                 />
               </div>

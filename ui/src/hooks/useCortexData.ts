@@ -9,7 +9,8 @@ import { useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
 import { getCognitiveGraph, getCortexActivity, getRecentPulses } from '../api/client';
 import type {
   CognitiveGraphResponse, PulseBatch, CortexThinkingMessage,
-  CortexShadowMessage, CortexStatusMessage, WhisperMessage, FrictionIndicator,
+  CortexShadowMessage, CortexStatusMessage, CortexHeartbeatMessage,
+  WhisperMessage, FrictionIndicator,
 } from '../components/cortex/types';
 
 export function useCortexGraph() {
@@ -147,6 +148,28 @@ export function useCortexStatus() {
   }, []));
 
   return status;
+}
+
+export function useHeartbeat() {
+  const [heartbeatType, setHeartbeatType] = useState<'spike' | 'wave' | null>(null);
+  const [tick, setTick] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useWSMessage(useCallback((msg) => {
+    if (msg.type === 'cortex_heartbeat') {
+      const hb = msg as unknown as CortexHeartbeatMessage;
+      setHeartbeatType(hb.heartbeat);
+      setTick(t => t + 1);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setHeartbeatType(null), 3000);
+    }
+  }, []));
+
+  useEffect(() => {
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, []);
+
+  return { heartbeatType, tick };
 }
 
 export function useCortexWhispers() {

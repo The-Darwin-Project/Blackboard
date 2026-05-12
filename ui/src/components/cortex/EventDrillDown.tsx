@@ -35,12 +35,14 @@ interface EventDrillDownProps {
   shadowEntries: CortexShadowMessage[];
   whisperEntries: WhisperMessage[];
   cortexStatus?: CortexStatusMessage | null;
+  heartbeatType?: 'spike' | 'wave' | null;
+  heartbeatTick?: number;
   glowingIds: Set<string>;
   onClose: () => void;
 }
 
 const EventDrillDown: FC<EventDrillDownProps> = ({
-  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, cortexStatus, onClose,
+  eventId, allNeurons, liveBatches, thinkingEntries, shadowEntries, whisperEntries, cortexStatus, heartbeatType, heartbeatTick, onClose,
 }) => {
   const { data: historicalBatches } = useQuery({
     queryKey: ['event-pulses', eventId],
@@ -273,7 +275,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         {/* Live feed */}
         <section>
           <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Cortex Live Feed</h4>
-          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} className="max-h-40 bg-bg-tertiary rounded p-1" />
+          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} heartbeatType={heartbeatType} heartbeatTick={heartbeatTick} className="max-h-40 bg-bg-tertiary rounded p-1" />
         </section>
       </div>
     </div>
