@@ -502,16 +502,26 @@ class LiveAPIAdapter:
         self._last_pulse_time = time.time()
 
         if self._active_meta_event_id and batch.event_id != self._active_meta_event_id:
-            logger.info("Real pulse for %s -- closing meta-event %s", batch.event_id, self._active_meta_event_id)
-            try:
-                await self._blackboard.close_event(
-                    self._active_meta_event_id,
-                    summary="Auto-closed: real event activity resumed",
-                    close_reason="resolved",
-                )
-            except Exception as e:
-                logger.warning("Meta-event close failed (non-fatal): %s", e)
-            self._active_meta_event_id = None
+            meta_event = await self._blackboard.get_event(self._active_meta_event_id)
+            has_agent_work = meta_event and any(
+                t.action in ("route", "message") and t.actor == "brain"
+                for t in meta_event.conversation
+            )
+            if has_agent_work:
+                logger.info("Real pulse for %s -- meta-event %s has agent work, skipping auto-close",
+                            batch.event_id, self._active_meta_event_id)
+                self._active_meta_event_id = None
+            else:
+                logger.info("Real pulse for %s -- closing meta-event %s", batch.event_id, self._active_meta_event_id)
+                try:
+                    await self._blackboard.close_event(
+                        self._active_meta_event_id,
+                        summary="Auto-closed: real event activity resumed",
+                        close_reason="resolved",
+                    )
+                except Exception as e:
+                    logger.warning("Meta-event close failed (non-fatal): %s", e)
+                self._active_meta_event_id = None
 
         if self._generating_report:
             return
