@@ -1564,7 +1564,10 @@ class BlackboardState:
         for eid in await self.redis.smembers(self.EVENT_ACTIVE):
             data = await self.redis.get(f"{self.EVENT_PREFIX}{eid}")
             if data:
-                event = json.loads(data)
+                try:
+                    event = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
                 if event.get("source") == source:
                     return eid
         return None

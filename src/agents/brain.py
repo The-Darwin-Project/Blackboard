@@ -1381,7 +1381,7 @@ class Brain:
         flags["has_recent_closed"] = bool(recent_closed)
 
         mermaid = ""
-        if getattr(event, "subject_type", "service") != "kargo_stage":
+        if getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
             try:
                 mermaid = await self.blackboard.generate_mermaid()
             except Exception:
@@ -4338,7 +4338,7 @@ class Brain:
 
         service_meta = await self.blackboard.get_service(event.service)
         mermaid = ""
-        if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
+        if event.source not in ("headhunter", "jarvis") and getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
             try:
                 mermaid = await self.blackboard.generate_mermaid()
             except Exception as e:

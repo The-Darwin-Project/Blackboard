@@ -410,11 +410,13 @@ STATUS_EMOJI: dict[str, str] = {
 SUBJECT_EMOJI: dict[str, str] = {
     "service": "",
     "kargo_stage": ":kargo:",
+    "system": ":brain:",
 }
 
 SUBJECT_LABEL: dict[str, str] = {
     "service": "Service",
     "kargo_stage": "Stage",
+    "system": "System",
 }
 
 

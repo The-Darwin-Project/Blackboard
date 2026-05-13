@@ -1129,6 +1129,9 @@ class LiveAPIAdapter:
             self._active_meta_event_id = existing
             return None
 
+        import re
+        _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
+
         summary_lines = []
         for eid in active_ids[:10]:
             event = await self._blackboard.get_event(eid)
@@ -1139,13 +1142,8 @@ class LiveAPIAdapter:
             for t in event.conversation:
                 if t.action == "defer":
                     defer_count += 1
-                    thoughts = t.thoughts or ""
-                    if "900s" in thoughts:
-                        defer_total_s += 900
-                    elif "600s" in thoughts:
-                        defer_total_s += 600
-                    else:
-                        defer_total_s += 300
+                    m = _DEFER_DELAY_RE.match(t.thoughts or "")
+                    defer_total_s += int(m.group(1)) if m else 300
             elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
             last_defer = next(
                 (t.thoughts for t in reversed(event.conversation) if t.action == "defer"), ""
@@ -1341,6 +1339,7 @@ class LiveAPIAdapter:
         self._last_was_watching = False
         self._last_status_broadcast = 0
         self._generating_report = False
+        self._active_meta_event_id = None
         try:
             await self._broadcast({
                 "type": "cortex_status",

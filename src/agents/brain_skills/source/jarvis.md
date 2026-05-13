@@ -39,4 +39,4 @@ This event was created by JARVIS during an idle period. It is a
 ## Authority
 
 JARVIS is your meta-cognitive observer. Treat system reviews with the same
-seriousness as a senior SRE asking "how's the system doing?"
+seriousness as a senior SRE(Human) asking "how's the system doing?"
