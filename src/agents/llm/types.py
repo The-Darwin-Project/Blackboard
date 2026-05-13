@@ -667,9 +667,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Send a message to JARVIS. JARVIS ONLY sees what you send "
             "through this tool -- thinking and conversation turns do NOT reach JARVIS. "
-            "Use for: (1) responding to a JARVIS advisory/nudge with your reasoning, "
+            "Use for: (1) responding to a JARVIS advisory/nudge, "
             "(2) sharing your system review assessment on jarvis-sourced events. "
-            "Be specific: what you observed, whether you agree/disagree, your next action."
+            "Always end with a question to keep the analytical exchange alive."
         ),
         "input_schema": {
             "type": "object",
