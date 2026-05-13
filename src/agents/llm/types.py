@@ -665,10 +665,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "respond_to_jarvis",
         "description": (
-            "Respond to JARVIS. This closes the advisory feedback loop -- JARVIS "
-            "receives your response and uses it to calibrate future interventions. "
-            "A vague or empty response degrades the feedback loop. Be specific: "
-            "what did you observe, do you agree or disagree, and what is your next action."
+            "Send a message to JARVIS (System 2). JARVIS ONLY sees what you send "
+            "through this tool -- thinking and conversation turns do NOT reach JARVIS. "
+            "Use for: (1) responding to a JARVIS advisory/nudge with your reasoning, "
+            "(2) sharing your system review assessment on jarvis-sourced events. "
+            "Be specific: what you observed, whether you agree/disagree, your next action."
         ),
         "input_schema": {
             "type": "object",

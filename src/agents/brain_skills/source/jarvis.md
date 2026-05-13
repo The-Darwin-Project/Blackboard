@@ -12,24 +12,31 @@ This event was created by JARVIS during an idle period. It is a
 ## Protocol
 
 1. **Read the evidence carefully.** It contains a snapshot of all active/deferred events
-   with their ages, phases, defer counts, and last defer reasons.
+   with their ages, phases, defer counts, total defer time, and last defer reasons.
 
-2. **Think critically.** For each event listed:
+2. **Consult deep memory.** For each deferred event, check historical pipeline durations
+   and past outcomes for the same service.
+
+3. **Think critically.** For each event listed:
    - Is the defer reason still valid? (e.g., "pipeline running" for 45min)
    - Are any events stuck in the same phase too long?
    - Is there a pattern across events? (same service, same failure)
+   - Is the total defer time within historical norms?
 
-3. **Respond substantively.** Share your reasoning:
-   - "evt-X looks healthy -- pipeline takes 20-30min per deep memory"
-   - "evt-Y has deferred 5 times for the same reason -- might be stuck"
-   - "All events are routine, within expected defer windows"
+4. **Reply to JARVIS using `respond_to_jarvis`.** This is how JARVIS receives your
+   assessment. Thinking alone is not enough -- you MUST call `respond_to_jarvis`
+   with your analysis so JARVIS can read it and calibrate future interventions.
 
-4. **Act if needed.** If you identify something stuck:
-   - Consult deep memory for historical durations
+   Example: `respond_to_jarvis({ response: "1 event active (evt-X), deferred 3x
+   totaling 15min for pipeline. Deep memory shows 20-30min typical for this service.
+   Within expected window, no action needed." })`
+
+5. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state
    - Surface a concern to maintainers if genuinely broken
+   - You may act on the stuck event directly from this review context
 
-5. **Do NOT defer this event.** Engage immediately with the data.
+6. **Do NOT defer this event.** Engage immediately with the data.
 
 ## Close Protocol
 
@@ -39,4 +46,4 @@ This event was created by JARVIS during an idle period. It is a
 ## Authority
 
 JARVIS is your meta-cognitive observer. Treat system reviews with the same
-seriousness as a senior SRE(Human) asking "how's the system doing?"
+seriousness as a senior SRE asking "how's the system doing?"
