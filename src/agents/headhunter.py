@@ -341,7 +341,9 @@ class Headhunter:
             instructions_idx = description.index("### Bot Instructions")
             instructions = description[instructions_idx + len("### Bot Instructions"):].strip()
 
-            domain = "clear" if mr_type in ("Submodule Update", "Konflux Release") else "complicated"
+            # Structured bot MR: has a type header + bot instructions = CLEAR domain.
+            # No type header but has instructions = COMPLICATED (needs LLM assist).
+            domain = "clear" if mr_type else "complicated"
 
             safe_instructions = instructions.replace('"', "'")
             plan = (
