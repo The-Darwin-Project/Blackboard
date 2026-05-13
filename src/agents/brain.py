@@ -2080,6 +2080,12 @@ class Brain:
             text = turn.evidence or turn.thoughts or ""
         elif turn.actor == "jarvis" and turn.action == "evidence":
             text = turn.evidence or turn.thoughts or ""
+        elif turn.actor == "jarvis" and turn.action == "message":
+            text = (
+                f"## JARVIS DIRECT MESSAGE\n\n"
+                f"{turn.thoughts or turn.result or ''}\n\n"
+                f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
+            )
         else:
             text = turn.result or turn.thoughts or ""
             if text and turn.actor != "user":
