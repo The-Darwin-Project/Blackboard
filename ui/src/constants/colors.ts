@@ -10,11 +10,18 @@ export const ACTOR_COLORS: Record<string, string> = {
   architect: '#3b82f6',
   sysadmin: '#f59e0b',
   developer: '#10b981',
-  manager: '#06b6d4',  // Cyan -- Manager moderator (distinct from amber sysadmin)
-  qe: '#fb7185',      // Coral -- QE pair partner
-  flash: '#06b6d4',    // Cyan -- Manager moderator (alias for manager)
+  manager: '#06b6d4',
+  qe: '#fb7185',
+  flash: '#06b6d4',
   aligner: '#6b7280',
+  jarvis: '#14b8a6',   // Teal -- JARVIS meta-cognitive observer
   user: '#ec4899',
+};
+
+/** Display names for actors (backend uses short IDs, UI shows personas) */
+export const ACTOR_LABELS: Record<string, string> = {
+  brain: 'FRIDAY',
+  jarvis: 'JARVIS',
 };
 
 export const DOMAIN_COLORS = {
