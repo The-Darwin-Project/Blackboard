@@ -252,13 +252,18 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
           <section>
             <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Cortex Observations</h4>
             <div className="space-y-1">
-              {eventShadow.map((s, i) => (
-                <div key={`s-${i}`} className="text-[10px] text-amber-400/80 bg-amber-900/10 px-2 py-1 rounded">
-                  <span className="bg-amber-500/20 text-amber-400 text-[9px] px-1 py-0.5 rounded mr-1">[shadow]</span>
-                  <span className="font-semibold">{s.tool}</span>{' '}
-                  {(s.args?.message as string) ?? (s.args?.context as string) ?? (s.args?.insight as string) ?? JSON.stringify(s.args)}
-                </div>
-              ))}
+              {eventShadow.map((s, i) => {
+                const isShadow = (s as unknown as Record<string, unknown>).shadow !== false;
+                return (
+                  <div key={`s-${i}`} className={`text-[10px] px-2 py-1 rounded ${isShadow ? 'text-amber-400/80 bg-amber-900/10' : 'text-blue-400/80 bg-blue-900/10'}`}>
+                    <span className={`text-[9px] px-1 py-0.5 rounded mr-1 ${isShadow ? 'bg-amber-500/20 text-amber-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                      {isShadow ? '[shadow]' : '[live]'}
+                    </span>
+                    <span className="font-semibold">{s.tool}</span>{' '}
+                    {(s.args?.message as string) ?? (s.args?.context as string) ?? (s.args?.insight as string) ?? JSON.stringify(s.args)}
+                  </div>
+                );
+              })}
               {eventWhispers.map((w, i) => (
                 <div key={`w-${i}`} className={`text-[10px] px-2 py-1 rounded ${WHISPER_COLORS[w.severity]}`}>
                   <span className="bg-blue-500/20 text-blue-400 text-[9px] px-1 py-0.5 rounded mr-1">[live]</span>
