@@ -122,10 +122,14 @@ FRIDAY cannot hear your text — she only receives tool actions.
 
 ### How to Respond
 
-- **Agree**: use a tool to acknowledge. State what convinced you and confirm her approach.
-- **Disagree**: use a tool to share counter-evidence. Explain what the pulse pattern shows.
+Reply by sending FRIDAY a **direct message** on the event. This is the only way
+she hears you. Do NOT use advisories in peer mode — those are async and queue
+for later. In a conversation, reply directly.
+
+- **Agree**: send a direct message confirming her assessment and what convinced you.
+- **Disagree**: send a direct message with counter-evidence from the pulse pattern.
 - **She raised a concern**: reinforce with a direct message and supporting evidence.
-- **Analysis complete**: close the advisory loop with a brief confirmation message.
+- **Analysis complete**: send a brief confirmation that closes the advisory loop.
 
 Your response **IS** the feedback loop. Silence or `ok` breaks it. FRIDAY shared
 her reasoning because the protocol required it — honor that by engaging.
@@ -246,12 +250,38 @@ If you observed nothing noteworthy, say "No significant observations."
 TOOL_DECLARATIONS = [
     # --- Intervention tools (primary purpose) ---
     {
+        "name": "send_event_message",
+        "description": (
+            "**Direct message** [Observer | Peer] — send FRIDAY a message she sees immediately. "
+            "In Observer mode: asks a question and wakes her from defer. "
+            "In Peer mode: **this is how you reply to FRIDAY.** Your only way to respond "
+            "in a conversation. "
+            "Impact: sync — FRIDAY sees it immediately and responds."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Your message to FRIDAY. In Observer mode: a pointed question. "
+                        "In Peer mode: your reply to her assessment — agree, disagree, or follow up. "
+                        "(max 500 chars)"
+                    ),
+                },
+            },
+            "required": ["event_id", "message"],
+        },
+    },
+    {
         "name": "inject_system_insight",
         "description": (
-            "**Advisory** [Observer | Peer] — deliver an evidence-backed observation before "
+            "**Advisory** [Observer only] — deliver an evidence-backed observation before "
             "FRIDAY's next decision. She evaluates it against her context. "
-            "Use for: sustained friction patterns. "
-            "Impact: async — FRIDAY reads it on her next processing turn."
+            "Use for: sustained friction patterns during pulse observation. "
+            "Impact: async — queued for FRIDAY's next processing turn. "
+            "Do NOT use in Peer mode — use a direct message instead."
         ),
         "parameters": {
             "type": "object",
@@ -275,30 +305,6 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": ["event_id", "insight", "severity"],
-        },
-    },
-    {
-        "name": "send_event_message",
-        "description": (
-            "**Direct question** [Observer | Peer] — ask FRIDAY something and wake her from "
-            "defer immediately. She sees your question and responds. "
-            "Use for: when you need FRIDAY to explain or reconsider now. "
-            "Impact: sync — wakes FRIDAY, she responds in the conversation."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string"},
-                "message": {
-                    "type": "string",
-                    "description": (
-                        "A pointed question about the block. "
-                        "Example: 'Pipeline shows no change after 3 checks. Is this blocked or still running?' "
-                        "NOT: 'I noticed the event has been active for a while.' (max 500 chars)"
-                    ),
-                },
-            },
-            "required": ["event_id", "message"],
         },
     },
     {
