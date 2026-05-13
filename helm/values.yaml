@@ -400,6 +400,10 @@ smartsheet:
     sheetId: "" # Incident report sheet ID
     reporter: "" # Jira-valid email for incident reporter (e.g., team DL)
     reporterName: "" # Must match Jira display name for the reporter email
+    labels: "" # Comma-separated labels for incidents (multi-picklist column)
+    components: "" # Comma-separated components for incidents (multi-picklist column)
+    issueType: "" # Issue type for incidents (e.g., "Task", "Bug")
+    labelFilter: "" # Label to filter on when reading incidents back (UI list endpoint)
 # =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================

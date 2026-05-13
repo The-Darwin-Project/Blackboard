@@ -417,6 +417,22 @@ spec:
             - name: SMARTSHEET_INCIDENT_REPORTER_NAME
               value: {{ .Values.smartsheet.incident.reporterName | quote }}
             {{- end }}
+            {{- if .Values.smartsheet.incident.labels }}
+            - name: SMARTSHEET_INCIDENT_LABELS
+              value: {{ .Values.smartsheet.incident.labels | quote }}
+            {{- end }}
+            {{- if .Values.smartsheet.incident.components }}
+            - name: SMARTSHEET_INCIDENT_COMPONENTS
+              value: {{ .Values.smartsheet.incident.components | quote }}
+            {{- end }}
+            {{- if .Values.smartsheet.incident.issueType }}
+            - name: SMARTSHEET_INCIDENT_ISSUE_TYPE
+              value: {{ .Values.smartsheet.incident.issueType | quote }}
+            {{- end }}
+            {{- if .Values.smartsheet.incident.labelFilter }}
+            - name: SMARTSHEET_INCIDENT_LABEL_FILTER
+              value: {{ .Values.smartsheet.incident.labelFilter | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
