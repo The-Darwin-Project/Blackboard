@@ -24,6 +24,8 @@ import TopologyView from './components/ops/TopologyView';
 import MemoryPage from './components/memory/MemoryPage';
 import ShiftsPage from './components/ShiftsPage';
 import CortexPage from './components/cortex/CortexPage';
+import { lazy, Suspense } from 'react';
+const CortexDevPage = lazy(() => import('./components/cortex/CortexDevPage'));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -83,6 +85,7 @@ function App() {
         <AuthProvider>
           <Routes>
             <Route path="/callback" element={<AuthCallbackHandler />} />
+            <Route path="/cortex-dev" element={<Suspense fallback={<div>Loading...</div>}><CortexDevPage /></Suspense>} />
             <Route path="*" element={<AuthGate />} />
           </Routes>
         </AuthProvider>

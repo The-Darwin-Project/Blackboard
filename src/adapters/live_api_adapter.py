@@ -1192,7 +1192,8 @@ class LiveAPIAdapter:
         """Two paths: meta-event (events active) or shift-end (no events)."""
         while self._running and self._session:
             await asyncio.sleep(60)
-            if not self._last_pulse_time or (time.time() - self._last_pulse_time) <= 300:
+            idle_threshold = int(os.getenv("SYSTEM2_IDLE_SECONDS", "120"))
+            if not self._last_pulse_time or (time.time() - self._last_pulse_time) <= idle_threshold:
                 continue
 
             try:
