@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
+_DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
 SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 WHISPER_KEY_PREFIX = "darwin:whisper:"
 WHISPER_TTL = 600  # 10 minutes
@@ -1149,9 +1151,6 @@ class LiveAPIAdapter:
             self._active_meta_event_id = existing
             return None
 
-        import re
-        _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
-
         summary_lines = []
         for eid in active_ids[:10]:
             event = await self._blackboard.get_event(eid)
@@ -1228,7 +1227,7 @@ class LiveAPIAdapter:
             if self._active_meta_event_id:
                 continue
 
-            logger.info("Cortex idle 5min + %d active events -- creating system review", len(active_ids))
+            logger.info("Cortex idle %ds + %d active events -- creating system review", idle_threshold, len(active_ids))
             await self._create_system_review_event(active_ids)
 
     async def _generate_session_report(self) -> None:

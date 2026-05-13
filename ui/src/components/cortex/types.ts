@@ -62,6 +62,8 @@ export interface CortexShadowMessage {
   tool: string;
   args: Record<string, unknown>;
   timestamp: number;
+  shadow?: boolean;
+  delivered?: boolean;
 }
 
 export interface WhisperMessage {

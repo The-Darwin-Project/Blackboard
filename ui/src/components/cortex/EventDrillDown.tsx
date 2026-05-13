@@ -165,15 +165,15 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
       </div>
 
       {/* 3D Brain visualization */}
-      <div className="h-80 flex-shrink-0 relative">
+      <div className="h-56 flex-shrink-0 relative">
         <BrainCore className="rounded-none" />
       </div>
 
       {/* Details */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
+      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-4">
         {/* Tool trail */}
-        <section>
-          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Tool Trail</h4>
+        <section className="pb-3 border-b border-border/30">
+          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">Tool Trail</h4>
           <div className="flex flex-wrap gap-1">
             {toolTrail.map((t, i) => (
               <span key={i} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-tertiary text-[10px] text-slate-300 font-mono">
@@ -200,8 +200,8 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         )}
 
         {/* Pulse timeline */}
-        <section>
-          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Pulse Timeline</h4>
+        <section className="pb-3 border-b border-border/30">
+          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">Pulse Timeline</h4>
           <PulseTimeline
             batches={eventBatches}
             eventCreatedAt={eventBatches[0]?.timestamp}
@@ -250,37 +250,42 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         {/* Cortex observations (shadow + live whispers) */}
         {(eventShadow.length > 0 || eventWhispers.length > 0) && (
           <section>
-            <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Cortex Observations</h4>
-            <div className="space-y-1">
+            <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">Cortex Observations</h4>
+            <div className="space-y-2">
               {eventShadow.map((s, i) => {
-                const isShadow = (s as unknown as Record<string, unknown>).shadow !== false;
+                const isShadow = s.shadow !== false;
+                const content = (s.args?.message as string) ?? (s.args?.context as string) ?? (s.args?.insight as string) ?? JSON.stringify(s.args);
                 return (
-                  <div key={`s-${i}`} className={`text-[10px] px-2 py-1 rounded ${isShadow ? 'text-amber-400/80 bg-amber-900/10' : 'text-blue-400/80 bg-blue-900/10'}`}>
-                    <span className={`text-[9px] px-1 py-0.5 rounded mr-1 ${isShadow ? 'bg-amber-500/20 text-amber-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                      {isShadow ? '[shadow]' : '[live]'}
-                    </span>
-                    <span className="font-semibold">{s.tool}</span>{' '}
-                    {(s.args?.message as string) ?? (s.args?.context as string) ?? (s.args?.insight as string) ?? JSON.stringify(s.args)}
+                  <div key={`s-${i}`} className={`text-[11px] leading-relaxed px-2.5 py-2 rounded border ${isShadow ? 'text-amber-300/90 bg-amber-900/10 border-amber-500/20' : 'text-blue-300/90 bg-blue-900/10 border-blue-500/20'}`}>
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className={`text-[9px] px-1 py-0.5 rounded font-medium ${isShadow ? 'bg-amber-500/20 text-amber-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                        {isShadow ? 'shadow' : 'live'}
+                      </span>
+                      <span className="font-semibold text-[10px]">{s.tool}</span>
+                    </div>
+                    <p className="text-[10px] leading-snug opacity-90">{content}</p>
                   </div>
                 );
               })}
               {eventWhispers.map((w, i) => (
-                <div key={`w-${i}`} className={`text-[10px] px-2 py-1 rounded ${WHISPER_COLORS[w.severity]}`}>
-                  <span className="bg-blue-500/20 text-blue-400 text-[9px] px-1 py-0.5 rounded mr-1">[live]</span>
-                  <span className={`text-[9px] px-1 py-0.5 rounded mr-1 ${WHISPER_COLORS[w.severity]}`}>
-                    {w.severity}
-                  </span>
-                  {w.insight.slice(0, 150)}
+                <div key={`w-${i}`} className={`text-[11px] leading-relaxed px-2.5 py-2 rounded border ${WHISPER_COLORS[w.severity]} border-current/20`}>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="bg-blue-500/20 text-blue-400 text-[9px] px-1 py-0.5 rounded font-medium">live</span>
+                    <span className={`text-[9px] px-1 py-0.5 rounded font-medium ${WHISPER_COLORS[w.severity]}`}>
+                      {w.severity}
+                    </span>
+                  </div>
+                  <p className="text-[10px] leading-snug opacity-90">{w.insight}</p>
                 </div>
               ))}
             </div>
           </section>
         )}
 
-        {/* Live feed */}
+        {/* Live feed — no status bar here (parent already shows context) */}
         <section>
-          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1">Cortex Live Feed</h4>
-          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} heartbeatType={heartbeatType} heartbeatTick={heartbeatTick} className="max-h-40 bg-bg-tertiary rounded p-1" />
+          <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">JARVIS Stream</h4>
+          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} heartbeatType={heartbeatType} heartbeatTick={heartbeatTick} className="max-h-60 bg-bg-tertiary rounded" hideStatusBar />
         </section>
       </div>
     </div>

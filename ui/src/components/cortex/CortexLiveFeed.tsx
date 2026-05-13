@@ -16,6 +16,7 @@ interface CortexLiveFeedProps {
   heartbeatType?: 'spike' | 'wave' | null;
   heartbeatTick?: number;
   className?: string;
+  hideStatusBar?: boolean;
 }
 
 const TYPE_STYLES: Record<string, { color: string; icon: typeof Brain }> = {
@@ -24,7 +25,7 @@ const TYPE_STYLES: Record<string, { color: string; icon: typeof Brain }> = {
   tool_result: { color: 'text-emerald-400',  icon: CheckCircle },
 };
 
-const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], cortexStatus, heartbeatType, heartbeatTick, className }) => {
+const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], cortexStatus, heartbeatType, heartbeatTick, className, hideStatusBar }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const isLive = cortexStatus?.shadow === false || whispers.length > 0;
 
@@ -50,16 +51,16 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
   if (entries.length === 0 && whispers.length === 0) {
     return (
       <div className={`flex flex-col ${className ?? ''}`}>
-        {statusBar}
-        <CortexHeartbeat heartbeatType={heartbeatType ?? null} isWatching={isWatching} tick={heartbeatTick ?? 0} />
+        {!hideStatusBar && statusBar}
+        {!hideStatusBar && <CortexHeartbeat heartbeatType={heartbeatType ?? null} isWatching={isWatching} tick={heartbeatTick ?? 0} />}
       </div>
     );
   }
 
   return (
     <div className={`flex flex-col ${className ?? ''}`}>
-      <div className="flex-shrink-0">{statusBar}</div>
-      <CortexHeartbeat heartbeatType={heartbeatType ?? null} isWatching={isWatching} tick={heartbeatTick ?? 0} />
+      {!hideStatusBar && <div className="flex-shrink-0">{statusBar}</div>}
+      {!hideStatusBar && <CortexHeartbeat heartbeatType={heartbeatType ?? null} isWatching={isWatching} tick={heartbeatTick ?? 0} />}
       <div ref={containerRef} className="flex-1 overflow-y-auto text-xs font-mono space-y-0.5">
       {/* Mode indicator */}
       <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/50 mb-1">
