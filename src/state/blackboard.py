@@ -1559,6 +1559,16 @@ class BlackboardState:
         """Get all active event IDs."""
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
 
+    async def find_active_event_by_source(self, source: str) -> str | None:
+        """Find an active event by source. Returns event_id or None."""
+        for eid in await self.redis.smembers(self.EVENT_ACTIVE):
+            data = await self.redis.get(f"{self.EVENT_PREFIX}{eid}")
+            if data:
+                event = json.loads(data)
+                if event.get("source") == source:
+                    return eid
+        return None
+
     async def get_flow_metrics(self) -> dict:
         """Flow observability: queue depth + active event count. Both O(1) Redis ops."""
         queue_depth = await self.redis.llen(self.EVENT_QUEUE)

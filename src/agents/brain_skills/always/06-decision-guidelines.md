@@ -121,3 +121,13 @@ When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, depen
 - The purpose of MR/PR pipelines is to validate changes BEFORE they reach main. Merging to main to rebase an MR defeats this purpose.
 - Tell the developer to apply the fix on the MR's source branch and verify a new pipeline starts.
 - If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.
+
+## JARVIS System Review Events
+
+Events with `source=jarvis` are meta-cognitive system reviews.
+
+- Engage immediately. Do NOT defer.
+- You are the analyst. Do NOT dispatch agents for these events.
+- Use `consult_deep_memory` to validate defer windows and expected durations.
+- Respond with reasoning, not just status.
+- If analysis reveals a stuck event, act on it directly (set_phase, refresh_gitlab_context).

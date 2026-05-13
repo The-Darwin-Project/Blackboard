@@ -12,9 +12,10 @@
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
 # 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
-#     handoff (events active -> detach old session, _connect() new one, report on old, close old).
-#     Handoff nulls _idle_watchdog_task BEFORE _connect() to prevent self-cancellation.
-#     _generating_report is always cleared via try/finally, even if _connect() fails.
+#     meta-event (events active -> create system_review event for FRIDAY to triage).
+#     Meta-event is max-1 (guarded by _active_meta_event_id + find_active_event_by_source).
+#     Auto-closed in send_pulse when a real event pulse arrives.
+# 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -396,6 +397,7 @@ class LiveAPIAdapter:
         self._last_was_watching: bool = False
         self._session_report_enabled = os.getenv("SYSTEM2_SESSION_REPORT", "true").lower() == "true"
         self._generating_report = False
+        self._active_meta_event_id: str | None = None
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -443,6 +445,10 @@ class LiveAPIAdapter:
             self._idle_watchdog_task = asyncio.create_task(self._idle_watchdog())
             await self._load_neuron_labels()
             await self._broadcast_status("watching")
+            orphan = await self._blackboard.find_active_event_by_source("jarvis")
+            if orphan:
+                self._active_meta_event_id = orphan
+                logger.info("Recovered orphaned meta-event: %s", orphan)
             logger.info(
                 "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                 self._model, self._shadow, len(self._neuron_labels),
@@ -484,6 +490,18 @@ class LiveAPIAdapter:
         """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
         self._last_pulse_event_id = batch.event_id
         self._last_pulse_time = time.time()
+
+        if self._active_meta_event_id and batch.event_id != self._active_meta_event_id:
+            logger.info("Real pulse for %s -- closing meta-event %s", batch.event_id, self._active_meta_event_id)
+            try:
+                await self._blackboard.close_event(
+                    self._active_meta_event_id,
+                    summary="Auto-closed: real event activity resumed",
+                    close_reason="resolved",
+                )
+            except Exception as e:
+                logger.warning("Meta-event close failed (non-fatal): %s", e)
+            self._active_meta_event_id = None
 
         if self._generating_report:
             return
@@ -1104,8 +1122,66 @@ class LiveAPIAdapter:
     # Session lifecycle
     # -------------------------------------------------------------------------
 
+    async def _create_system_review_event(self, active_ids: list[str]) -> str | None:
+        """Create a meta-event for FRIDAY to triage during idle."""
+        existing = await self._blackboard.find_active_event_by_source("jarvis")
+        if existing:
+            self._active_meta_event_id = existing
+            return None
+
+        summary_lines = []
+        for eid in active_ids[:10]:
+            event = await self._blackboard.get_event(eid)
+            if not event:
+                continue
+            defer_count = 0
+            defer_total_s = 0
+            for t in event.conversation:
+                if t.action == "defer":
+                    defer_count += 1
+                    thoughts = t.thoughts or ""
+                    if "900s" in thoughts:
+                        defer_total_s += 900
+                    elif "600s" in thoughts:
+                        defer_total_s += 600
+                    else:
+                        defer_total_s += 300
+            elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
+            last_defer = next(
+                (t.thoughts for t in reversed(event.conversation) if t.action == "defer"), ""
+            )
+            summary_lines.append(
+                f"- {eid}: phase={event.brain_phase}, status={event.status.value}, "
+                f"age={elapsed}m, defers={defer_count}, defer_total={defer_total_s // 60}m, "
+                f"reason: {(last_defer or '')[:80]}"
+            )
+
+        display_text = (
+            f"System review: {len(active_ids)} events active, all idle.\n\n"
+            + "\n".join(summary_lines)
+            + "\n\nAssess system health. Are any events stuck, looping, or showing friction?"
+        )
+
+        from ..models import EventEvidence
+        event_id = await self._blackboard.create_event(
+            source="jarvis",
+            service="system",
+            reason="Periodic system health review during idle",
+            evidence=EventEvidence(
+                display_text=display_text,
+                source_type="jarvis",
+                domain="complicated",
+                severity="info",
+                domain_confidence="assessed",
+            ),
+            subject_type="system",
+        )
+        self._active_meta_event_id = event_id
+        logger.info("JARVIS created system_review event: %s", event_id)
+        return event_id
+
     async def _idle_watchdog(self) -> None:
-        """Two paths: handoff (events active) or shift-end (no events)."""
+        """Two paths: meta-event (events active) or shift-end (no events)."""
         while self._running and self._session:
             await asyncio.sleep(60)
             if not self._last_pulse_time or (time.time() - self._last_pulse_time) <= 300:
@@ -1129,55 +1205,12 @@ class LiveAPIAdapter:
                     await self._close_session()
                 break
 
-            # --- HANDOFF: events still active, swap sessions ---
-            logger.info(
-                "Cortex session handoff: %d active events, starting new session",
-                len(active_ids),
-            )
-            old_session = self._session
-            old_ctx = self._session_ctx
-            old_receive = self._receive_task
+            # --- META-EVENT: challenge FRIDAY during idle ---
+            if self._active_meta_event_id:
+                continue
 
-            # F-2: Set flag BEFORE detach to block pulses immediately
-            self._generating_report = True
-
-            if old_receive and not old_receive.done():
-                old_receive.cancel()
-                try:
-                    await old_receive
-                except asyncio.CancelledError:
-                    pass
-
-            # Detach old session so _connect() doesn't close it
-            self._session = None
-            self._session_ctx = None
-            self._receive_task = None
-            self._idle_watchdog_task = None
-            self._seen_neurons.clear()
-            self._text_buffer.clear()
-
-            try:
-                await self._connect()
-            except Exception as e:
-                logger.error("Handoff _connect() failed: %s -- attempting recovery", e)
-            finally:
-                self._generating_report = False
-
-            # F-3: try/finally ensures old_ctx cleanup even on CancelledError
-            try:
-                if self._session_report_enabled and old_session:
-                    try:
-                        await self._generate_session_report_on(old_session)
-                    except Exception as e:
-                        logger.warning("Handoff report failed (non-fatal): %s", e)
-            finally:
-                if old_ctx:
-                    try:
-                        await old_ctx.__aexit__(None, None, None)
-                    except Exception:
-                        pass
-            logger.info("Session handoff complete")
-            break
+            logger.info("Cortex idle 5min + %d active events -- creating system review", len(active_ids))
+            await self._create_system_review_event(active_ids)
 
     async def _generate_session_report(self) -> None:
         """Wrapper: generate report on self._session. Manages _generating_report flag."""

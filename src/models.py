@@ -337,15 +337,15 @@ class ConversationTurn(BaseModel):
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper"]
+    source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper", "jarvis"]
     status: EventStatus = EventStatus.NEW
     brain_phase: Optional[str] = Field(
         None,
         description="Brain-declared processing phase (triage, investigate, execute, verify, escalate, close)"
     )
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage"] = Field(
-        "service", description="What the service field refers to: K8s service or Kargo stage"
+    subject_type: Literal["service", "kargo_stage", "system"] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, or system-level"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)
