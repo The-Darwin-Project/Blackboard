@@ -992,6 +992,9 @@ class Brain:
             "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
             "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
         }
+        # Hard strip: defer_event not available in triage — FRIDAY must classify and advance
+        if brain_phase == "triage":
+            active_tools = [t for t in active_tools if t["name"] != "defer_event"]
         priority_names = _phase_tool_priority.get(brain_phase, set())
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
         tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
