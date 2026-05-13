@@ -353,8 +353,6 @@ class Headhunter:
                 f"risk: low\n"
                 f"steps:\n"
                 f"  - id: execute-instructions\n"
-                f"    agent: developer\n"
-                f"    mode: execute\n"
                 f"    summary: \"MR {url} -- {safe_instructions}\"\n"
                 f"    status: pending\n"
                 f"---"
@@ -394,10 +392,10 @@ class Headhunter:
 
         parts.append(
             "\nProduce a YAML frontmatter work plan with fields: plan (one-sentence summary), "
-            "service (component name), repository, "
+            "service/repository (component name/repository url), "
             "domain (CLEAR/COMPLICATED/COMPLEX), risk (low/medium/high), "
             "steps (each with id, summary, status: pending). "
-            "Steps describe WHAT needs to happen, not WHO does it. "
+            "Steps describe WHAT needs to be Done -- NOT WHO does it && NOT HOW to do it. "
             "Do NOT assign agent names — routing is handled separately. "
             "Wrap in --- delimiters."
         )
@@ -413,7 +411,7 @@ class Headhunter:
             f"repository: {project}\ndomain: COMPLICATED\nrisk: medium\n"
             f"steps:\n  - id: investigate\n"
             f"    summary: \"Investigate {action} on {title}."
-            f" Notify the maintainer via Slack about the findings.\"\n    status: pending\n---"
+            f" Notify the maintainer via Slack about the findings, Only if Maintainer need to be aware of the event.\n    status: pending\n---"
         )
 
     @staticmethod
