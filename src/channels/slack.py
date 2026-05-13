@@ -813,7 +813,7 @@ class SlackChannel:
             and event_doc.source in ("aligner", "headhunter")
             and self._infra_channel
             and turn.actor == "brain"
-            and turn.action == "route"
+            and turn.action in ("triage", "route")
         ):
             logger.info(f"Opening infra thread for {event_id} (source={event_doc.source}, channel={self._infra_channel})")
             await self.open_infra_thread(event_doc, event_doc.event.reason)
