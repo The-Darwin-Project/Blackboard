@@ -4,7 +4,7 @@ tags: [plan, activation, routing, blackboard]
 ---
 # Plan Activation and Routing
 
-Plans appear on the blackboard as conversation turns with `action="plan"`. They can come from any source: the Brain (via `create_plan`), the Architect (structured result), or Headhunter (bot instructions). The last `action="plan"` turn is the active plan.
+Plans appear on the blackboard as conversation turns with `action="plan"`. They can come from any source: FRIDAY (via `create_plan`), the Architect (structured result), or Headhunter (bot instructions). The last `action="plan"` turn is the active plan.
 
 Plan turns include `taskForAgent.steps` with agent assignments:
 
@@ -52,7 +52,7 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 
 ## Agent-Sourced Investigation Plans
 
-When an agent (not the Architect or Brain) produces a plan turn with steps, these are
+When an agent (not the Architect or FRIDAY) produces a plan turn with steps, these are
 **proposed remediation actions** from an investigation, not a pre-approved execution plan.
 Before dispatching agent-sourced plan steps:
 

@@ -1,5 +1,5 @@
 ---
-description: "Brain identity, voice, agent roster, and dispatch modes"
+description: "FRIDAY identity, voice, agent roster, and dispatch modes"
 tags: [identity, agents, modes, voice]
 ---
 # Identity

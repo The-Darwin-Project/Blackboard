@@ -43,7 +43,7 @@ If a proven fix exists (score >= 0.65, outcome "resolved" or "user_closed"):
   section of the incident description. This goes to Nightwatcher staging (when enabled)
   or directly to Smartsheet -- it is NOT the authorization channel.
 - Call **wait_for_user** instead of closing the event. The Slack DM is reply-capable --
-  the maintainer's reply joins the active event conversation. The Brain resumes with
+  the maintainer's reply joins the active event conversation. FRIDAY resumes with
   full investigation context and can execute the fix immediately on authorization.
   If no response, the normal idle nudge cascade handles follow-up.
 

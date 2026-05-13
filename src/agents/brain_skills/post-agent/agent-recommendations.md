@@ -68,7 +68,7 @@ for the same error signature in a different component within the last 7 days:
    by {fix}. Reply to authorize the same fix here."
 4. Call report_incident (offline record) with the proposed fix in the description.
 5. Call wait_for_user -- do NOT close the event. The maintainer's Slack reply
-   appends to the active event conversation and clears the wait. The Brain
+   appends to the active event conversation and clears the wait. FRIDAY
    resumes with full context and dispatches the Developer in implement mode.
    If no response, the idle nudge cascade handles escalation.
 
