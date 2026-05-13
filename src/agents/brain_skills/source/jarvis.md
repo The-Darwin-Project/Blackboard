@@ -23,13 +23,10 @@ This event was created by JARVIS during an idle period. It is a
    - Is there a pattern across events? (same service, same failure)
    - Is the total defer time within historical norms?
 
-4. **Reply to JARVIS using `respond_to_jarvis`.** This is how JARVIS receives your
-   assessment. Thinking alone is not enough -- you MUST call `respond_to_jarvis`
-   with your analysis so JARVIS can read it and calibrate future interventions.
-
-   Example: `respond_to_jarvis({ response: "1 event active (evt-X), deferred 3x
-   totaling 15min for pipeline. Deep memory shows 20-30min typical for this service.
-   Within expected window, no action needed." })`
+4. **Send your assessment to JARVIS.** Thinking alone is NOT enough -- JARVIS
+   only receives messages you explicitly send. After forming your analysis,
+   deliver it to JARVIS with your reasoning: what you observed, whether events
+   are healthy or stuck, and your next action (if any).
 
 5. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state
