@@ -2238,8 +2238,10 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             response_parts = None
 
-        # Emit tool pulse for every function call
-        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
+        # Emit tool pulse for every function call (except respond_to_jarvis —
+        # that's a direct message TO JARVIS, not an observation FOR JARVIS)
+        if function_name != "respond_to_jarvis":
+            await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
 
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
