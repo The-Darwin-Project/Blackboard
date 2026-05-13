@@ -476,6 +476,16 @@ class LiveAPIAdapter:
 
     async def receive_brain_response(self, event_id: str, response: str) -> None:
         """Receive a direct response from FRIDAY into the Live API session."""
+        try:
+            await self._broadcast({
+                "type": "cortex_thinking",
+                "event_id": event_id,
+                "content_type": "text",
+                "text": f"[FRIDAY] {response}",
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
         if not self._session:
             logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
             return
