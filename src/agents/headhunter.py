@@ -393,11 +393,12 @@ class Headhunter:
             parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
         parts.append(
-            "\nProduce a YAML frontmatter work plan with fields: plan, service, repository, "
+            "\nProduce a YAML frontmatter work plan with fields: plan (one-sentence summary), "
+            "service (component name), repository, "
             "domain (CLEAR/COMPLICATED/COMPLEX), risk (low/medium/high), "
-            "steps (each with id, agent, mode, summary, status: pending). "
-            "Always include: notify the maintainer via Slack about the outcome. "
-            "Include the MR URL in step summaries so agents can reference it. "
+            "steps (each with id, summary, status: pending). "
+            "Steps describe WHAT needs to happen, not WHO does it. "
+            "Do NOT assign agent names — routing is handled separately. "
             "Wrap in --- delimiters."
         )
         return "\n".join(parts)
@@ -410,7 +411,7 @@ class Headhunter:
         return (
             f"---\nplan: Handle {action} on {title}\nservice: general\n"
             f"repository: {project}\ndomain: COMPLICATED\nrisk: medium\n"
-            f"steps:\n  - id: investigate\n    agent: developer\n    mode: investigate\n"
+            f"steps:\n  - id: investigate\n"
             f"    summary: \"Investigate {action} on {title}."
             f" Notify the maintainer via Slack about the findings.\"\n    status: pending\n---"
         )
