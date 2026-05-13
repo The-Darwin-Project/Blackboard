@@ -967,16 +967,19 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
-        # === JARVIS response gate: when unanswered jarvis.message or jarvis.insight exists ===
-        has_unanswered_jarvis = False
-        for t in reversed(event.conversation):
-            if t.actor == "jarvis" and t.action in ("message", "insight"):
-                has_unanswered_jarvis = True
-                break
-            if t.actor == "brain" and t.action == "respond_jarvis":
-                break
-        if not has_unanswered_jarvis:
-            active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
+        # === JARVIS response gate ===
+        # For jarvis-sourced events: always available (the entire event is a JARVIS message)
+        # For other events: only when unanswered jarvis.message or jarvis.insight exists
+        if event.source != "jarvis":
+            has_unanswered_jarvis = False
+            for t in reversed(event.conversation):
+                if t.actor == "jarvis" and t.action in ("message", "insight"):
+                    has_unanswered_jarvis = True
+                    break
+                if t.actor == "brain" and t.action == "respond_jarvis":
+                    break
+            if not has_unanswered_jarvis:
+                active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
 
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
