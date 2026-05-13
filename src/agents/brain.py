@@ -992,9 +992,9 @@ class Brain:
             "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
             "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
         }
-        # Hard strip: defer_event not available in triage or jarvis-sourced events
+        # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
         if brain_phase == "triage" or event.source == "jarvis":
-            active_tools = [t for t in active_tools if t["name"] != "defer_event"]
+            active_tools = [t for t in active_tools if t["name"] not in ("defer_event", "wait_for_user")]
         priority_names = _phase_tool_priority.get(brain_phase, set())
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
         tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
