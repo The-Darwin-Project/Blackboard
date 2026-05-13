@@ -983,13 +983,13 @@ class Brain:
 
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
-        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "defer_event", "wait_for_user"}
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user"}
         _phase_tool_priority: dict[str, set[str]] = {
             "triage":      {"refresh_gitlab_context", "refresh_kargo_context"},
-            "investigate":  {"select_agent", "create_plan", "message_agent"},
-            "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent"},
-            "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress"},
-            "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event"},
+            "investigate":  {"select_agent", "create_plan", "message_agent", "defer_event"},
+            "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event"},
+            "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
+            "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
             "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
         }
         priority_names = _phase_tool_priority.get(brain_phase, set())
