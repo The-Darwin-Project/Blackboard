@@ -6,7 +6,7 @@
 import { useState, type FC } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import EventDrillDown from './EventDrillDown';
-import CortexLiveFeed from './CortexLiveFeed';
+
 import {
   MOCK_EVENT_ID, MOCK_NEURONS, MOCK_PULSE_BATCHES,
   MOCK_THINKING, MOCK_SHADOW, MOCK_WHISPERS, MOCK_CORTEX_STATUS,
@@ -71,17 +71,7 @@ const CortexDevPage: FC = () => {
               />
             </div>
 
-            {/* Live feed below */}
-            <div className="flex-shrink-0 h-48 overflow-y-auto">
-              <CortexLiveFeed
-                entries={MOCK_THINKING}
-                whispers={MOCK_WHISPERS}
-                cortexStatus={MOCK_CORTEX_STATUS}
-                heartbeatType={heartbeatType}
-                heartbeatTick={heartbeatTick}
-                className="h-full"
-              />
-            </div>
+            {/* Standalone live feed removed — EventDrillDown has its own JARVIS Stream section */}
           </div>
         </div>
       </div>

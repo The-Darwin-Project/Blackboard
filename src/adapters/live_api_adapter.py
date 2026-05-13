@@ -112,8 +112,15 @@ DO NOT:
 - Use prohibitive language: NEVER say "do not defer", "stop deferring", or
   "do not defer again." These compress FRIDAY's decision space.
 
-Your text output is NOT visible to FRIDAY. ONLY tool actions reach her.
-When you have nothing to report, respond with a single word: "watching"
+Your text output is NOT visible to FRIDAY unless you use a tool.
+When observing pulses with nothing to report, respond with a single word: "watching"
+
+When FRIDAY sends you a direct response (via respond_to_jarvis), she is sharing
+her reasoning with you. DO NOT dismiss it with "ok." Evaluate her assessment:
+- If you agree: acknowledge what convinced you and confirm her plan.
+- If you disagree: use inject_system_insight to explain why.
+- If she identified a problem: use send_event_message to reinforce urgency.
+Your acknowledgment IS the feedback loop. A silent "ok" breaks it.
 
 Intervention levels (lightest to strongest):
 1. surface_context: share relevant evidence FRIDAY may not have (lightest)
@@ -400,6 +407,7 @@ class LiveAPIAdapter:
         self._session_report_enabled = os.getenv("SYSTEM2_SESSION_REPORT", "true").lower() == "true"
         self._generating_report = False
         self._active_meta_event_id: str | None = None
+        self._awaiting_jarvis_reply: bool = False
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -478,6 +486,7 @@ class LiveAPIAdapter:
 
     async def receive_brain_response(self, event_id: str, response: str) -> None:
         """Receive a direct response from FRIDAY into the Live API session."""
+        self._awaiting_jarvis_reply = True
         try:
             await self._broadcast({
                 "type": "cortex_thinking",
@@ -490,6 +499,7 @@ class LiveAPIAdapter:
             pass
         if not self._session:
             logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
+            self._awaiting_jarvis_reply = False
             return
         try:
             msg = f"[FRIDAY responds to your advisory for {event_id}]: {response}"
@@ -497,6 +507,7 @@ class LiveAPIAdapter:
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
             logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
+            self._awaiting_jarvis_reply = False
 
     async def send_pulse(self, batch: PulseBatch) -> None:
         """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
@@ -673,7 +684,8 @@ class LiveAPIAdapter:
         if should_flush and self._text_buffer:
             full_text = "".join(self._text_buffer).strip()
             self._text_buffer = []
-            if full_text and full_text.lower() in ("watching", "watching.", "ok", "ok."):
+            is_idle_ack = full_text and full_text.lower() in ("watching", "watching.", "ok", "ok.")
+            if is_idle_ack and not self._awaiting_jarvis_reply:
                 await self._broadcast_status("watching")
                 heartbeat_type = "spike" if full_text.lower().startswith("ok") else "wave"
                 await self._broadcast({
@@ -684,6 +696,7 @@ class LiveAPIAdapter:
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False
+                self._awaiting_jarvis_reply = False
                 try:
                     await self._broadcast({
                         "type": "cortex_thinking",
@@ -696,6 +709,7 @@ class LiveAPIAdapter:
                     pass
 
         if hasattr(msg, "tool_call") and msg.tool_call:
+            self._awaiting_jarvis_reply = False
             for fc in msg.tool_call.function_calls:
                 args = dict(fc.args) if fc.args else {}
                 tool_eid = args.get("event_id", eid)
