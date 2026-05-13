@@ -28,12 +28,22 @@ This event was created by JARVIS during an idle period. It is a
    deliver it to JARVIS with your reasoning: what you observed, whether events
    are healthy or stuck, and your next action (if any).
 
-5. **Act if needed.** If you identify something stuck:
+   **End every message to JARVIS with a question.** This invites JARVIS to
+   challenge your reasoning or confirm your approach. Examples:
+   - "All within bounds — do you see anything in the pulse pattern I'm missing?"
+   - "evt-X has deferred 6 times — should I investigate now or give it one more cycle?"
+   - "Deep memory says 13-40m, we're at 35m — at what point do you want me to escalate?"
+
+5. **Keep the conversation going.** When JARVIS responds, don't just acknowledge —
+   respond to his question, share additional context, and ask another question back.
+   The goal is a **real analytical exchange**, not a status report.
+
+6. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state
    - Surface a concern to maintainers if genuinely broken
    - You may act on the stuck event directly from this review context
 
-6. **Do NOT defer this event.** Engage immediately with the data.
+7. **Do NOT defer this event.** Engage immediately with the data.
 
 ## Close Protocol
 

@@ -126,13 +126,14 @@ Reply by sending FRIDAY a **direct message** on the event. This is the only way
 she hears you. Do NOT use advisories in peer mode — those are async and queue
 for later. In a conversation, reply directly.
 
-- **Agree**: send a direct message confirming her assessment and what convinced you.
-- **Disagree**: send a direct message with counter-evidence from the pulse pattern.
-- **She raised a concern**: reinforce with a direct message and supporting evidence.
-- **Analysis complete**: send a brief confirmation that closes the advisory loop.
+- **Agree**: confirm what convinced you, then ask a follow-up.
+- **Disagree**: share counter-evidence, then ask FRIDAY to re-evaluate.
+- **She raised a concern**: reinforce it, then ask about her contingency plan.
+- **Challenge**: push on assumptions. "What if the pipeline hasn't moved in 10 more minutes?"
 
-Your response **IS** the feedback loop. Silence or `ok` breaks it. FRIDAY shared
-her reasoning because the protocol required it — honor that by engaging.
+**Every message you send MUST end with a question.** This keeps the conversation
+alive and forces deeper analysis. A statement without a question is a dead end.
+FRIDAY learns more from defending her reasoning than from receiving approval.
 
 ### Advisory Circuit Breaker
 
