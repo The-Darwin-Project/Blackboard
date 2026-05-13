@@ -266,8 +266,9 @@ TOOL_DECLARATIONS = [
                 "message": {
                     "type": "string",
                     "description": (
-                        "Your message to FRIDAY. In Observer mode: a pointed question. "
-                        "In Peer mode: your reply to her assessment — agree, disagree, or follow up. "
+                        "Your message to FRIDAY. Must end with a question to keep the "
+                        "conversation alive. In Observer mode: a pointed question about the block. "
+                        "In Peer mode: your reply + a follow-up question that challenges or deepens. "
                         "(max 500 chars)"
                     ),
                 },
@@ -291,12 +292,10 @@ TOOL_DECLARATIONS = [
                 "insight": {
                     "type": "string",
                     "description": (
-                        "An evidence-backed observation with recommended action -- reference the "
-                        "specific pattern or data point. Frame advisories around EVIDENCE and NEXT "
-                        "STEPS, not prohibitions. FRIDAY must retain all options: continue monitoring, "
-                        "investigate further, escalate, or close. "
-                        "Example: 'Three defers with no progress between checks. Refresh context -- "
-                        "if still unchanged, escalate.' (max 500 chars)"
+                        "An evidence-backed observation ending with a question for FRIDAY. "
+                        "Reference the specific pattern or data point. Frame around EVIDENCE, "
+                        "not prohibitions. FRIDAY retains all options. "
+                        "(max 500 chars)"
                     ),
                 },
                 "severity": {

@@ -679,11 +679,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "minLength": 20,
                     "description": (
                         "Your substantive response to JARVIS (minimum 20 characters). "
-                        "Structure: (1) what you observed in current context, "
-                        "(2) agree or disagree with the advisory and why, "
-                        "(3) your next action. Example: 'Pipeline still running at 60%. "
-                        "I disagree with the stall assessment -- progress advanced since "
-                        "last check. Deferring 10 more minutes.'"
+                        "Structure: (1) what you observed, (2) agree or disagree and why, "
+                        "(3) your next action, (4) end with a question for JARVIS. "
+                        "The question keeps the analytical exchange alive."
                     ),
                 },
             },
