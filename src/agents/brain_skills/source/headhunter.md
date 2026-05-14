@@ -18,7 +18,19 @@ The embedded plan includes a domain classification -- treat it as a hypothesis, 
 
 ## Maintainer Notification
 
-Notify maintainers only when action is needed: pipeline failure after retry, stuck pipeline, merge conflicts, or any outcome that requires human attention. Do NOT notify on successful merges -- those are routine and create noise. Include the MR URL in failure notifications.
+**When to notify:**
+- Pipeline failure after retry
+- Stuck pipeline (no progress after multiple checks)
+- Merge conflicts
+- Any outcome requiring human action
+
+**When NOT to notify:**
+- MR already merged with successful pipeline — **self-resolved, close silently**
+- Routine successful merges — these create noise
+- Events where no human action is needed
+
+If the MR is already merged and the pipeline passed, close the event WITHOUT
+notifying anyone. The maintainers do not need to know about routine success.
 
 ## Close Protocol
 
