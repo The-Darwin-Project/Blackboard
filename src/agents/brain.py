@@ -96,6 +96,11 @@
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
 #     prevent hot retry loops (has_unread=True -> process_event -> fail -> repeat).
+# 38. [Pattern]: _waiting_for_jarvis (dict[str,float]) is SEPARATE from _waiting_for_user.
+#     Maps event_id -> respond_jarvis turn timestamp. _jarvis_wait_tasks holds asyncio.Task
+#     for nudge timer. _jarvis_wait_count tracks escalation (1st: 2 nudges, 2nd: 1, 3rd: 0,
+#     4th+: tool stripped). Cleaned in _clear_jarvis_wait, called from _close_and_broadcast,
+#     _cleanup_stale_events, and event loop resolution scan. NEVER add to _waiting_for_user.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -368,6 +373,10 @@ class Brain:
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Wait-for-user state: events where LLM called wait_for_user
         self._waiting_for_user: set[str] = set()
+        # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
+        self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
+        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge timer task
+        self._jarvis_wait_count: dict[str, int] = {}  # event_id -> escalation counter
         self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
         self._last_processed: dict[str, float] = {}
@@ -710,8 +719,8 @@ class Brain:
                 })
 
         # Health check: nudge idle events, escalate to human after max nudges.
-        # Guards: skip if deferred (intentional wait), waiting for user, or last real turn is brain.defer (just woke).
-        if event.conversation and event_id not in self._waiting_for_user:
+        # Guards: skip if deferred (intentional wait), waiting for user/jarvis, or last real turn is brain.defer (just woke).
+        if event.conversation and event_id not in self._waiting_for_user and event_id not in self._waiting_for_jarvis:
             last_real_turn = next(
                 (t for t in reversed(event.conversation)
                  if not (t.actor == "user" and t.source == "automated")),
@@ -980,6 +989,17 @@ class Brain:
                     break
             if not has_unanswered_jarvis:
                 active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
+
+        # === wait_for_jarvis gate ===
+        # Available only: jarvis-sourced events, after respond_jarvis sent, not already waiting, count < 3
+        if event.source == "jarvis":
+            has_respond = any(t.actor == "brain" and t.action == "respond_jarvis" for t in event.conversation)
+            already_waiting = event_id in self._waiting_for_jarvis
+            max_retries = self._jarvis_wait_count.get(event_id, 0) >= 3
+            if not (has_respond and not already_waiting and not max_retries):
+                active_tools = [t for t in active_tools if t["name"] != "wait_for_jarvis"]
+        else:
+            active_tools = [t for t in active_tools if t["name"] != "wait_for_jarvis"]
 
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
@@ -2602,6 +2622,51 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return False
 
+        elif function_name == "wait_for_jarvis":
+            if event_id in self._waiting_for_jarvis:
+                return True  # Already waiting -- let LLM re-evaluate
+            context = args.get("context", "")
+            # Pre-check: find last respond_jarvis turn timestamp, look for jarvis reply after it
+            last_respond_ts = 0.0
+            for t in reversed(event.conversation):
+                if t.actor == "brain" and t.action == "respond_jarvis":
+                    last_respond_ts = t.timestamp or 0.0
+                    break
+            if last_respond_ts:
+                existing_reply = next(
+                    (t for t in event.conversation
+                     if t.actor == "jarvis" and t.action == "message"
+                     and (t.timestamp or 0.0) > last_respond_ts),
+                    None,
+                )
+                if existing_reply:
+                    result_text = f"JARVIS already replied: {existing_reply.thoughts or ''}"
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain", action="tool_result",
+                        waitingFor="wait_for_jarvis",
+                        thoughts=result_text,
+                        response_parts=response_parts,
+                    )
+                    await self._append_and_broadcast(event_id, turn)
+                    return True
+            # Record wait state
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="wait",
+                thoughts=f"Waiting for JARVIS response: {context}",
+                waitingFor="jarvis",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            self._waiting_for_jarvis[event_id] = last_respond_ts or time.time()
+            self._jarvis_wait_count[event_id] = self._jarvis_wait_count.get(event_id, 0) + 1
+            self._last_processed[event_id] = time.time()
+            max_nudges = max(0, 3 - self._jarvis_wait_count[event_id])
+            task = asyncio.create_task(self._jarvis_nudge_loop(event_id, max_nudges))
+            self._jarvis_wait_tasks[event_id] = task
+            return False
+
         elif function_name == "lookup_service":
             service_name = args.get("service_name", "")
             svc = await self.blackboard.get_service(service_name)
@@ -3331,6 +3396,45 @@ class Brain:
         else:
             logger.warning(f"Unknown function call: {function_name}")
             return False
+
+    async def _jarvis_nudge_loop(self, event_id: str, max_nudges: int) -> None:
+        """Send nudges to JARVIS at 30s intervals. Auto-resolve after final window."""
+        try:
+            for i in range(max_nudges):
+                await asyncio.sleep(30)
+                if event_id not in self._waiting_for_jarvis:
+                    return
+                if self._live_adapter:
+                    try:
+                        await self._live_adapter.receive_brain_response(
+                            event_id,
+                            f"FRIDAY is waiting for your input on this review. (nudge {i + 1}/{max_nudges})",
+                        )
+                        logger.info("Sent JARVIS nudge %d/%d for %s", i + 1, max_nudges, event_id)
+                    except Exception as e:
+                        logger.warning("JARVIS nudge failed (non-fatal): %s", e)
+            await asyncio.sleep(30)
+            if event_id not in self._waiting_for_jarvis:
+                return
+            logger.info("JARVIS wait timed out for %s -- auto-resolving", event_id)
+            self._clear_jarvis_wait(event_id)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="system",
+                action="timeout",
+                thoughts="JARVIS did not respond within the wait window. Continuing.",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            self._last_processed[event_id] = time.time()
+        except asyncio.CancelledError:
+            return
+
+    def _clear_jarvis_wait(self, event_id: str) -> None:
+        """Clear wait_for_jarvis state and cancel the nudge timer."""
+        self._waiting_for_jarvis.pop(event_id, None)
+        task = self._jarvis_wait_tasks.pop(event_id, None)
+        if task and not task.done():
+            task.cancel()
 
     def _get_slack_channel(self):
         """Get the registered Slack channel from broadcast targets, if available."""
@@ -4219,6 +4323,8 @@ class Brain:
         # Clean up all per-event state to prevent memory leaks
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.discard(event_id)
+        self._clear_jarvis_wait(event_id)
+        self._jarvis_wait_count.pop(event_id, None)
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._event_locks.pop(event_id, None)
@@ -4570,6 +4676,8 @@ class Brain:
 
             # Close events that have turns (were being processed) -- they're stale from the previous instance
             if event.conversation:
+                self._clear_jarvis_wait(eid)
+                self._jarvis_wait_count.pop(eid, None)
                 stale_summary = (
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
                     f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
@@ -4715,6 +4823,21 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
+
+                    # --- JARVIS wait: check for reply before normal processing ---
+                    is_waiting_jarvis = eid in self._waiting_for_jarvis
+                    if is_waiting_jarvis:
+                        wait_start = self._waiting_for_jarvis[eid]
+                        jarvis_reply = any(
+                            t.actor == "jarvis" and t.action == "message"
+                            and (t.timestamp or 0.0) > wait_start
+                            for t in event.conversation
+                        )
+                        if jarvis_reply:
+                            self._clear_jarvis_wait(eid)
+                            self._last_processed[eid] = time.time()
+                            await self.process_event(eid, prefetched_event=event)
+                        continue
 
                     # Re-process if there are DELIVERED (unread) turns the Brain hasn't evaluated
                     # But skip if waiting for user -- only user response should resume

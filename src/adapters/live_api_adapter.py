@@ -502,25 +502,26 @@ class LiveAPIAdapter:
         """Receive a direct response from FRIDAY into the Live API session."""
         self._awaiting_jarvis_reply = True
         try:
-            await self._broadcast({
-                "type": "cortex_thinking",
-                "event_id": event_id,
-                "content_type": "text",
-                "text": f"[FRIDAY] {response}",
-                "timestamp": time.time(),
-            })
-        except Exception:
-            pass
-        if not self._session:
-            logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
-            self._awaiting_jarvis_reply = False
-            return
-        try:
-            msg = f"[FRIDAY DIRECT for {event_id}]: {response}"
-            await self._session.send(input=msg, end_of_turn=True)
-            logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
-        except Exception as e:
-            logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
+            try:
+                await self._broadcast({
+                    "type": "cortex_thinking",
+                    "event_id": event_id,
+                    "content_type": "text",
+                    "text": f"[FRIDAY] {response}",
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
+            if not self._session:
+                logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
+                return
+            try:
+                msg = f"[FRIDAY DIRECT for {event_id}]: {response}"
+                await self._session.send(input=msg, end_of_turn=True)
+                logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
+            except Exception as e:
+                logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
+        finally:
             self._awaiting_jarvis_reply = False
 
     async def send_pulse(self, batch: PulseBatch) -> None:
@@ -549,6 +550,11 @@ class LiveAPIAdapter:
                 except Exception as e:
                     logger.warning("Meta-event close failed (non-fatal): %s", e)
                 self._active_meta_event_id = None
+
+        # Suppress meta-event pulses: JARVIS stays in peer mode during system reviews
+        if self._active_meta_event_id and batch.event_id == self._active_meta_event_id:
+            self._last_pulse_time = time.time()
+            return
 
         if self._generating_report:
             return
@@ -1109,6 +1115,8 @@ class LiveAPIAdapter:
         # Wake FRIDAY: clear in-memory wait + transition deferred->active
         if hasattr(self, "_brain") and self._brain:
             self._brain.clear_waiting(event_id)
+            if hasattr(self._brain, '_clear_jarvis_wait'):
+                self._brain._clear_jarvis_wait(event_id)
         from ..models import EventStatus
         await self._blackboard.transition_event_status(
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,
@@ -1255,6 +1263,10 @@ class LiveAPIAdapter:
 
             # --- META-EVENT: challenge FRIDAY during idle ---
             if self._active_meta_event_id:
+                continue
+            # Skip meta-event creation while FRIDAY is waiting for JARVIS
+            if self._brain and getattr(self._brain, '_waiting_for_jarvis', {}):
+                logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
 
             logger.info("Cortex idle %ds + %d active events -- creating system review", idle_threshold, len(active_ids))

@@ -34,9 +34,16 @@ This event was created by JARVIS during an idle period. It is a
    - "evt-X has deferred 6 times — should I investigate now or give it one more cycle?"
    - "Deep memory says 13-40m, we're at 35m — at what point do you want me to escalate?"
 
-5. **Keep the conversation going.** When JARVIS responds, don't just acknowledge —
-   respond to his question, share additional context, and ask another question back.
-   The goal is a **real analytical exchange**, not a status report.
+4b. **Wait for JARVIS's response.** After sending your assessment, call
+    wait_for_jarvis to give JARVIS time to process and reply. The system
+    sends periodic nudges if JARVIS is slow. If JARVIS responds, you'll
+    see his message as a new turn. If he doesn't respond within ~90s,
+    the wait auto-resolves and you can continue.
+
+5. **Keep the conversation going.** When JARVIS responds after the wait,
+   don't just acknowledge — respond to his question, share additional
+   context, and ask another question back. The goal is a **real analytical
+   exchange**, not a status report.
 
 6. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state

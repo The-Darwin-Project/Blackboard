@@ -688,6 +688,26 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["response"],
         },
     },
+    # --- JARVIS wait (gated: jarvis-sourced events, after respond_to_jarvis) ---
+    {
+        "name": "wait_for_jarvis",
+        "description": (
+            "Wait for JARVIS to respond to your assessment. Sends periodic nudges "
+            "if no response arrives. Auto-resolves after ~90s if JARVIS does not respond. "
+            "Use after respond_to_jarvis to give JARVIS time to process and reply. "
+            "Only one wait per event at a time."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "context": {
+                    "type": "string",
+                    "description": "Brief note on what you sent JARVIS (for the wait turn log)",
+                },
+            },
+            "required": ["context"],
+        },
+    },
 ]
 
 
