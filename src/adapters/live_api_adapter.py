@@ -1115,8 +1115,7 @@ class LiveAPIAdapter:
         # Wake FRIDAY: clear in-memory wait + transition deferred->active
         if hasattr(self, "_brain") and self._brain:
             self._brain.clear_waiting(event_id)
-            if hasattr(self._brain, '_clear_jarvis_wait'):
-                self._brain._clear_jarvis_wait(event_id)
+            self._brain._clear_jarvis_wait(event_id)
         from ..models import EventStatus
         await self._blackboard.transition_event_status(
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,
@@ -1265,7 +1264,7 @@ class LiveAPIAdapter:
             if self._active_meta_event_id:
                 continue
             # Skip meta-event creation while FRIDAY is waiting for JARVIS
-            if self._brain and getattr(self._brain, '_waiting_for_jarvis', {}):
+            if self._brain and self._brain._waiting_for_jarvis:
                 logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
 
