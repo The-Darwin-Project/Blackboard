@@ -2624,7 +2624,7 @@ class Brain:
 
         elif function_name == "wait_for_jarvis":
             if event_id in self._waiting_for_jarvis:
-                return True  # Already waiting -- let LLM re-evaluate
+                return False  # Already waiting -- exit loop, nudge timer handles it
             context = args.get("context", "")
             # Pre-check: find last respond_jarvis turn timestamp, look for jarvis reply after it
             last_respond_ts = 0.0
