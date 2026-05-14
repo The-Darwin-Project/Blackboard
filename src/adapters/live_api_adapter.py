@@ -540,16 +540,28 @@ class LiveAPIAdapter:
                             batch.event_id, self._active_meta_event_id)
                 self._active_meta_event_id = None
             else:
-                logger.info("Real pulse for %s -- closing meta-event %s", batch.event_id, self._active_meta_event_id)
-                try:
-                    await self._blackboard.close_event(
-                        self._active_meta_event_id,
-                        summary="Auto-closed: real event activity resumed",
-                        close_reason="resolved",
-                    )
-                except Exception as e:
-                    logger.warning("Meta-event close failed (non-fatal): %s", e)
+                meta_id = self._active_meta_event_id
                 self._active_meta_event_id = None
+                logger.info("Real pulse for %s -- asking FRIDAY to wrap up meta-event %s", batch.event_id, meta_id)
+                try:
+                    from ..models import ConversationTurn
+                    turn = ConversationTurn(
+                        turn=len((await self._blackboard.get_event(meta_id)).conversation) + 1 if await self._blackboard.get_event(meta_id) else 1,
+                        actor="jarvis",
+                        action="message",
+                        thoughts="Real work just arrived. Summarize your findings and close this review.",
+                    )
+                    await self._blackboard.append_turn(meta_id, turn)
+                except Exception as e:
+                    logger.warning("Meta-event wrap-up message failed, falling back to auto-close: %s", e)
+                    try:
+                        await self._blackboard.close_event(
+                            meta_id,
+                            summary="Auto-closed: real event activity resumed",
+                            close_reason="resolved",
+                        )
+                    except Exception:
+                        pass
 
         # Suppress meta-event pulses: JARVIS stays in peer mode during system reviews
         if self._active_meta_event_id and batch.event_id == self._active_meta_event_id:
