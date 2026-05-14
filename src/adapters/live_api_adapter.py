@@ -1211,9 +1211,13 @@ class LiveAPIAdapter:
             )
 
         display_text = (
-            f"System review: {len(active_ids)} events active, all idle.\n\n"
+            f"FRIDAY — I've been watching the pulse stream and we've been quiet for a while. "
+            f"Here's what I see ({len(active_ids)} events still active):\n\n"
             + "\n".join(summary_lines)
-            + "\n\nAssess system health. Are any events stuck, looping, or showing friction?"
+            + "\n\nGive me your assessment:"
+            + "\n1. Health status — are these progressing normally or stuck?"
+            + "\n2. Anti-patterns — any lessons being violated (short defers, stale monitors)?"
+            + "\n3. Recommended action — should we intervene, or let them ride?"
         )
 
         from ..models import EventEvidence
