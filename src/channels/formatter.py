@@ -320,7 +320,7 @@ def build_event_report_md(event_doc: "EventDocument") -> str:
         "## Conversation",
     ]
     for t in event_doc.conversation:
-        name = t.user_name or t.actor
+        name = t.user_name or {"brain": "FRIDAY", "jarvis": "JARVIS"}.get(t.actor, t.actor)
         lines.append(f"### Turn {t.turn} - {name} ({t.action})")
         if t.actor == "user":
             text = (t.thoughts or t.result or t.action or "")[:300]
