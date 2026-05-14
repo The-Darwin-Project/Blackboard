@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent sidecars: Architect, SysAdmin, Developer, QE with Gemini CLI and Claude Code
 - Deep memory via Qdrant vector store with event summarization and similarity search
 - Bidirectional Slack integration (Socket Mode, DM notifications, thread mirroring)
-- Headhunter agent for GitLab MR lifecycle automation with two-tier triage
+- Headhunter agent for GitLab MR lifecycle automation with LLM-based triage
 - TimeKeeper for scheduled one-shot and recurring tasks with LLM instruction refinement
 - Ephemeral agents via Tekton TaskRun with circuit breaker and prune trigger
 - React Dashboard with architecture graph, conversation feed, agent streaming cards

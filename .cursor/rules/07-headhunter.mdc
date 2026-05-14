@@ -15,18 +15,19 @@ alwaysApply: true
 
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). Two-tier triage (see below).
+* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). Single-tier LLM analysis with `HEADHUNTER_SYSTEM_INSTRUCTION`.
 * **Flow Gate:** `maxActive` controls both headhunter event creation AND ephemeral agent concurrency. It is the single knob for headhunter throughput. Read by both Headhunter (event creation) and EphemeralProvisioner (agent spawning via `HEADHUNTER_MAX_ACTIVE` env var).
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
-## Two-Tier Triage
+## LLM Analysis
 
-| Tier | Trigger | How |
+All MRs go through Flash Lite analysis with `HEADHUNTER_SYSTEM_INSTRUCTION` (module-level constant, Aligner SI pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, and risk assessment.
+
+| Path | Trigger | How |
 |---|---|---|
-| **Tier 1: Bot Instructions** | `### Bot Instructions` found in `mr_description` | Deterministic parse -- no LLM call. See `09-bot-mr-description-protocol.mdc`. |
-| **Tier 2: LLM Analysis** | No Bot Instructions in description | Flash Lite reads full MR context (description, pipeline, changed files, comments) and generates a plan. |
-| **Emergency Fallback** | LLM unavailable | Static COMPLICATED/investigate plan. Safety net only. |
+| **LLM Analysis** | All MRs | Flash Lite reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. Bot Instructions in the MR description are included as prompt context. |
+| **Emergency Fallback** | LLM unavailable | Inline `_emergency_plan()` produces COMPLICATED/developer plan. Safety net only. |
 
 ## Maintainer Resolution
 
@@ -109,5 +110,5 @@ gcp:
   llm:
     headhunter:
       model: "gemini-3.1-flash-lite-preview"
-      temperature: "0.2"
+      temperature: "0.3"
 ```

@@ -3,22 +3,23 @@
 # 1. [Pattern]: Follows Aligner pattern -- in-process daemon, lazy-loaded LLM adapter via _get_adapter().
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
 # 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
-# 4. [Pattern]: All MRs go through Flash LLM analysis for consistent evidence quality. Bot Instructions are LLM context, not a bypass. Emergency static fallback when LLM unavailable.
+# 4. [Pattern]: Single-tier LLM analysis via HEADHUNTER_SYSTEM_INSTRUCTION. Bot Instructions flow as MR description context in prompt. Emergency _emergency_plan() when LLM unavailable.
 # 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
 # 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
 # 7. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
 # 8. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
 # 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
 # 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
-# 14. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
-# 11. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
-# 12. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
-# 13. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note). mark_feedback_sent runs only after successful dismiss (or no todo_id for duplicate/stale).
+# 11. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
+# 12. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
+# 13. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
+# 14. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note). mark_feedback_sent runs only after successful dismiss (or no todo_id for duplicate/stale).
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
 
-Two-tier triage: parse structured Bot Instructions from MR descriptions,
-or classify via Flash Lite LLM. Pushes structured events to the Brain queue.
+Single-tier LLM analysis: all MRs pass through Flash Lite with a comprehensive
+system instruction. Bot Instructions in MR descriptions are included as prompt
+context for the LLM. Pushes structured events to the Brain queue.
 """
 from __future__ import annotations
 

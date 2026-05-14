@@ -1,11 +1,11 @@
 ---
-description: "Protocol for structuring MR descriptions so Darwin's Headhunter can parse Bot Instructions and generate execution plans."
+description: "Protocol for structuring MR descriptions so Darwin's Headhunter LLM can produce optimal work plans."
 alwaysApply: true
 ---
 
 # Bot MR Description Protocol
 
-When building automations that create GitLab Merge Requests targeting Darwin (the Headhunter polls these via `/todos`), structure the MR description so Darwin can parse it deterministically without an LLM call.
+When building automations that create GitLab Merge Requests targeting Darwin (the Headhunter polls these via `/todos`), structure the MR description so the Headhunter's LLM produces clear, actionable work plans.
 
 ## Required Format
 
@@ -13,12 +13,12 @@ The description must contain three parts in order:
 
 ### 1. Type Header
 
-A single `##` line identifying the MR type. Known types that trigger deterministic Tier 1 parsing:
+A single `##` line identifying the MR type. Known types the LLM classifies as CLEAR domain:
 
 - `## Submodule Update`
 - `## Konflux Release`
 
-Unknown headers fall through to Tier 2 (LLM analysis) but are still useful as context.
+Unknown headers are classified by the LLM based on full MR context.
 
 ### 2. Metadata Table
 
@@ -41,10 +41,9 @@ Must start with `### Bot Instructions`. Contains two required sections:
 
 ## Parsing Contract
 
-- Headhunter's `_parse_bot_instructions()` detects `### Bot Instructions` in the MR description (truncated to 2000 characters).
-- If the marker is present, a YAML plan is generated directly from the instructions (no LLM call).
-- If parsing fails or the marker is absent, the MR falls through to Tier 2 LLM analysis with the full description as context.
-- The `mr_description` is also passed to the Brain via `evidence.gitlab_context.mr_description`.
+- The Headhunter's LLM receives the full MR description (truncated to 2000 characters) as prompt context.
+- Bot Instructions sections are incorporated by the LLM into the generated work plan steps.
+- The `mr_description` is also passed to the Brain via `evidence.gitlab_context.mr_description`, providing redundancy if the LLM's plan generation misses nuances.
 
 ## Reference: Submodule Update
 

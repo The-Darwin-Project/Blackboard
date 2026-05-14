@@ -314,12 +314,18 @@ class TestAnalysisFallback:
         hh._llm_enabled = False
         context = {
             "action_name": "build_failed",
+            "mr_iid": 42,
             "mr_title": "Fix CI",
             "project_path": "group/repo",
         }
         plan, domain = await hh.analyze_and_plan(context)
-        assert "---" in plan
+        assert plan.startswith("---")
+        assert plan.endswith("---")
         assert domain == "complicated"
+        assert "agent: developer" in plan
+        assert "domain: COMPLICATED" in plan
+        assert "reasoning:" in plan
+        assert "!42" in plan
 
     def test_extract_domain_from_plan(self):
         plan = "---\nplan: test\ndomain: CLEAR\n---"

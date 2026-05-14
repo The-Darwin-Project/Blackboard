@@ -19,7 +19,7 @@ Darwin uses 8 specialized agents plus the Brain orchestrator, communicating via 
 | **SysAdmin** | Execution | CLI sidecar (gemini/claude) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
 | **Developer** | Implementation | CLI sidecar (gemini/claude) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
 | **QE** | Verification | CLI sidecar (gemini/claude) | Test writing, test execution, verification of Developer changes |
-| **Headhunter** | MR Lifecycle | In-process Python + Flash Lite | GitLab todo polling, bot instruction parsing, MR classification, event creation |
+| **Headhunter** | MR Lifecycle | In-process Python + Flash Lite | GitLab todo polling, LLM-based MR triage and plan generation, event creation |
 | **Nightwatcher** | Shift Consolidation | In-process Python + Flash | Phase-gated escalation review, batch clustering, Smartsheet incidents, Slack shift summaries |
 
 ## Agent Dispatch
@@ -82,8 +82,8 @@ The Brain reads the `steps:` array, batches same-agent steps, and dispatches wit
 
 The Headhunter polls GitLab `/todos` for the Darwin bot account and classifies incoming MRs:
 
-- **Tier 1 (Fast-path):** Bot MRs with `### Bot Instructions` marker. Domain classified from `## ` header (Submodule Update → CLEAR, Konflux Release → CLEAR).
-- **Tier 2 (LLM fallback):** Unknown MRs analyzed by Flash Lite for intent classification and work plan generation.
+- **LLM Analysis:** All MRs pass through Flash Lite with `HEADHUNTER_SYSTEM_INSTRUCTION`. The SI defines YAML frontmatter output format, domain classification (CLEAR/COMPLICATED/COMPLEX), agent assignment, and risk assessment. Bot Instructions in MR descriptions are included as prompt context for the LLM.
+- **Emergency Fallback:** When LLM is unavailable, `_emergency_plan()` produces a minimal COMPLICATED/developer plan.
 - Creates events with `source=headhunter` and GitLab context (MR URL, pipeline status, description).
 - Brain routes the event like any other -- Headhunter creates events, Brain handles routing.
 
