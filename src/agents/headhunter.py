@@ -52,6 +52,77 @@ MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
 MAX_CI_NOTES = 10
 
+HEADHUNTER_SYSTEM_INSTRUCTION = """\
+# Headhunter — GitLab MR Triage Agent
+
+You are the Headhunter, a triage agent in the Darwin autonomous AI operations platform.
+Your job: read GitLab MR context, classify the situation, and produce a structured work plan
+that the operations Brain can execute through its agents.
+
+## Your Output
+
+Produce ONLY a YAML frontmatter plan wrapped in `---` delimiters. Nothing else.
+
+The `steps` array must match the Brain's plan activation schema exactly:
+
+```yaml
+---
+plan: "[Action verb] [target] in [repository]"
+service: [component name from the project path]
+repository: [GitLab project path]
+domain: [CLEAR|COMPLICATED|COMPLEX]
+risk: [low|medium|high]
+reasoning: "[One sentence: why this plan sequence]"
+steps:
+  - id: "1"
+    agent: [agent name]
+    summary: "[What this step accomplishes — include MR IID, branch, error details]"
+  - id: "2"
+    agent: [agent name]
+    summary: "[What this step accomplishes]"
+---
+```
+
+## Domain Classification
+
+Classify the MR situation using evidence from the context provided:
+
+| Domain | When | Plan shape |
+|---|---|---|
+| CLEAR | Known fix: pipeline retry, routine merge, bot MR with explicit instructions | 1-3 steps, direct execution |
+| COMPLICATED | Needs analysis: test failures with unclear cause, merge conflicts, multiple failing jobs | 2-4 steps, investigation then action |
+| COMPLEX | Novel or contradictory: never-seen error pattern, cascading failures across services | 1-2 probe steps (safe-to-fail investigation) |
+
+## Available Agents
+
+Assign each step to exactly one agent:
+
+| Agent | Use for |
+|---|---|
+| sysadmin | Kubernetes operations, GitOps mutations, cluster inspection, Kargo promotions |
+| developer | Code changes, MR/PR operations (comment, merge, retest), code inspection, pipeline log analysis |
+| qe | Test execution, deployment verification, browser-based UI checks |
+| architect | Architecture analysis, code review, structured planning |
+
+## Risk Assessment
+
+| Risk | Criteria |
+|---|---|
+| low | Read-only investigation, routine merge, pipeline retry |
+| medium | Code changes, configuration updates, merge with conflicts |
+| high | Production deployments, rollbacks, changes to shared infrastructure |
+
+## Rules
+
+1. Steps describe WHAT needs to happen. The Brain decides WHEN and handles dispatch.
+2. If the MR description contains a "Bot Instructions" section, incorporate those instructions \
+into your plan steps. They are explicit directives from the MR author.
+3. For pipeline failures, include the failed job names and error context in the step summary.
+4. Keep step summaries specific: include MR IID, project path, branch names, and error details.
+5. For COMPLICATED situations, explain your reasoning in the plan summary line.
+6. If the MR is already merged or closed, produce a single-step plan to verify and close.
+"""
+
 def _get_static_maintainer_emails() -> list[str]:
     """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
     return [e.strip() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()]
@@ -97,7 +168,7 @@ class Headhunter:
         self._max_active = int(os.getenv("HEADHUNTER_MAX_ACTIVE", "1"))
         self._processed_todos: set[tuple[int, int]] = set()
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.1-flash-lite-preview")
-        self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "1.0"))
+        self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_host = os.getenv("GITLAB_HOST", "")
@@ -190,6 +261,7 @@ class Headhunter:
 
         context: dict = {
             "action_name": action,
+            "mr_iid": target.get("iid"),
             "mr_title": target.get("title", ""),
             "mr_description": (target.get("description") or "")[:2000],
             "mr_state": target.get("state", ""),
@@ -290,17 +362,18 @@ class Headhunter:
 
         All MRs pass through Flash LLM analysis for consistent evidence quality.
         Bot Instructions in the MR description are included in the LLM prompt
-        as context, not parsed as a bypass. Emergency fallback when LLM is unavailable.
+        as context — the LLM incorporates them into plan steps.
+        Emergency inline fallback when LLM is unavailable.
         """
         adapter = await self._get_adapter()
         if not adapter:
             logger.warning(f"Emergency fallback plan for !{context.get('mr_title', '?')}")
-            return self._fallback_plan(context), "complicated"
+            return self._emergency_plan(context), "complicated"
 
         prompt = self._build_analysis_prompt(context)
         try:
             response = await adapter.generate(
-                system_prompt="You are a GitLab MR triage agent. Classify and plan.",
+                system_prompt=HEADHUNTER_SYSTEM_INSTRUCTION,
                 contents=prompt,
                 temperature=self._temperature,
                 max_output_tokens=10000,
@@ -308,66 +381,28 @@ class Headhunter:
             )
             plan_text = response.text.strip()
             domain = self._extract_domain(plan_text)
-            logger.info(f"Tier 2: LLM analysis for !{context.get('mr_title', '?')} -> {domain}")
+            logger.info(f"LLM analysis for !{context.get('mr_title', '?')} -> {domain}")
             return plan_text, domain
         except Exception as e:
-            logger.warning(f"Tier 2 LLM analysis failed, using emergency fallback: {e}")
-            return self._fallback_plan(context), "complicated"
+            logger.warning(f"LLM analysis failed, using emergency fallback: {e}")
+            return self._emergency_plan(context), "complicated"
 
     @staticmethod
-    def _parse_bot_instructions(context: dict) -> tuple[str, str] | None:
-        """Tier 1: Parse structured Bot Instructions from MR description.
-
-        Detects '### Bot Instructions' marker in mr_description.
-        Returns (plan_text, domain) or None if no instructions found.
-        Parse failures return None to fall through to Tier 2 LLM analysis.
-        """
-        description = context.get("mr_description", "")
-        if "### Bot Instructions" not in description:
-            return None
-
-        try:
-            title = context.get("mr_title", "")
-            project = context.get("project_path", "")
-            url = context.get("target_url", "")
-
-            mr_type = ""
-            for line in description.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("## ") and not stripped.startswith("### "):
-                    mr_type = stripped[3:].strip()
-                    break
-
-            instructions_idx = description.index("### Bot Instructions")
-            instructions = description[instructions_idx + len("### Bot Instructions"):].strip()
-
-            # Structured bot MR: has a type header + bot instructions = CLEAR domain.
-            # No type header but has instructions = COMPLICATED (needs LLM assist).
-            domain = "clear" if mr_type else "complicated"
-
-            safe_instructions = instructions.replace('"', "'")
-            plan = (
-                f"---\n"
-                f"plan: \"{mr_type or 'Handle MR'}: {title}\"\n"
-                f"service: general\n"
-                f"repository: {project}\n"
-                f"domain: {domain.upper()}\n"
-                f"risk: low\n"
-                f"steps:\n"
-                f"  - id: execute-instructions\n"
-                f"    summary: \"MR {url} -- {safe_instructions}\"\n"
-                f"    status: pending\n"
-                f"---"
-            )
-            logger.info(f"Tier 1: Bot Instructions parsed for !{context.get('mr_title', '?')} ({mr_type or 'unknown type'})")
-            return plan, domain
-
-        except Exception as e:
-            logger.warning(f"Tier 1: Bot Instructions detected but parsing failed: {e}")
-            return None
+    def _emergency_plan(context: dict) -> str:
+        """Minimal YAML plan when LLM is unavailable. Assigns developer/investigate."""
+        return (
+            f"---\nplan: Investigate {context['action_name']} on {context['mr_title']}\n"
+            f"service: {context['project_path'].rsplit('/', 1)[-1]}\n"
+            f"repository: {context['project_path']}\n"
+            f"domain: COMPLICATED\nrisk: medium\n"
+            f"reasoning: LLM analysis unavailable -- manual triage needed\n"
+            f"steps:\n  - id: \"1\"\n    agent: developer\n"
+            f"    summary: \"Investigate {context['action_name']} on !{context.get('mr_iid', '?')} "
+            f"in {context['project_path']}. LLM triage failed -- review MR manually.\"\n---"
+        )
 
     def _build_analysis_prompt(self, context: dict) -> str:
-        """Build structured prompt for Tier 2 LLM analysis with full MR context."""
+        """Build structured prompt with full MR context for LLM analysis."""
         parts = [
             f"Action: {context['action_name']}",
             f"MR: {context['mr_title']}",
@@ -392,29 +427,8 @@ class Headhunter:
         if context.get("mention_comment"):
             parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
-        parts.append(
-            "\nProduce a YAML frontmatter work plan with fields: plan (one-sentence summary), "
-            "service/repository (component name/repository url), "
-            "domain (CLEAR/COMPLICATED/COMPLEX), risk (low/medium/high), "
-            "steps (each with id, summary, status: pending). "
-            "Steps describe WHAT needs to be Done -- NOT WHO does it && NOT HOW to do it. "
-            "Do NOT assign agent names — routing is handled separately. "
-            "Wrap in --- delimiters."
-        )
+        parts.append("\nProduce a YAML frontmatter work plan for this MR.")
         return "\n".join(parts)
-
-    @staticmethod
-    def _fallback_plan(context: dict) -> str:
-        action = context["action_name"]
-        title = context["mr_title"]
-        project = context["project_path"]
-        return (
-            f"---\nplan: Handle {action} on {title}\nservice: general\n"
-            f"repository: {project}\ndomain: COMPLICATED\nrisk: medium\n"
-            f"steps:\n  - id: investigate\n"
-            f"    summary: \"Investigate {action} on {title}."
-            f" Notify the maintainer via Slack about the findings, Only if Maintainer need to be aware of the event.\n    status: pending\n---"
-        )
 
     @staticmethod
     def _extract_domain(plan_text: str) -> str:

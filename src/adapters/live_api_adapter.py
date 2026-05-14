@@ -1046,6 +1046,8 @@ class LiveAPIAdapter:
                 "event_id": event_id,
                 "tool": tool,
                 "args": args,
+                "shadow": self._shadow,
+                "delivered": not self._shadow,
                 "timestamp": time.time(),
             })
         except Exception:
