@@ -105,8 +105,9 @@ function startWSClient(brainUrl) {
         state.pushInboundMessage({
           from: msg.from || 'brain',
           content: msg.content || '',
+          event_id: msg.event_id || '',
         });
-        console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars)`);
+        console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars, event=${msg.event_id || 'current'})`);
         tryWake(msg.from || 'brain', msg.content || '');
       }
     });

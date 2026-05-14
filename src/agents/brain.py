@@ -2421,8 +2421,9 @@ class Brain:
                                 "type": "proactive_message",
                                 "from": "brain",
                                 "content": message,
+                                "event_id": event_id,
                             })
-                            logger.info(f"Brain message_agent -> {agent_name} (busy, inbox) ({len(message)} chars)")
+                            logger.info(f"Brain message_agent -> {agent_name} (busy, inbox, event={event_id}) ({len(message)} chars)")
                         except Exception as e:
                             logger.warning(f"Failed to send message to {agent_name}: {e}")
                             await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
@@ -2456,8 +2457,9 @@ class Brain:
                                 "type": "proactive_message",
                                 "from": "brain",
                                 "content": message,
+                                "event_id": event_id,
                             })
-                            logger.info(f"Brain message_agent -> {agent_name} (busy fallback, inbox) ({len(message)} chars)")
+                            logger.info(f"Brain message_agent -> {agent_name} (busy fallback, inbox, event={event_id}) ({len(message)} chars)")
                         except Exception as e:
                             logger.warning(f"Failed to send message to {agent_name}: {e}")
                             await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
