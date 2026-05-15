@@ -62,10 +62,10 @@
 #     Line 2: evidence delta since last classify_event. Challenge question "Any new evidence to
 #     reclassify?" fires only on agent return (plan/execute) or user message -- prevents
 #     reclassification loop by not prompting when nothing new happened.
-# 31. [Pattern]: Message-mode early return in _run_agent_task: when mode=="message", skip result turn
-#     and process_event re-entry before is_cancel. Agent's content was delivered via team_send_message
-#     progress turns. Intentional exception to rule #9 (_append_and_broadcast for all turns).
-#     Safety invariant: team_send_results has notInModes:['message'] in MCP (team-chat-mcp.js).
+# 31. [Pattern]: Message-mode early return in _run_agent_task: when mode=="message" AND no deliverable
+#     in result_str (< 100 chars, no frontmatter), skip result turn. If sendResults shell fallback
+#     bypassed the MCP notInModes gate and result_str has content (>100 chars or frontmatter),
+#     fall through to write the result as a conversation turn. This ensures wait_for_agent sees it.
 # 31. [Pattern]: Cross-source event merge: when dedup detects same MR URL across different sources
 #     (kargo_context.mr_url vs gitlab_context.target_url), inject the duplicate's evidence as
 #     actor=source, action="evidence", result=<formatted context> turn into the FILO survivor
@@ -4193,29 +4193,40 @@ class Brain:
                     await self.process_event(event_id)
                 return
 
-            # Message-mode: agent delivered content via progress turns (team_send_message).
-            # CLI exit stdout is redundant noise -- skip result turn and re-entry.
-            # Safety invariant: team_send_results has notInModes:['message'] in MCP layer
-            # (team-chat-mcp.js), so callbackResult is always null in message mode.
-            # Exception to rule #9 (_append_and_broadcast for all turns) -- intentional.
-            # Applies to both local and ephemeral agents (same dispatch + result path).
+            # Message-mode: agent typically delivers content via progress turns (team_send_message).
+            # CLI exit stdout is usually redundant noise -- skip result turn in that case.
+            # However: if sendResults was used (shell fallback bypasses MCP notInModes gate),
+            # the result_str contains the agent's actual deliverable and MUST be written as
+            # a conversation turn so FRIDAY and wait_for_agent can see it.
             if mode == "message":
-                logger.info(
-                    f"Message-mode task completed: {agent_name} for {event_id} "
-                    f"(skipping result turn, content delivered via progress)"
+                # Detect sendResults payload: structured results start with "---" (frontmatter)
+                # or contain substantial content (>100 chars) that isn't just CLI noise.
+                has_deliverable = (
+                    result_str.lstrip().startswith("---")
+                    or len(result_str) > 100
                 )
-                if routing_turn_num:
-                    await self.blackboard.mark_turn_status(
-                        event_id, routing_turn_num, MessageStatus.EVALUATED
+                if not has_deliverable:
+                    logger.info(
+                        f"Message-mode task completed: {agent_name} for {event_id} "
+                        f"(no deliverable, content delivered via progress)"
                     )
-                    await self._broadcast_status_update(
-                        event_id, "evaluated", turns=[routing_turn_num],
-                    )
-                await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
-                if not parallel:
-                    self._release_task_state(event_id)
-                self._last_processed[event_id] = time.time()
-                return
+                    if routing_turn_num:
+                        await self.blackboard.mark_turn_status(
+                            event_id, routing_turn_num, MessageStatus.EVALUATED
+                        )
+                        await self._broadcast_status_update(
+                            event_id, "evaluated", turns=[routing_turn_num],
+                        )
+                    await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
+                    if not parallel:
+                        self._release_task_state(event_id)
+                    self._last_processed[event_id] = time.time()
+                    return
+                # Has deliverable -- fall through to write result turn below
+                logger.info(
+                    f"Message-mode task completed with deliverable: {agent_name} for {event_id} "
+                    f"({len(result_str)} chars -- writing result turn)"
+                )
 
             # Append agent result turn (cancel = clean termination, not an error)
             is_cancel = result_str.strip() == "Cancelled by Brain"
