@@ -181,7 +181,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     if key == "brain.triage":
         thoughts = turn.thoughts or "Analyzing event..."
-        blocks.append(_section(f"_:brain: {thoughts}_"))
+        blocks.append(_section(f"_:female-technologist: {thoughts}_"))
 
     elif key == "brain.route":
         agents = ", ".join(turn.selectedAgents or [])
@@ -231,7 +231,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     elif key == "brain.think":
         raw = turn.thoughts or turn.evidence or ""
         if raw:
-            blocks.append(_context_line(f":brain: {raw}"))
+            blocks.append(_context_line(f":female-technologist: {raw}"))
 
     elif key == "brain.tool_result":
         tool_name = turn.waitingFor or "tool"
@@ -410,7 +410,7 @@ STATUS_EMOJI: dict[str, str] = {
 SUBJECT_EMOJI: dict[str, str] = {
     "service": "",
     "kargo_stage": ":kargo:",
-    "system": ":brain:",
+    "system": ":female-technologist:",
 }
 
 SUBJECT_LABEL: dict[str, str] = {

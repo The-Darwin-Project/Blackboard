@@ -32,7 +32,7 @@ def test_brain_think_kv_happy_path():
     ctx = [b for b in blocks if b.get("type") == "context" and "AI-generated" not in str(b)]
     assert ctx, "brain.think should produce a context block"
     text = ctx[0]["elements"][0]["text"]
-    assert ":brain:" in text
+    assert ":female-technologist:" in text
     assert "MR State" in text
 
 
@@ -200,7 +200,7 @@ def test_brain_think_kv_isolated_before_streak():
     ctx = [b for b in blocks if b.get("type") == "context" and "AI-generated" not in str(b)]
     assert ctx, "brain.think should produce a context block"
     text = ctx[0]["elements"][0]["text"]
-    assert ":brain:" in text
+    assert ":female-technologist:" in text
     assert "Summary: overview" in text, "Raw content should be preserved"
 
 
