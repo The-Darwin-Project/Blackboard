@@ -16,7 +16,7 @@
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
-# 15b. [Pattern]: _waiting_for_agent (dict[str,str]) blocks process_event re-entry after wait_for_agent. Set in handler, cleared in _release_task_state + _close_and_broadcast. Guard at top of _process_event_inner (same position as _waiting_for_user guard).
+# 15b. [Pattern]: _waiting_for_agent (dict[str,str]) blocks process_event re-entry after wait_for_agent. Set in handler, cleared when ANY participant responds (DELIVERED turn detected) OR in _release_task_state + _close_and_broadcast. Guard at top of _process_event_inner. Treats JARVIS, agents, users as equal participants.
 # 16. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
 # 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack).
 # 27. [Pattern]: event_status_changed broadcast fires after successful status transitions (new->active, active->deferred, deferred->active). Broadcasts at call sites, NOT inside transition_event_status() (Hexagonal boundary). Defer path is defense-in-depth (turn broadcast already fires via _append_and_broadcast).
@@ -604,10 +604,17 @@ class Brain:
             logger.debug(f"Skipping closed event {event_id}")
             return
 
-        # WAITING-FOR-AGENT guard: skip processing until agent delivers results
+        # WAITING-FOR-AGENT guard: skip processing until a participant responds.
+        # Any DELIVERED turn (from agent, JARVIS, user, aligner) clears the wait --
+        # FRIDAY doesn't need to know which participant she was waiting for.
         if event_id in self._waiting_for_agent:
-            logger.debug(f"Skipping process_event for {event_id}: waiting for agent")
-            return
+            has_response = any(t.status.value == "delivered" for t in event.conversation)
+            if has_response:
+                self._waiting_for_agent.pop(event_id, None)
+                logger.info(f"Cleared _waiting_for_agent for {event_id}: participant responded")
+            else:
+                logger.debug(f"Skipping process_event for {event_id}: waiting for participant")
+                return
 
         # Clear orphan re-queue count on successful recovery (event now has turns)
         if event.conversation and event_id in self._orphan_requeue_count:
