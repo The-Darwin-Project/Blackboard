@@ -8,6 +8,7 @@
 # 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only tool calls reach her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
+# 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays active event context via _replay_pending_context. All errors non-fatal.
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
@@ -1463,10 +1464,45 @@ class LiveAPIAdapter:
                 try:
                     await self._connect()
                     if self._session:
+                        if self._brain:
+                            for eid in list(self._brain._waiting_for_jarvis.keys()):
+                                self._brain._clear_jarvis_wait(eid)
+                            logger.info("Cortex reconnect: cleared stale JARVIS wait states")
+                        await self._replay_pending_context()
                         return
                 except Exception as e:
                     logger.warning("Cortex reconnect failed: %s", e)
         logger.info("Cortex: no recent activity, staying idle until next pulse")
+
+    async def _replay_pending_context(self) -> None:
+        """After reconnect, re-send active event summaries so JARVIS can resume."""
+        if not self._session:
+            return
+        try:
+            active_ids = await self._blackboard.get_active_events()
+            if not active_ids:
+                return
+            lines = ["[SESSION RESUMED] Previous session lost. Active event summaries:"]
+            for eid in active_ids[:5]:
+                event = await self._blackboard.get_event(eid)
+                if not event:
+                    continue
+                elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
+                phase = event.brain_phase or "triage"
+                turns = len(event.conversation)
+                last_action = ""
+                if event.conversation:
+                    last = event.conversation[-1]
+                    last_action = f"{last.actor}.{last.action}"
+                lines.append(
+                    f"  {eid}: phase={phase}, {turns} turns, {elapsed}m elapsed, "
+                    f"last={last_action}"
+                )
+            if len(lines) > 1:
+                await self._session.send(input="\n".join(lines), end_of_turn=True)
+                logger.info("Cortex reconnect: replayed context for %d events", len(lines) - 1)
+        except Exception as e:
+            logger.warning("Cortex context replay failed (non-fatal): %s", e)
 
     async def _rotate_session(self) -> None:
         """Ask for summary, close, reconnect with summary as first turn."""
