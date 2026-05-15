@@ -1008,14 +1008,21 @@ class Brain:
                 logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
 
         # === JARVIS response gate ===
-        # Strip respond_to_jarvis unless an unanswered jarvis.message or jarvis.insight exists
+        # Strip respond_to_jarvis unless an unanswered jarvis.message or jarvis.insight exists.
+        # For jarvis-sourced events: the initial JARVIS prompt is the event evidence, not a
+        # conversation turn. Treat it as an implicit unanswered message until FRIDAY responds.
         has_unanswered_jarvis = False
-        for t in reversed(event.conversation):
-            if t.actor == "jarvis" and t.action in ("message", "insight"):
-                has_unanswered_jarvis = True
-                break
-            if t.actor == "brain" and t.action == "respond_jarvis":
-                break
+        if event.source == "jarvis" and not any(
+            t.actor == "brain" and t.action == "respond_jarvis" for t in event.conversation
+        ):
+            has_unanswered_jarvis = True  # Implicit: JARVIS created the event, FRIDAY hasn't responded yet
+        else:
+            for t in reversed(event.conversation):
+                if t.actor == "jarvis" and t.action in ("message", "insight"):
+                    has_unanswered_jarvis = True
+                    break
+                if t.actor == "brain" and t.action == "respond_jarvis":
+                    break
         if not has_unanswered_jarvis:
             active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
 
