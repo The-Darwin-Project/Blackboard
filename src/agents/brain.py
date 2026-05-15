@@ -2716,6 +2716,9 @@ class Brain:
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return False
+            # Defer supersedes any active wait -- FRIDAY chose to wait on a timer,
+            # not on a participant. Clear wait states to prevent post-reactivation deadlock.
+            self._waiting_for_agent.pop(event_id, None)
             reason = args.get("reason", "Deferred by Brain")
             delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))  # Clamp 30s-60min
             defer_until = time.time() + delay
