@@ -103,12 +103,12 @@ function startWSClient(brainUrl) {
         console.log(`[${new Date().toISOString()}] Blackboard update: turn ${msg.turn?.turn || '?'} (${msg.turn?.actor || '?'}.${msg.turn?.action || '?'}), total=${msg.total_turns || '?'}`);
       } else if (msg.type === 'proactive_message') {
         state.pushInboundMessage({
-          from: msg.from || 'brain',
+          from: msg.from || 'FRIDAY',
           content: msg.content || '',
           event_id: msg.event_id || '',
         });
         console.log(`[${new Date().toISOString()}] Proactive message received (${(msg.content || '').length} chars, event=${msg.event_id || 'current'})`);
-        tryWake(msg.from || 'brain', msg.content || '');
+        tryWake(msg.from || 'FRIDAY', msg.content || '');
       }
     });
 

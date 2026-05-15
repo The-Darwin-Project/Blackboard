@@ -130,7 +130,7 @@ COPY server.js config.js state.js ws-utils.js stream-parser.js cli-setup.js \
      credentials.js cli-executor.js http-handler.js ws-server.js ws-client.js \
      team-chat-mcp.js blackboard-mcp.js journal-mcp.js kubearchive-mcp.js ./
 
-# Install agent-to-brain callback scripts (sendResults + sendMessage symlink)
+# Install agent-to-FRIDAY callback scripts (sendResults + sendMessage symlink)
 COPY sendResults.sh /usr/local/bin/sendResults
 RUN chmod +x /usr/local/bin/sendResults && \
     ln -s /usr/local/bin/sendResults /usr/local/bin/sendMessage

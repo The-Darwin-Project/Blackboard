@@ -143,7 +143,7 @@ async function handleRequest(req, res) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       if (parts.length > 0) {
         const ctx = parts.join('\n');
-        console.log(`[${new Date().toISOString()}] PreToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} brain msgs, ${tmCount} teammate hint(s)`);
+        console.log(`[${new Date().toISOString()}] PreToolUse hook: injecting ${bbTurns.length} bb turns, ${inbound.length} FRIDAY msgs, ${tmCount} teammate hint(s)`);
         res.end(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: ctx } }));
       } else {
         res.end('{}');
