@@ -247,6 +247,15 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     elif key == "brain.notify":
         blocks.append(_context_line(f":bell: {turn.thoughts or 'Notification sent.'}"))
 
+    elif key == "brain.phase":
+        reason = _md_to_mrkdwn(turn.thoughts) if turn.thoughts else "Phase transition"
+        blocks.append(_section(f":female-technologist: {reason}"))
+
+    elif key == "brain.respond_jarvis":
+        text = _md_to_mrkdwn(turn.thoughts) if turn.thoughts else ""
+        if text:
+            blocks.append(_section(f":female-technologist: {text}"))
+
     elif turn.action == "message" and turn.actor in AGENT_COLORS:
         emoji = AGENT_SHORTCODE.get(turn.actor, ":robot_face:")
         text = turn.thoughts or ""
