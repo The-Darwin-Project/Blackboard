@@ -5,6 +5,7 @@
 # 3. [Pattern]: PulseContext is caller-provided; PulseBatch is emitter-constructed.
 # 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "tool", "phase", "agent".
 # 5. [Semantic]: Tool pulse scores: 1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
+# 6. [Pattern]: PulseBatch.reasoning carries FRIDAY's thinking text (optional, 500-char truncated by JARVIS adapter).
 """
 Pulse data models for the Cognitive Recall Graph.
 
@@ -47,6 +48,7 @@ class PulseBatch:
     turn: int = 0
     event_elapsed_s: int = 0
     timestamp: float = field(default_factory=time.time)
+    reasoning: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +65,7 @@ class PulseBatch:
             "turn": self.turn,
             "event_elapsed_s": self.event_elapsed_s,
             "timestamp": self.timestamp,
+            "reasoning": self.reasoning,
         }
 
 

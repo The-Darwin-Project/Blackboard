@@ -645,6 +645,8 @@ class LiveAPIAdapter:
                     lines.append(f"  {p.neuron_id} ({p.score:.2f}{inj})")
             else:
                 lines.append(f"  {p.neuron_id} ({p.score:.2f}{inj})")
+        if batch.reasoning:
+            lines.append(f"  [REASONING] {batch.reasoning[:500]}")
         return "\n".join(lines)
 
     async def _receive_loop(self) -> None:

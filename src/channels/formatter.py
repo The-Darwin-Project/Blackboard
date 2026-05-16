@@ -176,6 +176,7 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
     Returns a list of block dicts ready for chat_postMessage(blocks=...).
     """
     key = f"{turn.actor}.{turn.action}"
+    display_name = {"brain": "FRIDAY", "jarvis": "JARVIS"}.get(turn.actor, turn.actor)
     logger.debug("format_turn: %s", key)
     blocks: list[dict] = []
 
@@ -274,8 +275,8 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
 
     else:
         emoji = AGENT_SHORTCODE.get(turn.actor, ":gear:")
-        text = _md_to_mrkdwn(turn.thoughts or turn.result or f"{turn.actor}.{turn.action}")
-        blocks.append(_section(f"{emoji} *{turn.actor}* ({turn.action}):\n{text}"))
+        text = _md_to_mrkdwn(turn.thoughts or turn.result or f"{display_name}.{turn.action}")
+        blocks.append(_section(f"{emoji} *{display_name}* ({turn.action}):\n{text}"))
 
     if turn.actor != "user" and turn.action in _DISCLAIMER_ACTIONS:
         blocks.append({
@@ -293,7 +294,8 @@ def get_agent_notification_text(turn: "ConversationTurn") -> str:
     so anything here appears as a separate visible line before the color bar.
     """
     emoji = AGENT_EMOJI.get(turn.actor, "\U0001f916")
-    return f"{emoji} {turn.actor}"
+    display_name = {"brain": "FRIDAY", "jarvis": "JARVIS"}.get(turn.actor, turn.actor)
+    return f"{emoji} {display_name}"
 
 
 def get_turn_attachment_color(turn: "ConversationTurn") -> str | None:

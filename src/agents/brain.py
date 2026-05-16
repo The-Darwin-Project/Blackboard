@@ -21,6 +21,9 @@
 # 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack).
 # 27. [Pattern]: event_status_changed broadcast fires after successful status transitions (new->active, active->deferred, deferred->active). Broadcasts at call sites, NOT inside transition_event_status() (Hexagonal boundary). Defer path is defense-in-depth (turn broadcast already fires via _append_and_broadcast).
 # 30. [Gotcha]: consult_deep_memory cached guard uses string matching ("No historical patterns", "No results") coupled to Archivist response text. If Archivist wording changes, the guard silently breaks.
+# 31. [Pattern]: _reasoning_by_event (dict[str, str | None]) keyed by event_id. Set in _process_with_llm
+#     before _execute_function_call, consumed via .pop() in _emit_executive_pulse, cleared on error/text-only
+#     paths, _process_intermediate, and _close_and_broadcast. JARVIS sees reasoning via PulseBatch.reasoning.
 # 28. [Debt]: defer_event handler (~2064) uses read-modify-write (get_event -> set status -> redis.set) without
 #     WATCH/MULTI/EXEC. Protected by per-event asyncio.Lock, but external concurrent writes (REST endpoints)
 #     could theoretically lose turns. Pre-existing pattern -- refactor to use transition_event_status() or
@@ -385,6 +388,8 @@ class Brain:
         self._last_processed: dict[str, float] = {}
         # Orphan re-queue attempts per event (blank events stuck in active set)
         self._orphan_requeue_count: dict[str, int] = {}
+        # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
+        self._reasoning_by_event: dict[str, str | None] = {}
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
         self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
@@ -1143,6 +1148,7 @@ class Brain:
 
         # If all retries failed with no output, write error turn
         if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
+            self._reasoning_by_event.pop(event_id, None)
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -1189,6 +1195,7 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
+            self._reasoning_by_event[event_id] = accumulated_thoughts or None
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
                 response_parts=captured_parts,
@@ -1196,6 +1203,7 @@ class Brain:
             )
 
         if accumulated_text or accumulated_thoughts:
+            self._reasoning_by_event.pop(event_id, None)
             turn = ConversationTurn(
                 turn=len(event.conversation) + 1,
                 actor="brain",
@@ -1220,6 +1228,7 @@ class Brain:
         Token limit: 256 (agent-only), 1024 (user or huddle present).
         Appends brain.think turn for temporal context; marks processed turns EVALUATED.
         """
+        self._reasoning_by_event.pop(event_id, None)
         if not self._adapter:
             logger.warning("_process_intermediate skipped: no LLM adapter")
             return
@@ -2283,11 +2292,13 @@ class Brain:
                     score = 1.0
                 pulses.append(Pulse(nid, ntype, score, injected=score >= 0.5))
             ev = await self.blackboard.get_event(event_id)
+            reasoning = self._reasoning_by_event.pop(event_id, None)
             batch = PulseBatch(
                 event_id=event_id,
                 pulses=pulses,
                 turn=len(ev.conversation) if ev else 0,
                 event_elapsed_s=int(time.time() - ev.conversation[0].timestamp) if ev and ev.conversation else 0,
+                reasoning=reasoning,
             )
             await self.pulse_port.on_pulse_batch(batch)
         except Exception as e:
@@ -4557,6 +4568,7 @@ class Brain:
         self._jarvis_wait_count.pop(event_id, None)
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
+        self._reasoning_by_event.pop(event_id, None)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
