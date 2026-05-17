@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "ba98dac" # Updated by CI to commit SHA
+  tag: "b402e9b" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -214,8 +214,7 @@ app:
 # Brain Scheduling (ReconcileScheduler)
 # =============================================================================
 brain:
-  reconcileWorkers: 0  # 0 = auto-derive from source caps * 1.3. N = fixed worker count.
-
+  reconcileWorkers: 0 # 0 = auto-derive from source caps * 1.3. N = fixed worker count.
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
