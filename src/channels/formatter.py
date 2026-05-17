@@ -336,6 +336,10 @@ def build_event_report_md(event_doc: "EventDocument") -> str:
         if t.actor == "user":
             text = (t.thoughts or t.result or t.action or "")[:300]
             lines.append(f"**Message:** {text}")
+        elif t.action == "respond_jarvis":
+            text = (t.thoughts or "")[:300]
+            if text:
+                lines.append(f"**Message to JARVIS:** {text}")
         elif t.action == "tool_result":
             text = (t.result or t.evidence or t.thoughts or t.action or "")[:300]
             lines.append(f"**Evidence:** {text}")

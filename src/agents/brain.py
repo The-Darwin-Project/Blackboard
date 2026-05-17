@@ -4856,6 +4856,9 @@ class Brain:
                 user_text = turn.thoughts or turn.result or ""
                 if user_text:
                     lines.append(f"**Message:** {user_text}")
+            elif turn.action == "respond_jarvis":
+                if turn.thoughts:
+                    lines.append(f"**Message to JARVIS:** {turn.thoughts}")
             elif turn.action == "tool_result":
                 evidence_text = turn.result or turn.thoughts or ""
                 if evidence_text:
