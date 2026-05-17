@@ -1315,8 +1315,8 @@ class LiveAPIAdapter:
                 logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
 
-            logger.info("Cortex idle %ds + %d active events -- creating system review", idle_threshold, len(active_ids))
-            await self._create_system_review_event(active_ids)
+            logger.info("Cortex idle %ds + %d stale events -- creating system review", idle_threshold, len(stale_events))
+            await self._create_system_review_event(stale_events)
 
     async def _generate_session_report(self) -> None:
         """Wrapper: generate report on self._session. Manages _generating_report flag."""
