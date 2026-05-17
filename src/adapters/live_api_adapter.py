@@ -1296,7 +1296,11 @@ class LiveAPIAdapter:
                     await self._close_session()
                 break
 
-            # Per-event staleness: skip if all active events have recent Brain activity
+            # === Path 1: Stale events -- JARVIS intervenes directly ===
+            # If specific events are stuck (active but not processed recently),
+            # JARVIS handles this via friction detection in the pulse stream --
+            # surface_context or send_event_message to the stuck event.
+            # No meta-event needed for stuck events.
             now = time.time()
             stale_events = []
             if self._brain:
@@ -1304,10 +1308,21 @@ class LiveAPIAdapter:
                     last = self._brain._last_processed.get(eid, now)
                     if (now - last) > idle_threshold:
                         stale_events.append(eid)
-            if self._brain and not stale_events:
+
+            # If some events are stale but others are active, the session
+            # stays alive (JARVIS observes via pulses from active events).
+            # Don't create a meta-event -- let JARVIS intervene naturally.
+            if stale_events and len(stale_events) < len(active_ids):
                 continue
 
-            # --- META-EVENT: challenge FRIDAY during idle ---
+            # === Path 2: All events parked -- meta-event to keep session warm ===
+            # ALL active events are either stale or waiting (no pulses flowing).
+            # Create a system review so JARVIS and FRIDAY can discuss what happened
+            # and keep the Live API session from going go_away.
+            all_parked = len(stale_events) == len(active_ids)
+            if not all_parked:
+                continue
+
             if self._active_meta_event_id:
                 continue
             # Skip meta-event creation while FRIDAY is waiting for JARVIS
@@ -1315,8 +1330,8 @@ class LiveAPIAdapter:
                 logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
 
-            logger.info("Cortex idle %ds + %d stale events -- creating system review", idle_threshold, len(stale_events))
-            await self._create_system_review_event(stale_events)
+            logger.info("Cortex idle %ds + all %d events parked -- creating system review", idle_threshold, len(active_ids))
+            await self._create_system_review_event(active_ids)
 
     async def _generate_session_report(self) -> None:
         """Wrapper: generate report on self._session. Manages _generating_report flag."""
