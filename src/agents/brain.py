@@ -38,8 +38,14 @@
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
 #     Token limit: 256 (agent-only), 1024 (user or huddle present). NEVER add wait_for_user to
-#     intermediate -- it sets _waiting_for_user which blocks the event loop. Appends brain.think,
+#     intermediate -- it sets _waiting_for_user which blocks the event loop. Appends brain.intermediate,
 #     marks turns EVALUATED.
+# 32. [Pattern]: brain.thoughts (internal reasoning, is_thought=True tokens) -- NOT fed to LLM prompt
+#     (_turn_to_parts returns []), no pulse, no _waiting_for_user. Dashboard/JARVIS can see it.
+# 33. [Pattern]: brain.response (visible reply, is_thought=False text) -- IN LLM prompt as role=model,
+#     emits pulse (tool:brain_response), updates _last_processed, sets _waiting_for_user for slack/chat.
+# 34. [Gotcha]: Legacy brain.think stays IN LLM prompt with [Internal observation] wrapper (backward
+#     compat for old Redis events). New code MUST produce brain.thoughts or brain.response, not brain.think.
 # 25. [Pattern]: WIP cap (two layers):
 #     Layer 1 (per-source): _get_source_wip_limit + _count_source_wip gate NEW->ACTIVE transition.
 #       Counts events in ACTIVE+DEFERRED status for the source. NEW events are input buffer, not WIP.
@@ -1207,17 +1213,32 @@ class Brain:
                 grounding_evidence=grounding_evidence or None,
             )
 
-        if accumulated_text or accumulated_thoughts:
-            self._reasoning_by_event.pop(event_id, None)
-            turn = ConversationTurn(
-                turn=len(event.conversation) + 1,
+        if accumulated_thoughts:
+            thoughts_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="think",
-                thoughts=accumulated_text or "[Brain reasoning complete]",
+                action="thoughts",
+                thoughts=accumulated_thoughts,
+            )
+            await self._append_and_broadcast(event_id, thoughts_turn)
+
+        if accumulated_text:
+            response_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="response",
+                thoughts=accumulated_text,
                 evidence=grounding_evidence if grounding_evidence else None,
                 response_parts=captured_parts,
             )
-            await self._append_and_broadcast(event_id, turn)
+            await self._append_and_broadcast(event_id, response_turn)
+            await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+            self._last_processed[event_id] = time.time()
+            if event.source in ("slack", "chat"):
+                self._waiting_for_user.add(event_id)
+
+        self._reasoning_by_event.pop(event_id, None)
+        if accumulated_text or accumulated_thoughts:
             return False
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")
@@ -1231,7 +1252,7 @@ class Brain:
         Processes ALL non-brain unseen turns: agent progress, user messages, aligner signals.
         Tools: reply_to_agent, message_agent, wait_for_agent (always available).
         Token limit: 256 (agent-only), 1024 (user or huddle present).
-        Appends brain.think turn for temporal context; marks processed turns EVALUATED.
+        Appends brain.thoughts turn for temporal context; marks processed turns EVALUATED.
         """
         self._reasoning_by_event.pop(event_id, None)
         if not self._adapter:
@@ -1323,13 +1344,13 @@ class Brain:
 
         if accumulated_text:
             turn = ConversationTurn(
-                turn=len(event.conversation) + 1,
+                turn=(await self._next_turn_number(event_id)),
                 actor="brain",
-                action="think",
+                action="intermediate",
                 thoughts=accumulated_text,
             )
             await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Appended turn {turn.turn} (brain.think) to event {event_id}")
+            logger.info(f"Appended turn {turn.turn} (brain.thoughts) to event {event_id}")
 
         if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_agent"):
             await self._execute_function_call(
@@ -1497,7 +1518,7 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "defer":
                 consecutive_defers += 1
-            elif t.actor == "brain" and t.action in ("think", "tool_result", "wait"):
+            elif t.actor == "brain" and t.action in ("think", "thoughts", "intermediate", "response", "tool_result", "wait"):
                 continue
             else:
                 break
@@ -1508,7 +1529,7 @@ class Brain:
         for t in reversed(event.conversation):
             if t.actor == "brain" and t.action == "wait" and t.waitingFor == "agent":
                 consecutive_waits += 1
-            elif t.actor == "brain" and t.action in ("think", "tool_result"):
+            elif t.actor == "brain" and t.action in ("think", "thoughts", "intermediate", "response", "tool_result"):
                 continue
             else:
                 break
@@ -2112,6 +2133,8 @@ class Brain:
         for turn in event.conversation:
             role = "model" if turn.actor == "brain" else "user"
             parts = self._turn_to_parts(turn)
+            if not parts:
+                continue  # Skip turns with no prompt content (e.g., brain.thoughts)
 
             if contents and contents[-1]["role"] == role:
                 contents[-1]["parts"].extend(parts)
@@ -2136,6 +2159,9 @@ class Brain:
         User/agent turns use text from thoughts/result/evidence fields.
         Image turns embed the image bytes inline in the parts array.
         """
+        if turn.actor == "brain" and turn.action in ("thoughts", "intermediate"):
+            return []
+
         if turn.actor == "brain" and turn.action == "tool_result":
             tool_name = turn.waitingFor or "tool"
             text = f"## Tool Result: {tool_name}\n\n{turn.evidence or turn.thoughts or ''}"
@@ -2890,14 +2916,14 @@ class Brain:
             # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
             ev = await self.blackboard.get_event(event_id)
             already_consulted = any(
-                t.action in ("think", "tool_result") and t.evidence and "Deep memory" in (t.evidence or "")
+                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep memory" in (t.evidence or "")
                 for t in (ev.conversation if ev else [])
             )
             if already_consulted:
                 logger.info(f"Deep memory already consulted for {event_id} -- returning cached results")
                 cached_evidence = next(
                     (t.evidence for t in (ev.conversation if ev else [])
-                     if t.action in ("think", "tool_result") and t.evidence and "Deep memory" in t.evidence),
+                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep memory" in t.evidence),
                     "Deep memory was already consulted (no cached results).",
                 )
                 turn = ConversationTurn(
@@ -4869,6 +4895,12 @@ class Brain:
             elif turn.action == "respond_jarvis":
                 if turn.thoughts:
                     lines.append(f"**Message to JARVIS:** {turn.thoughts}")
+            elif turn.action in ("think", "thoughts", "intermediate"):
+                if turn.thoughts:
+                    lines.append(f"**Internal:** {turn.thoughts}")
+            elif turn.action == "response":
+                if turn.thoughts:
+                    lines.append(f"**FRIDAY:** {turn.thoughts}")
             elif turn.action == "tool_result":
                 evidence_text = turn.result or turn.thoughts or ""
                 if evidence_text:
@@ -5028,7 +5060,7 @@ class Brain:
                         continue
                     if event.status == EventStatus.CLOSED:
                         logger.warning(f"Zombie active event {eid} is closed -- removing from active set")
-                        await self.blackboard.redis.srem("darwin:active_events", eid)
+                        await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
                         continue
                     if not event.conversation:
                         if event.status == EventStatus.NEW:

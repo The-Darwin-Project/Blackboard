@@ -229,10 +229,25 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         reason = _md_to_mrkdwn(turn.thoughts) if turn.thoughts else "Deferred"
         blocks.append(_section(f":double_vertical_bar: *Event paused* -- {reason}"))
 
+    elif key == "brain.thoughts":
+        raw = turn.thoughts or ""
+        if raw:
+            blocks.append(_context_line(f":female-technologist: {raw}"))
+
+    elif key == "brain.intermediate":
+        raw = turn.thoughts or ""
+        if raw:
+            blocks.append(_context_line(f":female-technologist: {raw}"))
+
     elif key == "brain.think":
         raw = turn.thoughts or turn.evidence or ""
         if raw:
             blocks.append(_context_line(f":female-technologist: {raw}"))
+
+    elif key == "brain.response":
+        raw = _md_to_mrkdwn(turn.thoughts) if turn.thoughts else ""
+        if raw:
+            blocks.append(_section(f":female-technologist: {raw}"))
 
     elif key == "brain.tool_result":
         tool_name = turn.waitingFor or "tool"
@@ -342,6 +357,14 @@ def build_event_report_md(event_doc: "EventDocument") -> str:
         elif t.actor == "user":
             text = (t.thoughts or t.result or t.action or "")[:300]
             lines.append(f"**Message:** {text}")
+        elif t.action in ("think", "thoughts"):
+            text = (t.thoughts or "")[:300]
+            if text:
+                lines.append(f"**Internal:** {text}")
+        elif t.action == "response":
+            text = (t.thoughts or "")[:300]
+            if text:
+                lines.append(f"**FRIDAY:** {text}")
         elif t.action == "respond_jarvis":
             text = (t.thoughts or "")[:300]
             if text:
