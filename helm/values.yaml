@@ -211,6 +211,12 @@ app:
   agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
   maxConcurrentDispatches: 0 # Global WIP cap for local sidecar dispatches: 0=disabled, N=max concurrent. Does NOT affect ephemeral agents (separate {SOURCE}_MAX_ACTIVE caps).
 # =============================================================================
+# Brain Scheduling (ReconcileScheduler)
+# =============================================================================
+brain:
+  reconcileWorkers: 0  # 0 = auto-derive from source caps * 1.3. N = fixed worker count.
+
+# =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
 github:

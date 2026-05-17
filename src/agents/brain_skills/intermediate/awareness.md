@@ -32,8 +32,8 @@ Do not call `select_agent` during active dispatch. The current agent
 continues working. Route new work after the agent completes.
 
 NEVER call `wait_for_user` during intermediate processing -- it blocks
-the event loop and prevents the active agent's completion from being
-processed. Use `wait_for_agent` instead.
+further reconciliation for this event and prevents the active agent's
+completion from being processed. Use `wait_for_agent` instead.
 
 ## Blackboard Updates to Agents
 

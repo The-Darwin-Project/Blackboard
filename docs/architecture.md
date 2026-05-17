@@ -128,7 +128,7 @@ The Brain can proactively propose actions to users and prompt for approval, shif
 
 ## Adaptive Message Routing
 
-The `message_agent` tool uses adaptive routing: if the target agent is **idle**, the Brain dispatches directly. If the agent is **busy**, the message goes to the agent's **inbox** (via MCP) for asynchronous pickup. This prevents blocking the Brain's event loop while ensuring no message is lost.
+The `message_agent` tool uses adaptive routing: if the target agent is **idle**, the Brain dispatches directly. If the agent is **busy**, the message goes to the agent's **inbox** (via MCP) for asynchronous pickup. This prevents blocking the Brain's reconcile workers while ensuring no message is lost.
 
 ## Safety Model
 

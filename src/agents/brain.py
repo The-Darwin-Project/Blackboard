@@ -11,9 +11,13 @@
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
 # 9. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
-# 11. [Constraint]: Event loop has_unread + deferred re-activation paths skip processing when _waiting_for_user.
+# 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
+# 13b. [Pattern]: ReconcileScheduler (src/scheduling/) replaces monolithic event loop. start_event_loop() is a
+#     thin facade that wires QueueTrigger (BRPOP), ResyncTrigger (5s scan), StalenessGuard (jarvis 120s TTL).
+#     N workers process events concurrently. FairQueue provides per-key dedup (no spin monopoly).
+#     Brain._scan_active_for_reconcile() is the decision callback: returns list[str] of event_ids to enqueue.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
 # 15b. [Pattern]: _waiting_for_agent (dict[str,str]) blocks process_event re-entry after wait_for_agent. Set in handler, cleared when ANY participant responds (DELIVERED turn detected) OR in _release_task_state + _close_and_broadcast. Guard at top of _process_event_inner. Treats JARVIS, agents, users as equal participants.
@@ -38,7 +42,7 @@
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
 #     Token limit: 256 (agent-only), 1024 (user or huddle present). NEVER add wait_for_user to
-#     intermediate -- it sets _waiting_for_user which blocks the event loop. Appends brain.intermediate,
+#     intermediate -- it sets _waiting_for_user which blocks reconcile for that event. Appends brain.intermediate,
 #     marks turns EVALUATED.
 # 32. [Pattern]: brain.thoughts (internal reasoning, is_thought=True tokens) -- NOT fed to LLM prompt
 #     (_turn_to_parts returns []), no pulse, no _waiting_for_user. Dashboard/JARVIS can see it.
@@ -103,7 +107,7 @@
 #     jarvis.message turn has no subsequent brain.respond_jarvis turn. Handler appends turn AND
 #     sends response to LiveAPIAdapter.receive_brain_response() for real-time delivery.
 #     _live_adapter set by main.py when SYSTEM2_ENABLED=true.
-# 34. [Pattern]: Event loop scan blank-event guard uses processing_started_at with queued_at
+# 34. [Pattern]: Resync scan blank-event guard uses processing_started_at with queued_at
 #     fallback as orphan discriminator. Covers both "dequeued but crashed before stamp" and
 #     "never dequeued" cases. Error turn from catch-all is marked evaluated immediately to
 #     prevent hot retry loops (has_unread=True -> process_event -> fail -> repeat).
@@ -406,6 +410,7 @@ class Brain:
         self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
+        self._scheduler = None  # ReconcileScheduler | None -- set by start_event_loop()
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
@@ -4019,7 +4024,8 @@ class Brain:
             self._last_processed[event_id] = time.time()
 
             if not await self._is_event_closed(event_id) and event_id not in self._waiting_for_user:
-                await self.process_event(event_id)
+                if self._scheduler:
+                    self._scheduler.enqueue(event_id)
 
         except Exception as e:
             logger.error("Wake task failed: %s for %s: %s", role, event_id, e, exc_info=True)
@@ -4269,8 +4275,8 @@ class Brain:
                         )
                         await self._append_and_broadcast(event_id, turn)
                         self._release_task_state(event_id)
-                        if not await self._is_event_closed(event_id):
-                            await self.process_event(event_id)
+                        if not await self._is_event_closed(event_id) and self._scheduler:
+                            self._scheduler.enqueue(event_id)
                         return
 
                     if result_data.get("type") == "agent_busy":
@@ -4283,8 +4289,8 @@ class Brain:
                         await self._append_and_broadcast(event_id, turn)
                         logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
                         self._release_task_state(event_id)
-                        if not await self._is_event_closed(event_id):
-                            await self.process_event(event_id)
+                        if not await self._is_event_closed(event_id) and self._scheduler:
+                            self._scheduler.enqueue(event_id)
                         return
             except (json.JSONDecodeError, TypeError):
                 pass  # Not a JSON question, treat as regular result
@@ -4301,8 +4307,8 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
                 self._release_task_state(event_id)
-                if not await self._is_event_closed(event_id):
-                    await self.process_event(event_id)
+                if not await self._is_event_closed(event_id) and self._scheduler:
+                    self._scheduler.enqueue(event_id)
                 return
 
             # Message-mode: agent typically delivers content via progress turns (team_send_message).
@@ -4406,8 +4412,8 @@ class Brain:
             self._last_processed[event_id] = time.time()
 
             # Trigger next Brain decision (skip if event was closed while agent ran)
-            if not await self._is_event_closed(event_id):
-                await self.process_event(event_id)
+            if not await self._is_event_closed(event_id) and self._scheduler:
+                self._scheduler.enqueue(event_id)
             else:
                 logger.info(f"Skipping re-entry for {event_id}: event closed while agent ran")
 
@@ -4428,8 +4434,8 @@ class Brain:
             self._last_processed[event_id] = time.time()
 
             # Re-evaluate (skip if event was closed concurrently)
-            if not await self._is_event_closed(event_id):
-                await self.process_event(event_id)
+            if not await self._is_event_closed(event_id) and self._scheduler:
+                self._scheduler.enqueue(event_id)
 
         finally:
             if sema_acquired and self._dispatch_semaphore:
@@ -5067,165 +5073,211 @@ class Brain:
             logger.info(f"Startup cleanup: closed {stale_count} stale events from previous instance")
 
     async def start_event_loop(self) -> None:
+        """Start the ReconcileScheduler with trigger-based event processing.
+
+        Replaces the old monolithic while-loop with fair N-worker scheduling.
+        Workers are auto-derived from source caps * 1.3 (configurable via
+        BRAIN_RECONCILE_WORKERS env var, 0 = auto).
         """
-        Background event loop: dequeue new events + check for user approvals.
-        
-        Agent responses are handled via _run_agent_task callbacks (non-blocking).
-        No agent response scanning needed -- WebSocket agents complete asynchronously.
-        """
-        from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+        import math
+        from .scheduling import ReconcileScheduler
+        from .scheduling.triggers import QueueTrigger, ResyncTrigger, StalenessGuard
 
         self._running = True
-        _redis_backoff = 2  # seconds, doubles on consecutive Redis failures (max 60s)
-
-        # Startup: clean up stale events from previous Brain instance
         await self._cleanup_stale_events()
 
-        logger.info("Brain event loop started (WebSocket mode)")
+        self._scheduler = ReconcileScheduler(
+            reconcile_fn=self.process_event,
+            workers=self._derive_workers(),
+            on_error=self._on_reconcile_error,
+        )
 
-        while self._running:
-            try:
-                # 1. Check for new events on the queue
-                event_id = await self.blackboard.dequeue_event()
-                if event_id:
-                    logger.info(f"New event from queue: {event_id}")
-                    await self.process_event(event_id)
+        self._scheduler.register_trigger(QueueTrigger(
+            dequeue_fn=self.blackboard.dequeue_event,
+        ))
+        self._scheduler.register_trigger(ResyncTrigger(
+            scan_fn=self._scan_active_for_reconcile,
+            interval=5.0,
+        ))
+        self._scheduler.register_trigger(StalenessGuard(
+            check_fn=self._check_jarvis_staleness,
+            on_stale=self._close_stale_jarvis_event,
+        ))
 
-                _redis_backoff = 2  # reset on successful Redis call
+        logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
+        await self._scheduler.start()
 
-                # 2. Scan active events: status-driven two-phase scan
-                active = await self.blackboard.get_active_events()
-                for eid in active:
-                    event = None
-                    # Agent task running: acknowledge turns, forward user messages or cancel
-                    if eid in self._active_tasks and not self._active_tasks[eid].done():
-                        event = await self.blackboard.get_event(eid)
-                        if event:
-                            unseen = [t for t in event.conversation if t.status.value == "sent"]
-                            if unseen:
-                                await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
-                                await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                            intermediate = [
-                                t for t in unseen
-                                if t.actor != "brain"
-                            ]
-                            if intermediate:
-                                await self._process_intermediate(eid, event, intermediate)
-                            continue
-                        else:
-                            continue
+    def _derive_workers(self) -> int:
+        """Auto-derive worker count from source caps, or use explicit override."""
+        import math
+        configured = int(os.getenv("BRAIN_RECONCILE_WORKERS", "0"))
+        if configured > 0:
+            return configured
+        caps = (
+            int(os.getenv("ALIGNER_MAX_ACTIVE", "2"))
+            + int(os.getenv("HEADHUNTER_MAX_ACTIVE", "3"))
+            + int(os.getenv("NIGHTWATCHER_MAX_ACTIVE", "1"))
+            + int(os.getenv("CHAT_MAX_ACTIVE", "1"))
+            + int(os.getenv("SLACK_MAX_ACTIVE", "1"))
+            + 1  # JARVIS meta-event
+        )
+        return math.ceil(caps * 1.3)
 
-                    event = await self.blackboard.get_event(eid)
-                    if not event:
-                        continue
-                    if event.status == EventStatus.CLOSED:
-                        logger.warning(f"Zombie active event {eid} is closed -- removing from active set")
-                        await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
-                        continue
-                    if not event.conversation:
-                        if event.status == EventStatus.NEW:
-                            await self.process_event(eid, prefetched_event=event)
-                            continue
-                        await self._handle_orphan_blank_event(eid, event)
-                        continue
-
-                    # Check if event is deferred -- skip until delay expires OR user interrupts
-                    if event.status == EventStatus.DEFERRED:
-                        defer_key = f"{self.blackboard.EVENT_PREFIX}{eid}:defer_until"
-                        defer_until = await self.blackboard.redis.get(defer_key)
-                        if defer_until and time.time() < float(defer_until):
-                            last_defer_idx = next(
-                                (i for i, t in enumerate(reversed(event.conversation))
-                                 if t.actor == "brain" and t.action == "defer"), None
-                            )
-                            user_after_defer = last_defer_idx is not None and any(
-                                t.actor == "user"
-                                for t in event.conversation[len(event.conversation) - last_defer_idx:]
-                            )
-                            if not user_after_defer:
-                                continue  # Still deferred, no user interrupt
-                            logger.info(f"User message interrupted defer for {eid} -- waking early")
-                        # Delay expired -- atomically re-activate (WATCH/MULTI/EXEC)
-                        # to avoid losing turns appended during the defer window.
-                        logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
-                        transitioned = await self.blackboard.transition_event_status(
-                            eid, "deferred", EventStatus.ACTIVE,
-                        )
-                        await self.blackboard.redis.delete(defer_key)
-                        if transitioned:
-                            await self._broadcast({
-                                "type": "event_status_changed",
-                                "event_id": eid,
-                                "status": EventStatus.ACTIVE.value,
-                            })
-                            if eid in self._waiting_for_user:
-                                logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
-                            else:
-                                logger.info(f"Deferred event {eid} re-activated")
-                                event = await self.blackboard.get_event(eid)
-                                if event:
-                                    await self.process_event(eid, prefetched_event=event)
-                        else:
-                            refetched = await self.blackboard.get_event(eid)
-                            actual_status = refetched.status.value if refetched else "MISSING"
-                            logger.warning(f"Defer re-activation FAILED for {eid}: expected 'deferred', actual '{actual_status}'")
-                        continue
-
-                    # Mark all SENT turns as DELIVERED (Brain has seen them)
-                    unseen = [t for t in event.conversation if t.status.value == "sent"]
-                    if unseen:
-                        await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
-                        await self._broadcast_status_update(eid, "delivered", turns=unseen)
-
-                    # --- JARVIS wait: check for reply before normal processing ---
-                    is_waiting_jarvis = eid in self._waiting_for_jarvis
-                    if is_waiting_jarvis:
-                        wait_start = self._waiting_for_jarvis[eid]
-                        jarvis_reply = any(
-                            t.actor == "jarvis" and t.action == "message"
-                            and (t.timestamp or 0.0) > wait_start
-                            for t in event.conversation
-                        )
-                        if jarvis_reply:
-                            self._clear_jarvis_wait(eid)
-                            self._last_processed[eid] = time.time()
-                            await self.process_event(eid, prefetched_event=event)
-                        continue
-
-                    # Re-process if there are DELIVERED (unread) turns the Brain hasn't evaluated
-                    # But skip if waiting for user -- only user response should resume
-                    # Skip if event is already being processed (lock held) -- prevents
-                    # queued process_event calls that exhaust routing_depth during 429 retries
-                    has_unread = any(t.status.value == "delivered" for t in event.conversation)
-                    is_waiting = eid in self._waiting_for_user
-                    is_locked = eid in self._event_locks and self._event_locks[eid].locked()
-                    if has_unread and not is_waiting and not is_locked:
-                        await self.process_event(eid, prefetched_event=event)
-                    elif not has_unread and not is_locked:
-                        time_since_process = time.time() - self._last_processed.get(eid, 0)
-                        if not is_waiting and time_since_process > 60:
-                            logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since_process:.0f}s)")
-                            await self.process_event(eid, prefetched_event=event)
-
-            except (RedisConnectionError, RedisTimeoutError) as e:
-                logger.warning(f"Redis connection lost, retrying in {_redis_backoff}s: {e}")
-                await asyncio.sleep(_redis_backoff)
-                _redis_backoff = min(_redis_backoff * 2, 60)
-                continue
-
-            except Exception as e:
-                logger.error(f"Brain event loop error: {e}", exc_info=True)
-                await asyncio.sleep(2)
-
-            # Prevent tight spinning when many active events exist.
-            # brpop in dequeue_event() blocks up to 5s when queue is empty,
-            # but the active-event scan runs without blocking.
-            await asyncio.sleep(1)
+    async def _on_reconcile_error(self, event_id: str, exc: Exception) -> None:
+        """Error handler for ReconcileScheduler worker failures."""
+        logger.error(f"Reconcile failed for {event_id}: {exc}", exc_info=True)
 
     async def stop_event_loop(self) -> None:
         """Stop the event loop."""
         self._running = False
+        if self._scheduler:
+            await self._scheduler.stop()
         logger.info("Brain event loop stopped")
+
+    # =========================================================================
+    # ReconcileScheduler: scan callback + staleness helpers
+    # =========================================================================
+
+    async def _scan_active_for_reconcile(self) -> list[str]:
+        """Scan active events and return IDs that need reconciliation.
+
+        Side effects handled inline: mark_delivered, zombie cleanup,
+        orphan handling, defer re-activation. Pure decision logic
+        delegates to the validated _scan_logic pattern from Probe B.
+        """
+        active = await self.blackboard.get_active_events()
+        to_enqueue: list[str] = []
+
+        for eid in active:
+            # Agent task running: handle delivery + intermediate, don't enqueue
+            if eid in self._active_tasks and not self._active_tasks[eid].done():
+                event = await self.blackboard.get_event(eid)
+                if event:
+                    unseen = [t for t in event.conversation if t.status.value == "sent"]
+                    if unseen:
+                        await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
+                        await self._broadcast_status_update(eid, "delivered", turns=unseen)
+                    intermediate = [t for t in unseen if t.actor != "brain"]
+                    if intermediate:
+                        await self._process_intermediate(eid, event, intermediate)
+                continue
+
+            event = await self.blackboard.get_event(eid)
+            if not event:
+                continue
+
+            # Zombie cleanup
+            if event.status == EventStatus.CLOSED:
+                logger.warning(f"Zombie active event {eid} is closed -- removing from active set")
+                await self.blackboard.redis.srem(self.blackboard.EVENT_ACTIVE, eid)
+                continue
+
+            # Orphan blank events
+            if not event.conversation:
+                if event.status == EventStatus.NEW:
+                    to_enqueue.append(eid)
+                else:
+                    await self._handle_orphan_blank_event(eid, event)
+                continue
+
+            # Deferred events: check timer + user interrupt
+            if event.status == EventStatus.DEFERRED:
+                defer_key = f"{self.blackboard.EVENT_PREFIX}{eid}:defer_until"
+                defer_until = await self.blackboard.redis.get(defer_key)
+                if defer_until and time.time() < float(defer_until):
+                    last_defer_idx = next(
+                        (i for i, t in enumerate(reversed(event.conversation))
+                         if t.actor == "brain" and t.action == "defer"), None
+                    )
+                    user_after_defer = last_defer_idx is not None and any(
+                        t.actor == "user"
+                        for t in event.conversation[len(event.conversation) - last_defer_idx:]
+                    )
+                    if not user_after_defer:
+                        continue
+                    logger.info(f"User message interrupted defer for {eid} -- waking early")
+                # Re-activate deferred event
+                logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
+                transitioned = await self.blackboard.transition_event_status(
+                    eid, "deferred", EventStatus.ACTIVE,
+                )
+                await self.blackboard.redis.delete(defer_key)
+                if transitioned:
+                    await self._broadcast({
+                        "type": "event_status_changed",
+                        "event_id": eid,
+                        "status": EventStatus.ACTIVE.value,
+                    })
+                    if eid in self._waiting_for_user:
+                        logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
+                    else:
+                        logger.info(f"Deferred event {eid} re-activated")
+                        to_enqueue.append(eid)
+                else:
+                    refetched = await self.blackboard.get_event(eid)
+                    actual_status = refetched.status.value if refetched else "MISSING"
+                    logger.warning(f"Defer re-activation FAILED for {eid}: expected 'deferred', actual '{actual_status}'")
+                continue
+
+            # Mark SENT turns as DELIVERED
+            unseen = [t for t in event.conversation if t.status.value == "sent"]
+            if unseen:
+                await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
+                await self._broadcast_status_update(eid, "delivered", turns=unseen)
+
+            # JARVIS wait check
+            if eid in self._waiting_for_jarvis:
+                wait_start = self._waiting_for_jarvis[eid]
+                jarvis_reply = any(
+                    t.actor == "jarvis" and t.action == "message"
+                    and (t.timestamp or 0.0) > wait_start
+                    for t in event.conversation
+                )
+                if jarvis_reply:
+                    self._clear_jarvis_wait(eid)
+                    self._last_processed[eid] = time.time()
+                    to_enqueue.append(eid)
+                continue
+
+            # Standard enqueue decision
+            has_unread = any(t.status.value == "delivered" for t in event.conversation)
+            is_waiting = eid in self._waiting_for_user
+            is_locked = eid in self._event_locks and self._event_locks[eid].locked()
+
+            if has_unread and not is_waiting and not is_locked:
+                to_enqueue.append(eid)
+            elif not has_unread and not is_locked:
+                time_since = time.time() - self._last_processed.get(eid, 0)
+                if not is_waiting and time_since > 60:
+                    logger.info(f"Idle safety net: re-processing event {eid} (idle {time_since:.0f}s)")
+                    to_enqueue.append(eid)
+
+        return to_enqueue
+
+    async def _check_jarvis_staleness(self, event_id: str) -> bool:
+        """Check if a jarvis-source event has gone stale (no jarvis turn in TTL)."""
+        if event_id not in self._waiting_for_jarvis:
+            return False
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.source != "jarvis":
+            return False
+        ttl = float(os.getenv("JARVIS_STALE_TTL", "120"))
+        last_jarvis = max(
+            (t.timestamp or 0.0 for t in event.conversation
+             if t.actor == "jarvis"),
+            default=0.0,
+        )
+        return (time.time() - last_jarvis) > ttl if last_jarvis else False
+
+    async def _close_stale_jarvis_event(self, event_id: str) -> None:
+        """Close a stale jarvis event that exceeded its TTL."""
+        logger.warning(f"StalenessGuard: closing stale jarvis event {event_id}")
+        self._clear_jarvis_wait(event_id)
+        await self._close_and_broadcast(
+            event_id,
+            summary="JARVIS meta-event timed out (no response within TTL)",
+            close_reason="timeout",
+        )
 
     # =========================================================================
     # Helpers
