@@ -5080,8 +5080,8 @@ class Brain:
         BRAIN_RECONCILE_WORKERS env var, 0 = auto).
         """
         import math
-        from .scheduling import ReconcileScheduler
-        from .scheduling.triggers import QueueTrigger, ResyncTrigger, StalenessGuard
+        from ..scheduling import ReconcileScheduler
+        from ..scheduling.triggers import QueueTrigger, ResyncTrigger, StalenessGuard
 
         self._running = True
         await self._cleanup_stale_events()
