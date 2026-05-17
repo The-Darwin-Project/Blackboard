@@ -4850,9 +4850,14 @@ class Brain:
             delta = int(turn.timestamp - prev_ts)
             delta_label = f"+{delta // 60}m {delta % 60}s" if delta > 0 else "+0s"
             display_actor = {"brain": "FRIDAY", "jarvis": "JARVIS"}.get(turn.actor, turn.actor)
+            if turn.actor == "user" and getattr(turn, "source", None) == "automated":
+                display_actor = "System"
             lines.append(f"### Turn {turn.turn} - {display_actor} ({turn.action}) [{ts_str}] ({delta_label})")
             prev_ts = turn.timestamp
-            if turn.actor == "user" or turn.action == "message":
+            if turn.actor == "user" and turn.source == "automated":
+                if turn.thoughts:
+                    lines.append(f"**System Nudge:** {turn.thoughts}")
+            elif turn.actor == "user" or turn.action == "message":
                 user_text = turn.thoughts or turn.result or ""
                 if user_text:
                     lines.append(f"**Message:** {user_text}")

@@ -332,8 +332,14 @@ def build_event_report_md(event_doc: "EventDocument") -> str:
     ]
     for t in event_doc.conversation:
         name = t.user_name or {"brain": "FRIDAY", "jarvis": "JARVIS"}.get(t.actor, t.actor)
+        if t.actor == "user" and t.source == "automated":
+            name = "System"
         lines.append(f"### Turn {t.turn} - {name} ({t.action})")
-        if t.actor == "user":
+        if t.actor == "user" and t.source == "automated":
+            text = (t.thoughts or "")[:300]
+            if text:
+                lines.append(f"**System Nudge:** {text}")
+        elif t.actor == "user":
             text = (t.thoughts or t.result or t.action or "")[:300]
             lines.append(f"**Message:** {text}")
         elif t.action == "respond_jarvis":
