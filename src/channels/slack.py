@@ -808,6 +808,10 @@ class SlackChannel:
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
 
+        # Internal reasoning -- don't post to Slack. Thinking animation persists until brain.response.
+        if turn.actor == "brain" and turn.action == "thoughts":
+            return
+
         if (
             not event_doc.slack_thread_ts
             and event_doc.source in ("aligner", "headhunter")

@@ -185,6 +185,7 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
   onStatusChange?: () => void;
   onViewReport?: (content: string, filename: string) => void;
 }) {
+  const [thoughtsExpanded, setThoughtsExpanded] = useState(false);
   const color = ACTOR_COLORS[turn.actor] || '#6b7280';
   const isHuman = turn.actor === 'user';
   const isLongExecute = !isHuman && turn.action === 'execute' && turn.result && turn.result.length > 500;
@@ -198,6 +199,23 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
       <div style={{ borderLeft: '3px solid #64748b', paddingLeft: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', color: '#64748b', fontSize: 12, fontStyle: 'italic' }}>
         <RefreshCw size={14} className="animate-spin" />
         Brain retrying...
+      </div>
+    );
+  }
+
+  if (turn.action === 'thoughts' && turn.actor === 'brain') {
+    return (
+      <div style={{ borderLeft: '3px solid #475569', paddingLeft: 12, marginBottom: 8, opacity: 0.7 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setThoughtsExpanded(!thoughtsExpanded)}>
+          <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+          <span style={{ fontSize: 12, color: '#64748b', fontStyle: 'italic' }}>thinking...</span>
+          <span style={{ fontSize: 10, color: '#475569', transform: thoughtsExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▶</span>
+        </div>
+        {thoughtsExpanded && turn.thoughts && (
+          <div style={{ marginTop: 6, padding: '8px 12px', background: '#1e293b', borderRadius: 6, border: '1px solid #334155' }}>
+            <MarkdownPreview source={turn.thoughts} style={{ fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
+          </div>
+        )}
       </div>
     );
   }

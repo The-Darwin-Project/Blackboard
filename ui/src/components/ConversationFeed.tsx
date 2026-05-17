@@ -89,7 +89,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
     if (msg.type === 'brain_thinking') {
       setBrainThinking({
         eventId: msg.event_id as string,
-        text: msg.accumulated as string,
+        text: (msg.is_thought) ? '' : (msg.accumulated as string),
         isThought: (msg.is_thought as boolean) || false,
       });
     } else if (msg.type === 'brain_thinking_done') {
