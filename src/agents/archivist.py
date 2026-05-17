@@ -143,7 +143,7 @@ class Archivist:
 
             conv_lines = []
             for turn in event.conversation:
-                if turn.action in ("think", "thoughts"):
+                if turn.action in ("think", "thoughts", "intermediate"):
                     continue
                 ts = datetime.fromtimestamp(turn.timestamp).strftime("%H:%M:%S")
                 line = f"[{ts} {turn.actor}.{turn.action}]"
