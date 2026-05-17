@@ -890,7 +890,7 @@ class LiveAPIAdapter:
         action_lines = []
         for t in recent:
             action_lines.append(
-                f"  [{t.actor}.{t.action}] {(t.thoughts or t.result or '')[:120]}"
+                f"  [{t.actor}.{t.action}] {t.thoughts or t.result or ''}"
             )
         body = "\n".join(action_lines) if action_lines else "  (no turns)"
         return f"{header}\nLast {len(recent)} actions:\n{body}"

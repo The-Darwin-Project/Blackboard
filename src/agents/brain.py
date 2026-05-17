@@ -1053,6 +1053,11 @@ class Brain:
         else:
             active_tools = [t for t in active_tools if t["name"] != "wait_for_jarvis"]
 
+        # === inspect_event gate ===
+        # Available only in jarvis-sourced meta-events
+        if event.source != "jarvis":
+            active_tools = [t for t in active_tools if t["name"] != "inspect_event"]
+
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
         _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user"}
@@ -1350,7 +1355,7 @@ class Brain:
                 thoughts=accumulated_text,
             )
             await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Appended turn {turn.turn} (brain.thoughts) to event {event_id}")
+            logger.info(f"Appended turn {turn.turn} (brain.intermediate) to event {event_id}")
 
         if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_agent"):
             await self._execute_function_call(
@@ -3648,6 +3653,61 @@ class Brain:
                 except Exception as e:
                     logger.warning(f"Failed to deliver response to JARVIS for {event_id}: {e}")
             logger.info(f"Responded to JARVIS for {event_id}")
+            return True
+
+        elif function_name == "inspect_event":
+            target_id = args.get("event_id", "").strip()
+            if not target_id:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="Error: event_id is required.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            target_event = await self.blackboard.get_event(target_id)
+            if not target_event:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=f"Event {target_id} not found in active storage.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            age_seconds = time.time() - (target_event.queued_at or target_event.processing_started_at or time.time())
+            age_h = int(age_seconds // 3600)
+            age_m = int((age_seconds % 3600) // 60)
+            age_str = f"{age_h}h {age_m}m"
+            header = (
+                f"## Event: {target_id}\n"
+                f"Phase: {target_event.brain_phase or 'triage'} | "
+                f"Status: {target_event.status.value if target_event.status else 'unknown'} | "
+                f"Age: {age_str}\n"
+                f"Source: {target_event.source or 'unknown'} | "
+                f"Service: {target_event.service or '?'}\n"
+            )
+            evidence = target_event.event.evidence if target_event.event else None
+            if evidence and hasattr(evidence, 'display_text') and evidence.display_text:
+                header += f"\n## Original Request\n{evidence.display_text}\n"
+            my_turns = [t for t in target_event.conversation if t.actor == "brain"]
+            lines = [f"\n## My Actions ({len(my_turns)} turns)"]
+            for t in my_turns:
+                content = t.thoughts or t.result or ""
+                lines.append(f"[{t.action}] {content}")
+            result_text = header + "\n".join(lines)
+            result_text = result_text[:15000]
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
             return True
 
         else:
