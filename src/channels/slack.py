@@ -219,7 +219,7 @@ class SlackChannel:
                         event_id, channel_id, thread_ts, user_id,
                     )
                     await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
-                    await set_title(f"evt-{event_id}: {text[:50]}")
+                    await set_title(f"{event_id}: {text[:50]}")
                     logger.info(f"Assistant: new event {event_id} by {user_id}")
                 else:
                     from ..models import ConversationTurn
@@ -233,7 +233,7 @@ class SlackChannel:
                         event_id = await self._create_followup_event(
                             event_doc, event_id, text, channel_id, thread_ts, user_id, display_name,
                         )
-                        await set_title(f"evt-{event_id}: {text[:50]}")
+                        await set_title(f"{event_id}: {text[:50]}")
                         logger.info(f"Assistant: smart-routed to new event {event_id} (original was closed)")
                     else:
                         from ..models import ConversationTurn
