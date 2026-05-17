@@ -217,6 +217,33 @@ def test_brain_notify_context_block():
     assert not disclaimer
 
 
+# ── Test 13: brain.thoughts renders as context block ────────────────
+
+def test_brain_thoughts_context_block():
+    """brain.thoughts renders as context block (internal reasoning, grey)."""
+    turn = _make_turn(action="thoughts", thoughts="Reasoning about options")
+    blocks = format_turn(turn)
+    ctx = [b for b in blocks if b.get("type") == "context"
+           and "AI-generated" not in str(b)]
+    assert ctx, "brain.thoughts should produce a context block"
+    text = ctx[0]["elements"][0]["text"]
+    assert ":female-technologist:" in text
+    assert "Reasoning about options" in text
+
+
+# ── Test 14: brain.response renders as section block ────────────────
+
+def test_brain_response_section_block():
+    """brain.response renders as section block (visible reply to user)."""
+    turn = _make_turn(action="response", thoughts="Here is your answer")
+    blocks = format_turn(turn)
+    sections = [b for b in blocks if b.get("type") == "section"]
+    assert sections, "brain.response should produce a section block"
+    text = sections[0]["text"]["text"]
+    assert ":female-technologist:" in text
+    assert "Here is your answer" in text
+
+
 # ── build_event_report_md: actor-aware labels ────────────────────────
 
 def _make_event_doc(*turns: ConversationTurn) -> EventDocument:
@@ -243,9 +270,23 @@ def test_report_md_tool_result_evidence_label():
     assert "**Evidence:** service healthy" in md
 
 
-def test_report_md_brain_turn_no_label():
-    """Non-user, non-tool_result turns render raw text without bold label prefix."""
+def test_report_md_brain_think_internal_label():
+    """Legacy brain.think renders **Internal:** label in report."""
     turn = _make_turn(actor="brain", action="think", thoughts="Analyzing")
     md = build_event_report_md(_make_event_doc(turn))
-    assert "Analyzing" in md
+    assert "**Internal:** Analyzing" in md
     assert "**Message:**" not in md
+
+
+def test_report_md_brain_thoughts_internal_label():
+    """brain.thoughts renders **Internal:** label in report."""
+    turn = _make_turn(actor="brain", action="thoughts", thoughts="Reasoning")
+    md = build_event_report_md(_make_event_doc(turn))
+    assert "**Internal:** Reasoning" in md
+
+
+def test_report_md_brain_response_friday_label():
+    """brain.response renders **FRIDAY:** label in report."""
+    turn = _make_turn(actor="brain", action="response", thoughts="Here is the answer")
+    md = build_event_report_md(_make_event_doc(turn))
+    assert "**FRIDAY:** Here is the answer" in md

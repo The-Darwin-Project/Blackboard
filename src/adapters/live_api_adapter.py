@@ -1296,6 +1296,17 @@ class LiveAPIAdapter:
                     await self._close_session()
                 break
 
+            # Per-event staleness: skip if all active events have recent Brain activity
+            now = time.time()
+            stale_events = []
+            if self._brain:
+                for eid in active_ids:
+                    last = self._brain._last_processed.get(eid, now)
+                    if (now - last) > idle_threshold:
+                        stale_events.append(eid)
+            if self._brain and not stale_events:
+                continue
+
             # --- META-EVENT: challenge FRIDAY during idle ---
             if self._active_meta_event_id:
                 continue

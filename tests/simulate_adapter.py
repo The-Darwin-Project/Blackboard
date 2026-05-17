@@ -208,7 +208,7 @@ def simulate_brain_dispatch(response: LLMResponse) -> dict:
     elif response.text:
         return {
             "dispatched": False,
-            "action": "think",
+            "action": "thoughts/response",
             "text_preview": response.text[:150],
         }
     else:

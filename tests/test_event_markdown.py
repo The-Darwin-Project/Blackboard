@@ -39,11 +39,25 @@ def test_user_turn_falls_back_to_result():
     assert "**Message:** fallback text" in md
 
 
-def test_brain_turn_still_renders_thoughts():
-    """Brain turn must still render **Thoughts:** (regression check)."""
+def test_brain_think_renders_internal_label():
+    """Legacy brain.think renders **Internal:** label (backward compat)."""
     turn = _make_turn(actor="brain", action="think", thoughts="Analyzing the situation")
     md = Brain._event_to_markdown(_make_event(turn))
-    assert "**Thoughts:** Analyzing the situation" in md
+    assert "**Internal:** Analyzing the situation" in md
+
+
+def test_brain_thoughts_renders_internal_label():
+    """brain.thoughts renders **Internal:** label."""
+    turn = _make_turn(actor="brain", action="thoughts", thoughts="Reasoning about options")
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert "**Internal:** Reasoning about options" in md
+
+
+def test_brain_response_renders_friday_label():
+    """brain.response renders **FRIDAY:** label."""
+    turn = _make_turn(actor="brain", action="response", thoughts="Here is your answer")
+    md = Brain._event_to_markdown(_make_event(turn))
+    assert "**FRIDAY:** Here is your answer" in md
 
 
 def test_tool_result_renders_evidence_label():
