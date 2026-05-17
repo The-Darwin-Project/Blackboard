@@ -995,6 +995,11 @@ class Brain:
         # === Domain classification gate (mandatory before routing) ===
         if context_flags and not context_flags.get("brain_has_classified", False):
             pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase"}
+            # Human-initiated events: allow wait_for_user before classification.
+            # A greeting or vibe check is Cynefin Confusion -- the domain isn't known yet.
+            # FRIDAY can pause and ask what's on their mind before forcing a classification.
+            if event.source in ("slack", "chat"):
+                pre_classify_tools.add("wait_for_user")
             active_tools = [t for t in active_tools if t["name"] in pre_classify_tools]
             logger.info(f"Pre-classification gate: only lookup+classify+set_phase tools for {event_id}")
         elif context_flags:
