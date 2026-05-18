@@ -5099,6 +5099,12 @@ class Brain:
                 signal = getattr(self, "_headhunter_close_signal", None)
                 if signal and event.source == "headhunter":
                     signal.set()
+                    hh = self.agents.get("_headhunter")
+                    if hh and hasattr(hh, "process_event_feedback"):
+                        try:
+                            await hh.process_event_feedback(eid)
+                        except Exception as e:
+                            logger.warning(f"Headhunter stale-close feedback failed (non-fatal): {e}")
                 # Archive to deep memory (same as _close_and_broadcast path)
                 archivist = self.agents.get("_archivist_memory")
                 if archivist and hasattr(archivist, "archive_event"):
