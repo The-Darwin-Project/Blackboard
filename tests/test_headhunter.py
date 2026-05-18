@@ -133,9 +133,8 @@ class TestPollCycle:
             assert "marked" not in actions
 
     @pytest.mark.asyncio
-    async def test_dedup_skips_already_processed(self):
+    async def test_dedup_skips_active_event_mr(self):
         hh = _make_headhunter()
-        hh._processed_todos.add((100, 42))
         todos_response = [_make_todo(action_name="assigned", project_id=100, mr_iid=42)]
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_resp = MagicMock()
@@ -146,6 +145,8 @@ class TestPollCycle:
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
+            # Mock active-event dedup: MR (100, 42) already has an active event
+            hh._get_active_mr_keys = AsyncMock(return_value={(100, 42)})
 
             result = await hh.poll_cycle()
             assert len(result) == 0
@@ -225,15 +226,15 @@ class TestEventCreation:
         assert bb.events[0]["source"] == "headhunter"
 
     @pytest.mark.asyncio
-    async def test_marks_todo_as_processed_after_creation(self):
+    async def test_event_creation_succeeds(self):
         bb = StubBlackboard()
         hh = _make_headhunter(blackboard=bb)
         todo = _make_todo(project_id=200, mr_iid=55)
         context = {"action_name": "assigned", "pipeline_status": "success"}
 
-        await hh.create_headhunter_event(todo, "plan", "clear", context)
+        event_id = await hh.create_headhunter_event(todo, "plan", "clear", context)
 
-        assert (200, 55) in hh._processed_todos
+        assert event_id is not None
 
     @pytest.mark.asyncio
     async def test_pipeline_status_flows_from_context_to_evidence(self):
