@@ -103,6 +103,9 @@
 # 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/investigate).
 #     Brain calls adapter.set_search_enabled() before/after generate_stream via try/finally. hasattr guard for Claude.
 #     Grounding metadata formatted as evidence, not thoughts. Graceful fallback if search unavailable.
+# 36b. [Pattern]: _resolve_grounding_urls() follows Vertex grounding-api-redirect URIs to canonical URLs
+#     via httpx HEAD with follow_redirects=True, 2.5s timeout. Shared AsyncClient per batch. Deduplicates
+#     by resolved URL. Fallback: empty URI -> title rendered without link. Non-redirect URIs pass through.
 # 37. [Pattern]: respond_to_jarvis tool is conversation-gated: only available when the most recent
 #     jarvis.message turn has no subsequent brain.respond_jarvis turn. Handler appends turn AND
 #     sends response to LiveAPIAdapter.receive_brain_response() for real-time delivery.
@@ -142,6 +145,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
+
+import httpx
 
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus
 from ..ports import BroadcastPort
@@ -1189,13 +1194,15 @@ class Brain:
 
         grounding_evidence = ""
         if last_grounding and last_grounding.get("chunks"):
+            resolved_chunks = await self._resolve_grounding_urls(last_grounding["chunks"])
             sources = "\n".join(
                 f"- [{c['title']}]({c['uri']})"
-                for c in last_grounding["chunks"]
+                for c in resolved_chunks
+                if c.get("uri")
             )
             queries = ", ".join(last_grounding.get("queries", []))
             grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
-            logger.info(f"Google Search grounding for {event_id}: {len(last_grounding['chunks'])} sources")
+            logger.info(f"Google Search grounding for {event_id}: {len(resolved_chunks)} sources (resolved)")
 
         # Process the final result
         if function_call:
@@ -1386,6 +1393,34 @@ class Brain:
             return True
         err_str = str(e)
         return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+
+    @staticmethod
+    async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:
+        """Follow redirect URLs from Vertex AI Search grounding and deduplicate."""
+        REDIRECT_PREFIX = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
+
+        async def resolve_one(client: httpx.AsyncClient, chunk: dict) -> dict:
+            uri = chunk.get("uri", "")
+            if REDIRECT_PREFIX not in uri:
+                return chunk
+            try:
+                resp = await client.head(uri)
+                return {**chunk, "uri": str(resp.url)}
+            except Exception:
+                logger.debug(f"Grounding URL resolve failed for {chunk.get('title', '?')}")
+                return {**chunk, "uri": ""}
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=2.5) as client:
+            resolved = await asyncio.gather(*(resolve_one(client, c) for c in chunks))
+
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for c in resolved:
+            key = c["uri"] or c.get("title", "")
+            if key not in seen:
+                seen.add(key)
+                deduped.append(c)
+        return deduped
 
     def _resolve_llm_params(self, active_phases: list[str]) -> tuple[str, float, int]:
         """Resolve thinking_level + temperature + max_output_tokens from phase metadata.

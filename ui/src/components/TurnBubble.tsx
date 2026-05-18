@@ -277,7 +277,7 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
         )
       )}
       {turn.plan && <MarkdownPreview source={turn.plan} style={{ background: '#1e1e2e', padding: 12, borderRadius: 8, fontSize: 13, overflow: 'auto', maxHeight: 300, color: '#e2e8f0' }} wrapperElement={{ 'data-color-mode': 'dark' }} components={{ code: ({ children, className, ...props }) => { const code = props.node?.children ? getCodeString(props.node.children) : String(children ?? ''); if (typeof code === 'string' && typeof className === 'string' && /^language-mermaid/.test(className.toLowerCase())) return <MermaidBlock code={code} />; return <code className={String(className ?? '')}>{children}</code>; } }} />}
-      {turn.evidence && <p style={{ margin: '4px 0', fontSize: 13, color: '#94a3b8' }}>Evidence: {turn.evidence}</p>}
+      {turn.evidence && <MarkdownPreview source={turn.evidence} style={{ margin: '4px 0', fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />}
       {turn.pendingApproval && eventId && (
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button onClick={() => approveEvent(eventId).then(() => onStatusChange?.())} style={{ background: '#22c55e', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Approve</button>
