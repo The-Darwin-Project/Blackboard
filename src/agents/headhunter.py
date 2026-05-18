@@ -167,7 +167,7 @@ class Headhunter:
         self._close_signal = close_signal
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._max_active = int(os.getenv("HEADHUNTER_MAX_ACTIVE", "1"))
-        self._processed_todos: set[tuple[int, int]] = set()
+        # _processed_todos removed: dedup now checks active events, not in-memory set
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.1-flash-lite-preview")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
@@ -218,30 +218,67 @@ class Headhunter:
         return f"https://{self._gitlab_host}/api/v4{path}"
 
     async def poll_cycle(self) -> list[dict]:
-        """Fetch pending todos (oldest first), filter actionable, group by MR, return highest-priority per MR."""
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            resp = await client.get(
-                self._api_url("/todos"),
-                headers=self._headers(),
-                params={"state": "pending", "type": "MergeRequest", "sort": "asc"},
-            )
-            resp.raise_for_status()
-            todos = resp.json()
+        """Fetch ALL pending todos (paginated, oldest first), filter actionable, group by MR.
 
-        actionable = [t for t in todos if t.get("action_name") in V1_ACTIONABLE]
+        Dedup: skip MRs that already have an active/deferred headhunter event.
+        The GitLab todo list is the queue -- items stay until FRIDAY resolves them.
+        """
+        all_todos: list[dict] = []
+        page = 1
+        per_page = 100
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            while True:
+                resp = await client.get(
+                    self._api_url("/todos"),
+                    headers=self._headers(),
+                    params={
+                        "state": "pending", "type": "MergeRequest",
+                        "sort": "asc", "page": str(page), "per_page": str(per_page),
+                    },
+                )
+                resp.raise_for_status()
+                batch = resp.json()
+                all_todos.extend(batch)
+                if len(batch) < per_page:
+                    break
+                page += 1
+
+        actionable = [t for t in all_todos if t.get("action_name") in V1_ACTIONABLE]
         if not actionable:
             return []
         actionable.sort(key=lambda t: t.get("created_at", ""))
 
+        # Dedup: find MRs that already have an active headhunter event
+        active_mr_keys = await self._get_active_mr_keys()
+
         grouped = self._group_by_mr(actionable)
         result = []
         for key, group in grouped.items():
-            if key in self._processed_todos:
+            if key in active_mr_keys:
                 continue
             best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
             result.append(best)
         result.sort(key=lambda t: t.get("created_at", ""))
+        logger.info(f"Headhunter poll: {len(all_todos)} total todos, {len(actionable)} actionable, {len(active_mr_keys)} already active, {len(result)} new")
         return result
+
+    async def _get_active_mr_keys(self) -> set[tuple[int, int]]:
+        """Get (project_id, mr_iid) for all active/deferred headhunter events."""
+        active_ids = await self.blackboard.get_active_events()
+        keys: set[tuple[int, int]] = set()
+        for eid in active_ids:
+            event = await self.blackboard.get_event(eid)
+            if not event or event.source != "headhunter":
+                continue
+            if event.status.value not in ("new", "active", "deferred"):
+                continue
+            ctx = getattr(event.event.evidence, "gitlab_context", None) if event.event and event.event.evidence else None
+            if ctx:
+                pid = ctx.get("project_id", 0) if isinstance(ctx, dict) else getattr(ctx, "project_id", 0)
+                iid = ctx.get("mr_iid", 0) if isinstance(ctx, dict) else getattr(ctx, "mr_iid", 0)
+                if pid and iid:
+                    keys.add((pid, iid))
+        return keys
 
     @staticmethod
     def _group_by_mr(todos: list[dict]) -> dict[tuple[int, int], list[dict]]:
@@ -505,7 +542,6 @@ class Headhunter:
             reason=plan_text,
             evidence=evidence,
         )
-        self._processed_todos.add((project["id"], target["iid"]))
         logger.info(f"Headhunter event created: {event_id} for {todo['action_name']} on !{target['iid']}")
         return event_id
 
@@ -734,12 +770,6 @@ class Headhunter:
             if not await self.check_flow_gate():
                 logger.info("Headhunter flow gate closed mid-cycle -- stopping")
                 break
-            project_id = todo.get("project", {}).get("id", 0)
-            mr_iid = todo.get("target", {}).get("iid", 0)
-            action = todo.get("action_name", "")
-            if action not in ("directly_addressed", "mentioned") and await self._is_recently_processed(project_id, mr_iid):
-                logger.info(f"Headhunter: skipping !{mr_iid} (recently processed)")
-                continue
             context = await self.fetch_context(todo)
             plan_text, domain = await self.analyze_and_plan(context)
             await self.create_headhunter_event(todo, plan_text, domain, context)
