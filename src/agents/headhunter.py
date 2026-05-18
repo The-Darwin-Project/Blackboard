@@ -226,8 +226,9 @@ class Headhunter:
         all_todos: list[dict] = []
         page = 1
         per_page = 100
+        max_pages = 20
         async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            while True:
+            while page <= max_pages:
                 resp = await client.get(
                     self._api_url("/todos"),
                     headers=self._headers(),
@@ -242,6 +243,8 @@ class Headhunter:
                 if len(batch) < per_page:
                     break
                 page += 1
+            else:
+                logger.warning(f"Headhunter: hit max_pages ({max_pages}), {len(all_todos)} todos fetched")
 
         actionable = [t for t in all_todos if t.get("action_name") in V1_ACTIONABLE]
         if not actionable:
@@ -916,11 +919,3 @@ class Headhunter:
 
         return "\n".join(lines)
 
-    async def _is_recently_processed(self, project_id: int, mr_iid: int) -> bool:
-        """Check if this MR was processed in the last 30 minutes (Redis-backed dedup)."""
-        recent = await self.blackboard.get_recent_closed_by_source("headhunter", minutes=30)
-        for event in recent:
-            ctx = getattr(event.event.evidence, "gitlab_context", None) if event.event.evidence else None
-            if isinstance(ctx, dict) and ctx.get("project_id") == project_id and ctx.get("mr_iid") == mr_iid:
-                return True
-        return False
