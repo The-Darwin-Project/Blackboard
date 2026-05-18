@@ -15,16 +15,10 @@
 name: Build and Push Image
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - "src/**"
-      - "ui/**"
-      - "Dockerfile"
-      - "requirements.txt"
-      - ".github/workflows/build-push.yaml"
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main, master]
   pull_request:
     branches:
       - main
@@ -38,6 +32,11 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Only build if CI passed (workflow_run) or on PR/manual trigger
+    if: >
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     permissions:
       contents: write # Needed to push helm values update
