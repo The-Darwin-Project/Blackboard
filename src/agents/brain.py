@@ -4722,6 +4722,13 @@ class Brain:
         signal = getattr(self, '_headhunter_close_signal', None)
         if signal and event and event.source == "headhunter":
             signal.set()
+            # Direct feedback: mark GitLab todo as done immediately on close
+            hh = self.agents.get("_headhunter")
+            if hh and hasattr(hh, "process_event_feedback"):
+                try:
+                    await hh.process_event_feedback(event_id)
+                except Exception as e:
+                    logger.warning(f"Headhunter direct feedback failed (non-fatal): {e}")
 
     # =========================================================================
     # Active Task Cancellation
