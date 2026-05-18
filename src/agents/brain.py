@@ -1694,8 +1694,9 @@ class Brain:
                     f"({last_agent.action}): {elapsed_min} minutes."
                 )
             resolved_contents.append(
-                f"**DEFER WAKE-UP ({consecutive}x):** {last_reason}\n"
-                f"{elapsed_str}"
+                f"**DEFER WAKE-UP ({consecutive}x):** You deferred because: {last_reason}\n"
+                f"{elapsed_str}\n"
+                f"That was {consecutive} defer(s) ago. What changed since then?"
             )
 
         if context_flags and context_flags.get("consecutive_agent_waits", 0) >= 2:
