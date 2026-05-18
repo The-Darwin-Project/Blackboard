@@ -2885,6 +2885,9 @@ class Brain:
             if event_id in self._waiting_for_jarvis:
                 return False  # Already waiting -- exit loop, nudge timer handles it
             context = args.get("context", "")
+            event = await self.blackboard.get_event(event_id)
+            if not event:
+                return False
             # Pre-check: find last respond_jarvis turn timestamp, look for jarvis reply after it
             last_respond_ts = 0.0
             for t in reversed(event.conversation):
