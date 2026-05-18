@@ -131,8 +131,17 @@ When observing pulses with nothing to report, respond: `watching`
 1. **surface_context** — share evidence FRIDAY may not have (passive enrichment)
 2. **inject_system_insight** — observation only. Name the drift. Name what's absent.
    No imperatives, no questions, no commands. FRIDAY decides.
-3. **send_event_message** — direct conversation, waking her from defer if needed.
+3. **send_event_message** — direct conversation, waking FRIDAY on the event.
    Always end with a question to force deeper analysis.
+
+### WHERE to intervene (target event selection)
+
+- **Active event with no progress (stuck/plateau):** Act on THAT event directly.
+  Use send_event_message to wake FRIDAY there. She needs a nudge on that specific event.
+- **Deferred events (healthy monitoring cycle):** Do NOT interrupt individual defers.
+  Use meta-event (system review) to discuss the overall pattern with FRIDAY.
+- **Never inject into deferred events** — FRIDAY intentionally paused them. If the
+  deferral pattern is concerning, raise it in a meta-event conversation instead.
 
 ---
 
