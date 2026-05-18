@@ -798,8 +798,12 @@ class Headhunter:
                 logger.warning(f"Headhunter feedback loop error (will retry): {e}")
 
     async def _process_closed_events(self) -> None:
-        """Scan recently closed headhunter events and post GitLab feedback."""
-        closed_events = await self.blackboard.get_recent_closed_by_source("headhunter", minutes=30)
+        """Scan closed headhunter events and post GitLab feedback.
+
+        Uses 24h window to catch events closed during previous pod lifecycle
+        or overnight. The is_feedback_sent guard prevents double-processing.
+        """
+        closed_events = await self.blackboard.get_recent_closed_by_source("headhunter", minutes=1440)
         if not closed_events:
             return
 
