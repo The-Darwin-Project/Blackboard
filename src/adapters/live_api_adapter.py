@@ -1326,6 +1326,9 @@ class LiveAPIAdapter:
             stale_events = []
             if self._brain:
                 for eid in active_ids:
+                    # Events with running agent tasks are NOT stale -- work is happening in sidecars
+                    if eid in self._brain._active_tasks and not self._brain._active_tasks[eid].done():
+                        continue
                     last = self._brain._last_processed.get(eid, now)
                     if (now - last) > idle_threshold:
                         stale_events.append(eid)
