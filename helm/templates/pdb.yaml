@@ -1,0 +1,19 @@
+# BlackBoard/helm/templates/pdb.yaml
+# @ai-rules:
+# 1. [Constraint]: Must match deployment.yaml selector labels exactly.
+# 2. [Pattern]: minAvailable: 1 on a single-replica stateful pod blocks voluntary eviction entirely.
+# 3. [Gotcha]: Descheduler respects PDBs. Without this, LowNodeUtilization evicts the brain pod.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-brain
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/name: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: darwin-brain
+      app.kubernetes.io/instance: {{ .Release.Name }}
