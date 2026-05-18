@@ -191,7 +191,7 @@ class ReconcileScheduler:
                 break
             except Exception as e:
                 self._error_count += 1
-                logger.error("Reconcile error for %s (worker %d): %s", event_id, worker_id, e)
+                logger.error("Reconcile error for %s (worker %d): %s", event_id, worker_id, e, exc_info=True)
                 if self._on_error:
                     try:
                         await self._on_error(event_id, e)
