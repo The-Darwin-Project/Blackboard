@@ -661,7 +661,8 @@ class TestProcessClosedEventsFeedback:
         assert ev.id in bb.feedback_sent
 
     @pytest.mark.asyncio
-    async def test_resolved_does_not_mark_feedback_sent_when_mark_as_done_fails(self):
+    async def test_resolved_marks_feedback_sent_even_when_mark_as_done_fails(self):
+        """MR comment was posted -- mark feedback sent to prevent re-posting."""
         ev = _closed_headhunter_event("resolved")
         bb = StubBlackboard()
         bb._recent_closed = [ev]
@@ -685,7 +686,7 @@ class TestProcessClosedEventsFeedback:
 
             await hh._process_closed_events()
 
-        assert ev.id not in bb.feedback_sent
+        assert ev.id in bb.feedback_sent
 
     @pytest.mark.asyncio
     async def test_duplicate_rate_limit_returns_without_marking_feedback_sent(self):
