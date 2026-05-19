@@ -90,8 +90,9 @@
 #     (agent_rounds, last_agent, _surface_agent_recommendation, legacy thinking) so dispatch
 #     phase stays active and recommendation surfacing skips evidence turns.
 #     URL normalized: split("#")[0].rstrip("/").
-# 32. [Pattern]: _cleanup_stale_events wakes Headhunter via _headhunter_close_signal when source=headhunter
-#     (mirrors _close_and_broadcast); main.py assigns the signal before start_event_loop().
+# 32. [Pattern]: _cleanup_stale_events calls hh.process_event_feedback directly for headhunter events
+#     (mirrors _close_and_broadcast). No signal.set() -- direct await avoids race with _feedback_loop.
+#     _feedback_loop poll-interval safety net handles cross-pod catch-up without signal.
 # 33. [Pattern]: _handle_orphan_blank_event() encapsulates orphan recovery logic.
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
@@ -4724,10 +4725,7 @@ class Brain:
             "event_id": event_id,
             "summary": summary,
             })
-        signal = getattr(self, '_headhunter_close_signal', None)
-        if signal and event and event.source == "headhunter":
-            signal.set()
-            # Direct feedback: mark GitLab todo as done immediately on close
+        if event and event.source == "headhunter":
             hh = self.agents.get("_headhunter")
             if hh and hasattr(hh, "process_event_feedback"):
                 try:
@@ -5101,9 +5099,7 @@ class Brain:
                     "event_id": eid,
                     "summary": stale_summary,
                 })
-                signal = getattr(self, "_headhunter_close_signal", None)
-                if signal and event.source == "headhunter":
-                    signal.set()
+                if event.source == "headhunter":
                     hh = self.agents.get("_headhunter")
                     if hh and hasattr(hh, "process_event_feedback"):
                         try:
