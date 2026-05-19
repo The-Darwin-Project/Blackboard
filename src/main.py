@@ -6,7 +6,8 @@
 # 4. [Pattern]: emergency_stop WS handler cancels all active tasks and responds with cancelled count.
 # 5. [Pattern]: Slack channel init is conditional on SLACK_BOT_TOKEN + SLACK_APP_TOKEN env vars. Graceful degradation if missing.
 # 6. [Pattern]: /agent/ws endpoint delegates to agent_ws_handler.py. Registry + Bridge on app.state, initialized in lifespan().
-# 7. [Gotcha]: brain._headhunter_close_signal must be assigned before asyncio.create_task(brain.start_event_loop()) so startup stale cleanup can wake Headhunter.
+# 7. [Pattern]: headhunter_close_signal gates _feedback_loop startup. Signal is never .set() —
+#     feedback loop relies on poll-interval timeout. Brain calls process_event_feedback directly on close.
 # 8. [Pattern]: auth_enabled on DashboardWSAdapter is (DEX_ENABLED or TRUSTED_PROXY_ENABLED) -- fail-closed when either auth mode is active.
 """
 Darwin Blackboard (Brain) - FastAPI Application

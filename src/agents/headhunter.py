@@ -6,14 +6,16 @@
 # 4. [Pattern]: Single-tier LLM analysis via HEADHUNTER_SYSTEM_INSTRUCTION. Bot Instructions flow as MR description context in prompt. Emergency _emergency_plan() when LLM unavailable.
 # 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
 # 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
-# 7. [Pattern]: Feedback loop uses asyncio.Event signal from Brain + timeout safety net. Phase 2 only.
-# 8. [Gotcha]: mark_as_done is called in feedback loop (on close), NOT during poll.
+# 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up. Brain calls
+#     process_event_feedback directly on close (no signal). Phase 2 only.
+# 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
 # 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
 # 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
 # 11. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
 # 12. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
 # 13. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
-# 14. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note). mark_feedback_sent runs only after successful dismiss (or no todo_id for duplicate/stale).
+# 14. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note).
+#     Normal closes: mark_feedback_sent always runs after MR comment post, regardless of dismiss outcome.
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
 
@@ -784,7 +786,8 @@ class Headhunter:
     async def _feedback_loop(self) -> None:
         """Process GitLab feedback for closed headhunter events.
 
-        Wakes instantly via close_signal from Brain, or every poll_interval as safety net.
+        Poll-interval safety net for cross-pod catch-up. Brain calls
+        process_event_feedback directly for current-pod closes.
         """
         while True:
             try:

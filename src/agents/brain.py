@@ -424,6 +424,7 @@ class Brain:
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
         self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
+        self._lesson_enrichment_enabled = os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true"
         self._last_embedding_warmup: float = 0.0
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
@@ -5198,7 +5199,7 @@ class Brain:
         active = await self.blackboard.get_active_events()
 
         # Keep embedding warm while events are in flight (60s throttle)
-        if active and os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true":
+        if active and self._lesson_enrichment_enabled:
             now = time.time()
             if now - self._last_embedding_warmup > 60:
                 self._last_embedding_warmup = now
