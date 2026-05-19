@@ -1750,8 +1750,8 @@ class BlackboardState:
         """Check if headhunter feedback was already sent for an event."""
         return bool(await self.redis.get(f"darwin:headhunter:feedback:{event_id}"))
 
-    async def mark_feedback_sent(self, event_id: str, ttl: int = 3600) -> None:
-        """Mark headhunter feedback as sent (TTL prevents unbounded growth)."""
+    async def mark_feedback_sent(self, event_id: str, ttl: int = 172800) -> None:
+        """Mark headhunter feedback as sent (48h TTL covers 24h scan window + margin)."""
         await self.redis.set(f"darwin:headhunter:feedback:{event_id}", "1", ex=ttl)
 
     async def append_journal(self, service: str, entry: str) -> None:

@@ -892,7 +892,6 @@ class Headhunter:
             elif not resp.is_success:
                 logger.warning(f"MR comment failed ({resp.status_code}): {resp.text[:200]}")
 
-            dismiss_ok = True
             if todo_id:
                 done_resp = await client.post(
                     self._api_url(f"/todos/{todo_id}/mark_as_done"),
@@ -904,15 +903,13 @@ class Headhunter:
                 if done_resp.status_code == 404:
                     logger.info(f"Headhunter feedback: todo {todo_id} not found for {event.id}")
                 elif not done_resp.is_success:
-                    dismiss_ok = False
                     logger.warning(
                         f"Headhunter feedback: mark_as_done failed ({done_resp.status_code}) for {event.id}: "
                         f"{done_resp.text[:200]}"
                     )
 
-                if dismiss_ok:
-                    await self.blackboard.mark_feedback_sent(event.id)
-                    logger.info(f"Headhunter normal feedback posted for {event.id}: {close_reason} on !{mr_iid}")
+            await self.blackboard.mark_feedback_sent(event.id)
+            logger.info(f"Headhunter normal feedback posted for {event.id}: {close_reason} on !{mr_iid}")
 
     @staticmethod
     def _build_feedback_comment(event: "EventDocument", close_reason: str) -> str:
