@@ -37,7 +37,10 @@
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
-# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on post-agent/defer-wake phases. Gated by BRAIN_LESSON_ENRICHMENT env var (default false). 2s timeout on archivist call. Scores + latency logged at INFO.
+# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on post-agent/defer-wake phases.
+#     Gated by BRAIN_LESSON_ENRICHMENT env var (default false). 10s timeout on archivist call (embed + search).
+#     Scores + latency logged at INFO. Embedding keepalive: _scan_active_for_reconcile fires
+#     _warmup_embedding every 60s while active events > 0. Prevents Vertex AI cold-start timeouts.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
@@ -420,6 +423,7 @@ class Brain:
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
         self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
+        self._last_embedding_warmup: float = 0.0
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
         self._skill_loader = None
@@ -3526,8 +3530,6 @@ class Brain:
                 "phase": phase,
             })
             await self._emit_executive_pulse(event_id, [(f"phase:{phase}", "phase")])
-            if current_phase == "triage" and os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true":
-                asyncio.create_task(self._warmup_embedding())
             return True
 
         elif function_name == "refresh_gitlab_context":
@@ -5198,6 +5200,14 @@ class Brain:
         delegates to the validated _scan_logic pattern from Probe B.
         """
         active = await self.blackboard.get_active_events()
+
+        # Keep embedding warm while events are in flight (60s throttle)
+        if active and os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true":
+            now = time.time()
+            if now - self._last_embedding_warmup > 60:
+                self._last_embedding_warmup = now
+                asyncio.create_task(self._warmup_embedding())
+
         to_enqueue: list[str] = []
 
         for eid in active:
