@@ -990,9 +990,13 @@ class Brain:
                     0,
                 )
             else:
+                # Window boundary = the most recent phase transition into the CURRENT phase.
+                # Refreshes from a prior phase (e.g., triage) don't block the new phase's refresh.
+                # Phase turns store "Phase: VERIFY. ..." in thoughts -- match current brain_phase.
                 last_window_ts = next(
                     (t.timestamp for t in reversed(event.conversation)
-                     if t.actor == "brain" and t.action == "phase"),
+                     if t.actor == "brain" and t.action == "phase"
+                     and (t.thoughts or "").lower().startswith(f"phase: {brain_phase}")),
                     0,
                 )
             recent_gl_refresh = any(
