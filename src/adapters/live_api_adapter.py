@@ -421,7 +421,7 @@ TOOL_DECLARATIONS = [
 ]
 
 # Compact pulse format: track which neurons have been introduced
-_INTERVENTION_COOLDOWN_TURNS = 10
+_INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
 
 
 class LiveAPIAdapter:
@@ -1036,27 +1036,38 @@ class LiveAPIAdapter:
     # -------------------------------------------------------------------------
 
     async def _check_rate_limit(self, event_id: str, current_turn: int) -> str | None:
-        """Returns error string if rate-limited, None if OK. Persists across restarts via Redis."""
+        """Returns error string if rate-limited, None if OK.
+
+        Time-based cooldown: JARVIS can intervene on the same event once every
+        _INTERVENTION_COOLDOWN_SECONDS. Turn-based limits broke on stale events
+        where turns don't advance.
+        """
         redis = self._blackboard.redis
         key = f"darwin:cortex:ratelimit:{event_id}"
         try:
             last_raw = await redis.get(key)
-            last = int(last_raw) if last_raw else -_INTERVENTION_COOLDOWN_TURNS
+            if last_raw:
+                last_ts = float(last_raw)
+                elapsed = time.time() - last_ts
+                if elapsed < _INTERVENTION_COOLDOWN_SECONDS:
+                    remaining = int(_INTERVENTION_COOLDOWN_SECONDS - elapsed)
+                    return (
+                        f"Rate limited: last intervention was {int(elapsed)}s ago. "
+                        f"Wait {remaining}s before next intervention on this event."
+                    )
         except Exception:
-            last = -_INTERVENTION_COOLDOWN_TURNS
-        if current_turn - last < _INTERVENTION_COOLDOWN_TURNS:
-            return (
-                f"Rate limited: last intervention was at turn {last}, "
-                f"current turn is {current_turn}. "
-                f"Wait {_INTERVENTION_COOLDOWN_TURNS} Brain turns between interventions."
-            )
+            pass
         return None
 
     async def _record_intervention(self, event_id: str, current_turn: int) -> None:
-        """Record that an intervention was made at this turn. TTL 1 hour."""
+        """Record intervention timestamp. TTL matches cooldown + buffer."""
         redis = self._blackboard.redis
         try:
-            await redis.set(f"darwin:cortex:ratelimit:{event_id}", str(current_turn), ex=3600)
+            await redis.set(
+                f"darwin:cortex:ratelimit:{event_id}",
+                str(time.time()),
+                ex=_INTERVENTION_COOLDOWN_SECONDS + 60,
+            )
         except Exception:
             pass
 
@@ -1289,6 +1300,23 @@ class LiveAPIAdapter:
         )
         self._active_meta_event_id = event_id
         logger.info("JARVIS created system_review event: %s", event_id)
+
+        # Inform JARVIS Live session: provide the same evidence so he knows
+        # what FRIDAY is being asked. Different derivative: JARVIS is the reviewer.
+        jarvis_context = (
+            f"[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
+            f"Here is what I observed and asked her to assess:\n\n"
+            f"{display_text}\n\n"
+            f"When FRIDAY responds, you have full context of the prompt. "
+            f"Challenge her reasoning if the evidence doesn't support her assessment."
+        )
+        try:
+            if self._session:
+                await self._session.send(input=jarvis_context, end_of_turn=True)
+                logger.debug("Sent meta-event context to JARVIS session: %s", event_id)
+        except Exception as e:
+            logger.warning("Failed to send meta-event context to JARVIS: %s", e)
+
         return event_id
 
     async def _idle_watchdog(self) -> None:
