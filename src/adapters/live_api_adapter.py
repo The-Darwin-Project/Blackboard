@@ -1041,7 +1041,15 @@ class LiveAPIAdapter:
         Time-based cooldown: JARVIS can intervene on the same event once every
         _INTERVENTION_COOLDOWN_SECONDS. Turn-based limits broke on stale events
         where turns don't advance.
+
+        No rate limit on jarvis-sourced events (meta-events) -- JARVIS should
+        freely converse with FRIDAY in his own review sessions.
         """
+        # Skip rate limit for JARVIS's own meta-events
+        event = await self._blackboard.get_event(event_id)
+        if event and event.source == "jarvis":
+            return None
+
         redis = self._blackboard.redis
         key = f"darwin:cortex:ratelimit:{event_id}"
         try:
