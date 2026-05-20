@@ -581,18 +581,23 @@ class LiveAPIAdapter:
             else:
                 meta_id = self._active_meta_event_id
                 self._active_meta_event_id = None
-                logger.info("Real pulse for %s -- asking FRIDAY to wrap up meta-event %s", batch.event_id, meta_id)
+                logger.info("Real pulse for %s -- informing JARVIS to wrap up meta-event %s", batch.event_id, meta_id)
+                # Inform JARVIS via Live session -- let HIM tell FRIDAY to wrap up (conversational)
                 try:
-                    from ..models import ConversationTurn
-                    turn = ConversationTurn(
-                        turn=len((await self._blackboard.get_event(meta_id)).conversation) + 1 if await self._blackboard.get_event(meta_id) else 1,
-                        actor="jarvis",
-                        action="message",
-                        thoughts="Real work just arrived. Summarize your findings and close this review.",
-                    )
-                    await self._blackboard.append_turn(meta_id, turn)
+                    if self._session:
+                        await self._session.send(
+                            input=(
+                                f"[SYSTEM] A new active event ({batch.event_id}) just entered processing. "
+                                f"Your system review ({meta_id}) should wrap up. "
+                                f"Send FRIDAY a message on {meta_id} to close the review."
+                            ),
+                            end_of_turn=True,
+                        )
+                        logger.debug("Sent wrap-up nudge to JARVIS for meta-event %s", meta_id)
+                        # Schedule fallback: if JARVIS doesn't close it in 5 min, force-close
+                        asyncio.create_task(self._meta_event_close_fallback(meta_id, timeout=300))
                 except Exception as e:
-                    logger.warning("Meta-event wrap-up message failed, falling back to auto-close: %s", e)
+                    logger.warning("JARVIS wrap-up nudge failed, force-closing meta-event: %s", e)
                     try:
                         await self._blackboard.close_event(
                             meta_id,
@@ -1533,6 +1538,18 @@ class LiveAPIAdapter:
             })
         except Exception:
             pass
+
+    async def _meta_event_close_fallback(self, meta_id: str, timeout: int = 300) -> None:
+        """Fallback: force-close meta-event if JARVIS doesn't close it within timeout."""
+        await asyncio.sleep(timeout)
+        event = await self._blackboard.get_event(meta_id)
+        if event and event.status.value in ("active", "new"):
+            logger.warning(f"Meta-event {meta_id} not closed by JARVIS within {timeout}s -- force-closing")
+            await self._blackboard.close_event(
+                meta_id,
+                summary="Auto-closed: JARVIS did not close the review within timeout",
+                close_reason="timeout",
+            )
 
     async def _close_session(self) -> None:
         """Close session from within _idle_watchdog (avoids self-await deadlock)."""
