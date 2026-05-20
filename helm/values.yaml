@@ -417,6 +417,7 @@ timekeeper:
   pollInterval: "30" # seconds between poll cycles
   maxPerUser: "10" # max schedules per authenticated user
   maxTotal: "50" # max schedules system-wide
+  chatStaleTtl: "5400" # seconds before auto-closing stale chat/slack approval requests (90 min)
 # =============================================================================
 # Google Search Grounding (Brain web search during triage/investigate)
 # =============================================================================
