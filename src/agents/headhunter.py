@@ -757,7 +757,16 @@ class Headhunter:
                 if failures >= max_failures:
                     logger.critical("Headhunter disabled after 3 consecutive failures")
                     return
-            await asyncio.sleep(self._poll_interval)
+            # Wake early if an event closes (slot opens) -- otherwise sleep full interval
+            if self._close_signal:
+                try:
+                    await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
+                    self._close_signal.clear()
+                    logger.debug("Headhunter poll woke early: event closed, slot may be open")
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(self._poll_interval)
 
     async def _poll_and_process(self) -> None:
         """Single poll cycle: check gate, fetch todos, analyze, create events."""
