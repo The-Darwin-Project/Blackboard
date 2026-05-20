@@ -2,16 +2,19 @@
 # @ai-rules:
 # 1. [Constraint]: Pure functions only -- no I/O, no Slack API calls (debug-level logging excepted). Returns Block Kit dicts or slack-sdk model objects.
 # 2. [Pattern]: format_turn dispatches on actor.action key into 4 card families:
-#    - System Card (brain.triage/think/defer/wait/close/tool_result, aligner.confirm) -- low visual weight
+#    - System Card (brain.triage/thoughts/intermediate/think/defer/wait/close/tool_result, aligner.confirm) -- low visual weight
 #    - Action Card (brain.route, brain.request_approval) -- bold, state-changing
+#    - Response Card (brain.response, brain.respond_jarvis) -- full section, user-facing FRIDAY output
 #    - Agent Card (agent.message/execute) -- color bar + emoji header via AGENT_SHORTCODE
 #    - User Card (user.message/approve/reject) -- speech balloon
 # 3. [Gotcha]: Slack Block Kit text limit is 3000 chars per section. Truncate long results.
 # 4. [Pattern]: create_feedback_block uses slack-sdk model objects (ContextActionsBlock, FeedbackButtonsElement).
 # 5. [Contract]: AI disclaimer only on _DISCLAIMER_ACTIONS (execute, request_approval, close). Not on operational status turns.
 # 6. [Contract]: get_turn_attachment_color fires for action in ("message", "execute") on agent actors.
-# 7. [Pattern]: brain.think always renders as compact _context_line (small grey text). No KV formatting in Slack.
-#    brain.notify renders as :bell: context block. Both are low-weight system cards.
+# 7. [Pattern]: brain.think/thoughts/intermediate render as compact _context_line (small grey text).
+#    brain.response renders as full _section (user-facing). brain.thoughts is suppressed in slack.py
+#    legacy handler (never posted to thread -- thinking animation persists until brain.response).
+#    brain.notify renders as :bell: context block. brain.respond_jarvis as full section.
 # 8. [Pattern]: agent.cancel uses :stop_button: (System Card style, not Agent Card identity). No color bar.
 """Convert ConversationTurn objects to Slack Block Kit payloads."""
 from __future__ import annotations
