@@ -91,8 +91,8 @@
 #     phase stays active and recommendation surfacing skips evidence turns.
 #     URL normalized: split("#")[0].rstrip("/").
 # 32. [Pattern]: _cleanup_stale_events calls hh.process_event_feedback directly for headhunter events
-#     (mirrors _close_and_broadcast). No signal.set() -- direct await avoids race with _feedback_loop.
-#     _feedback_loop poll-interval safety net handles cross-pod catch-up without signal.
+#     (mirrors _close_and_broadcast). signal.set() AFTER direct feedback to wake poll loop (slot opened).
+#     Safe ordering: feedback processed first, then signal wakes poll to pick up next todo.
 # 33. [Pattern]: _handle_orphan_blank_event() encapsulates orphan recovery logic.
 #     _orphan_requeue_count tracks attempts per event. Cap at 3, then close as error.
 #     Reset on successful first turn or on close.
@@ -4733,6 +4733,10 @@ class Brain:
                     await hh.process_event_feedback(event_id)
                 except Exception as e:
                     logger.warning(f"Headhunter direct feedback failed (non-fatal): {e}")
+            # Wake poll loop: slot opened, pick up next todo immediately
+            signal = getattr(self, '_headhunter_close_signal', None)
+            if signal:
+                signal.set()
 
     # =========================================================================
     # Active Task Cancellation
