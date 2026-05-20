@@ -12,8 +12,14 @@ phase you declare.
 
 Core tools (lookups, classify_event, set_phase, select_agent,
 message_agent, reply_to_agent, create_plan, get_plan_progress,
-defer_event, wait_for_user, wait_for_agent) remain available in
-ALL phases. Phase gating only restricts these specific tools:
+wait_for_agent) remain available in ALL phases.
+
+**Triage-phase constraints:** defer_event and wait_for_user are NOT
+available in triage. Triage is for assessment only -- once you know
+what the event needs (monitoring, investigation, execution), transition
+to the appropriate phase where these tools become available.
+
+Phase gating restricts these specific tools:
 
 - report_incident: requires escalate phase
 - notify_user_slack: requires escalate or close phase
