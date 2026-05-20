@@ -15,7 +15,7 @@
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 13b. [Pattern]: ReconcileScheduler (src/scheduling/) replaces monolithic event loop. start_event_loop() is a
-#     thin facade that wires QueueTrigger (BRPOP), ResyncTrigger (5s scan), StalenessGuard (jarvis 120s TTL).
+#     thin facade that wires QueueTrigger (BRPOP), ResyncTrigger (5s scan), StalenessGuard (jarvis 120s, chat 5400s).
 #     N workers process events concurrently. FairQueue provides per-key dedup (no spin monopoly).
 #     Brain._scan_active_for_reconcile() is the decision callback: returns list[str] of event_ids to enqueue.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
@@ -5161,6 +5161,13 @@ class Brain:
         self._scheduler.register_trigger(StalenessGuard(
             check_fn=self._check_jarvis_staleness,
             on_stale=self._close_stale_jarvis_event,
+            name="jarvis",
+        ))
+        self._scheduler.register_trigger(StalenessGuard(
+            check_fn=self._check_chat_staleness,
+            on_stale=self._close_stale_chat_event,
+            interval=60.0,
+            name="chat",
         ))
 
         logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
@@ -5343,6 +5350,32 @@ class Brain:
         await self._close_and_broadcast(
             event_id,
             summary="JARVIS meta-event timed out (no response within TTL)",
+            close_reason="timeout",
+        )
+
+    async def _check_chat_staleness(self, event_id: str) -> bool:
+        """Check if a chat/slack event in WAITING_APPROVAL has exceeded its TTL."""
+        if event_id not in self._waiting_for_user:
+            return False
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.source not in ("chat", "slack"):
+            return False
+        if event.status != EventStatus.WAITING_APPROVAL:
+            return False
+        ttl = float(os.getenv("CHAT_STALE_TTL", "5400"))
+        last_turn_ts = max(
+            (t.timestamp or 0.0 for t in event.conversation),
+            default=0.0,
+        )
+        return (time.time() - last_turn_ts) > ttl if last_turn_ts else False
+
+    async def _close_stale_chat_event(self, event_id: str) -> None:
+        """Close a stale chat/slack event that exceeded its approval TTL."""
+        logger.warning(f"StalenessGuard[chat]: closing stale chat event {event_id}")
+        self._waiting_for_user.discard(event_id)
+        await self._close_and_broadcast(
+            event_id,
+            summary="Chat session timed out waiting for user approval",
             close_reason="timeout",
         )
 

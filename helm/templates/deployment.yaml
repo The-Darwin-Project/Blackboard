@@ -322,6 +322,10 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_TIMEKEEPER
+            {{- if .Values.timekeeper.chatStaleTtl }}
+            - name: CHAT_STALE_TTL
+              value: "{{ .Values.timekeeper.chatStaleTtl }}"
+            {{- end }}
             {{- end }}
             {{- if .Values.googleSearch }}
             # Google Search Grounding

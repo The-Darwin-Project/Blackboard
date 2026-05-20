@@ -476,7 +476,8 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     Separate from /health (which stays zero-Redis for K8s probes).
     Returns queue depth, active events, and per-role agent utilization.
     """
-    from .dependencies import _blackboard, get_registry_and_bridge
+    from .dependencies import _blackboard, get_registry_and_bridge, get_brain
+    from .scheduling.triggers import StalenessGuard
 
     flow = {"queue_depth": 0, "active_events": 0}
     if _blackboard is not None:
@@ -502,12 +503,23 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     except Exception:
         pass
 
+    staleness_guards: list[dict] = []
+    try:
+        brain = get_brain()
+        if brain and brain._scheduler:
+            for trigger in brain._scheduler._triggers:
+                if isinstance(trigger, StalenessGuard):
+                    staleness_guards.append(trigger.metrics())
+    except Exception:
+        pass
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
         busy_agents=busy,
         idle_agents=idle,
         agents_by_role=by_role,
+        staleness_guards=staleness_guards,
     )
 
 

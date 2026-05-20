@@ -3,7 +3,7 @@
 # 1. [Constraint]: Triggers enqueue event_ids -- they NEVER call process_event directly.
 # 2. [Pattern]: QueueTrigger owns the BRPOP loop. ResyncTrigger owns the periodic active-set scan.
 # 3. [Gotcha]: ResyncTrigger interval must be > 1s to avoid tight-spinning (default 5s).
-# 4. [Pattern]: StalenessGuard is source-scoped policy. Currently only jarvis (120s). Extensible via dict config.
+# 4. [Pattern]: StalenessGuard is source-scoped policy. Named instances: jarvis (120s), chat (5400s). Extensible via name param.
 """
 Trigger implementations for ReconcileScheduler.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -113,20 +114,28 @@ class StalenessGuard:
         check_fn: Callable[[str], Awaitable[bool]],
         on_stale: Callable[[str], Awaitable[None]],
         interval: float = 10.0,
+        name: str = "default",
     ) -> None:
         self._check_fn = check_fn
         self._on_stale = on_stale
         self._interval = interval
+        self._name = name
         self._running = False
+        self._last_sweep_at: float = 0.0
+        self._last_sweep_duration: float = 0.0
+        self._sweep_count: int = 0
+        self._stale_close_count: int = 0
+        self._error_count: int = 0
 
     async def start(self, scheduler: ReconcileScheduler) -> None:
         self._running = True
-        logger.info("StalenessGuard started (interval=%.1fs)", self._interval)
+        logger.info("StalenessGuard[%s] started (interval=%.1fs)", self._name, self._interval)
         while self._running:
             try:
                 await asyncio.sleep(self._interval)
                 if not self._running:
                     break
+                sweep_start = time.time()
                 stale_count = 0
                 tracked = list(scheduler.tracked_event_ids())
                 for eid in tracked:
@@ -135,14 +144,30 @@ class StalenessGuard:
                             await self._on_stale(eid)
                             stale_count += 1
                     except Exception as e:
-                        logger.warning("StalenessGuard check failed for %s: %s", eid, e)
+                        self._error_count += 1
+                        logger.warning("StalenessGuard[%s] check failed for %s: %s", self._name, eid, e)
+                self._last_sweep_at = sweep_start
+                self._last_sweep_duration = time.time() - sweep_start
+                self._sweep_count += 1
+                self._stale_close_count += stale_count
                 if stale_count:
-                    logger.info("StalenessGuard: handled %d stale events", stale_count)
+                    logger.info("StalenessGuard[%s]: handled %d stale events", self._name, stale_count)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("StalenessGuard error: %s", e)
+                self._error_count += 1
+                logger.warning("StalenessGuard[%s] error: %s", self._name, e)
                 await asyncio.sleep(self._interval)
 
     async def stop(self) -> None:
         self._running = False
+
+    def metrics(self) -> dict:
+        return {
+            "name": self._name,
+            "last_sweep_at": self._last_sweep_at,
+            "last_sweep_duration": round(self._last_sweep_duration, 3),
+            "sweep_count": self._sweep_count,
+            "stale_close_count": self._stale_close_count,
+            "error_count": self._error_count,
+        }
