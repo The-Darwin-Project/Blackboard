@@ -547,13 +547,29 @@ class Archivist:
         except Exception as e:
             logger.debug(f"Pulse emission failed (non-fatal): {e}")
 
-    async def list_memories(self, limit: int = 200) -> list[dict]:
-        """List all event memories from Qdrant (single-page scroll, capped)."""
+    async def list_memories(self, limit: int = 0) -> list[dict]:
+        """List all event memories from Qdrant (paginated scroll, fetches all).
+
+        Args:
+            limit: 0 = fetch all (default), N = cap at N results.
+        """
         try:
             if not await self._ensure_initialized():
                 return []
-            points, _ = await self._vector_store.scroll(COLLECTION_NAME, limit=limit)
-            return points
+            all_points: list[dict] = []
+            offset = None
+            page_size = 256
+            while True:
+                points, next_offset = await self._vector_store.scroll(
+                    COLLECTION_NAME, limit=page_size, offset=offset,
+                )
+                all_points.extend(points)
+                if not next_offset or not points:
+                    break
+                if limit and len(all_points) >= limit:
+                    return all_points[:limit]
+                offset = next_offset
+            return all_points
         except Exception as e:
             logger.warning(f"list_memories failed: {e}")
             return []
@@ -581,13 +597,29 @@ class Archivist:
             logger.warning(f"get_memory failed for {event_id}: {e}")
             return None
 
-    async def list_lessons(self, limit: int = 200) -> list[dict]:
-        """List all lessons from Qdrant (single-page scroll, capped)."""
+    async def list_lessons(self, limit: int = 0) -> list[dict]:
+        """List all lessons from Qdrant (paginated scroll, fetches all).
+
+        Args:
+            limit: 0 = fetch all (default), N = cap at N results.
+        """
         try:
             if not await self._ensure_initialized():
                 return []
-            points, _ = await self._vector_store.scroll(LESSONS_COLLECTION, limit=limit)
-            return points
+            all_points: list[dict] = []
+            offset = None
+            page_size = 256
+            while True:
+                points, next_offset = await self._vector_store.scroll(
+                    LESSONS_COLLECTION, limit=page_size, offset=offset,
+                )
+                all_points.extend(points)
+                if not next_offset or not points:
+                    break
+                if limit and len(all_points) >= limit:
+                    return all_points[:limit]
+                offset = next_offset
+            return all_points
         except Exception as e:
             logger.warning(f"list_lessons failed: {e}")
             return []
