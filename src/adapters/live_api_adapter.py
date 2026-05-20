@@ -749,6 +749,19 @@ class LiveAPIAdapter:
                              "go_away", "session_resumption_update") if hasattr(msg, a) and getattr(msg, a)]
         logger.debug("Cortex _process_message: type=%s attrs=%s", msg_type, attrs)
 
+        # === PROBE: go_away writability test ===
+        if hasattr(msg, "go_away") and msg.go_away:
+            time_left = getattr(msg.go_away, "time_left", None)
+            time_left_s = float(time_left.total_seconds()) if time_left else 60.0
+            logger.info("PROBE go_away received (time_left=%.1fs). Testing send...", time_left_s)
+            try:
+                if self._session:
+                    await self._session.send(input="Session rotating. Say 'handoff confirmed' in one sentence.", end_of_turn=True)
+                    logger.info("PROBE go_away: send() succeeded -- session is writable after go_away")
+            except Exception as e:
+                logger.warning("PROBE go_away: send() FAILED -- %s", e)
+            return
+
         eid = self._last_pulse_event_id
 
         # Buffer text fragments, flush on turn_complete OR tool_call (natural turn boundaries)
