@@ -128,6 +128,8 @@ export const MOCK_EVENT_DOC = {
   slack_channel_id: null,
   slack_user_id: null,
   slack_thread_title: null,
+  sticky_notes: [],
+  unread_notes: 0,
 };
 
 export const MOCK_HH_TODOS = [

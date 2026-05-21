@@ -728,6 +728,49 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["event_id"],
         },
     },
+    # --- post_sticky_note (gated: jarvis-sourced + close phase only) ---
+    {
+        "name": "post_sticky_note",
+        "description": (
+            "Write a note to your future self on another event's blackboard. "
+            "The note will appear when you next process that event. Use to "
+            "preserve insights, reminders, or cross-event context discovered "
+            "during this review session."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "Target event ID to attach the note to (e.g., evt-abc12345)",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The note content — insight, reminder, or context for your future self",
+                },
+            },
+            "required": ["event_id", "content"],
+        },
+    },
+    # --- read_sticky_notes (gated: unread_notes > 0) ---
+    {
+        "name": "read_sticky_notes",
+        "description": (
+            "Read unread notes left by your past self on this event. "
+            "Returns all unread notes with timestamps and marks them as read. "
+            "Call when the event state header shows unread notes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "Event ID to read notes from (typically the current event)",
+                },
+            },
+            "required": ["event_id"],
+        },
+    },
 ]
 
 

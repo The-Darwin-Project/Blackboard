@@ -4,7 +4,7 @@
 // 2. [Constraint]: Pure presentational. No data fetching, no context access.
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
 import { useState, type ReactNode } from 'react';
-import { ChevronRight, Bot, Radio, Bell } from 'lucide-react';
+import { ChevronRight, Bot, Radio, Bell, StickyNote } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 
@@ -51,7 +51,7 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
 }
 
 export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
-  evt: { id: string; status: string; source: string; service: string; subject_type?: string; current_agent?: string | null };
+  evt: { id: string; status: string; source: string; service: string; subject_type?: string; current_agent?: string | null; unread_notes?: number };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const sc = STATUS_COLORS[evt.status];
@@ -72,6 +72,9 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
       <span className={`truncate ${isWaiting ? 'text-amber-300' : 'text-text-secondary'}`}>{evt.id.slice(4, 12)}</span>
       {isWaiting && (
         <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
+      )}
+      {!isWaiting && (evt.unread_notes ?? 0) > 0 && (
+        <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
       )}
       {evt.current_agent && (
         <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"

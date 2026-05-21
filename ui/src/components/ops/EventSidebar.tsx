@@ -388,6 +388,27 @@ export default function EventSidebar() {
                       <div className="flex justify-between"><span>Turns</span><span>{doc.conversation.length}</span></div>
                     </div>
                   </CollapsibleSection>
+                  {doc.sticky_notes && doc.sticky_notes.length > 0 && (
+                    <CollapsibleSection title="Sticky Notes" badge={
+                      <span className="text-[12px] text-yellow-400">{doc.sticky_notes.length}</span>
+                    }>
+                      <div className="space-y-1.5">
+                        {doc.sticky_notes.map((note: { timestamp: string; content: string; read: boolean }, i: number) => (
+                          <div key={i} className="text-[13px] rounded px-2 py-1.5"
+                            style={{
+                              borderLeft: `3px solid ${note.read ? '#475569' : '#facc15'}`,
+                              background: note.read ? '#1e293b40' : '#facc1508',
+                              opacity: note.read ? 0.6 : 1,
+                            }}>
+                            <div className="text-text-muted text-[11px] mb-0.5">
+                              {new Date(note.timestamp).toLocaleString()}
+                            </div>
+                            <div className="text-text-secondary">{note.content}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </CollapsibleSection>
+                  )}
                 </div>
               </div>
             );

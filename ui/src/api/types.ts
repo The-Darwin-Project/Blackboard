@@ -171,6 +171,7 @@ export interface ActiveEvent {
   evidence: EventEvidence;
   turns: number;
   created: string;
+  unread_notes?: number;
 }
 
 // =============================================================================
@@ -207,13 +208,15 @@ export interface ConversationTurn {
 
 export interface EventDocument {
   id: string;
-  source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper';
+  source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';
   status: EventStatus;
   brain_phase?: string;
   service: string;
   subject_type?: SubjectType;
   event: EventInput;
   conversation: ConversationTurn[];
+  sticky_notes?: Array<{ timestamp: string; content: string; read: boolean }>;
+  unread_notes?: number;
 }
 
 // =============================================================================

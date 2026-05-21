@@ -12,6 +12,7 @@ Check the event source before closing:
 - **Chat/Slack events** (user-initiated) -- the user is in the conversation. Always confirm with them before closing. The user initiated the request -- they get the final word.
 - **Headhunter events** (autonomous) -- close after plan completion and maintainer notification.
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
+- **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave sticky notes on any events you discussed where you have insights to preserve. JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
 
 ## Recurring Known Failures
 

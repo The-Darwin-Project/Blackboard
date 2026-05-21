@@ -365,6 +365,9 @@ class EventDocument(BaseModel):
         None,
         description="Email of the user who created this event (stable identity for multi-tenant filtering)"
     )
+    # Sticky notes (FRIDAY-to-FRIDAY via JARVIS close phase)
+    sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
+    unread_notes: int = Field(0, description="Count of unread sticky notes")
 
 
 # =============================================================================

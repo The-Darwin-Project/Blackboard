@@ -7,6 +7,7 @@
 # 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
 # 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
 # 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to external/0.
+# 8. [Pattern]: /active response includes unread_notes for sidebar badge display.
 """
 Conversation Queue API - Event document management.
 
@@ -77,6 +78,7 @@ async def list_active_events(
                 "turns": len(event.conversation),
                 "created": event.event.timeDate,
                 "created_by_email": event.created_by_email,
+                "unread_notes": getattr(event, "unread_notes", 0) or 0,
             })
     return events
 

@@ -123,6 +123,7 @@
 #     for nudge timer. _jarvis_wait_count tracks escalation (1st: 2 nudges, 2nd: 1, 3rd: 0,
 #     4th+: tool stripped). Cleaned in _clear_jarvis_wait, called from _close_and_broadcast,
 #     _cleanup_stale_events, and event loop resolution scan. NEVER add to _waiting_for_user.
+# 39. [Pattern]: Sticky notes gates: post_sticky_note requires source=jarvis+phase=close; read_sticky_notes requires unread_notes>0.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -1078,16 +1079,24 @@ class Brain:
         if event.source != "jarvis":
             active_tools = [t for t in active_tools if t["name"] != "inspect_event"]
 
+        # === Sticky notes gates ===
+        if not (event.source == "jarvis" and brain_phase == "close"):
+            active_tools = [t for t in active_tools if t["name"] != "post_sticky_note"]
+
+        unread = getattr(event, "unread_notes", 0) or 0
+        if unread <= 0:
+            active_tools = [t for t in active_tools if t["name"] != "read_sticky_notes"]
+
         # Reorder tools: always-available first, then phase-relevant, then rest.
         # Gives the LLM a signal about what's most useful for the current phase.
-        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user"}
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
         _phase_tool_priority: dict[str, set[str]] = {
             "triage":      {"refresh_gitlab_context", "refresh_kargo_context"},
             "investigate":  {"select_agent", "create_plan", "message_agent", "defer_event"},
             "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event"},
             "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
             "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
-            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack"},
+            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note"},
         }
         # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
         if brain_phase == "triage" or event.source == "jarvis":
@@ -1910,6 +1919,10 @@ class Brain:
 
             if challenge:
                 line2 += " Any new evidence to reclassify?"
+
+        unread = getattr(event, "unread_notes", 0) or 0
+        if unread > 0:
+            line2 += f"\n📌 You have {unread} unread note(s) from a past session."
 
         return f"{line1}\n{line2}"
 
@@ -3760,6 +3773,101 @@ class Brain:
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "post_sticky_note":
+            target_id = args.get("event_id", "").strip()
+            content = args.get("content", "").strip()
+            if not target_id or not content:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="Error: event_id and content are required.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            target_event = await self.blackboard.get_event(target_id)
+            if not target_event:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=f"Event {target_id} not found — cannot post note.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            notes = list(getattr(target_event, "sticky_notes", None) or [])
+            notes.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "content": content,
+                "read": False,
+            })
+            new_unread = (getattr(target_event, "unread_notes", 0) or 0) + 1
+            await self.blackboard.update_event_sticky_notes(target_id, notes, new_unread)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=f"Note posted to {target_id}.",
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info(f"Sticky note posted from {event_id} to {target_id}")
+            return True
+
+        elif function_name == "read_sticky_notes":
+            target_id = args.get("event_id", "").strip()
+            if not target_id:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="Error: event_id is required.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            target_event = await self.blackboard.get_event(target_id)
+            if not target_event:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=f"Event {target_id} not found.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            notes = list(getattr(target_event, "sticky_notes", None) or [])
+            unread_notes = [n for n in notes if not n.get("read", False)]
+            if not unread_notes:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="No unread notes on this event.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+            lines = [f"## {len(unread_notes)} Unread Note(s)\n"]
+            for n in unread_notes:
+                lines.append(f"**{n.get('timestamp', '?')}**: {n.get('content', '')}")
+                n["read"] = True
+            await self.blackboard.update_event_sticky_notes(target_id, notes, 0)
+            formatted = "\n".join(lines)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=formatted,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info(f"Read {len(unread_notes)} sticky notes on {target_id}")
             return True
 
         else:

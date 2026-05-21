@@ -8,6 +8,7 @@
 # 6. [Pattern]: _should_include_service() is the shared node filter for BOTH get_graph_data() and generate_mermaid(). Ticket nodes bypass this filter -- they are loaded via _get_ticket_nodes() from active events, not from the K8s topology.
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
 # 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
+# 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -1976,6 +1977,30 @@ class BlackboardState:
                 except WatchError:
                     continue
         logger.debug(f"Brain severity set on event {event_id}: {brain_severity}")
+
+    async def update_event_sticky_notes(
+        self, event_id: str, sticky_notes: list[dict], unread_notes: int,
+    ) -> None:
+        """Update sticky notes and unread counter on an EventDocument (WATCH/MULTI)."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for sticky_notes update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    event.sticky_notes = sticky_notes
+                    event.unread_notes = unread_notes
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"Sticky notes updated on event {event_id}: {unread_notes} unread")
 
     SLACK_MAPPING_TTL = 86400  # 24h safety net (cleaned explicitly on event close)
 
