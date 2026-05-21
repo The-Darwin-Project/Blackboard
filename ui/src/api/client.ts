@@ -634,3 +634,32 @@ export async function getCortexActivity(eventId?: string): Promise<PulseBatch[]>
   const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/cortex/activity${params}`);
   return resp.batches;
 }
+
+// =============================================================================
+// JARVIS Memory API (handoff reports + proposals)
+// =============================================================================
+
+export interface HandoffReport {
+  timestamp: number;
+  report: string;
+  events_tracked: string | null;
+}
+
+export interface EnhancementProposal {
+  timestamp: number;
+  event_id: string;
+  title: string;
+  description: string;
+  severity: 'nice_to_have' | 'would_improve' | 'blocking';
+  status: string;
+}
+
+export async function getHandoffReports(): Promise<HandoffReport[]> {
+  const resp = await fetchApi<{ reports: HandoffReport[]; count: number }>('/api/cortex/handoff-reports');
+  return resp.reports;
+}
+
+export async function getProposals(): Promise<EnhancementProposal[]> {
+  const resp = await fetchApi<{ proposals: EnhancementProposal[]; count: number }>('/api/cortex/proposals');
+  return resp.proposals;
+}

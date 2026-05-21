@@ -25,6 +25,7 @@ const BASE_TABS = [
   { id: '/incidents', label: 'Incidents' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
+  { id: '/jarvis-memory', label: 'JARVIS Memory' },
   { id: '/guide', label: 'Guide' },
 ];
 

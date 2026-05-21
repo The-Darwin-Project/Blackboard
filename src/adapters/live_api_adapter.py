@@ -433,6 +433,42 @@ TOOL_DECLARATIONS = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    # --- Enhancement proposal tool (metadata, not intervention) ---
+    {
+        "name": "propose_enhancement",
+        "description": (
+            "Document a feature gap or improvement discovered during observation. "
+            "The proposal is stored for operator review. Use when a FRIDAY conversation "
+            "reveals a missing capability, a broken heuristic, or an architectural improvement. "
+            "NOT for routine observations (those belong in session handoff reports)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The event that surfaced this gap",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short name for the enhancement (1-2 sentences)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "The gap observed + proposed improvement. Include what was attempted, "
+                        "what failed or was missing, and what would fix it. Max 1000 chars."
+                    ),
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": ["nice_to_have", "would_improve", "blocking"],
+                    "description": "Impact level of the gap",
+                },
+            },
+            "required": ["event_id", "title", "description", "severity"],
+        },
+    },
 ]
 
 # Compact pulse format: track which neurons have been introduced
@@ -920,6 +956,13 @@ class LiveAPIAdapter:
                     args.get("insight", ""),
                     args.get("severity", "nudge"),
                 )
+            elif name == "propose_enhancement":
+                return await self._tool_propose_enhancement(
+                    args.get("event_id", ""),
+                    args.get("title", ""),
+                    args.get("description", ""),
+                    args.get("severity", "nice_to_have"),
+                )
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -1314,6 +1357,46 @@ class LiveAPIAdapter:
         except Exception:
             pass
         return f"System insight queued for {event_id} (severity: {severity})"
+
+    # -------------------------------------------------------------------------
+    # Enhancement proposals (metadata, not intervention -- no shadow gating)
+    # -------------------------------------------------------------------------
+
+    async def _tool_propose_enhancement(
+        self, event_id: str, title: str, description: str, severity: str,
+    ) -> str:
+        """Store an enhancement proposal for operator review."""
+        if not title or not description:
+            return "Error: title and description required"
+        if severity not in ("nice_to_have", "would_improve", "blocking"):
+            severity = "nice_to_have"
+        description = description[:1000]
+        redis = self._blackboard.redis
+        key = "darwin:cortex:proposals"
+        entry = json.dumps({
+            "timestamp": time.time(),
+            "event_id": event_id,
+            "title": title,
+            "description": description,
+            "severity": severity,
+            "status": "pending",
+        })
+        try:
+            await redis.rpush(key, entry)
+            logger.info(
+                "Enhancement proposal stored: %s (severity=%s, event=%s)",
+                title, severity, event_id,
+            )
+            await self._broadcast({
+                "type": "cortex_proposal",
+                "title": title,
+                "severity": severity,
+                "timestamp": time.time(),
+            })
+            return f"Proposal '{title}' stored for operator review."
+        except Exception as e:
+            logger.warning("Proposal store failed: %s", e)
+            return f"Failed to store proposal: {e}"
 
     # -------------------------------------------------------------------------
     # Session lifecycle

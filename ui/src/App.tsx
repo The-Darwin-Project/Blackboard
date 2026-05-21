@@ -23,6 +23,7 @@ import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
 import TopologyView from './components/ops/TopologyView';
 import MemoryPage from './components/memory/MemoryPage';
 import ShiftsPage from './components/ShiftsPage';
+import JarvisMemoryPage from './components/JarvisMemoryPage';
 import CortexPage from './components/cortex/CortexPage';
 import { lazy, Suspense } from 'react';
 const CortexDevPage = lazy(() => import('./components/cortex/CortexDevPage'));
@@ -70,6 +71,7 @@ function AuthGate() {
           <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="shifts" element={<ShiftsPage />} />
           <Route path="memory" element={<MemoryPage />} />
+          <Route path="jarvis-memory" element={<JarvisMemoryPage />} />
           <Route path="cortex" element={<CortexPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

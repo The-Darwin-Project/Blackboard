@@ -6,6 +6,8 @@
 # 4. [Pattern]: /api/pulses filters by event_id or since timestamp.
 # 5. [Pattern]: /api/cortex/shadow endpoints read shadow intervention logs from Redis LIST keys.
 # 6. [Pattern]: /api/cortex/status reads live_adapter from app.state for UI hydration on mount.
+# 7. [Pattern]: /api/cortex/handoff-reports and /api/cortex/proposals read from Redis LIST keys
+#    (darwin:cortex:handoff_reports, darwin:cortex:proposals). JSON-parsed, tolerant of bad entries.
 """
 Cognitive Graph REST API.
 
@@ -14,6 +16,7 @@ Provides endpoints for the Cortex UI to load the neural topology
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -147,7 +150,6 @@ async def get_all_shadow_interventions(
         raise HTTPException(503, "Blackboard not available")
     redis = blackboard.redis
 
-    import json as _json
     index_key = f"{SHADOW_KEY_PREFIX}_index"
     event_ids = await redis.smembers(index_key)
     all_entries: list[dict] = []
@@ -156,7 +158,7 @@ async def get_all_shadow_interventions(
         raw_items = await redis.lrange(f"{SHADOW_KEY_PREFIX}{eid}", -limit, -1)
         for raw in raw_items:
             try:
-                entry = _json.loads(raw)
+                entry = json.loads(raw)
                 entry["event_id"] = eid
                 all_entries.append(entry)
             except Exception:
@@ -179,15 +181,62 @@ async def get_event_shadow_interventions(
         raise HTTPException(503, "Blackboard not available")
     redis = blackboard.redis
 
-    import json as _json
     key = f"{SHADOW_KEY_PREFIX}{event_id}"
     raw_items = await redis.lrange(key, -limit, -1)
     entries = []
     for raw in raw_items:
         try:
-            entry = _json.loads(raw)
+            entry = json.loads(raw)
             entry["event_id"] = event_id
             entries.append(entry)
         except Exception:
             pass
     return {"interventions": entries, "count": len(entries)}
+
+
+# =============================================================================
+# JARVIS Memory Endpoints (handoff reports + proposals)
+# =============================================================================
+
+@router.get("/cortex/handoff-reports")
+async def get_handoff_reports(limit: int = 100):
+    """Return accumulated JARVIS session handoff reports from Redis."""
+    from ..dependencies import get_blackboard
+    try:
+        blackboard = await get_blackboard()
+    except RuntimeError:
+        raise HTTPException(503, "Blackboard not available")
+    redis = blackboard.redis
+    raw = await redis.lrange("darwin:cortex:handoff_reports", -limit, -1)
+    reports = []
+    for entry in raw:
+        try:
+            reports.append(json.loads(entry))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    reports.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+    return {"reports": reports, "count": len(reports)}
+
+
+@router.get("/cortex/proposals")
+async def get_proposals(limit: int = 100):
+    """Return JARVIS enhancement proposals from Redis.
+
+    Proposals have no TTL (intentional) -- they persist until explicitly
+    dismissed by an operator or converted to events.
+    """
+    from ..dependencies import get_blackboard
+    try:
+        blackboard = await get_blackboard()
+    except RuntimeError:
+        raise HTTPException(503, "Blackboard not available")
+    redis = blackboard.redis
+    raw = await redis.lrange("darwin:cortex:proposals", -limit, -1)
+    proposals = []
+    for entry in raw:
+        try:
+            proposals.append(json.loads(entry))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    proposals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+    return {"proposals": proposals, "count": len(proposals)}
