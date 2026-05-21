@@ -751,9 +751,18 @@ class LiveAPIAdapter:
 
         # === PROBE: go_away writability test ===
         if hasattr(msg, "go_away") and msg.go_away:
-            time_left = getattr(msg.go_away, "time_left", None)
-            time_left_s = float(time_left.total_seconds()) if time_left else 60.0
-            logger.info("PROBE go_away received (time_left=%.1fs). Testing send...", time_left_s)
+            time_left_raw = getattr(msg.go_away, "time_left", None)
+            try:
+                if hasattr(time_left_raw, "total_seconds"):
+                    time_left_s = float(time_left_raw.total_seconds())
+                elif time_left_raw is not None:
+                    time_left_s = float(str(time_left_raw).rstrip("s"))
+                else:
+                    time_left_s = 60.0
+            except (ValueError, TypeError):
+                time_left_s = 60.0
+            logger.info("PROBE go_away received (time_left=%.1fs, raw=%s, type=%s). Testing send...",
+                        time_left_s, time_left_raw, type(time_left_raw).__name__)
             try:
                 if self._session:
                     await self._session.send(input="Session rotating. Say 'handoff confirmed' in one sentence.", end_of_turn=True)
