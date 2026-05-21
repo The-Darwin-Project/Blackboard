@@ -348,6 +348,8 @@ spec:
               value: "{{ .Values.cortex.system2.shadow }}"
             - name: SYSTEM2_SESSION_REPORT
               value: "{{ .Values.cortex.system2.sessionReport }}"
+            - name: SYSTEM2_HANDOFF_REPORT
+              value: "{{ .Values.cortex.system2.handoffReport }}"
             {{- if .Values.cortex.system2.model }}
             - name: LLM_MODEL_SYSTEM2
               value: "{{ .Values.cortex.system2.model }}"

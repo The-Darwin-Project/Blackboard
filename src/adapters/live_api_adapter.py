@@ -17,6 +17,12 @@
 #     Meta-event is max-1 (guarded by _active_meta_event_id + find_active_event_by_source).
 #     Auto-closed in send_pulse when a real event pulse arrives.
 # 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
+# 13. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
+#     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
+# 14. [Pattern]: Session resumption: _resumption_handle captured from
+#     session_resumption_update. NOT YET wired to LiveConnectConfig (Probe 2 pending).
+# 15. [Gotcha]: Handoff collection happens INSIDE _receive_loop. Do NOT
+#     cancel _receive_task during handoff — use flag-based accumulation.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -283,6 +289,15 @@ Respond with the full report as plain text. Do NOT use tool calls.
 If you observed nothing noteworthy, say "No significant observations."
 """
 
+HANDOFF_REPORT_PROMPT = """Session connection rotating. Capture your working memory in 3-5 sentences:
+
+1. Which events are you tracking and what phase is each in?
+2. Any friction patterns you're watching (type, event, duration)?
+3. Pending observations you haven't acted on yet?
+4. Any open questions about FRIDAY's approach?
+
+Be brief and concrete. This feeds your next session's context."""
+
 TOOL_DECLARATIONS = [
     # --- Intervention tools (primary purpose) ---
     {
@@ -461,6 +476,11 @@ class LiveAPIAdapter:
         self._generating_report = False
         self._active_meta_event_id: str | None = None
         self._awaiting_jarvis_reply: bool = False
+        self._handoff_enabled = os.getenv("SYSTEM2_HANDOFF_REPORT", "true").lower() == "true"
+        self._go_away_received = False
+        self._collecting_handoff = False
+        self._handoff_buffer: list[str] = []
+        self._resumption_handle: str | None = None
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -715,6 +735,9 @@ class LiveAPIAdapter:
                     break
         logger.info("Cortex _receive_loop exited (running=%s, session=%s, msgs=%d)",
                      self._running, self._session is not None, msg_count)
+        if self._go_away_received and self._running:
+            self._go_away_received = False
+            await self._try_reconnect()
 
     async def _receive_watchdog(self, get_last_msg_time) -> None:
         """Log periodic warnings when no messages arrive from the Live API."""
@@ -749,7 +772,6 @@ class LiveAPIAdapter:
                              "go_away", "session_resumption_update") if hasattr(msg, a) and getattr(msg, a)]
         logger.debug("Cortex _process_message: type=%s attrs=%s", msg_type, attrs)
 
-        # === PROBE: go_away writability test ===
         if hasattr(msg, "go_away") and msg.go_away:
             time_left_raw = getattr(msg.go_away, "time_left", None)
             try:
@@ -761,26 +783,43 @@ class LiveAPIAdapter:
                     time_left_s = 60.0
             except (ValueError, TypeError):
                 time_left_s = 60.0
-            logger.info("PROBE go_away received (time_left=%.1fs, raw=%s, type=%s). Testing send...",
-                        time_left_s, time_left_raw, type(time_left_raw).__name__)
-            try:
-                if self._session:
-                    await self._session.send(input="Session rotating. Say 'handoff confirmed' in one sentence.", end_of_turn=True)
-                    logger.info("PROBE go_away: send() succeeded -- session is writable after go_away")
-            except Exception as e:
-                logger.warning("PROBE go_away: send() FAILED -- %s", e)
+            self._go_away_received = True
+            logger.info("Cortex go_away received (time_left=%.1fs)", time_left_s)
+            if self._handoff_enabled and self._session and not self._generating_report:
+                try:
+                    await self._session.send(input=HANDOFF_REPORT_PROMPT, end_of_turn=True)
+                    self._collecting_handoff = True
+                    self._handoff_buffer = []
+                    logger.info("Cortex handoff report requested (%.1fs window)", time_left_s)
+                except Exception as e:
+                    logger.warning("Cortex handoff prompt failed (non-fatal): %s", e)
             return
+
+        if hasattr(msg, "session_resumption_update") and msg.session_resumption_update:
+            update = msg.session_resumption_update
+            if getattr(update, "resumable", False) and getattr(update, "new_handle", None):
+                self._resumption_handle = update.new_handle
+                logger.debug("Cortex session resumption handle updated")
 
         eid = self._last_pulse_event_id
 
-        # Buffer text fragments, flush on turn_complete OR tool_call (natural turn boundaries)
         if hasattr(msg, "text") and msg.text:
-            self._text_buffer.append(msg.text)
+            if self._collecting_handoff:
+                self._handoff_buffer.append(msg.text)
+            else:
+                self._text_buffer.append(msg.text)
 
         should_flush = (
             (hasattr(msg, "server_content") and getattr(msg.server_content, "turn_complete", False))
             or (hasattr(msg, "tool_call") and msg.tool_call)
         )
+        if should_flush and self._collecting_handoff:
+            report = "".join(self._handoff_buffer).strip()
+            self._handoff_buffer = []
+            self._collecting_handoff = False
+            if report:
+                asyncio.create_task(self._store_handoff_report(report))
+            return
         if should_flush and self._text_buffer:
             full_text = "".join(self._text_buffer).strip()
             self._text_buffer = []
@@ -1373,7 +1412,12 @@ class LiveAPIAdapter:
                 logger.info("Cortex idle + 0 active events -- shift end")
                 try:
                     if self._session_report_enabled:
-                        await self._generate_session_report()
+                        handoff_history = await self._get_handoff_history()
+                        await self._generate_session_report(handoff_history=handoff_history)
+                        try:
+                            await self._blackboard.redis.delete("darwin:cortex:handoff_reports")
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning("Shift-end report failed (non-fatal): %s", e)
                 finally:
@@ -1420,7 +1464,7 @@ class LiveAPIAdapter:
             logger.info("Cortex idle %ds + all %d events parked -- creating system review", idle_threshold, len(active_ids))
             await self._create_system_review_event(active_ids)
 
-    async def _generate_session_report(self) -> None:
+    async def _generate_session_report(self, handoff_history: str = "") -> None:
         """Wrapper: generate report on self._session. Manages _generating_report flag."""
         if not self._session:
             return
@@ -1432,15 +1476,24 @@ class LiveAPIAdapter:
             except asyncio.CancelledError:
                 pass
         try:
-            await self._generate_session_report_on(self._session)
+            await self._generate_session_report_on(self._session, handoff_history=handoff_history)
         finally:
             self._generating_report = False
 
-    async def _generate_session_report_on(self, session: object) -> None:
+    async def _generate_session_report_on(self, session: object, handoff_history: str = "") -> None:
         """Generate report on a specific session (may differ from self._session during handoff)."""
         report = ""
+        prompt = SESSION_REPORT_PROMPT
+        if handoff_history:
+            segments = handoff_history.count("---") + 1
+            prompt = (
+                f"Before writing your report, here are your session notes from this shift "
+                f"({segments} segments):\n\n"
+                f"{handoff_history}\n\n"
+                f"---\n\n{SESSION_REPORT_PROMPT}"
+            )
         try:
-            await session.send(input=SESSION_REPORT_PROMPT, end_of_turn=True)
+            await session.send(input=prompt, end_of_turn=True)
             parts: list[str] = []
             async with asyncio.timeout(45):
                 async for msg in session.receive():
@@ -1527,8 +1580,60 @@ class LiveAPIAdapter:
         except Exception as e:
             logger.warning("Session report processing failed (non-fatal): %s", e)
 
+    async def _get_handoff_history(self) -> str:
+        """Load accumulated handoff reports from Redis for shift-end merge."""
+        redis = self._blackboard.redis
+        key = "darwin:cortex:handoff_reports"
+        try:
+            raw_reports = await redis.lrange(key, 0, -1)
+            if not raw_reports:
+                return ""
+            reports = []
+            for raw in raw_reports:
+                entry = json.loads(raw)
+                ts = time.strftime("%H:%M:%S", time.localtime(entry["timestamp"]))
+                reports.append(f"[{ts}] {entry['report']}")
+            return "\n\n---\n\n".join(reports)
+        except Exception as e:
+            logger.warning("Handoff history load failed (non-fatal): %s", e)
+            return ""
+
+    async def _store_handoff_report(self, report: str) -> None:
+        """Store handoff report in Redis. Best-effort, non-fatal."""
+        if not report or report.lower().startswith("no significant"):
+            logger.info("Cortex handoff: nothing noteworthy")
+            return
+        redis = self._blackboard.redis
+        key = "darwin:cortex:handoff_reports"
+        entry = json.dumps({
+            "timestamp": time.time(),
+            "report": report[:4000],
+            "events_tracked": self._last_pulse_event_id,
+        })
+        try:
+            await redis.rpush(key, entry)
+            await redis.expire(key, 86400)
+            logger.info("Cortex handoff report stored (%d chars)", len(report))
+            await self._broadcast({
+                "type": "cortex_handoff_report",
+                "report": report[:2000],
+                "timestamp": time.time(),
+            })
+        except Exception as e:
+            logger.warning("Cortex handoff store failed (non-fatal): %s", e)
+
     async def _cleanup_session_state(self) -> None:
         """Shared session teardown: cancel receive, close ctx, reset state, broadcast."""
+        if self._collecting_handoff and self._handoff_buffer:
+            report = "".join(self._handoff_buffer).strip()
+            if report:
+                try:
+                    await self._store_handoff_report(report)
+                except Exception:
+                    pass
+        self._go_away_received = False
+        self._collecting_handoff = False
+        self._handoff_buffer = []
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
             try:
