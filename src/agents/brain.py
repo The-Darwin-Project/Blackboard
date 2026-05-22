@@ -926,6 +926,24 @@ class Brain:
             logger.error(f"_process_with_llm called without adapter for {event_id}")
             return False
 
+        # Sticky note notification injection (iteration 0 only, dedup by existing turn)
+        if iteration == 0:
+            unread = getattr(event, "unread_notes", 0) or 0
+            if unread > 0:
+                has_notification = any(
+                    t.actor == "system" and t.action == "notification"
+                    for t in event.conversation
+                )
+                if not has_notification:
+                    notif_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="system",
+                        action="notification",
+                        thoughts=f"{unread} unread sticky note{'s' if unread != 1 else ''}. You want to read them?",
+                    )
+                    await self._append_and_broadcast(event_id, notif_turn)
+                    event = await self.blackboard.get_event(event_id)
+
         # Progressive skill loading: build phase-specific system prompt + LLM params
         if self._progressive_skills and self._skill_loader:
             context_flags = await self._extract_context_flags(event)
@@ -1105,7 +1123,14 @@ class Brain:
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
         tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
         tier_rest = [t for t in active_tools if t["name"] not in _always_tools and t["name"] not in priority_names]
-        active_tools = tier_always + tier_phase + tier_rest
+        # Sticky note urgency: surface read_sticky_notes FIRST when unread
+        unread = getattr(event, "unread_notes", 0) or 0
+        if unread > 0:
+            tier_sticky = [t for t in tier_always if t["name"] == "read_sticky_notes"]
+            tier_always = [t for t in tier_always if t["name"] != "read_sticky_notes"]
+            active_tools = tier_sticky + tier_always + tier_phase + tier_rest
+        else:
+            active_tools = tier_always + tier_phase + tier_rest
 
         prompt = await self._build_contents(event, context_cache=context_flags)
 
@@ -1919,10 +1944,6 @@ class Brain:
 
             if challenge:
                 line2 += " Any new evidence to reclassify?"
-
-        unread = getattr(event, "unread_notes", 0) or 0
-        if unread > 0:
-            line2 += f"\n📌 You have {unread} unread note(s) from a past session."
 
         return f"{line1}\n{line2}"
 

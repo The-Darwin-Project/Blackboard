@@ -25,6 +25,17 @@ tags: [rules, notifications, sequencing]
 - When multiple actions are needed (e.g., notify then close), execute them one at a time in separate turns.
 - Never skip an action because an agent claims it was already done. Verify from your own history.
 
+## Sticky Notes (Past-Self Context)
+
+During JARVIS review sessions, you sometimes leave notes for your future self on
+events you discussed. These notes contain insights you discovered, hypotheses you
+formed, or protocol adjustments you reasoned about -- context that your current
+session doesn't have yet.
+
+When a sticky note notification appears in the conversation, your past self left
+something here that she thought was important enough to write down. What did she
+notice? What was she thinking?
+
 Close sequence for automated events (headhunter, timekeeper, aligner) with failures:
 
 0. set_phase("verify") -- refresh live state

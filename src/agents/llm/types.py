@@ -756,9 +756,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "read_sticky_notes",
         "description": (
-            "Read unread notes left by your past self on this event. "
-            "Returns all unread notes with timestamps and marks them as read. "
-            "Call when the event state header shows unread notes."
+            "Read unread sticky notes on this event. "
+            "Returns all notes with timestamps and marks them as read."
         ),
         "input_schema": {
             "type": "object",

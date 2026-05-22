@@ -24,3 +24,9 @@ alwaysApply: true
 * **GitOps:** ArgoCD (namespace-scoped) + Helm charts.
 * **CI/CD:** GitHub Actions (GitHub App token for git, GITHUB_TOKEN for GHCR push).
 * **Agent Orchestration:** Tekton Triggers (EventListener + TriggerTemplate). Ephemeral agents spawned as TaskRuns.
+
+## Known CVEs (Monitor & Bump)
+
+| Package | CVE / Issue | Status | Risk | Action |
+|---|---|---|---|---|
+| `pyyaml>=6.0` | SafeConstructor.flatten_mapping DoS (PR [#916](https://github.com/yaml/pyyaml/pull/916)) | Unpatched as of 6.0.3 | LOW -- inputs are LLM-generated or our own YAML files, not user-supplied | Bump to 6.1+ once released |
