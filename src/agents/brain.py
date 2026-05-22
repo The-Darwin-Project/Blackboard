@@ -3832,7 +3832,8 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
-                thoughts=f"Note posted to {target_id}.",
+                thoughts=f"Sticky note sent to {target_id}.",
+                result=f"Sticky note sent to {target_id}. It will be presented once that event continues.",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
