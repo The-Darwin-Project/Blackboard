@@ -364,7 +364,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "defer_event",
-        "description": "Defer an event for later processing. Use when an agent is busy, the issue is not urgent, or you want to retry after a cooldown period.",
+        "description": (
+            "Set a timer and pause this event. Use for pipeline completions, "
+            "cooldown periods, or any timed wait. Works like an alarm clock -- "
+            "you will be woken after delay_seconds to check again."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -383,8 +387,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "wait_for_user",
         "description": (
-            "Signal that the current question is answered but agent recommendations exist. "
-            "Summarize findings and available next actions for the user."
+            "Pause processing until a human or agent responds. "
+            "Use ONLY when waiting for a person's decision or an agent's final result. "
+            "NOT for pipelines, timers, or external processes -- use defer_event for those."
         ),
         "input_schema": {
             "type": "object",

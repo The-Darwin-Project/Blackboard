@@ -1759,11 +1759,6 @@ class Brain:
         if lesson_block:
             resolved_contents.append(lesson_block)
 
-        # Cortex (System 2) insight injection -- GETDEL is atomic, no race
-        cortex_block = await self._get_pending_cortex_insight(event.id, event)
-        if cortex_block:
-            resolved_contents.append(cortex_block)
-
         prompt = "\n\n---\n\n".join(resolved_contents)
 
         total_tokens = len(prompt) // 4
@@ -1835,42 +1830,6 @@ class Brain:
             f"(scores: {', '.join(scores)}, latency={latency_ms}ms) for {event.id}"
         )
         return "\n".join(lines)
-
-    async def _get_pending_cortex_insight(self, event_id: str, event: "EventDocument | None" = None) -> str | None:
-        """Read and clear any pending Cortex insight for this event (GETDEL = atomic)."""
-        try:
-            redis = self.blackboard.redis
-            raw = await redis.getdel(f"darwin:whisper:{event_id}")
-            if not raw:
-                return None
-            import json as _json
-            data = _json.loads(raw)
-            insight = data.get("insight", "")
-            severity = data.get("severity", "nudge")
-            issued_ts = data.get("timestamp") or time.time()
-            age_s = max(0, int(time.time() - issued_ts))
-            age_str = f"{age_s // 60}m {age_s % 60}s" if age_s > 0 else "just now"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="jarvis",
-                action="insight",
-                thoughts=f"[{severity}] {insight}",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            if event:
-                event.conversation.append(turn)
-            logger.info(f"Cortex insight consumed for {event_id} (severity={severity}, age={age_str})")
-            return (
-                f"## JARVIS ADVISORY\n"
-                f"Severity: {severity} | Issued {age_str} ago\n\n"
-                f"{insight}\n\n"
-                f"Your context may have changed since this advisory was issued. "
-                f"Refresh your context before acting on it.\n"
-                f"Use respond_to_jarvis to acknowledge or explain your reasoning."
-            )
-        except Exception as e:
-            logger.debug(f"Cortex insight check failed (non-fatal): {e}")
-            return None
 
     async def _warmup_embedding(self) -> None:
         """Fire-and-forget: warm the Vertex AI embedding serving slot."""

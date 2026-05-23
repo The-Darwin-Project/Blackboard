@@ -5,7 +5,7 @@
 # 3. [Gotcha]: Live API session is on-demand. Lazy-connects on first pulse, closes after 5min idle.
 # 4. [Pattern]: Rate limit: max 1 intervention per 10 FRIDAY turns per event.
 # 5. [Constraint]: google.genai Client with vertexai=True. Model from LLM_MODEL_SYSTEM2 env var.
-# 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only tool calls reach her.
+# 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only send_event_message reaches her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
 # 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays active event context via _replay_pending_context. All errors non-fatal.
@@ -29,7 +29,7 @@ LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 On-demand lifecycle: starts idle, lazy-connects on first pulse, closes after
 5 minutes of no pulses. Receives pulse batches from PulseTracker, formats them
 as text turns, and streams them to the LLM. The LLM detects cognitive friction
-and intervenes via 7 declared tools.
+and intervenes via declared tools.
 """
 from __future__ import annotations
 
@@ -54,8 +54,6 @@ logger = logging.getLogger(__name__)
 SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
 _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
 SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
-WHISPER_KEY_PREFIX = "darwin:whisper:"
-WHISPER_TTL = 600  # 10 minutes
 
 SYSTEM_INSTRUCTION = """# JARVIS — Meta-Cognitive Observer
 
@@ -132,13 +130,10 @@ When observing pulses with nothing to report, respond: `watching`
 - Do not use prohibitive language ("do not defer", "stop deferring").
 - Your text is **NOT visible** to FRIDAY. Only tool actions reach her.
 
-### Intervention Levels (lightest → strongest)
+### How to Intervene
 
-1. **surface_context** — share evidence FRIDAY may not have (passive enrichment)
-2. **inject_system_insight** — observation only. Name the drift. Name what's absent.
-   No imperatives, no questions, no commands. FRIDAY decides.
-3. **send_event_message** — direct conversation, waking FRIDAY on the event.
-   Always end with a question to force deeper analysis.
+Your only tool to communicate with FRIDAY is **send_event_message**.
+When you see friction, talk to her directly. End with a question.
 
 ### WHERE to intervene (target event selection)
 
@@ -266,7 +261,7 @@ For each friction pattern you detected (spiral, plateau, agent churn):
 ### Interventions Attempted
 For each intervention you made or considered:
 - Event ID
-- Tool used (surface_context / send_event_message / inject_system_insight)
+- Tool used (send_event_message)
 - What you observed that triggered it
 - Perceived impact (did FRIDAY's behavior change afterward?)
 - If shadow mode: what you WOULD have done and why
@@ -324,58 +319,6 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": ["event_id", "message"],
-        },
-    },
-    {
-        "name": "inject_system_insight",
-        "description": (
-            "**Advisory** [Observer only] — deliver an evidence-backed observation before "
-            "FRIDAY's next decision. She evaluates it against her context. "
-            "Use for: sustained friction patterns during pulse observation. "
-            "Impact: async — queued for FRIDAY's next processing turn. "
-            "Do NOT use in Peer mode — use a direct message instead."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string"},
-                "insight": {
-                    "type": "string",
-                    "description": (
-                        "A steering observation injected into FRIDAY's context before her "
-                        "next decision. Visible to operators in the conversation thread. "
-                        "Content: state the pattern you observed -- counts, timeframe, "
-                        "what is absent between occurrences. "
-                        "NEVER use imperative verbs (Verify, Check, Ensure, Confirm). "
-                        "NEVER ask questions. NEVER issue commands. "
-                        "You observe. You name what's missing. FRIDAY decides what to do. "
-                        "(max 500 chars)"
-                    ),
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": ["nudge", "course_correct", "alert"],
-                    "description": "nudge=gentle suggestion, course_correct=change approach now, alert=something is wrong",
-                },
-            },
-            "required": ["event_id", "insight", "severity"],
-        },
-    },
-    {
-        "name": "surface_context",
-        "description": (
-            "**Evidence drop** [Observer] — add context FRIDAY may not have. She treats it as "
-            "supplementary intelligence, not a question or directive. Lightest touch. "
-            "Use for: historical timing data, similar past events, operational baselines. "
-            "Impact: async — available on FRIDAY's next processing turn."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "event_id": {"type": "string"},
-                "context": {"type": "string", "description": "Factual context to surface (max 800 chars)"},
-            },
-            "required": ["event_id", "context"],
         },
     },
     # --- Investigation tools (gather evidence before intervening) ---
@@ -942,19 +885,9 @@ class LiveAPIAdapter:
                 )
             elif name == "get_neuron_details":
                 return await self._tool_get_neuron_details(args.get("neuron_id", ""))
-            elif name == "surface_context":
-                return await self._tool_surface_context(
-                    args.get("event_id", ""), args.get("context", ""),
-                )
             elif name == "send_event_message":
                 return await self._tool_send_event_message(
                     args.get("event_id", ""), args.get("message", ""),
-                )
-            elif name == "inject_system_insight":
-                return await self._tool_inject_system_insight(
-                    args.get("event_id", ""),
-                    args.get("insight", ""),
-                    args.get("severity", "nudge"),
                 )
             elif name == "propose_enhancement":
                 return await self._tool_propose_enhancement(
@@ -1191,10 +1124,8 @@ class LiveAPIAdapter:
     async def _check_content_dedup(self, event_id: str, content: str) -> bool:
         """Return True if this exact content was already sent for this event.
 
-        Exact-match dedup -- intentionally not semantic. Catches identical text
-        re-firing at escalated severity (e.g., nudge then course_correct 5 min later).
-        Dedup SET TTL (1hr) is intentionally different from WHISPER_TTL (600s) --
-        dedup tracks what was already said, whisper tracks pending delivery.
+        Exact-match dedup -- intentionally not semantic. Catches identical
+        send_event_message content re-firing within the 1hr TTL window.
         """
         redis = self._blackboard.redis
         key = f"darwin:cortex:dedup:{event_id}"
@@ -1240,33 +1171,6 @@ class LiveAPIAdapter:
         except Exception:
             pass
 
-    async def _tool_surface_context(self, event_id: str, context: str) -> str:
-        if not event_id or not context:
-            return "Error: event_id and context required"
-        context = context[:800]
-        current_turn = await self._get_event_turn_count(event_id)
-        rate_err = await self._check_rate_limit(event_id, current_turn)
-        if rate_err:
-            return rate_err
-
-        await self._record_intervention(event_id, current_turn)
-
-        if self._shadow:
-            await self._write_shadow(event_id, "surface_context", {"context": context})
-            return f"[SHADOW] Context surfaced for {event_id}"
-
-        from ..models import ConversationTurn
-        turn = ConversationTurn(
-            turn=current_turn + 1,
-            actor="jarvis",
-            action="evidence",
-            evidence=context,
-            thoughts="Cortex context enrichment",
-        )
-        await self._blackboard.append_turn(event_id, turn)
-        await self._write_shadow(event_id, "surface_context", {"context": context})
-        return f"Context surfaced for {event_id}"
-
     async def _tool_send_event_message(self, event_id: str, message: str) -> str:
         if not event_id or not message:
             return "Error: event_id and message required"
@@ -1303,60 +1207,6 @@ class LiveAPIAdapter:
         )
         await self._write_shadow(event_id, "send_event_message", {"message": message})
         return f"Message delivered to {event_id} as turn {current_turn + 1}"
-
-    async def _tool_inject_system_insight(
-        self, event_id: str, insight: str, severity: str = "nudge",
-    ) -> str:
-        if not event_id or not insight:
-            return "Error: event_id and insight required"
-        insight = insight[:500]
-        if severity not in ("nudge", "course_correct", "alert"):
-            severity = "nudge"
-        current_turn = await self._get_event_turn_count(event_id)
-        rate_err = await self._check_rate_limit(event_id, current_turn)
-        if rate_err:
-            return rate_err
-
-        if await self._check_content_dedup(event_id, insight):
-            return f"Blocked: identical insight already sent for {event_id} within the last hour."
-
-        # One SI injection at a time per event
-        redis = self._blackboard.redis
-        existing = await redis.get(f"{WHISPER_KEY_PREFIX}{event_id}")
-        if existing and not self._shadow:
-            return f"Pending insight already exists for {event_id}. Wait for Brain to consume it."
-
-        await self._record_intervention(event_id, current_turn)
-
-        if self._shadow:
-            await self._write_shadow(event_id, "inject_system_insight", {
-                "insight": insight, "severity": severity,
-            })
-            return f"[SHADOW] System insight queued for {event_id} (severity: {severity})"
-
-        whisper_data = json.dumps({
-            "insight": insight,
-            "severity": severity,
-            "timestamp": time.time(),
-        })
-        await redis.set(
-            f"{WHISPER_KEY_PREFIX}{event_id}", whisper_data, ex=WHISPER_TTL,
-        )
-
-        await self._write_shadow(event_id, "inject_system_insight", {
-            "insight": insight, "severity": severity,
-        })
-        try:
-            await self._broadcast({
-                "type": "whisper",
-                "event_id": event_id,
-                "severity": severity,
-                "insight": insight,
-                "timestamp": time.time(),
-            })
-        except Exception:
-            pass
-        return f"System insight queued for {event_id} (severity: {severity})"
 
     # -------------------------------------------------------------------------
     # Enhancement proposals (metadata, not intervention -- no shadow gating)
@@ -1510,7 +1360,7 @@ class LiveAPIAdapter:
             # === Path 1: Stale events -- JARVIS intervenes directly ===
             # If specific events are stuck (active but not processed recently),
             # JARVIS handles this via friction detection in the pulse stream --
-            # surface_context or send_event_message to the stuck event.
+            # send_event_message to the stuck event.
             # No meta-event needed for stuck events.
             now = time.time()
             stale_events = []
