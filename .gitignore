@@ -44,4 +44,4 @@ ui/dist/
 
 # Logs
 *.log
-probe-data/**
+probe-data/***.plan.md
