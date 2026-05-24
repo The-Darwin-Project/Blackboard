@@ -57,7 +57,7 @@ You must strictly adhere to these agent roles:
     * **See:** `13-nightwatcher.mdc` for the full protocol and invariants.
 
 8. **JARVIS (Agent 7 -- System 2)**
-    * **Type:** In-process Python adapter using Gemini Live API (`gemini-live-2.5-flash`).
+    * **Type:** In-process Python adapter using Gemini Live API (`gemini-3.1-flash-live-preview`).
     * **Role:** Meta-cognitive observer. Watches the Brain's pulse stream, detects friction patterns, intervenes when FRIDAY is stuck.
     * **Behavior:** Composed, terse, evidence-first. Speaks only when silence would be negligent. Communicates with FRIDAY exclusively via `send_event_message` (direct conversation turns).
     * **Actor name:** `jarvis` in conversation turns (evidence, message, insight).

@@ -27,7 +27,7 @@ import traceback
 
 PROJECT = os.environ.get("GCP_PROJECT", "cnv-ai-insights")
 LOCATION = os.environ.get("GCP_LOCATION", "global")
-MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash")
+MODEL = os.environ.get("LLM_MODEL_SYSTEM2", "gemini-3.1-flash-live-preview")
 SA_KEY = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS",
     os.path.join(os.path.dirname(__file__), "..", "cnv-ai-insights-8502f29094a2.json"))
 
