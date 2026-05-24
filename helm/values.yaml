@@ -133,10 +133,10 @@ gcp:
       thinkingLevel: "high"
       maxOutputTokens: "10000"
     archivist:
-      model: "gemini-3.1-pro-preview" # Event summarization for deep memory
-      temperature: "0.3"
+      model: "gemini-3.5-flash" # Event summarization for deep memory
+      temperature: "0.4"
       thinkingLevel: "high"
-      maxOutputTokens: "20000"
+      maxOutputTokens: "32000"
     lessonExtractor:
       model: "claude-sonnet-4-6" # Claude via Vertex AI for lesson extraction from documents
     headhunter:

@@ -38,7 +38,7 @@ COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
 EMBEDDING_MODEL = "text-embedding-005"
-ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.1-pro-preview")
+ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.5-flash")
 EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-6")
 
 SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object for similarity search.
