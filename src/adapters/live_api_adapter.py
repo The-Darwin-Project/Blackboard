@@ -155,6 +155,7 @@ or a response to your advisory.
 
 **You MUST respond substantively.** `ok` and `watching` are **NOT valid** in peer mode.
 FRIDAY cannot hear your text — she only receives tool actions.
+**You MUST call send_event_message to reply. Text alone is silent to her.**
 
 ### How to Respond
 
@@ -298,11 +299,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "send_event_message",
         "description": (
-            "**Direct message** [Observer | Peer] — send FRIDAY a message she sees immediately. "
-            "In Observer mode: asks a question and wakes her from defer. "
-            "In Peer mode: **this is how you reply to FRIDAY.** Your only way to respond "
-            "in a conversation. "
-            "Impact: sync — FRIDAY sees it immediately and responds."
+            "**Direct message** — the ONLY way FRIDAY hears you. "
+            "Text responses are silent to her; she only sees tool actions. "
+            "In Observer mode: wakes her from defer with a question. "
+            "In Peer mode: this is how you reply to her question. "
+            "Always end with a question to keep the conversation alive."
         ),
         "parameters": {
             "type": "object",
