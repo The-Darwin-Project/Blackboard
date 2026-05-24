@@ -117,6 +117,15 @@ class KargoObserver:
                 except config.ConfigException as e:
                     logger.warning(f"No Kubernetes config available: {e}")
                     return False
+            # Workaround: kubernetes client v36+ stores token under 'authorization'
+            # but auth_settings() reads from 'BearerToken'. Patch the mismatch.
+            cfg = client.Configuration._default
+            if cfg and 'authorization' in cfg.api_key and 'BearerToken' not in cfg.api_key:
+                token_val = cfg.api_key['authorization']
+                if token_val.lower().startswith('bearer '):
+                    token_val = token_val[7:]
+                cfg.api_key['BearerToken'] = token_val
+                cfg.api_key_prefix['BearerToken'] = 'Bearer'
             self._custom_api = client.CustomObjectsApi()
             self._k8s_available = True
             return True
