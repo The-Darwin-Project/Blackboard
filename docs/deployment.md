@@ -104,7 +104,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-3.1-flash-lite-preview` |
+| `LLM_MODEL_ALIGNER` | Aligner model | `gemini-3.5-flash` |
 | `ALIGNER_CPU_THRESHOLD` | CPU warning threshold | (see code) |
 | `ALIGNER_MEMORY_THRESHOLD` | Memory warning threshold | (see code) |
 | `ALIGNER_ERROR_RATE_THRESHOLD` | Error rate threshold | (see code) |
@@ -120,7 +120,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `TIMEKEEPER_POLL_INTERVAL` | TimeKeeper poll interval (seconds) | `30` |
 | `TIMEKEEPER_MAX_PER_USER` | Max schedules per user | `10` |
 | `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
-| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.1-flash-lite-preview` |
+| `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.5-flash` |
 
 ### Headhunter
 

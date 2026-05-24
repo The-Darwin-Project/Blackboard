@@ -170,7 +170,7 @@ class Headhunter:
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._max_active = int(os.getenv("HEADHUNTER_MAX_ACTIVE", "1"))
         # _processed_todos removed: dedup now checks active events, not in-memory set
-        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.1-flash-lite-preview")
+        self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))

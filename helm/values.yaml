@@ -128,7 +128,7 @@ gcp:
       temperature: "0.8"
       maxOutputTokens: "65000"
     aligner:
-      model: "gemini-3.1-flash-lite-preview"
+      model: "gemini-3.5-flash"
       temperature: "0.3"
       thinkingLevel: "high"
       maxOutputTokens: "10000"
@@ -140,11 +140,11 @@ gcp:
     lessonExtractor:
       model: "claude-sonnet-4-6" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
-      model: "gemini-3.1-flash-lite-preview" # MR triage and plan generation
+      model: "gemini-3.5-flash" # MR triage and plan generation
       temperature: "0.3"
       thinkingLevel: "low"
     timekeeper:
-      model: "gemini-3.1-flash-lite-preview" # Instruction refinement (user-facing, fast)
+      model: "gemini-3.5-flash" # Instruction refinement (user-facing, fast)
       temperature: "0.3"
       maxOutputTokens: "2048"
     nightwatcher:
