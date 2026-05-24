@@ -456,6 +456,7 @@ class LiveAPIAdapter:
         self._generating_report = False
         self._active_meta_event_id: str | None = None
         self._awaiting_jarvis_reply: bool = False
+        self._awaiting_jarvis_event_id: str | None = None
         self._handoff_enabled = os.getenv("SYSTEM2_HANDOFF_REPORT", "true").lower() == "true"
         self._go_away_received = False
         self._collecting_handoff = False
@@ -540,28 +541,30 @@ class LiveAPIAdapter:
     async def receive_brain_response(self, event_id: str, response: str) -> None:
         """Receive a direct response from FRIDAY into the Live API session."""
         self._awaiting_jarvis_reply = True
+        self._awaiting_jarvis_event_id = event_id
         try:
-            try:
-                await self._broadcast({
-                    "type": "cortex_thinking",
-                    "event_id": event_id,
-                    "content_type": "text",
-                    "text": f"[FRIDAY] {response}",
-                    "timestamp": time.time(),
-                })
-            except Exception:
-                pass
-            if not self._session:
-                logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
-                return
-            try:
-                msg = f"[FRIDAY DIRECT for {event_id}]: {response}"
-                await self._session.send(input=msg, end_of_turn=True)
-                logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
-            except Exception as e:
-                logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
-        finally:
+            await self._broadcast({
+                "type": "cortex_thinking",
+                "event_id": event_id,
+                "content_type": "text",
+                "text": f"[FRIDAY] {response}",
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+        if not self._session:
+            logger.warning("No active Cortex session -- brain response for %s not delivered", event_id)
             self._awaiting_jarvis_reply = False
+            self._awaiting_jarvis_event_id = None
+            return
+        try:
+            msg = f"[FRIDAY DIRECT for {event_id}]: {response}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
+            await self._session.send(input=msg, end_of_turn=True)
+            logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
+        except Exception as e:
+            logger.warning("Cortex brain response delivery failed (non-fatal): %s", e)
+            self._awaiting_jarvis_reply = False
+            self._awaiting_jarvis_event_id = None
 
     async def send_pulse(self, batch: PulseBatch) -> None:
         """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
@@ -815,7 +818,16 @@ class LiveAPIAdapter:
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False
-                self._awaiting_jarvis_reply = False
+                # Auto-wrap (A): if JARVIS replied with text while awaiting reply,
+                # deliver it as send_event_message to the target event automatically.
+                if self._awaiting_jarvis_reply and self._awaiting_jarvis_event_id:
+                    target_eid = self._awaiting_jarvis_event_id
+                    self._awaiting_jarvis_reply = False
+                    self._awaiting_jarvis_event_id = None
+                    logger.info("Auto-wrapping JARVIS text reply as send_event_message to %s", target_eid)
+                    await self._tool_send_event_message(target_eid, full_text)
+                else:
+                    self._awaiting_jarvis_reply = False
                 try:
                     await self._broadcast({
                         "type": "cortex_thinking",
@@ -829,6 +841,7 @@ class LiveAPIAdapter:
 
         if hasattr(msg, "tool_call") and msg.tool_call:
             self._awaiting_jarvis_reply = False
+            self._awaiting_jarvis_event_id = None
             for fc in msg.tool_call.function_calls:
                 args = dict(fc.args) if fc.args else {}
                 tool_eid = args.get("event_id", eid)

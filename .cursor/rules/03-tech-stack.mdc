@@ -30,3 +30,4 @@ alwaysApply: true
 | Package | CVE / Issue | Status | Risk | Action |
 |---|---|---|---|---|
 | `pyyaml>=6.0` | SafeConstructor.flatten_mapping DoS (PR [#916](https://github.com/yaml/pyyaml/pull/916)) | Unpatched as of 6.0.3 | LOW -- inputs are LLM-generated or our own YAML files, not user-supplied | Bump to 6.1+ once released |
+| `gemini-live-2.5-flash` | JARVIS Live API model | Awaiting Vertex AI availability of `gemini-3.1-flash-live` | N/A -- current model works | Upgrade when 3.1-live lands on Vertex AI ([blog](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-live/)) |
