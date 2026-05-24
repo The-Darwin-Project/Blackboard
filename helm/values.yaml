@@ -148,8 +148,8 @@ gcp:
       temperature: "0.3"
       maxOutputTokens: "2048"
     nightwatcher:
-      model: "gemini-3-flash-preview" # Shift consolidation (high thinking for clustering)
-      temperature: "0.3"
+      model: "gemini-3.5-flash" # Shift consolidation (high thinking for clustering)
+      temperature: "0.5"
       thinkingLevel: "high"
       maxOutputTokens: "8192"
   tpmLimit: "500000" # Vertex AI tokens-per-minute quota (Tier 1 default). Shared across Brain, Aligner, Headhunter, Archivist.
