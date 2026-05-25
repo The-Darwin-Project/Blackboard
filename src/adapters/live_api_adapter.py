@@ -1230,9 +1230,9 @@ class LiveAPIAdapter:
             return "Error: event_id and message required"
         message = message[:500]
         current_turn = await self._get_event_turn_count(event_id)
-        rate_err = await self._check_rate_limit(event_id, current_turn)
-        if rate_err:
-            return rate_err
+        # Rate limiter disabled -- trusting context-driven messaging SI to self-regulate.
+        # Re-enable if JARVIS spams: rate_err = await self._check_rate_limit(event_id, current_turn)
+        # if rate_err: return rate_err
 
         if await self._check_content_dedup(event_id, message):
             return f"Blocked: identical message already sent for {event_id} within the last hour."
