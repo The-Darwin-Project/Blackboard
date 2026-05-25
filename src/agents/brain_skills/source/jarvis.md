@@ -63,15 +63,12 @@ This event was created by JARVIS during an idle period. It is a
 
 During the close phase, you can leave up to 2 notes per target event.
 Consolidate your insights into comprehensive notes -- one note can contain
-multiple observations. Notes surface automatically when you next process
+multiple observations.
+
+Notes surface automatically when you next process
 that event.
 
-Good note: "Pipeline exceeded P90 (34m). Two fix-and-test cycles attempted.
-If still failing on next wake, escalate with full sequence of errors.
-Consider 15m initial deferral for this service based on historical data."
-
-Notes are passive — they don't wake or re-enqueue events. You'll see them
-the next time the event naturally comes back to you.
+You'll see them the next time the event naturally comes back to you.
 
 ## Authority
 
