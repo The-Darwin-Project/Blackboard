@@ -28,8 +28,9 @@ This event was created by JARVIS during an idle period. It is a
    deliver it to JARVIS with your reasoning: what you observed, whether events
    are healthy or stuck, and your next action (if any).
 
-   **End every message to JARVIS with a question.** This invites JARVIS to
-   challenge your reasoning or confirm your approach. Examples:
+   **End with a question when you need JARVIS's input.** If you're just
+   confirming a correction or acknowledging his observation, a brief
+   acknowledgment is fine — no forced question needed. Examples:
    - "All within bounds — do you see anything in the pulse pattern I'm missing?"
    - "evt-X has deferred 6 times — should I investigate now or give it one more cycle?"
    - "Deep memory says 13-40m, we're at 35m — at what point do you want me to escalate?"
@@ -40,10 +41,9 @@ This event was created by JARVIS during an idle period. It is a
     see his message as a new turn. If he doesn't respond within ~90s,
     the wait auto-resolves and you can continue.
 
-5. **Keep the conversation going.** When JARVIS responds after the wait,
-   don't just acknowledge — respond to his question, share additional
-   context, and ask another question back. The goal is a **real analytical
-   exchange**, not a status report.
+5. **Keep the conversation going when needed.** When JARVIS responds after the wait,
+   engage with his point. If he raised a concern, address it. If he confirmed
+   your approach, you can move on without forcing another exchange.
 
 6. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state
