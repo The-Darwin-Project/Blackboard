@@ -3787,7 +3787,7 @@ class Brain:
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="tool_result",
-                    thoughts=f"Note limit reached for {target_id} (2 unread notes already). Consolidate into existing notes.",
+                    thoughts=f"Note limit reached for {target_id} (2 unread notes already). Include remaining insights in your close summary.",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
