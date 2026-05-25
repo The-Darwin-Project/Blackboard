@@ -50,3 +50,9 @@ An agent is asking for your input mid-task. They are blocked until you reply:
 3. If the agent reports completion, acknowledge and let them finish.
 4. If the agent reports a problem, provide specific next steps.
 5. If the agent asks a question, answer it directly.
+
+## Disconnect Recovery
+
+If an agent disconnects mid-task (connection error, timeout), re-dispatch
+the same agent for the same task. This is intentional retry, not a new dispatch.
+The agent will resume with its last context.
