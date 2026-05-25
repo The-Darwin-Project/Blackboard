@@ -56,19 +56,19 @@ This event was created by JARVIS during an idle period. It is a
 
 - When JARVIS signals wrap-up (real work arrived) or 30 minutes pass with no new
   observations, transition to close phase with `set_phase("close")`.
-- Before closing, leave sticky notes on events you discussed (if you have insights).
+- Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights).
 - Then call `close_event` with a summary of the review.
 
 ## Sticky Notes
 
-During the close phase of a JARVIS review, you can leave notes for your
-future self on any event you inspected. Notes are attached to the target
-event and surface automatically when you next process it.
+During the close phase, you can leave up to 2 notes per target event.
+Consolidate your insights into comprehensive notes -- one note can contain
+multiple observations. Notes surface automatically when you next process
+that event.
 
-Use notes to:
-- Flag a pattern you noticed ("3rd pipeline failure this week — check infra")
-- Remind yourself of context ("User mentioned this is blocking release")
-- Record a hypothesis for a deferred event ("Suspect s390x pool, verify next cycle")
+Good note: "Pipeline exceeded P90 (34m). Two fix-and-test cycles attempted.
+If still failing on next wake, escalate with full sequence of errors.
+Consider 15m initial deferral for this service based on historical data."
 
 Notes are passive — they don't wake or re-enqueue events. You'll see them
 the next time the event naturally comes back to you.
