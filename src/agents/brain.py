@@ -3780,18 +3780,6 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
             notes = list(getattr(target_event, "sticky_notes", None) or [])
-            # Cap: max 2 unread notes per target event
-            unread_on_target = sum(1 for n in notes if not n.get("read", False))
-            if unread_on_target >= 2:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts=f"Note limit reached for {target_id} (2 unread notes already). Include remaining insights in your close summary.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
             notes.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "content": content,
