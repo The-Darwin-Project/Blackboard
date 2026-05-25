@@ -737,10 +737,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "post_sticky_note",
         "description": (
-            "Write a note to your future self on another event's blackboard. "
-            "The note will appear when you next process that event. Use to "
-            "preserve insights, reminders, or cross-event context discovered "
-            "during this review session."
+            "Write a note on another event's blackboard. You have a budget of 2 notes "
+            "per target event -- consolidate your insights into comprehensive notes "
+            "rather than many small ones. The note appears when you next process that event."
         ),
         "input_schema": {
             "type": "object",
