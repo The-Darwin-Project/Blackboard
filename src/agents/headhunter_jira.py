@@ -270,6 +270,9 @@ class HeadhunterJira:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
                     content = resp.text
+                    if content.strip().startswith("<!DOCTYPE") or "<html" in content[:200]:
+                        logger.warning(f"Skill fetch for '{label}' returned HTML (login page?) -- token may be expired")
+                        return None
                     self._skill_cache[label] = {"content": content, "ts": time.time()}
                     logger.debug(f"Skill fetched for label '{label}' ({len(content)} chars)")
                     return content
