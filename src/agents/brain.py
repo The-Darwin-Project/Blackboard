@@ -2216,9 +2216,10 @@ class Brain:
             return []
 
         if turn.actor == "brain" and turn.action == "tool_result":
-            # If response_parts contains the original functionCall, return a proper
-            # functionResponse so Gemini sees the rejection as a direct reply to its call.
-            if turn.response_parts:
+            # For valid tool executions (waitingFor set), use proper functionResponse format.
+            # For hallucinated/rejected tools (waitingFor=None), use text -- functionResponse
+            # for undeclared tools causes empty model responses.
+            if turn.waitingFor and turn.response_parts:
                 fc_part = next(
                     (rp for rp in turn.response_parts if rp.get("functionCall")),
                     None,
