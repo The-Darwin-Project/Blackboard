@@ -258,7 +258,7 @@ class HeadhunterJira:
         if cached and (time.time() - cached["ts"]) < 300:
             return cached["content"]
         try:
-            async with httpx.AsyncClient(timeout=10, verify=False) as client:
+            async with httpx.AsyncClient(timeout=10, verify=False, follow_redirects=True) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     content = resp.text
@@ -400,30 +400,36 @@ class HeadhunterJira:
     # =========================================================================
 
     async def _run_claude_analysis(self, jira_content: str, system_prompt: str | None = None) -> str:
-        """Run Claude analysis with given system prompt. Returns analysis text."""
+        """Run Claude analysis with given system prompt via streaming. Returns analysis text."""
         adapter = self._get_claude_adapter()
         if not adapter:
             raise RuntimeError("Claude adapter not available")
-        response = await adapter.generate(
+        chunks: list[str] = []
+        async for chunk in adapter.generate_stream(
             system_prompt=system_prompt or BUSINESS_ANALYST_SYSTEM_PROMPT,
             contents=f"Analyze this Jira issue and produce a validation plan:\n\n{jira_content}",
-        )
-        return response.text
+        ):
+            if chunk.text:
+                chunks.append(chunk.text)
+        return "".join(chunks)
 
     async def _run_brain_plan(self, jira_content: str, analysis: str) -> str:
-        """Run Claude plan generation. Returns YAML plan text."""
+        """Run Claude plan generation via streaming. Returns YAML plan text."""
         adapter = self._get_claude_adapter()
         if not adapter:
             raise RuntimeError("Claude adapter not available")
-        response = await adapter.generate(
+        chunks: list[str] = []
+        async for chunk in adapter.generate_stream(
             system_prompt=BRAIN_PLAN_SYSTEM_PROMPT,
             contents=(
                 f"Produce a Brain execution plan for this approved analysis.\n\n"
                 f"Jira issue context:\n{jira_content}\n\n"
                 f"Approved validation plan:\n{analysis}"
             ),
-        )
-        return response.text
+        ):
+            if chunk.text:
+                chunks.append(chunk.text)
+        return "".join(chunks)
 
     async def analyze_and_comment(self, issue: dict) -> tuple[str, str] | None:
         """Run Claude analysis with label-resolved skill, post as Jira comment.
