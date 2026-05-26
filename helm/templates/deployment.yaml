@@ -465,6 +465,8 @@ spec:
                   key: bot-account-id
             - name: HEADHUNTER_JIRA_LABEL
               value: {{ .Values.jira.label | quote }}
+            - name: HEADHUNTER_JIRA_MAX_ACTIVE
+              value: {{ .Values.jira.maxActive | default "1" | quote }}
             - name: LLM_MODEL_HEADHUNTER_JIRA
               value: {{ .Values.jira.model | quote }}
             {{- range $label, $url := .Values.jira.skills }}

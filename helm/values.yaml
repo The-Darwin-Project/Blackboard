@@ -412,6 +412,7 @@ jira:
   existingSecret: "" # e.g., "darwin-jira-creds" (keys: email, api-token, bot-account-id)
   url: ""
   label: "darwin"
+  maxActive: 1 # Independent WIP limit for Jira events (separate from GitLab headhunter)
   model: "claude-sonnet-4-6"
   skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
 # =============================================================================

@@ -200,6 +200,7 @@ class TestPollAndProcess:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[issue]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "check_flow_gate", new_callable=AsyncMock, return_value=True),
             patch.object(jira_head, "analyze_and_comment", new_callable=AsyncMock, return_value=("comment-1", "analysis text")),
         ):
             await jira_head.poll_and_process()
@@ -211,6 +212,7 @@ class TestPollAndProcess:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "check_flow_gate", new_callable=AsyncMock, return_value=True),
             patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis text"),
             patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: test\n---"),
             patch.object(jira_head, "create_qe_event", new_callable=AsyncMock, return_value="evt-001"),
@@ -225,6 +227,7 @@ class TestPollAndProcess:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "check_flow_gate", new_callable=AsyncMock, return_value=True),
             patch.object(jira_head, "create_qe_event", new_callable=AsyncMock) as mock_create,
         ):
             await jira_head.poll_and_process()

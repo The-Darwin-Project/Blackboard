@@ -209,6 +209,7 @@ class HeadhunterJira:
         self._bot_account_id = os.getenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "")
         self._jira_label = os.getenv("HEADHUNTER_JIRA_LABEL", "darwin")
         self._model = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-4-6")
+        self._max_active = int(os.getenv("HEADHUNTER_JIRA_MAX_ACTIVE", "1"))
         self._claude_adapter = None
         # Label-driven skill selection: env HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>
         self._skill_urls: dict[str, str] = {}
@@ -497,12 +498,28 @@ class HeadhunterJira:
         return event_id
 
     # =========================================================================
+    # Flow Gate (independent from GitLab head)
+    # =========================================================================
+
+    async def check_flow_gate(self) -> bool:
+        """Return True if a Jira slot is available (active jira events < max_active)."""
+        active_ids = await self.blackboard.get_active_events()
+        count = 0
+        for eid in active_ids:
+            event = await self.blackboard.get_event(eid)
+            if (event and event.source == "headhunter"
+                    and getattr(event, "subject_type", "service") == "jira"
+                    and event.status.value in ("new", "active", "deferred")):
+                count += 1
+        return count < self._max_active
+
+    # =========================================================================
     # Main Poll Cycle
     # =========================================================================
 
     async def poll_and_process(self) -> None:
         """Single cycle: handle Planning issues + To Do issues."""
-        # Phase 1: Analyze Planning issues
+        # Phase 1: Analyze Planning issues (no flow gate -- analysis doesn't create events)
         planning_issues = await self.poll_planning()
         logger.debug(f"Jira Planning issues: {len(planning_issues)}")
         for issue in planning_issues:
@@ -519,13 +536,19 @@ class HeadhunterJira:
                     self._analyzed_issues[key]["last_comment_id"] = comment_id
                     self._analyzed_issues[key]["analysis"] = analysis
 
-        # Phase 2: Create events for To Do issues
+        # Phase 2: Create events for To Do issues (gated by Jira-specific WIP limit)
+        if not await self.check_flow_gate():
+            logger.debug("Jira flow gate closed -- skipping event creation")
+            return
         todo_issues = await self.poll_todo()
         logger.debug(f"Jira To Do issues: {len(todo_issues)}")
         for issue in todo_issues:
             key = issue["key"]
             if self._analyzed_issues.get(key, {}).get("phase") == "event_created":
                 continue
+            if not await self.check_flow_gate():
+                logger.info("Jira flow gate closed mid-cycle -- stopping")
+                break
             try:
                 jira_content = format_jira_for_llm(issue)
                 analysis_text = self._analyzed_issues.get(key, {}).get("analysis", "")
