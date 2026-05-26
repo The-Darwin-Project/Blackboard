@@ -3357,7 +3357,7 @@ class Brain:
                             json=adf_body,
                         )
                     if resp.status_code < 300:
-                        result_text = f"Comment posted to {issue_key}."
+                        result_text = f"Comment posted to {issue_key}. Jira communication complete -- proceed with next action."
                     else:
                         result_text = f"Failed to comment on {issue_key}: {resp.status_code}"
                 except Exception as e:
@@ -3411,7 +3411,7 @@ class Brain:
                                     json={"transition": {"id": match["id"]}},
                                 )
                             if post_resp.status_code < 300:
-                                result_text = f"{issue_key} transitioned to '{target_status}'."
+                                result_text = f"{issue_key} transitioned to '{target_status}'. Jira status updated -- proceed with next action."
                             else:
                                 result_text = f"Transition failed for {issue_key}: {post_resp.status_code}"
                 except Exception as e:
