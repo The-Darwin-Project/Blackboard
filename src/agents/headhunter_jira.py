@@ -321,7 +321,7 @@ class HeadhunterJira:
         max_results = 50
         while True:
             resp = await self._get(
-                "/rest/api/3/search",
+                "/rest/api/3/search/jql",
                 params={
                     "jql": jql,
                     "startAt": str(start_at),

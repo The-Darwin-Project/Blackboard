@@ -56,7 +56,7 @@ async def list_missions():
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"{base_url}/rest/api/3/search",
+                f"{base_url}/rest/api/3/search/jql",
                 headers=headers,
                 params={"jql": jql, "fields": "summary,status,priority,labels,comment", "maxResults": 50},
             )
