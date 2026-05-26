@@ -2909,7 +2909,7 @@ class Brain:
                     None,
                 )
                 if existing_reply:
-                    result_text = f"JARVIS already replied: {existing_reply.thoughts or ''}"
+                    result_text = "JARVIS already replied. Check his message above."
                     turn = ConversationTurn(
                         turn=(await self._next_turn_number(event_id)),
                         actor="brain", action="tool_result",
