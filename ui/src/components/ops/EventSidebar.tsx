@@ -102,7 +102,7 @@ export default function EventSidebar() {
   const { invalidateActive } = useQueueInvalidation();
 
   const { data: eventDoc, isLoading: docLoading, isError: docError } = useEventDocument(selectedEventId);
-  const { hasPlan } = usePlanState(eventDoc?.conversation || []);
+  const { hasPlan, steps: planSteps } = usePlanState(eventDoc?.conversation || []);
 
   if (collapsed) {
     return (
@@ -356,9 +356,7 @@ export default function EventSidebar() {
               );
             }
             const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
-            const planTurns = doc.conversation.filter((t: { action: string }) => t.action === 'plan');
-            const completedSteps = doc.conversation.filter((t: { action: string; evidence?: string }) => t.action === 'plan_step' && t.evidence === 'completed').length;
-            const showPlan = planTurns.length > 0 || hasPlan;
+            const showPlan = hasPlan;
             return (
               <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-border">
                 <div className="flex-shrink-0 px-1.5 pt-2 pb-1">
@@ -392,7 +390,7 @@ export default function EventSidebar() {
                 <div className="flex-shrink-0 overflow-auto px-1.5 pb-1" style={{ maxHeight: '25vh' }}>
                   {showPlan && (
                     <CollapsibleSection title="Plan" badge={
-                      <span className="text-[12px] text-text-muted">{completedSteps}/4</span>
+                      <span className="text-[12px] text-text-muted">{planSteps.filter(s => s.status === 'completed').length}/{planSteps.length}</span>
                     }>
                       <PlanProgress conversation={doc.conversation as import('../../api/types').ConversationTurn[]} />
                     </CollapsibleSection>

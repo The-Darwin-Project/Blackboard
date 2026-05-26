@@ -166,7 +166,7 @@ export function PlanProgress({ conversation }: PlanProgressProps) {
               <div style={{
                 fontSize: 11,
                 color: isDone ? '#64748b' : '#e2e8f0',
-                textDecoration: isDone ? 'line-through' : 'none',
+                opacity: isDone ? 0.7 : 1,
                 lineHeight: 1.3,
               }}>
                 {step.summary || `Step ${step.id}`}
