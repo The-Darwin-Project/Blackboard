@@ -258,8 +258,16 @@ class HeadhunterJira:
         if cached and (time.time() - cached["ts"]) < 300:
             return cached["content"]
         try:
+            headers = {}
+            gitlab_token_path = os.getenv("GITLAB_TOKEN_PATH", "")
+            if gitlab_token_path and "gitlab" in url.lower():
+                try:
+                    with open(gitlab_token_path) as f:
+                        headers["PRIVATE-TOKEN"] = f.read().strip()
+                except OSError:
+                    pass
             async with httpx.AsyncClient(timeout=10, verify=False, follow_redirects=True) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
                     content = resp.text
                     self._skill_cache[label] = {"content": content, "ts": time.time()}
