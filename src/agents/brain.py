@@ -3965,7 +3965,7 @@ class Brain:
                 action="tool_result",
                 waitingFor="post_sticky_note",
                 thoughts=f"Sticky note sent to {target_id}.",
-                result=f"Sticky note sent to {target_id}. It will be presented once that event continues.",
+                result=f"Sticky note sent to {target_id} -- proceed with next action.",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
