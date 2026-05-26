@@ -2185,10 +2185,6 @@ class Brain:
             if not parts:
                 continue  # Skip turns with no prompt content (e.g., brain.thoughts)
 
-            # functionResponse parts must be on user role (Gemini requirement)
-            if any(isinstance(p, dict) and "functionResponse" in p for p in parts):
-                role = "user"
-
             if contents and contents[-1]["role"] == role:
                 contents[-1]["parts"].extend(parts)
             else:
@@ -2216,23 +2212,6 @@ class Brain:
             return []
 
         if turn.actor == "brain" and turn.action == "tool_result":
-            # For valid tool executions (waitingFor set), use proper functionResponse format.
-            # For hallucinated/rejected tools (waitingFor=None), use text -- functionResponse
-            # for undeclared tools causes empty model responses.
-            if turn.waitingFor and turn.response_parts:
-                fc_part = next(
-                    (rp for rp in turn.response_parts if rp.get("functionCall")),
-                    None,
-                )
-                if fc_part:
-                    fn_name = fc_part["functionCall"].get("name", "unknown")
-                    result_text = turn.evidence or turn.thoughts or ""
-                    return [{
-                        "functionResponse": {
-                            "name": fn_name,
-                            "response": {"result": result_text},
-                        }
-                    }]
             tool_name = turn.waitingFor or "tool"
             text = f"## Tool Result: {tool_name}\n\n{turn.evidence or turn.thoughts or ''}"
             parts: list[dict] = [{"text": text}]
