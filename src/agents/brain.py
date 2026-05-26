@@ -3963,6 +3963,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
+                waitingFor="post_sticky_note",
                 thoughts=f"Sticky note sent to {target_id}.",
                 result=f"Sticky note sent to {target_id}. It will be presented once that event continues.",
                 response_parts=response_parts,
@@ -4016,6 +4017,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
+                waitingFor="read_sticky_notes",
                 thoughts=formatted,
                 response_parts=response_parts,
             )
