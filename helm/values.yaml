@@ -258,6 +258,15 @@ kargo:
   server: ""
   insecure: true
 # =============================================================================
+# Container Registry Credentials (for agent runtime access to private registries)
+# Mounts a kubernetes.io/dockerconfigjson Secret at /secrets/registry/.dockerconfigjson
+# and copies to $HOME/.docker/config.json so skopeo/podman can pull at task time.
+# This is NOT imagePullSecrets (kubelet-only) -- this is runtime auth for agent CLI tools.
+# =============================================================================
+registry:
+  enabled: false
+  existingSecret: "" # e.g., "darwin-registry-pull"
+# =============================================================================
 # Remote Kubernetes Clusters (read-only MCP access for agents)
 # Each entry mounts a kubeconfig Secret and registers a K8s MCP server.
 # Agents see each cluster as a separate MCP tool namespace (K8s_<name>).

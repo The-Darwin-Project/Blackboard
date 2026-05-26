@@ -480,6 +480,11 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              mountPath: /secrets/registry
+              readOnly: true
+            {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
@@ -669,6 +674,11 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              mountPath: /secrets/registry
+              readOnly: true
+            {{- end }}
             {{- range $name, $cluster := .Values.remoteClusters }}
             {{- if $cluster.enabled }}
             - name: remote-cluster-{{ $name }}
@@ -834,6 +844,11 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              mountPath: /secrets/registry
+              readOnly: true
+            {{- end }}
             {{- range $name, $cluster := .Values.remoteClusters }}
             {{- if $cluster.enabled }}
             - name: remote-cluster-{{ $name }}
@@ -976,6 +991,11 @@ spec:
             {{- if .Values.gitlab.enabled }}
             - name: gitlab-token-secret
               mountPath: /secrets/gitlab
+              readOnly: true
+            {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              mountPath: /secrets/registry
               readOnly: true
             {{- end }}
             {{- range $name, $cluster := .Values.remoteClusters }}
@@ -1123,6 +1143,11 @@ spec:
               mountPath: /secrets/gitlab
               readOnly: true
             {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              mountPath: /secrets/registry
+              readOnly: true
+            {{- end }}
             {{- range $name, $cluster := .Values.remoteClusters }}
             {{- if $cluster.enabled }}
             - name: remote-cluster-{{ $name }}
@@ -1233,6 +1258,11 @@ spec:
         - name: gitlab-token-secret
           secret:
             secretName: {{ .Values.gitlab.existingSecret | default (printf "%s-gitlab" .Release.Name) }}
+        {{- end }}
+        {{- if .Values.registry.enabled }}
+        - name: registry-secret
+          secret:
+            secretName: {{ .Values.registry.existingSecret | default (printf "%s-registry" .Release.Name) }}
         {{- end }}
         {{- range $name, $cluster := .Values.remoteClusters }}
         {{- if $cluster.enabled }}

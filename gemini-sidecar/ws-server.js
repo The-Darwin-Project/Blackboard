@@ -17,6 +17,7 @@ const {
   setupGitLabTooling,
   setupArgoCDMCP,
   setupCLILogins,
+  setupRegistryCredentials,
   GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
@@ -91,6 +92,8 @@ function setupWSServer(wss) {
 
         // Login to ArgoCD/Kargo CLIs (awaited, with deduplication)
         await setupCLILogins();
+
+        setupRegistryCredentials();
 
         // Execute agent CLI with streaming progress (headless mode for both Gemini + Claude).
         // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event

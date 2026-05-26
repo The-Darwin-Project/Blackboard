@@ -1,7 +1,7 @@
 // gemini-sidecar/credentials.js
 // @ai-rules:
 // 1. [Constraint]: Consolidates ALL authentication, credential setup, and CLI login logic.
-// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT. Claude MCP -> ~/.claude.json (via writeClaudeMcpServer); Gemini MCP -> ~/.gemini/settings.json.
+// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT; Registry copies dockerconfigjson to ~/.docker/config.json. Claude MCP -> ~/.claude.json (via writeClaudeMcpServer); Gemini MCP -> ~/.gemini/settings.json.
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
 // 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
@@ -22,6 +22,11 @@ const PRIVATE_KEY_PATTERN = /\.pem$/;
 const GITLAB_SECRETS_PATH = '/secrets/gitlab';
 const GITLAB_TOKEN_PATH = process.env.GITLAB_TOKEN_PATH || `${GITLAB_SECRETS_PATH}/token`;
 const GITLAB_HOST = process.env.GITLAB_HOST || '';
+
+// --- Container Registry ---
+const REGISTRY_CONFIG_PATH = '/secrets/registry/.dockerconfigjson';
+const DOCKER_DIR = `${process.env.HOME}/.docker`;
+const DOCKER_CONFIG_PATH = `${DOCKER_DIR}/config.json`;
 
 // --- CLI Logins ---
 let _lastCLILoginTime = 0;
@@ -538,6 +543,29 @@ function getRemoteClustersMeta() {
   return result;
 }
 
+/**
+ * Check if container registry credentials are mounted.
+ */
+function hasRegistryCredentials() {
+  return fs.existsSync(REGISTRY_CONFIG_PATH);
+}
+
+/**
+ * Copy mounted dockerconfigjson to $HOME/.docker/config.json so skopeo,
+ * podman, and crane can authenticate to private registries at task time.
+ */
+function setupRegistryCredentials() {
+  if (!fs.existsSync(REGISTRY_CONFIG_PATH)) return;
+  try {
+    fs.mkdirSync(DOCKER_DIR, { recursive: true });
+    fs.copyFileSync(REGISTRY_CONFIG_PATH, DOCKER_CONFIG_PATH);
+    fs.chmodSync(DOCKER_CONFIG_PATH, 0o600);
+    console.log(`[${new Date().toISOString()}] Registry credentials configured (${DOCKER_CONFIG_PATH})`);
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] Registry credentials setup failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   hasGitHubCredentials,
   generateInstallationToken,
@@ -551,6 +579,8 @@ module.exports = {
   setupCLILogins,
   setupRemoteK8sMCPs,
   getRemoteClustersMeta,
+  setupRegistryCredentials,
+  hasRegistryCredentials,
   GITLAB_HOST,
   CLI_LOGIN_INTERVAL_MS,
 };
