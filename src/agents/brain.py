@@ -2181,6 +2181,10 @@ class Brain:
 
         for turn in event.conversation:
             role = "model" if turn.actor == "brain" else "user"
+            # tool_result turns are function responses -- must be on user role
+            # per Gemini multi-turn function calling protocol
+            if turn.actor == "brain" and turn.action == "tool_result":
+                role = "user"
             parts = self._turn_to_parts(turn)
             if not parts:
                 continue  # Skip turns with no prompt content (e.g., brain.thoughts)
