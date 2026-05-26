@@ -139,6 +139,11 @@ spec:
                   mountPath: /secrets/kargo
                   readOnly: true
                 {{- end }}
+                {{- if .Values.registry.enabled }}
+                - name: registry-secret
+                  mountPath: /secrets/registry
+                  readOnly: true
+                {{- end }}
                 {{- range $name, $cluster := .Values.remoteClusters }}
                 {{- if $cluster.enabled }}
                 - name: remote-cluster-{{ $name }}
@@ -176,6 +181,11 @@ spec:
             - name: kargo-secret
               secret:
                 secretName: {{ .Values.kargo.existingSecret | default (printf "%s-kargo" .Release.Name) }}
+            {{- end }}
+            {{- if .Values.registry.enabled }}
+            - name: registry-secret
+              secret:
+                secretName: {{ .Values.registry.existingSecret | default (printf "%s-registry" .Release.Name) }}
             {{- end }}
             - name: gemini-rules
               configMap:
