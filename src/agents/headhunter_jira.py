@@ -266,8 +266,9 @@ class HeadhunterJira:
                         headers["PRIVATE-TOKEN"] = f.read().strip()
                 except OSError:
                     pass
+            fetch_url = self._to_gitlab_api_url(url) if "gitlab" in url.lower() else url
             async with httpx.AsyncClient(timeout=10, verify=False, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
+                resp = await client.get(fetch_url, headers=headers)
                 if resp.status_code == 200:
                     content = resp.text
                     if content.strip().startswith("<!DOCTYPE") or "<html" in content[:200]:
@@ -280,6 +281,28 @@ class HeadhunterJira:
         except Exception as e:
             logger.warning(f"Skill fetch failed for '{label}': {e}")
         return None
+
+    @staticmethod
+    def _to_gitlab_api_url(raw_url: str) -> str:
+        """Convert GitLab raw file URL to API endpoint format.
+
+        /-/raw/main/path/file.md -> /api/v4/projects/{encoded}/repository/files/{encoded_path}/raw?ref=main
+        Already API format -> return as-is.
+        """
+        if "/api/v4/" in raw_url:
+            return raw_url
+        import re
+        from urllib.parse import quote
+        match = re.match(
+            r"(https?://[^/]+)/([^/]+/[^/]+)/-/raw/([^/]+)/(.+?)(?:\?.*)?$",
+            raw_url,
+        )
+        if not match:
+            return raw_url
+        host, project_path, ref, file_path = match.groups()
+        encoded_project = quote(project_path, safe="")
+        encoded_file = quote(file_path, safe="")
+        return f"{host}/api/v4/projects/{encoded_project}/repository/files/{encoded_file}/raw?ref={ref}"
 
     async def _resolve_system_prompt(self, issue: dict) -> str:
         """Pick system prompt based on issue labels. Falls back to built-in BA prompt."""
