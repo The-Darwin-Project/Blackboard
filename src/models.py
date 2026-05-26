@@ -278,6 +278,9 @@ class EventEvidence(BaseModel):
     kargo_context: Optional[dict] = Field(
         None, description="Kargo stage context: project, stage, promotion, freight, phase, message, failed_step"
     )
+    jira_context: Optional[dict] = Field(
+        None, description="Jira issue context: issue_key, issue_url, summary, status, priority, components, labels"
+    )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
@@ -344,8 +347,8 @@ class EventDocument(BaseModel):
         description="Brain-declared processing phase (triage, investigate, execute, verify, escalate, close)"
     )
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage", "system"] = Field(
-        "service", description="What the service field refers to: K8s service, Kargo stage, or system-level"
+    subject_type: Literal["service", "kargo_stage", "system", "qe_mission"] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, or QE mission"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)

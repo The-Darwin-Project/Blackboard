@@ -405,6 +405,16 @@ headhunter:
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
 # =============================================================================
+# Jira Integration (QE Mission Polling -- Headhunter Jira Head)
+# =============================================================================
+jira:
+  enabled: false
+  existingSecret: "" # e.g., "darwin-jira-creds" (keys: email, api-token, bot-account-id)
+  url: ""
+  label: "darwin"
+  model: "claude-sonnet-4-6"
+  skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
+# =============================================================================
 # Smartsheet Integration (Incident Tracking)
 # =============================================================================
 smartsheet:

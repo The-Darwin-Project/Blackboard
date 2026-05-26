@@ -444,6 +444,34 @@ spec:
               value: {{ .Values.smartsheet.incident.labelFilter | quote }}
             {{- end }}
             {{- end }}
+            {{- if and .Values.jira.enabled .Values.jira.existingSecret }}
+            # Jira Integration (Headhunter Jira Head)
+            - name: JIRA_URL
+              value: {{ .Values.jira.url | quote }}
+            - name: JIRA_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jira.existingSecret }}
+                  key: email
+            - name: JIRA_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jira.existingSecret }}
+                  key: api-token
+            - name: HEADHUNTER_JIRA_BOT_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jira.existingSecret }}
+                  key: bot-account-id
+            - name: HEADHUNTER_JIRA_LABEL
+              value: {{ .Values.jira.label | quote }}
+            - name: LLM_MODEL_HEADHUNTER_JIRA
+              value: {{ .Values.jira.model | quote }}
+            {{- range $label, $url := .Values.jira.skills }}
+            - name: HEADHUNTER_JIRA_SKILL_{{ $label | upper }}
+              value: {{ $url | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.gcp.existingSecret }}
             # GCP Service Account credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS

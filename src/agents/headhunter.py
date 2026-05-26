@@ -37,6 +37,8 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from .headhunter_jira import HeadhunterJira
+
 logger = logging.getLogger(__name__)
 
 V1_ACTIONABLE = {"assigned", "build_failed", "approval_required", "review_requested", "unmergeable", "directly_addressed"}
@@ -178,6 +180,7 @@ class Headhunter:
         self._gitlab_token: str | None = None
         self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
         self._smartsheet_cache = None  # lazy-loaded only when source=smartsheet
+        self._jira = HeadhunterJira(blackboard)
 
     # =========================================================================
     # LLM Adapter (lazy-loaded, same pattern as Aligner._get_adapter)
@@ -757,6 +760,12 @@ class Headhunter:
                 if failures >= max_failures:
                     logger.critical("Headhunter disabled after 3 consecutive failures")
                     return
+            # Jira head has its own error boundary -- failures here don't kill GitLab head
+            if self._jira.enabled():
+                try:
+                    await self._jira.poll_and_process()
+                except Exception as e:
+                    logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
             # Wake early if an event closes (slot opens) -- otherwise sleep full interval
             if self._close_signal:
                 try:
