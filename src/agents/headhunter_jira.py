@@ -257,7 +257,7 @@ class HeadhunterJira:
         if cached and (time.time() - cached["ts"]) < 300:
             return cached["content"]
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, verify=False) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
                     content = resp.text
@@ -404,8 +404,8 @@ class HeadhunterJira:
         if not adapter:
             raise RuntimeError("Claude adapter not available")
         response = await adapter.generate(
-            prompt=f"Analyze this Jira issue and produce a validation plan:\n\n{jira_content}",
-            system_instruction=system_prompt or BUSINESS_ANALYST_SYSTEM_PROMPT,
+            system_prompt=system_prompt or BUSINESS_ANALYST_SYSTEM_PROMPT,
+            contents=f"Analyze this Jira issue and produce a validation plan:\n\n{jira_content}",
         )
         return response.text
 
@@ -415,12 +415,12 @@ class HeadhunterJira:
         if not adapter:
             raise RuntimeError("Claude adapter not available")
         response = await adapter.generate(
-            prompt=(
+            system_prompt=BRAIN_PLAN_SYSTEM_PROMPT,
+            contents=(
                 f"Produce a Brain execution plan for this approved analysis.\n\n"
                 f"Jira issue context:\n{jira_content}\n\n"
                 f"Approved validation plan:\n{analysis}"
             ),
-            system_instruction=BRAIN_PLAN_SYSTEM_PROMPT,
         )
         return response.text
 
