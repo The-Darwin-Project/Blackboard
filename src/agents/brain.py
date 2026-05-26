@@ -985,9 +985,14 @@ class Brain:
             if maintainer_emails:
                 active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
 
-        close_tools = {"close_event", "notify_gitlab_result", "comment_jira_issue"}
+        close_tools = {"close_event", "notify_gitlab_result"}
         if brain_phase not in ("escalate", "close"):
             active_tools = [t for t in active_tools if t["name"] not in close_tools]
+
+        # Jira tools: comment available during execution + close; transition in investigate/verify/close
+        jira_phases = ("investigate", "verify", "escalate", "close")
+        if brain_phase not in jira_phases:
+            active_tools = [t for t in active_tools if t["name"] not in {"comment_jira_issue", "transition_jira_issue"}]
 
         # Refresh tools: available in triage and verify, with strip-after-use guard
         refresh_tools = {"refresh_gitlab_context", "refresh_kargo_context", "fetch_jira_issue"}
@@ -2393,6 +2398,23 @@ class Brain:
         except Exception as e:
             logger.debug(f"Executive pulse emission failed (non-fatal): {e}")
 
+    async def _get_jira_reporter(self, issue_key: str, jira_url: str, jira_email: str, jira_token: str) -> str:
+        """Fetch the reporter accountId for a Jira issue. Returns empty string on failure."""
+        try:
+            import base64
+            auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{jira_url}/rest/api/3/issue/{issue_key}",
+                    headers={"Authorization": f"Basic {auth}"},
+                    params={"fields": "reporter"},
+                )
+            if resp.status_code < 300:
+                return resp.json().get("fields", {}).get("reporter", {}).get("accountId", "")
+        except Exception as e:
+            logger.debug(f"Failed to fetch reporter for {issue_key}: {e}")
+        return ""
+
     async def _execute_function_call(
         self,
         event_id: str,
@@ -3307,6 +3329,7 @@ class Brain:
         elif function_name == "comment_jira_issue":
             issue_key = args.get("issue_key", "")
             comment_text = args.get("comment", "")
+            mention_reporter = args.get("mention_reporter", False)
             jira_url = os.getenv("JIRA_URL", "")
             jira_email = os.getenv("JIRA_EMAIL", "")
             jira_token = os.getenv("JIRA_API_TOKEN", "")
@@ -3315,10 +3338,18 @@ class Brain:
             else:
                 try:
                     import base64
+                    from marklassian import markdown_to_adf
                     auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
-                    adf_body = {"body": {"version": 1, "type": "doc", "content": [
-                        {"type": "paragraph", "content": [{"type": "text", "text": comment_text}]}
-                    ]}}
+                    adf_doc = markdown_to_adf(comment_text)
+                    if mention_reporter:
+                        reporter_id = await self._get_jira_reporter(issue_key, jira_url, jira_email, jira_token)
+                        if reporter_id:
+                            mention_node = {"type": "paragraph", "content": [
+                                {"type": "mention", "attrs": {"id": reporter_id, "text": "@reporter", "accessLevel": ""}},
+                                {"type": "text", "text": " "},
+                            ]}
+                            adf_doc["content"].insert(0, mention_node)
+                    adf_body = {"body": adf_doc}
                     async with httpx.AsyncClient(timeout=15) as client:
                         resp = await client.post(
                             f"{jira_url}/rest/api/3/issue/{issue_key}/comment",
@@ -3332,6 +3363,60 @@ class Brain:
                 except Exception as e:
                     result_text = f"Jira comment error: {e}"
             logger.info(f"comment_jira_issue: event={event_id} issue={issue_key} result={result_text[:100]}")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                waitingFor="jira",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "transition_jira_issue":
+            issue_key = args.get("issue_key", "")
+            target_status = args.get("target_status", "")
+            jira_url = os.getenv("JIRA_URL", "")
+            jira_email = os.getenv("JIRA_EMAIL", "")
+            jira_token = os.getenv("JIRA_API_TOKEN", "")
+            if not jira_url or not jira_token:
+                result_text = "Cannot transition Jira issue: not configured."
+            else:
+                try:
+                    import base64
+                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
+                    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        tr_resp = await client.get(
+                            f"{jira_url}/rest/api/3/issue/{issue_key}/transitions",
+                            headers=headers,
+                        )
+                    if tr_resp.status_code >= 400:
+                        result_text = f"Failed to get transitions for {issue_key}: {tr_resp.status_code}"
+                    else:
+                        transitions = tr_resp.json().get("transitions", [])
+                        match = next(
+                            (t for t in transitions if t["name"].lower() == target_status.lower()),
+                            None,
+                        )
+                        if not match:
+                            available = [t["name"] for t in transitions]
+                            result_text = f"Transition '{target_status}' not available for {issue_key}. Available: {available}"
+                        else:
+                            async with httpx.AsyncClient(timeout=15) as client:
+                                post_resp = await client.post(
+                                    f"{jira_url}/rest/api/3/issue/{issue_key}/transitions",
+                                    headers=headers,
+                                    json={"transition": {"id": match["id"]}},
+                                )
+                            if post_resp.status_code < 300:
+                                result_text = f"{issue_key} transitioned to '{target_status}'."
+                            else:
+                                result_text = f"Transition failed for {issue_key}: {post_resp.status_code}"
+                except Exception as e:
+                    result_text = f"Jira transition error: {e}"
+            logger.info(f"transition_jira_issue: event={event_id} issue={issue_key} target={target_status} result={result_text[:100]}")
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",

@@ -422,7 +422,7 @@ class HeadhunterJira:
         return "".join(chunks)
 
     async def _run_brain_plan(self, jira_content: str, analysis: str) -> str:
-        """Run Claude plan generation via streaming. Returns YAML plan text."""
+        """Run Claude plan generation via streaming. Returns clean YAML plan text."""
         adapter = self._get_claude_adapter()
         if not adapter:
             raise RuntimeError("Claude adapter not available")
@@ -437,7 +437,39 @@ class HeadhunterJira:
         ):
             if chunk.text:
                 chunks.append(chunk.text)
-        return "".join(chunks)
+        return self._extract_yaml("".join(chunks))
+
+    @staticmethod
+    def _extract_yaml(raw: str) -> str:
+        """Strip markdown code fences and prose preamble from LLM YAML output."""
+        lines = raw.strip().splitlines()
+        in_fence = False
+        yaml_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```") and not in_fence:
+                in_fence = True
+                continue
+            if stripped.startswith("```") and in_fence:
+                in_fence = False
+                continue
+            if in_fence:
+                yaml_lines.append(line)
+        if yaml_lines:
+            return "\n".join(yaml_lines).strip()
+        # No fences found -- try to find YAML by looking for '---' delimiters
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == "---" and start is None:
+                start = i
+                continue
+            if line.strip() == "---" and start is not None:
+                return "\n".join(lines[start:i + 1]).strip()
+        # Last resort: return everything after stripping common LLM preambles
+        for i, line in enumerate(lines):
+            if line.strip().startswith("plan:") or line.strip() == "---":
+                return "\n".join(lines[i:]).strip()
+        return raw.strip()
 
     async def analyze_and_comment(self, issue: dict) -> tuple[str, str] | None:
         """Run Claude analysis with label-resolved skill, post as Jira comment.
@@ -456,19 +488,10 @@ class HeadhunterJira:
             return None
 
     async def post_comment(self, issue_key: str, body_text: str) -> str:
-        """Post a plain-text comment to a Jira issue. Returns the comment ID."""
-        adf_body = {
-            "body": {
-                "version": 1,
-                "type": "doc",
-                "content": [
-                    {
-                        "type": "paragraph",
-                        "content": [{"type": "text", "text": body_text}],
-                    }
-                ],
-            }
-        }
+        """Post a structured comment to a Jira issue. Converts markdown to ADF."""
+        from marklassian import markdown_to_adf
+        adf_doc = markdown_to_adf(body_text)
+        adf_body = {"body": adf_doc}
         resp = await self._post(f"/rest/api/3/issue/{issue_key}/comment", adf_body)
         return resp.json().get("id", "")
 

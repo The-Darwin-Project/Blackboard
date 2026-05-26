@@ -227,7 +227,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "issue persists. For automated events, escalation means notifying "
                         "a human who may be asleep -- verify first. "
                         "For chaotic events, enter immediately -- act first. "
-                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, and comment_jira_issue."
+                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, comment_jira_issue, and transition_jira_issue."
                     ),
                 },
                 "reasoning": {
@@ -531,17 +531,17 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "fetch_jira_issue",
         "description": (
-            "Fetch a Jira issue's details (description, comments, linked PRs, child issues). "
-            "Use during triage to enrich context for Jira-sourced events. "
-            "The issue key is in evidence.jira_context.issue_key. "
-            "Returns structured issue content or error if unavailable."
+            "Retrieve the current state of a Jira issue -- description, comments, linked PRs, "
+            "child issues, status, and priority. Returns structured content that can supplement "
+            "the evidence snapshot taken at event creation time. Available for events with "
+            "jira_context in evidence. Graceful degradation: proceed without if unavailable."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "issue_key": {
                     "type": "string",
-                    "description": "Jira issue key (e.g., CNV-85192)",
+                    "description": "The Jira issue identifier from evidence.jira_context.issue_key",
                 },
             },
             "required": ["issue_key"],
@@ -550,24 +550,51 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "comment_jira_issue",
         "description": (
-            "Post a comment on a Jira issue. Use for Jira-sourced events to communicate "
-            "results, findings, or status updates back to the issue. "
-            "The issue key is in evidence.jira_context.issue_key. "
-            "If jira_context is missing, this tool returns an error."
+            "Post a progress update or final report to the Jira issue. The comment renders as "
+            "structured content (headings, tables, code blocks, bold). For Jira-sourced events, "
+            "the issue is the primary communication channel with the human who approved the plan. "
+            "Mention the reporter when delivering final results so they receive a notification."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "issue_key": {
                     "type": "string",
-                    "description": "Jira issue key (e.g., CNV-85192)",
+                    "description": "The Jira issue identifier from evidence.jira_context.issue_key",
                 },
                 "comment": {
                     "type": "string",
-                    "description": "Comment text to post (markdown supported by Jira)",
+                    "description": "Markdown-formatted comment body (headings, lists, tables, code blocks supported)",
+                },
+                "mention_reporter": {
+                    "type": "boolean",
+                    "description": "Tag the issue reporter with an @mention so they receive a Jira notification",
                 },
             },
             "required": ["issue_key", "comment"],
+        },
+    },
+    {
+        "name": "transition_jira_issue",
+        "description": (
+            "Move a Jira issue to a new workflow status. The issue status should reflect the "
+            "event's execution state -- the Jira board becomes a live view of Darwin's progress. "
+            "Returns available transitions if the requested status is not reachable from the "
+            "current state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "issue_key": {
+                    "type": "string",
+                    "description": "The Jira issue identifier from evidence.jira_context.issue_key",
+                },
+                "target_status": {
+                    "type": "string",
+                    "description": "Workflow status name to transition to (e.g., In Progress, Dev Complete)",
+                },
+            },
+            "required": ["issue_key", "target_status"],
         },
     },
     {
