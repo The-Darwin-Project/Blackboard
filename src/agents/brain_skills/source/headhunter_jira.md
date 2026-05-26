@@ -95,6 +95,14 @@ must resolve before the event is complete.
 
 Investigation windows drift -- act on refreshed state, not triage state.
 
+The close sequence is strict and terminal:
+1. Transition the Jira issue status to reflect completion
+2. Post ONE final summary comment (with reporter mention)
+3. Call close_event immediately after -- do not post additional comments
+
+After posting the closing comment, the event is done. Additional comments
+are noise. If the close comment succeeded, proceed to close_event.
+
 For escalation scenarios: post findings to the Jira issue, then escalate
 through normal channels. The Jira issue provides traceability.
 
