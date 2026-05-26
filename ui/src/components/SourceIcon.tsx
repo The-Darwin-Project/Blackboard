@@ -78,6 +78,15 @@ function TimeKeeperIcon({ size }: { size: number }) {
   );
 }
 
+function JiraIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M14.5 8L8.5 14L5.5 11L8 8.5L5.5 6L8.5 3L14.5 8Z" fill="#2684FF" />
+      <path d="M8 8.5L5.5 11L2.5 8L5.5 5L8 8.5Z" fill="#2684FF" opacity="0.7" />
+    </svg>
+  );
+}
+
 function KargoIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -111,6 +120,7 @@ const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
 
 const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   kargo_stage: KargoIcon,
+  jira: JiraIcon,
 };
 
 export default function SourceIcon({ source, subjectType, size = 16 }: SourceIconProps) {

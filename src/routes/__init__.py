@@ -15,6 +15,7 @@ from .dex_proxy import router as dex_proxy_router
 from .incidents import router as incidents_router
 from .timekeeper import router as timekeeper_router
 from .cognitive_graph import router as cognitive_graph_router
+from .jira import router as jira_router
 
 __all__ = [
     "chat_router",
@@ -32,4 +33,5 @@ __all__ = [
     "timekeeper_router",
     "topology_router",
     "cognitive_graph_router",
+    "jira_router",
 ]

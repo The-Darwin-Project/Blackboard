@@ -159,7 +159,7 @@ export interface EventEvidence {
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
-export type SubjectType = 'service' | 'kargo_stage';
+export type SubjectType = 'service' | 'kargo_stage' | 'system' | 'jira';
 
 export interface ActiveEvent {
   id: string;
@@ -420,6 +420,21 @@ export interface KargoStageStatus {
   mr_url: string;
   started_at?: string;
   finished_at?: string;
+}
+
+// =============================================================================
+// Jira Missions (Headhunter tracked issues)
+// =============================================================================
+
+export interface JiraMission {
+  key: string;
+  summary: string;
+  status: string;
+  priority: string;
+  labels: string[];
+  phase: 'pending' | 'analyzed' | 'approved' | 'executing';
+  issue_url: string;
+  analysis: string | null;
 }
 
 // =============================================================================

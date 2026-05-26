@@ -14,9 +14,10 @@ import { useActiveEvents, useEventDocument, useHeadhunterPending, useQueueInvali
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
+import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
-import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems } from './sidebarMenus';
+import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
 import { MOCK_EVENTS, MOCK_EVENT_DOC, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 import MockConversationFeed from './MockConversationFeed';
 
@@ -95,6 +96,8 @@ export default function EventSidebar() {
     refetchInterval: 10_000,
   });
   const { data: hhTodos = [], isError: hhError } = useHeadhunterPending();
+  const { data: jiraMissions = [] } = useJiraMissions();
+  const jiraActions = useJiraActions();
   const { data: schedules = [] } = useSchedules();
   const { invalidateActive } = useQueueInvalidation();
 
@@ -241,6 +244,25 @@ export default function EventSidebar() {
                   </Link>
                 </TreeGroup>
               )}
+            </TreeGroup>
+
+            {/* Jira Missions Group */}
+            <TreeGroup icon={<SourceIcon source="headhunter" subjectType="jira" size={16} />} label="Jira Missions" count={jiraMissions.length}
+              countColor={jiraMissions.length > 0 ? '#2684FF' : '#64748b'}
+              forceCollapsed={!!selectedEventId}>
+              {jiraMissions.length === 0 && <EmptyLabel>No Jira missions</EmptyLabel>}
+              {jiraMissions.map(m => (
+                <TreeNode key={m.key}
+                  icon={<SourceIcon source="headhunter" subjectType="jira" size={14} />}
+                  label={m.key}
+                  sublabel={m.phase}
+                  sublabelColor={m.phase === 'analyzed' ? '#22c55e' : m.phase === 'approved' ? '#3b82f6' : '#64748b'}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setCtxMenu({ x: e.clientX, y: e.clientY, items: jiraMissionMenuItems(m, openContentTile, jiraActions) });
+                  }}
+                />
+              ))}
             </TreeGroup>
 
             {/* Kargo Stages Group */}

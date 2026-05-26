@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.headhunter_jira import HeadhunterJira, _walk_adf_mentions, _format_jira_for_llm
+from src.agents.headhunter_jira import HeadhunterJira, _walk_adf_mentions, format_jira_for_llm
 
 
 # =========================================================================
@@ -167,7 +167,7 @@ class TestReevalSignal:
 class TestFormatJiraForLLM:
     def test_basic_formatting(self):
         issue = _make_issue()
-        text = _format_jira_for_llm(issue)
+        text = format_jira_for_llm(issue)
         assert "CNV-85192" in text
         assert "Test VM boot" in text
         assert "kubevirt-ui" in text
@@ -185,7 +185,7 @@ class TestEventCreation:
         assert event_id == "evt-jira-001"
         stub_blackboard.create_event.assert_called_once()
         call_kwargs = stub_blackboard.create_event.call_args
-        assert call_kwargs.kwargs["subject_type"] == "qe_mission"
+        assert call_kwargs.kwargs["subject_type"] == "jira"
         assert call_kwargs.kwargs["source"] == "headhunter"
 
 

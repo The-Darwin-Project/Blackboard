@@ -347,8 +347,8 @@ class EventDocument(BaseModel):
         description="Brain-declared processing phase (triage, investigate, execute, verify, escalate, close)"
     )
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage", "system", "qe_mission"] = Field(
-        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, or QE mission"
+    subject_type: Literal["service", "kargo_stage", "system", "jira"] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, or Jira issue"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)

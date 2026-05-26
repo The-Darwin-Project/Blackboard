@@ -363,6 +363,20 @@ export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {
 }
 
 // =============================================================================
+// Jira Missions API
+// =============================================================================
+
+import type { JiraMission } from './types';
+
+export async function getJiraMissions(): Promise<JiraMission[]> {
+  return fetchApi<JiraMission[]>('/jira/missions');
+}
+
+export async function postJiraAction(key: string, action: 'approve' | 'reanalyze' | 'dismiss'): Promise<void> {
+  await fetchApi<unknown>(`/jira/missions/${encodeURIComponent(key)}/${action}`, { method: 'POST' });
+}
+
+// =============================================================================
 // Configuration API (AI Transparency & Compliance)
 // =============================================================================
 

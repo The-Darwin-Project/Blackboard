@@ -985,12 +985,12 @@ class Brain:
             if maintainer_emails:
                 active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
 
-        close_tools = {"close_event", "notify_gitlab_result"}
+        close_tools = {"close_event", "notify_gitlab_result", "comment_jira_issue"}
         if brain_phase not in ("escalate", "close"):
             active_tools = [t for t in active_tools if t["name"] not in close_tools]
 
         # Refresh tools: available in triage and verify, with strip-after-use guard
-        refresh_tools = {"refresh_gitlab_context", "refresh_kargo_context"}
+        refresh_tools = {"refresh_gitlab_context", "refresh_kargo_context", "fetch_jira_issue"}
         has_kargo = (
             event.event and event.event.evidence
             and hasattr(event.event.evidence, "kargo_context")
@@ -1687,11 +1687,16 @@ class Brain:
         initial_paths: list[str] = []
         for phase in active_phases:
             if phase == "source":
+                subject_type = getattr(event, "subject_type", "service") or "service"
+                composite_file = f"source/{event.source}_{subject_type}.md"
                 source_file = f"source/{event.source}.md"
-                if source_file in self._skill_loader.get_all_paths_for_phase("source"):
+                all_source_paths = self._skill_loader.get_all_paths_for_phase("source")
+                if composite_file in all_source_paths:
+                    initial_paths.append(composite_file)
+                elif source_file in all_source_paths:
                     initial_paths.append(source_file)
                 else:
-                    logger.warning(f"No source skill for '{event.source}' -- close protocol guidance unavailable")
+                    logger.warning(f"No source skill for '{event.source}' (subject_type={subject_type})")
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
@@ -3254,6 +3259,84 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="notify",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "fetch_jira_issue":
+            issue_key = args.get("issue_key", "")
+            jira_url = os.getenv("JIRA_URL", "")
+            jira_email = os.getenv("JIRA_EMAIL", "")
+            jira_token = os.getenv("JIRA_API_TOKEN", "")
+            if not jira_url or not jira_token:
+                result_text = "Jira not configured (JIRA_URL or JIRA_API_TOKEN missing). Proceeding without Jira context."
+            else:
+                try:
+                    import base64
+                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        resp = await client.get(
+                            f"{jira_url}/rest/api/3/issue/{issue_key}",
+                            headers={"Authorization": f"Basic {auth}"},
+                            params={"fields": "summary,description,status,comment,issuelinks,subtasks,labels,fixVersions"},
+                        )
+                    if resp.status_code == 404:
+                        result_text = f"Jira issue {issue_key} not found."
+                    elif resp.status_code == 429:
+                        result_text = "Jira rate limited. Proceeding without additional context."
+                    elif resp.status_code >= 400:
+                        result_text = f"Jira fetch failed ({resp.status_code}). Proceeding without context."
+                    else:
+                        from .headhunter_jira import format_jira_for_llm
+                        result_text = format_jira_for_llm(resp.json())
+                except Exception as e:
+                    result_text = f"Jira fetch error: {e}. Proceeding without context."
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                waitingFor="jira",
+                thoughts=result_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "comment_jira_issue":
+            issue_key = args.get("issue_key", "")
+            comment_text = args.get("comment", "")
+            jira_url = os.getenv("JIRA_URL", "")
+            jira_email = os.getenv("JIRA_EMAIL", "")
+            jira_token = os.getenv("JIRA_API_TOKEN", "")
+            if not jira_url or not jira_token:
+                result_text = "Cannot comment on Jira: not configured."
+            else:
+                try:
+                    import base64
+                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
+                    adf_body = {"body": {"version": 1, "type": "doc", "content": [
+                        {"type": "paragraph", "content": [{"type": "text", "text": comment_text}]}
+                    ]}}
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        resp = await client.post(
+                            f"{jira_url}/rest/api/3/issue/{issue_key}/comment",
+                            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+                            json=adf_body,
+                        )
+                    if resp.status_code < 300:
+                        result_text = f"Comment posted to {issue_key}."
+                    else:
+                        result_text = f"Failed to comment on {issue_key}: {resp.status_code}"
+                except Exception as e:
+                    result_text = f"Jira comment error: {e}"
+            logger.info(f"comment_jira_issue: event={event_id} issue={issue_key} result={result_text[:100]}")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                waitingFor="jira",
                 thoughts=result_text,
                 response_parts=response_parts,
             )

@@ -111,7 +111,7 @@ steps:
 # Jira issue formatter (reused from probe script)
 # ---------------------------------------------------------------------------
 
-def _format_jira_for_llm(issue: dict) -> str:
+def format_jira_for_llm(issue: dict) -> str:
     """Format Jira issue into a structured prompt for the LLM."""
     fields = issue.get("fields", {})
     key = issue.get("key", "?")
@@ -430,7 +430,7 @@ class HeadhunterJira:
         Returns (comment_id, analysis_text) on success, None on failure.
         """
         try:
-            jira_content = _format_jira_for_llm(issue)
+            jira_content = format_jira_for_llm(issue)
             system_prompt = await self._resolve_system_prompt(issue)
             analysis = await self._run_claude_analysis(jira_content, system_prompt)
             comment_id = await self.post_comment(issue["key"], analysis)
@@ -489,7 +489,7 @@ class HeadhunterJira:
         event_id = await self.blackboard.create_event(
             source="headhunter",
             service=service_name,
-            subject_type="qe_mission",
+            subject_type="jira",
             reason=plan_yaml,
             evidence=evidence,
         )
@@ -527,7 +527,7 @@ class HeadhunterJira:
             if self._analyzed_issues.get(key, {}).get("phase") == "event_created":
                 continue
             try:
-                jira_content = _format_jira_for_llm(issue)
+                jira_content = format_jira_for_llm(issue)
                 analysis_text = self._analyzed_issues.get(key, {}).get("analysis", "")
                 if not analysis_text:
                     analysis_text = await self._run_claude_analysis(jira_content)

@@ -6,10 +6,10 @@
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
-  Square, ExternalLink, PlusCircle,
+  Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
-import type { AgentRegistryEntry, KargoStageStatus } from '../../api/types';
+import type { AgentRegistryEntry, KargoStageStatus, JiraMission } from '../../api/types';
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
 
@@ -88,5 +88,27 @@ export function kargoStageMenuItems(
       { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b',
         onClick: () => window.open(stage.mr_url, '_blank') },
     ] : []),
+  ];
+}
+
+export function jiraMissionMenuItems(
+  mission: JiraMission,
+  openContentTile: (title: string, content: string) => void,
+  actions: { approve: (key: string) => void; reanalyze: (key: string) => void; dismiss: (key: string) => void },
+): ContextMenuItem[] {
+  return [
+    { id: 'view-plan', label: 'View Plan', icon: <FileText size={18} />, color: '#8b5cf6',
+      disabled: !mission.analysis,
+      onClick: () => mission.analysis && openContentTile(`${mission.key}: Analysis`, mission.analysis),
+    },
+    { id: 'open-jira', label: 'Open in Jira', icon: <ExternalLink size={18} />, color: '#2684FF',
+      onClick: () => window.open(mission.issue_url, '_blank') },
+    { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
+    { id: 'approve', label: 'Approve (→ To Do)', icon: <CheckCircle2 size={18} />, color: '#22c55e',
+      onClick: () => actions.approve(mission.key) },
+    { id: 'reanalyze', label: 'Re-analyze', icon: <RefreshCw size={18} />, color: '#f59e0b',
+      onClick: () => actions.reanalyze(mission.key) },
+    { id: 'dismiss', label: 'Dismiss', icon: <XCircle size={18} />, color: '#ef4444',
+      onClick: () => actions.dismiss(mission.key) },
   ];
 }

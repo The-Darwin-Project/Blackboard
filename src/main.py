@@ -37,6 +37,7 @@ from .routes import (
     events_router,
     feedback_router,
     incidents_router,
+    jira_router,
     journal_router,
     kargo_router,
     metrics_router,
@@ -655,6 +656,7 @@ app.include_router(feedback_router)
 app.include_router(reports_router)
 app.include_router(incidents_router)
 app.include_router(kargo_router)
+app.include_router(jira_router)
 if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)

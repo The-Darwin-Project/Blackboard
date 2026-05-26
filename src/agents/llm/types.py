@@ -227,7 +227,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "issue persists. For automated events, escalation means notifying "
                         "a human who may be asleep -- verify first. "
                         "For chaotic events, enter immediately -- act first. "
-                        "close: wrapping up. Unlocks close_event and notify_gitlab_result."
+                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, and comment_jira_issue."
                     ),
                 },
                 "reasoning": {
@@ -526,6 +526,48 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
             },
             "required": ["project_id", "mr_iid", "result", "summary"],
+        },
+    },
+    {
+        "name": "fetch_jira_issue",
+        "description": (
+            "Fetch a Jira issue's details (description, comments, linked PRs, child issues). "
+            "Use during triage to enrich context for Jira-sourced events. "
+            "The issue key is in evidence.jira_context.issue_key. "
+            "Returns structured issue content or error if unavailable."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "issue_key": {
+                    "type": "string",
+                    "description": "Jira issue key (e.g., CNV-85192)",
+                },
+            },
+            "required": ["issue_key"],
+        },
+    },
+    {
+        "name": "comment_jira_issue",
+        "description": (
+            "Post a comment on a Jira issue. Use for Jira-sourced events to communicate "
+            "results, findings, or status updates back to the issue. "
+            "The issue key is in evidence.jira_context.issue_key. "
+            "If jira_context is missing, this tool returns an error."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "issue_key": {
+                    "type": "string",
+                    "description": "Jira issue key (e.g., CNV-85192)",
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Comment text to post (markdown supported by Jira)",
+                },
+            },
+            "required": ["issue_key", "comment"],
         },
     },
     {
