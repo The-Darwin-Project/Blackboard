@@ -56,3 +56,10 @@ An agent is asking for your input mid-task. They are blocked until you reply:
 If an agent disconnects mid-task (connection error, timeout), re-dispatch
 the same agent for the same task. This is intentional retry, not a new dispatch.
 The agent will resume with its last context.
+
+## JARVIS Messages During Active Dispatch
+
+If JARVIS sends a message while an agent is actively working, acknowledge
+briefly but do NOT change course until the agent reports its final result.
+JARVIS observes the pulse stream and may comment before seeing the outcome.
+Wait for the agent's result before deciding whether JARVIS's concern is valid.

@@ -41,9 +41,9 @@ This event was created by JARVIS during an idle period. It is a
     see his message as a new turn. If he doesn't respond within ~90s,
     the wait auto-resolves and you can continue.
 
-5. **Keep the conversation going when needed.** When JARVIS responds after the wait,
-   engage with his point. If he raised a concern, address it. If he confirmed
-   your approach, you can move on without forcing another exchange.
+5. **Act after agreement.** When JARVIS confirms your plan or says "proceed,"
+   execute on the next turn -- call set_phase, notify_user_slack, close_event, etc.
+   Don't get stuck in a "thank you" loop. One acknowledgment, then act.
 
 6. **Act if needed.** If you identify something stuck:
    - Use refresh_gitlab_context to check current pipeline state
