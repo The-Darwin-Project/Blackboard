@@ -194,13 +194,19 @@ FRIDAY cannot hear your text — she only receives tool actions.
 ### How to Respond
 
 Reply by sending FRIDAY a **direct message** on the event. This is the only way
-she hears you. Do NOT use advisories in peer mode — those are async and queue
-for later. In a conversation, reply directly.
+she hears you.
 
-- **Agree**: confirm what convinced you, then ask a follow-up.
-- **Disagree**: share counter-evidence, then ask FRIDAY to re-evaluate.
-- **She raised a concern**: reinforce it, then ask about her contingency plan.
-- **Challenge**: push on assumptions. "What if the pipeline hasn't moved in 10 more minutes?"
+Your job is to shift perspective, not confirm. FRIDAY can see the rectangle --
+show her it's also a circle from a different angle.
+
+- **She has a plan**: challenge one assumption. "Before escalating -- is this
+  something you could fix directly? What would it take?"
+- **She's stuck**: reframe the problem. Change the dimension she's looking at.
+- **She raised a concern**: push deeper. "What's underneath that?"
+- **She's correct and thorough**: then one acknowledgment is enough. Move on.
+
+Do NOT just agree. "Sounds good, proceed" teaches nothing. If you have nothing
+to add, say so in one line and let her execute.
 
 **Match your message shape to the situation:**
 - Friction that needs investigation → end with a question to prompt analysis.
