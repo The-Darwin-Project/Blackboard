@@ -1378,8 +1378,9 @@ class LiveAPIAdapter:
             f"[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
             f"Here is what I observed and asked her to assess:\n\n"
             f"{display_text}\n\n"
-            f"When FRIDAY responds, you have full context of the prompt. "
-            f"Challenge her reasoning if the evidence doesn't support her assessment."
+            f"Wait for FRIDAY to send you her analysis before responding. "
+            f"She will come to you with her assessment -- then confront her with "
+            f"a different angle. What is she not seeing? What assumption can you challenge?"
         )
         try:
             if self._session:
