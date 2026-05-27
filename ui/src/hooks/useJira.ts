@@ -23,5 +23,6 @@ export function useJiraActions() {
     approve: async (key: string) => { await postJiraAction(key, 'approve'); invalidate(); },
     reanalyze: async (key: string) => { await postJiraAction(key, 'reanalyze'); invalidate(); },
     dismiss: async (key: string) => { await postJiraAction(key, 'dismiss'); invalidate(); },
+    retry: async (key: string) => { await postJiraAction(key, 'retry'); invalidate(); },
   };
 }

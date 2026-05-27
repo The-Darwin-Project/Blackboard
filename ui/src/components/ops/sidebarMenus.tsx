@@ -6,7 +6,7 @@
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
-  Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2,
+  Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
 import type { AgentRegistryEntry, KargoStageStatus, JiraMission } from '../../api/types';
@@ -94,7 +94,7 @@ export function kargoStageMenuItems(
 export function jiraMissionMenuItems(
   mission: JiraMission,
   openContentTile: (title: string, content: string) => void,
-  actions: { approve: (key: string) => void; reanalyze: (key: string) => void; dismiss: (key: string) => void },
+  actions: { approve: (key: string) => void; reanalyze: (key: string) => void; dismiss: (key: string) => void; retry: (key: string) => void },
 ): ContextMenuItem[] {
   return [
     { id: 'view-plan', label: 'View Plan', icon: <FileText size={18} />, color: '#8b5cf6',
@@ -108,6 +108,8 @@ export function jiraMissionMenuItems(
       onClick: () => actions.approve(mission.key) },
     { id: 'reanalyze', label: 'Re-analyze', icon: <RefreshCw size={18} />, color: '#f59e0b',
       onClick: () => actions.reanalyze(mission.key) },
+    { id: 'retry', label: 'Retry (Reset & Re-trigger)', icon: <RotateCcw size={18} />, color: '#6366f1',
+      onClick: () => actions.retry(mission.key) },
     { id: 'dismiss', label: 'Dismiss', icon: <XCircle size={18} />, color: '#ef4444',
       onClick: () => actions.dismiss(mission.key) },
   ];

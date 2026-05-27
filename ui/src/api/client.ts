@@ -372,7 +372,7 @@ export async function getJiraMissions(): Promise<JiraMission[]> {
   return fetchApi<JiraMission[]>('/jira/missions');
 }
 
-export async function postJiraAction(key: string, action: 'approve' | 'reanalyze' | 'dismiss'): Promise<void> {
+export async function postJiraAction(key: string, action: 'approve' | 'reanalyze' | 'dismiss' | 'retry'): Promise<void> {
   await fetchApi<unknown>(`/jira/missions/${encodeURIComponent(key)}/${action}`, { method: 'POST' });
 }
 

@@ -11,6 +11,11 @@
 # 9. [Pattern]: Label-driven skill selection: HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>.
 #    Labels on issue (beyond base "darwin") map to system prompts fetched from git. 5-min cache.
 #    Teams self-serve by updating rules in their own repo. Fallback: built-in BA prompt.
+# 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
+#     _get_issue_state/_set_issue_state are the canonical accessors.
+# 11. [Pattern]: _get_active_jira_keys() mirrors GitLab headhunter's _get_active_mr_keys() for dedup.
+# 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing comments.
+#     Capped at 10 comment checks per cycle to avoid Jira rate limits.
 """
 Headhunter Jira: polls Jira issues assigned to bot with a label filter.
 
@@ -210,6 +215,9 @@ def _walk_adf_mentions(body: dict | list) -> set[str]:
 class HeadhunterJira:
     """Jira polling head -- two-phase flow for QE mission analysis and event creation."""
 
+    REDIS_PREFIX = "darwin:headhunter:jira:"
+    REDIS_TTL = 604800  # 7 days
+
     def __init__(self, blackboard: BlackboardState):
         self.blackboard = blackboard
         self._jira_url = os.getenv("JIRA_URL", "")
@@ -229,12 +237,27 @@ class HeadhunterJira:
         self._skill_cache: dict[str, dict] = {}
         if self._skill_urls:
             logger.info(f"Jira skill labels configured: {list(self._skill_urls.keys())}")
-        # In-memory state: tracks which issues have been analyzed or event-created
-        self._analyzed_issues: dict[str, dict[str, str]] = {}
+        # Redis-backed state -- survives pod restarts
 
     def enabled(self) -> bool:
         """Returns True if required env vars are configured."""
         return bool(self._jira_url and self._jira_token and self._bot_account_id)
+
+    # =========================================================================
+    # Redis State (durable issue tracking -- survives pod restarts)
+    # =========================================================================
+
+    async def _get_issue_state(self, key: str) -> dict | None:
+        """Get Redis-backed state for an issue. Returns None if expired or never set."""
+        raw = await self.blackboard.redis.get(f"{self.REDIS_PREFIX}{key}")
+        return json.loads(raw) if raw else None
+
+    async def _set_issue_state(self, key: str, state: dict) -> None:
+        """Persist issue state to Redis with 7-day TTL."""
+        state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await self.blackboard.redis.set(
+            f"{self.REDIS_PREFIX}{key}", json.dumps(state), ex=self.REDIS_TTL
+        )
 
     # =========================================================================
     # Claude Adapter (lazy-loaded, same pattern as Archivist)
@@ -570,20 +593,38 @@ class HeadhunterJira:
         return event_id
 
     # =========================================================================
-    # Flow Gate (independent from GitLab head)
+    # Active Event Dedup + Flow Gate
     # =========================================================================
 
-    async def check_flow_gate(self) -> bool:
-        """Return True if a Jira slot is available (active jira events < max_active)."""
+    async def _get_active_jira_keys(self) -> set[str]:
+        """Get issue keys for all active/deferred Jira headhunter events."""
         active_ids = await self.blackboard.get_active_events()
-        count = 0
+        keys: set[str] = set()
         for eid in active_ids:
             event = await self.blackboard.get_event(eid)
             if (event and event.source == "headhunter"
                     and getattr(event, "subject_type", "service") == "jira"
                     and event.status.value in ("new", "active", "deferred")):
-                count += 1
-        return count < self._max_active
+                jira_ctx = getattr(event.event.evidence, "jira_context", None) if event.event and event.event.evidence else None
+                if jira_ctx and isinstance(jira_ctx, dict):
+                    keys.add(jira_ctx.get("issue_key", ""))
+        return keys - {""}
+
+    async def check_flow_gate(self) -> bool:
+        """Return True if a Jira slot is available (active jira events < max_active)."""
+        return len(await self._get_active_jira_keys()) < self._max_active
+
+    # =========================================================================
+    # Cold-Start Recovery
+    # =========================================================================
+
+    def _find_bot_comment(self, issue: dict) -> str | None:
+        """Find the latest comment posted by the bot. Returns comment ID or None."""
+        comments = issue.get("fields", {}).get("comment", {}).get("comments", [])
+        for comment in reversed(comments):
+            if comment.get("author", {}).get("accountId") == self._bot_account_id:
+                return comment.get("id", "")
+        return None
 
     # =========================================================================
     # Main Poll Cycle
@@ -594,40 +635,55 @@ class HeadhunterJira:
         # Phase 1: Analyze Planning issues (no flow gate -- analysis doesn't create events)
         planning_issues = await self.poll_planning()
         logger.debug(f"Jira Planning issues: {len(planning_issues)}")
+        cold_start_checks = 0
         for issue in planning_issues:
             key = issue["key"]
-            if key not in self._analyzed_issues:
+            state = await self._get_issue_state(key)
+            if state is None:
+                # Cold-start: reconstruct from bot comments if they exist
+                if cold_start_checks < 10:
+                    bot_comment_id = self._find_bot_comment(issue)
+                    cold_start_checks += 1
+                    if bot_comment_id:
+                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": bot_comment_id})
+                        continue
                 result = await self.analyze_and_comment(issue)
                 if result:
-                    comment_id, analysis = result
-                    self._analyzed_issues[key] = {"last_comment_id": comment_id, "analysis": analysis, "phase": "analyzed"}
-            elif await self.has_reeval_signal(issue, self._analyzed_issues[key]["last_comment_id"]):
-                result = await self.analyze_and_comment(issue)
-                if result:
-                    comment_id, analysis = result
-                    self._analyzed_issues[key]["last_comment_id"] = comment_id
-                    self._analyzed_issues[key]["analysis"] = analysis
+                    comment_id, _analysis = result
+                    await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
+            elif state.get("phase") == "analyzed":
+                last_cid = state.get("last_comment_id", "")
+                if last_cid and await self.has_reeval_signal(issue, last_cid):
+                    result = await self.analyze_and_comment(issue)
+                    if result:
+                        comment_id, _analysis = result
+                        await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
 
         # Phase 2: Create events for To Do issues (gated by Jira-specific WIP limit)
-        if not await self.check_flow_gate():
+        active_jira_keys = await self._get_active_jira_keys()
+        if len(active_jira_keys) >= self._max_active:
             logger.debug("Jira flow gate closed -- skipping event creation")
             return
         todo_issues = await self.poll_todo()
         logger.debug(f"Jira To Do issues: {len(todo_issues)}")
         for issue in todo_issues:
             key = issue["key"]
-            if self._analyzed_issues.get(key, {}).get("phase") == "event_created":
+            if key in active_jira_keys:
                 continue
-            if not await self.check_flow_gate():
+            state = await self._get_issue_state(key)
+            if state and state.get("phase") == "event_created":
+                continue
+            if len(active_jira_keys) >= self._max_active:
                 logger.info("Jira flow gate closed mid-cycle -- stopping")
                 break
             try:
                 jira_content = format_jira_for_llm(issue)
-                analysis_text = self._analyzed_issues.get(key, {}).get("analysis", "")
+                analysis_text = state.get("analysis", "") if state else ""
                 if not analysis_text:
                     analysis_text = await self._run_claude_analysis(jira_content)
                 plan_yaml = await self._run_brain_plan(jira_content, analysis_text)
-                await self.create_qe_event(issue, plan_yaml)
-                self._analyzed_issues[key] = {"last_comment_id": "", "analysis": "", "phase": "event_created"}
+                event_id = await self.create_qe_event(issue, plan_yaml)
+                await self._set_issue_state(key, {"phase": "event_created", "event_id": event_id})
+                active_jira_keys.add(key)
             except Exception as e:
                 logger.warning(f"Jira event creation failed for {key}: {e}")

@@ -1,9 +1,10 @@
 # BlackBoard/src/routes/jira.py
 # @ai-rules:
-# 1. [Pattern]: Stateless endpoints -- queries Jira directly, no Redis state.
+# 1. [Pattern]: Endpoints query Jira directly; retry/reanalyze clear Redis state via Depends(get_blackboard).
 # 2. [Constraint]: Returns [] when JIRA_URL not configured (graceful degradation).
 # 3. [Pattern]: Same httpx + Basic auth pattern as headhunter_jira.py.
 # 4. [Constraint]: No hardcoded org-specific values -- all from env vars.
+# 5. [Pattern]: Redis key format: darwin:headhunter:jira:{issue_key} (shared with headhunter_jira.py).
 """Jira Missions API -- exposes tracked Jira issues for the Operations Center UI."""
 from __future__ import annotations
 
@@ -12,10 +13,16 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..dependencies import get_blackboard
+from ..state.blackboard import BlackboardState
+from ..agents.headhunter_jira import HeadhunterJira
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jira", tags=["jira"])
+
+_REDIS_PREFIX = HeadhunterJira.REDIS_PREFIX
 
 
 def _jira_config() -> tuple[str, dict[str, str]] | None:
@@ -135,8 +142,10 @@ async def approve_mission(key: str):
 
 
 @router.post("/missions/{key}/reanalyze")
-async def reanalyze_mission(key: str):
-    """Post a comment requesting re-analysis of the issue."""
+async def reanalyze_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
+    """Clear Redis state and post a comment requesting re-analysis."""
+    await blackboard.redis.delete(f"{_REDIS_PREFIX}{key}")
+
     cfg = _jira_config()
     if not cfg:
         raise HTTPException(503, "Jira not configured")
@@ -192,3 +201,29 @@ async def dismiss_mission(key: str):
             raise HTTPException(resp.status_code, f"Failed to update labels on {key}")
 
     return {"status": "dismissed", "key": key}
+
+
+@router.post("/missions/{key}/retry")
+async def retry_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
+    """Clear Darwin state and re-trigger processing for a Jira issue."""
+    await blackboard.redis.delete(f"{_REDIS_PREFIX}{key}")
+
+    cfg = _jira_config()
+    if cfg:
+        base_url, headers = cfg
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{base_url}/rest/api/3/issue/{key}", headers=headers, params={"fields": "status"})
+            if resp.is_success:
+                current = resp.json().get("fields", {}).get("status", {}).get("name", "")
+                if current.lower() not in ("to do", "planning"):
+                    tr_resp = await client.get(f"{base_url}/rest/api/3/issue/{key}/transitions", headers=headers)
+                    if tr_resp.is_success:
+                        todo = next((t for t in tr_resp.json().get("transitions", []) if "to do" in t["name"].lower()), None)
+                        if todo:
+                            await client.post(
+                                f"{base_url}/rest/api/3/issue/{key}/transitions",
+                                headers=headers,
+                                json={"transition": {"id": todo["id"]}},
+                            )
+
+    return {"status": "retried", "key": key}
