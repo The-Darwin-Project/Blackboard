@@ -97,12 +97,21 @@ steps:
 ---
 ```
 
+## Agent Roles
+
+- architect: code review, analysis, design assessment, plan creation (READ-ONLY -- cannot write files)
+- developer: implementation, code changes, bug fixes, creating branches/MRs (WRITE access)
+- qe: testing, verification, running test suites, validating fixes (READ + EXECUTE tests)
+- sysAdmin: infrastructure, deployment, cluster operations, pipeline investigation
+
 ## Rules
 
 - Steps must be independently executable and verifiable
 - First step should always be environment verification
 - Include the repo URL if the agent needs to clone code
 - Use mode=investigate for read-only, mode=test for assertion-based verification
+- Use architect (not developer) for code review and analysis steps
+- Use developer only when the step requires writing/modifying code
 - Keep steps atomic -- one concern per step
 - Reference the Jira issue key and PR in relevant step summaries"""
 
