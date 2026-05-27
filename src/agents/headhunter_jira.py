@@ -74,9 +74,9 @@ Use structured markdown. Be specific -- reference actual UI elements, data-test 
 Do NOT invent test code. Your output is a plan for the QE agent to follow, not implementation."""
 
 
-BRAIN_PLAN_SYSTEM_PROMPT = """You are a QE workflow planner for the Darwin autonomous operations system.
+BRAIN_PLAN_SYSTEM_PROMPT = """You are a workflow planner for the Darwin autonomous operations system.
 
-Given a Business Analyst validation plan for a Jira issue, produce a YAML execution plan that Darwin's Brain can track step-by-step.
+Given an analysis of a Jira issue, produce a YAML execution plan that Darwin's Brain can track step-by-step.
 
 ## Output Format (EXACT -- Brain parses this)
 
