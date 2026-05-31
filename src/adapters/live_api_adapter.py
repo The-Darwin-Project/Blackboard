@@ -158,6 +158,9 @@ When observing pulses with nothing to report, respond: `watching`
 - **Do NOT intervene while an agent is actively working.** Wait for the agent's
   final result before assessing. An agent dispatch followed by progress is healthy.
 - **Two sentences max** per text response.
+- **Verify before claiming.** If you haven't searched deep memory or checked
+  evidence via a tool, do not claim precedent or absence of precedent.
+  Say "I have not checked" rather than "there are no incidents."
 - Do not use prohibitive language toward FRIDAY's operational choices.
 - Your text is **NOT visible** to FRIDAY. Only tool actions reach her.
 
@@ -427,6 +430,21 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "search_deep_memory",
+        "description": (
+            "**Investigate** [Observer | Peer] — search past events and lessons "
+            "for patterns matching a query. Returns scored results with symptoms, "
+            "root causes, and outcomes. Use before claiming historical precedent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "list_active_events",
         "description": (
             "**Situational awareness** [Observer | Peer] — snapshot of all events being "
@@ -542,9 +560,12 @@ class LiveAPIAdapter:
                 system_instruction=types.Content(
                     parts=[types.Part(text=SYSTEM_INSTRUCTION)]
                 ),
-                tools=[types.Tool(function_declarations=[
-                    types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
-                ])],
+                tools=[
+                    types.Tool(function_declarations=[
+                        types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
+                    ]),
+                    types.Tool(google_search=types.GoogleSearch()),
+                ],
             )
 
             self._session_ctx = self._client.aio.live.connect(
@@ -956,6 +977,8 @@ class LiveAPIAdapter:
                 )
             elif name == "get_neuron_details":
                 return await self._tool_get_neuron_details(args.get("neuron_id", ""))
+            elif name == "search_deep_memory":
+                return await self._tool_search_deep_memory(args.get("query", ""))
             elif name == "send_event_message":
                 return await self._tool_send_event_message(
                     args.get("event_id", ""), args.get("message", ""),
@@ -1143,6 +1166,33 @@ class LiveAPIAdapter:
             )
         else:
             return f"Neuron: {neuron_id}\nType: {ntype}\nGlobal heat: {global_heat}"
+
+    async def _tool_search_deep_memory(self, query: str) -> str:
+        if not query:
+            return "Error: query required"
+        memories = await self._archivist.search(query, limit=3)
+        lessons = await self._archivist.search_lessons(query, limit=3)
+        lines = [f"## Deep Memory Search: '{query}'"]
+        if memories:
+            lines.append("\n### Past Events")
+            for m in memories:
+                p = m.get("payload", {})
+                lines.append(
+                    f"- [{m.get('score', 0):.2f}] {p.get('service', '?')}: "
+                    f"{p.get('symptom', '?')} → {p.get('root_cause', '?')} "
+                    f"({p.get('outcome', '?')})"
+                )
+        if lessons:
+            lines.append("\n### Lessons")
+            for ls in lessons:
+                p = ls.get("payload", {})
+                lines.append(
+                    f"- [{ls.get('score', 0):.2f}] {p.get('title', '?')}: "
+                    f"{p.get('pattern', '?')}"
+                )
+        if not memories and not lessons:
+            lines.append("\nNo results found.")
+        return "\n".join(lines)
 
     # -------------------------------------------------------------------------
     # Write tools (shadow-gated)
