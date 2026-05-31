@@ -286,6 +286,7 @@ spec:
   serviceAccountName: {{ .Release.Name }}-brain
   resources:
     kubernetesResource:
+      replicas: 2
       spec:
         template:
           metadata:
