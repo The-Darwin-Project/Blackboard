@@ -252,6 +252,11 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
         )
     except Exception as e:
         result_text = f"Investigation dispatch failed: {e}"
+    finally:
+        try:
+            await ctx.provisioner.terminate_agent(sweep_event_id)
+        except Exception:
+            logger.debug("Nightwatcher: failed to terminate sweep agent %s (may already be gone)", sweep_event_id)
     duration = round(time.time() - start, 1)
     ctx.dispatch_count += 1
     ctx.investigations.append(ShiftInvestigation(
