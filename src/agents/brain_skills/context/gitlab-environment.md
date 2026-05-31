@@ -8,11 +8,11 @@ tags: [gitlab, environment, capabilities]
 
 Darwin's GitLab SA can:
 
-- Read MR details, pipelines, job logs
-- Post MR comments (notes)
+- Read MR/PR details, pipelines, job logs
+- Post MR/PR comments (notes)
 - Trigger pipeline retests via PaC GitOps commands (/retest, /test, /ok-to-test, /cancel)
 - Merge MRs (when pipeline is green and merge_status is can_be_merged)
-- Update MR reviewers/assignees
+- Update MR/PR reviewers/assignees
 
 Darwin's GitLab SA CANNOT:
 
@@ -28,12 +28,12 @@ Darwin's GitLab SA CANNOT:
 - When the developer reports a pipeline is running, defer until it completes, then use refresh_gitlab_context to check the result.
 - After an agent retests a pipeline, defer then use refresh_gitlab_context to verify the retest result before closing.
 
-## MR Lifecycle
+## MR/PR Lifecycle
 
 1. Check pipeline status
 2. If failed: retest via PaC GitOps command
 3. If green + can_be_merged: merge
-4. If green + cannot_be_merged on a submodule MR: close the MR (obsolete, newer update merged)
+4. If green + cannot_be_merged on a submodule MR: close the MR/PR (obsolete, newer update merged)
 5. If green + cannot_be_merged on a regular MR: report conflict to maintainer
 6. If retest fails: the failure reason must be known before escalating. Comment with failure analysis, notify maintainer, create incident.
 

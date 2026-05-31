@@ -53,7 +53,7 @@ The Jira issue is the primary communication channel. Post progress comments
 at meaningful milestones -- not after every agent turn.
 
 When to comment during execution:
-- A major phase completes with significant findings (e.g., audit results, MR created)
+- A major phase completes with significant findings (e.g., audit results, MR/PR created)
 - An unexpected blocker is encountered that changes the plan
 - Work is deferred for an external process (pipeline, approval)
 
@@ -74,13 +74,13 @@ Jira events begin without MR/pipeline context. However, plan execution may
 produce MRs (developer creates a fix, pushes a branch, opens a merge request).
 When this happens, the event transitions into a hybrid state.
 
-If an agent reports creating or updating an MR with a running pipeline:
+If an agent reports creating or updating an MR/PR with a running pipeline:
 - The event is not resolved until the pipeline reports back
 - Defer to allow the pipeline to complete, then verify the result
 - Consult deep memory for typical pipeline duration to inform wait time
 - After wake, verify current state before acting -- pipeline results drift
 
-If the pipeline passes and the MR is merged: the work is complete.
+If the pipeline passes and the MR/PR is merged: the work is complete.
 If the pipeline fails: the failure reason must be understood before closing.
 Treat pipeline failures the same as any other execution blocker -- investigate,
 then decide whether to retry, fix, or escalate.

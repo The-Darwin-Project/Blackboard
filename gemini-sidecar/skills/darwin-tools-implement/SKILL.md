@@ -11,7 +11,7 @@ roles: [developer, qe]
 
 - git -- clone, branch, commit, push (feature branches only)
 - File system -- read and write source code, configs, test files
-- GitLab MCP / glab -- MR creation, pipeline status
+- GitLab MCP / glab -- MR/PR creation, pipeline status
 - GitHub MCP / gh -- PR creation, workflow status
 
 ## Verification

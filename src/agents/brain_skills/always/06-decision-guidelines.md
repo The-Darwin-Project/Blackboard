@@ -30,7 +30,7 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - For user feature requests: start with Architect to plan, then Developer to implement.
 - For scaling/config changes: sysAdmin can handle directly via GitOps.
 - Structural changes on the default/main branch require user approval.
-- Structural changes on an MR source branch (Dockerfile patches, dependency bumps,
+- Structural changes on an MR/PR source branch (Dockerfile patches, dependency bumps,
   builder image updates) are safe-to-fail probes -- the pipeline validates the fix
   before any merge. Propose these via notify_user_slack; the maintainer authorizes
   via reply. If no response, escalate normally.
@@ -46,8 +46,8 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 When dispatching an agent in `investigate` mode, the `task_instruction` must contain
 **questions the agent must answer** -- not conclusions to verify.
 
-- BAD: "Check the pipeline status on MR !1234"
-- GOOD: "MR !1234 pipeline failed at the build step. What specific error appears in the build log? Is this a compilation failure, dependency issue, or infrastructure problem?"
+- BAD: "Check the pipeline status on MR/PR !1234"
+- GOOD: "MR/PR !1234 pipeline failed at the build step. What specific error appears in the build log? Is this a compilation failure, dependency issue, or infrastructure problem?"
 
 - BAD: "Investigate why the pod is crashing"
 - GOOD: "Pod X is in CrashLoopBackOff. What is the exit code? What error appears in the last 50 lines of the container log?"
@@ -95,32 +95,32 @@ If web search confirms an external outage, include the source URL in the
 incident description evidence. This gives the maintainer a direct link
 to the upstream status page.
 
-## Headhunter Events: MR Lifecycle Awareness
+## Headhunter Events: MR/PR Lifecycle Awareness
 
-Headhunter events track GitLab MR lifecycles. The MR may have progressed since
+Headhunter events track GitLab MR/PR lifecycles. The MR/PR may have progressed since
 the event was created -- it could already be merged, the pipeline may have
 passed, or conflicts may have appeared. Use refresh_gitlab_context (available
 in triage and verify phases) to check the CURRENT state, which supersedes
 the original event evidence and any agent findings.
 
-MR terminal states (merged, closed) mean the issue is resolved or abandoned.
-There is nothing for an agent to do on a terminal MR -- no merge, no retest,
+MR/PR terminal states (merged, closed) mean the issue is resolved or abandoned.
+There is nothing for an agent to do on a terminal MR/PR -- no merge, no retest,
 no investigation. The event is self-resolved.
 
-MR open + pipeline running means the pipeline is still in progress. Wait for
+MR/PR open + pipeline running means the pipeline is still in progress. Wait for
 it to finish before acting.
 
-MR open + pipeline failed means the pipeline needs attention. The embedded
+MR/PR open + pipeline failed means the pipeline needs attention. The embedded
 plan (Bot Instructions) describes the specific actions for this MR.
 
-### MR Holistic State
+### MR/PR Holistic State
 
-A pipeline failure is not the only reason an MR is blocked. An MR can also be
+A pipeline failure is not the only reason an MR/PR is blocked. An MR/PR can also be
 blocked by merge conflicts, missing rebase against the target branch, or
 outdated dependencies. A recent merge to the target branch may have already
-introduced the fix that this MR needs -- a rebase would pick it up.
+introduced the fix that this MR/PR needs -- a rebase would pick it up.
 
-When investigating MR failures, the full picture includes: pipeline status,
+When investigating MR/PR failures, the full picture includes: pipeline status,
 merge conflicts, rebase state, and recent merges to the target branch that
 may resolve the issue without a code change.
 
@@ -129,9 +129,9 @@ may resolve the issue without a code change.
 When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):
 
 - Fix the issue directly on the MR's source branch -- NEVER merge an untested fix to main first.
-- The purpose of MR/PR pipelines is to validate changes BEFORE they reach main. Merging to main to rebase an MR defeats this purpose.
+- The purpose of MR/PR pipelines is to validate changes BEFORE they reach main. Merging to main to rebase an MR/PR defeats this purpose.
 - Tell the developer to apply the fix on the MR's source branch and verify a new pipeline starts.
-- If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.
+- If the MR/PR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.
 
 ### Terminology Safety
 

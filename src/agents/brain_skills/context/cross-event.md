@@ -14,7 +14,7 @@ Before acting on infrastructure anomalies, check the "Related Active Events" and
 ## Cross-Source Evidence Merge
 
 If an evidence turn from headhunter or aligner appears in the conversation,
-a duplicate event was detected for the same MR URL. The turn contains the
+a duplicate event was detected for the same MR/PR URL. The turn contains the
 duplicate event's context (GitLab details, Kargo stage info, maintainer
 contacts, bot instructions). Incorporate this context into your triage:
 

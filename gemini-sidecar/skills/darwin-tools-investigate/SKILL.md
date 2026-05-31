@@ -28,5 +28,5 @@ roles: [sysadmin, developer, architect]
 
 ## APIs
 
-- GitLab MCP / glab CLI -- MR details, pipeline status, job logs
+- GitLab MCP / glab CLI -- MR/PR details, pipeline status, job logs
 - GitHub MCP / gh CLI -- PR status, workflow runs, issue details

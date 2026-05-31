@@ -15,13 +15,13 @@ Pipeline failures can originate from different trigger sources. Identify where t
 
 | Source | Where to find jobs/tasks | How to drill into failures |
 |--------|-------------------------|---------------------------|
-| **GitLab MR pipeline** | GitLab pipeline jobs list (MR → Pipelines tab) | Job trace for native jobs; external CI link for Konflux jobs |
-| **GitLab push/tag pipeline** | GitLab pipeline jobs list (project → CI/CD → Pipelines) | Same as MR pipeline |
-| **Kargo promotion** | Kargo stage steps (promotion status in Kargo UI/CLI) + linked MR pipeline | Kargo step error message; then follow linked MR pipeline if failure is CI-related |
+| **GitLab MR/PR pipeline** | GitLab pipeline jobs list (MR/PR → Pipelines tab) | Job trace for native jobs; external CI link for Konflux jobs |
+| **GitLab push/tag pipeline** | GitLab pipeline jobs list (project → CI/CD → Pipelines) | Same as MR/PR pipeline |
+| **Kargo promotion** | Kargo stage steps (promotion status in Kargo UI/CLI) + linked MR/PR pipeline | Kargo step error message; then follow linked MR/PR pipeline if failure is CI-related |
 | **Tekton PipelineRun (direct)** | K8s MCP or KubeArchive — list TaskRuns in the PipelineRun | TaskRun → step container logs |
 | **Konflux build (no GitLab)** | K8s MCP or KubeArchive — find PipelineRun by component + commit | TaskRun → step container logs |
 
-Use the event document to determine the source: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion ID, MR URL), Aligner events may reference either.
+Use the event document to determine the source: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion ID, MR/PR URL), Aligner events may reference either.
 
 ## Step 1: Enumerate ALL Failed Jobs/Tasks (CRITICAL)
 
@@ -36,7 +36,7 @@ A pipeline can contain multiple jobs or tasks. Each may map to a separate execut
 
 ### For Kargo promotions
 1. Check the Kargo promotion status to identify which step failed (e.g., `wait-for-merge`, `auto-merge`, `wait-for-update`).
-2. If the failed step is CI-related (wait-for-merge blocked by pipeline failure): follow the linked MR URL from the Kargo context and enumerate the MR pipeline jobs as above.
+2. If the failed step is CI-related (wait-for-merge blocked by pipeline failure): follow the linked MR/PR URL from the Kargo context and enumerate the MR/PR pipeline jobs as above.
 3. If the failed step is Kargo-internal (timeout, webhook, freight error): report the Kargo step error directly.
 
 ### For direct Tekton/Konflux PipelineRuns (no GitLab)
@@ -61,8 +61,8 @@ GitLab external jobs link to an external CI system. Follow that link to find the
 
 ### Kargo step failures
 For Kargo-internal failures (not CI-related), extract the error from the promotion status. Common patterns:
-- `wait-for-merge` timeout: CI pipeline blocked the merge — investigate the MR pipeline.
-- `auto-merge` failure: merge conflicts or permissions — check MR merge status.
+- `wait-for-merge` timeout: CI pipeline blocked the merge — investigate the MR/PR pipeline.
+- `auto-merge` failure: merge conflicts or permissions — check MR/PR merge status.
 - `wait-for-update` failure: submodule/image update step failed — check the Tekton TaskRun that performed the update.
 
 If the external link is unavailable or the data is pruned, state what you could not access and why.
@@ -81,7 +81,7 @@ After collecting errors from ALL failed jobs/tasks, classify each one:
 
 ### Promotion/orchestration failures
 - **Kargo timeout**: promotion step exceeded its deadline (e.g., 6h wait-for-merge).
-- **Merge conflict**: MR cannot be merged due to conflicting changes.
+- **Merge conflict**: MR/PR cannot be merged due to conflicting changes.
 - **Webhook/callback failure**: external system did not report back to GitLab/Kargo.
 
 ### Reporting priority
@@ -116,7 +116,7 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 
 ## Critical: No @mentions
 
-Do NOT tag individual users (`@username`) in MR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- the Brain handles all human notifications via Slack.
 
 ## Reporting Results
 
@@ -126,7 +126,7 @@ Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer
 Report format when multiple jobs/tasks failed:
 
 ```
-Pipeline source: {GitLab MR | GitLab push | Kargo promotion | Tekton direct}
+Pipeline source: {GitLab MR/PR | GitLab push | Kargo promotion | Tekton direct}
 Failed jobs/tasks (N total):
 1. [job-name] — {error classification}: {specific error}
 2. [job-name] — {error classification}: {specific error}

@@ -25,9 +25,9 @@ Key questions depend on the failure type:
 ### Pipeline Failure (CI/CD, Tekton, Konflux, Kargo)
 Pipeline failures can originate from GitLab (MR, push, tag, scheduled), Kargo promotions, or direct Tekton PipelineRuns. The investigation method depends on the source but the principle is the same: **enumerate ALL failed jobs/tasks before attributing root cause.**
 
-1. **Identify the pipeline source** from the event document: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion, MR URL), Aligner events may reference either.
+1. **Identify the pipeline source** from the event document: Headhunter events have GitLab context, Kargo events have Kargo context (project, stage, promotion, MR/PR URL), Aligner events may reference either.
 2. **For GitLab pipelines**: list ALL jobs in the pipeline. A single pipeline can contain multiple jobs, each mapping to a different external CI PipelineRun (e.g., build, SAST scan, cert checks). Do NOT investigate a single PipelineRun on the cluster without first enumerating all jobs in GitLab.
-3. **For Kargo promotions**: check which step failed. If CI-related (wait-for-merge, pipeline failure), follow the linked MR URL and enumerate its pipeline jobs. If Kargo-internal (timeout, webhook), report the step error directly.
+3. **For Kargo promotions**: check which step failed. If CI-related (wait-for-merge, pipeline failure), follow the linked MR/PR URL and enumerate its pipeline jobs. If Kargo-internal (timeout, webhook), report the step error directly.
 4. **For direct Tekton/Konflux PipelineRuns**: find the PipelineRun on the cluster, list ALL TaskRuns, identify every failed one.
 5. **Drill into each failure**: for GitLab-native jobs, read the job log. For external/Konflux jobs, follow the external CI link to the PipelineRun, then drill TaskRun -> step container log. Use KubeArchive if live data is pruned.
 6. Extract the actual error message from each failed job/task. Classify: code (compilation, test assertion), dependency (resolution, version conflict), compliance (cert check, license), infrastructure (image pull failure, timeout, resource limit), or orchestration (Kargo timeout, merge conflict, webhook failure).

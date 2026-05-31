@@ -45,7 +45,7 @@ Vanilla GitLab CI pipelines are triggered by the GitLab CI/CD service, not a Tek
 
 ## Failure Modes
 
-- **Closed MR/PR**: Commands do not work on closed merge/pull requests. If the MR is closed, the command is silently ignored.
+- **Closed MR/PR**: Commands do not work on closed merge/pull requests. If the MR/PR is closed, the command is silently ignored.
 - **Permissions**: The comment author must have sufficient permissions. If Darwin's service account lacks authorization, the command has no effect and no error is returned.
 - **No matching PipelineRun**: `/retest <name>` or `/test <name>` with a non-existent PipelineRun name produces no pipeline. Check the PipelineRun name against the repository's PaC configuration.
 - **Command not recognized**: If the repository uses vanilla GitLab CI and a PaC-only command (`/test`, `/ok-to-test`, `/cancel`) is posted, it appears as a regular comment with no CI effect.

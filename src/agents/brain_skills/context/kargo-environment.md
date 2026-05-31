@@ -32,14 +32,14 @@ For **Errored** status: use shorter intervals (5→5→10 min max) since errors 
 
 - Route to **sysadmin** for investigation and reconciliation (kubectl/oc access, Kargo CLI).
 - If the failure is a config/expression error in the stage spec, route to **developer** for a code fix.
-- If the failure is an MR merge timeout, sysadmin can check the MR state and either merge or close it.
+- If the failure is an MR/PR merge timeout, sysadmin can check the MR/PR state and either merge or close it.
 
 ## Error Categories (from cluster probe)
 
-- **MR merge timeout**: `step "wait-for-merge" timed out after 3h0m0s` -- MR pipeline may have failed or is stuck.
+- **MR/PR merge timeout**: `step "wait-for-merge" timed out after 3h0m0s` -- MR/PR pipeline may have failed or is stuck.
 - **Config/expression error**: `failed to extract outputs: error compiling expression` -- stage spec has a bug.
 - **Missing files**: `error reading YAML file ... no such file or directory` -- repo structure changed.
-- **Auto-merge timeout**: `step "auto-merge" timed out after 2m0s` -- MR cannot be merged (conflicts, approvals).
+- **Auto-merge timeout**: `step "auto-merge" timed out after 2m0s` -- MR/PR cannot be merged (conflicts, approvals).
 
 ## Kargo Concepts
 

@@ -10,7 +10,7 @@ roles: [sysadmin, developer]
 ## Developer Execute
 
 - git -- clone, checkout, commit, push to branches
-- glab / GitLab MCP -- post MR comments, merge MRs, retest pipelines, update reviewers
+- glab / GitLab MCP -- post MR/PR comments, merge MRs, retest pipelines, update reviewers
 - gh / GitHub MCP -- PR operations, workflow dispatch
 - jq, yq -- JSON/YAML processing for API responses
 

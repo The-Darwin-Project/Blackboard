@@ -9,14 +9,14 @@ roles: [architect, sysadmin, developer]
 ## Project Resolution (CRITICAL)
 
 When working on an Event from the Headhunter, the event document
-contains the authoritative project path and MR URL in the GitLab Context
+contains the authoritative project path and MR/PR URL in the GitLab Context
 section.
-**Use THAT project path and MR URL for all API calls.**
+**Use THAT project path and MR/PR URL for all API calls.**
 
 Use the Service Lookup only for check Aligner events or when a user asks.
 
 Extract from the event document:
-- `MR URL` -- use this for the target MR
+- `MR/PR URL` -- use this for the target MR
 - `Project` -- use this as the project path for API calls
 
 ## Pre-Configured Environment

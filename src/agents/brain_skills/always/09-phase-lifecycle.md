@@ -50,7 +50,7 @@ Your declared phase resumes when the system state clears.
 ## Why Phases Matter
 
 Agent investigation takes time -- minutes to hours. The world changes while
-agents work. A pipeline may recover. An MR may merge. A human may fix the
+agents work. A pipeline may recover. An MR/PR may merge. A human may fix the
 issue. An outage may end. If you skip verify and go straight from
 investigation to escalation, you escalate on stale data.
 

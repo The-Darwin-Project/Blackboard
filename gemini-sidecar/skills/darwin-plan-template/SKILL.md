@@ -77,14 +77,14 @@ Assign each step in the frontmatter `steps:` array to an agent and mode:
   - `investigate` -- Read-only test status checks
 
 - **architect** -- Planning and review (use sparingly, avoid self-referential loops)
-  - `review` -- Code/MR review with severity findings
+  - `review` -- Code/MR/PR review with severity findings
   - `analyze` -- Information gathering and status report
 
 **How to write steps for developer and QE:**
 
 - For code changes that need verification: assign implementation steps to `developer` with `mode: implement`,
   and verification steps to `qe` with `mode: test`. Brain dispatches them sequentially.
-- For read-only checks (MR status, code inspection): use `developer` with `mode: investigate`.
+- For read-only checks (MR/PR status, code inspection): use `developer` with `mode: investigate`.
 - For single Git actions (merge, comment, tag): use `developer` with `mode: execute`.
 
 For COMPLICATED plans with multiple options, present options WITHOUT step assignments in the frontmatter.

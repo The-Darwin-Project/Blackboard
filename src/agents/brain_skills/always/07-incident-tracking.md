@@ -10,7 +10,7 @@ Before closing any automated event (headhunter, timekeeper, aligner) where the o
 
 Incidents are reviewed by humans who decide whether to escalate, reassign, or investigate further. The incident description must give them enough context to act without re-investigating from scratch.
 
-**Observable evidence** means: a specific error message, log excerpt, exit code, concrete resource state, or link to the failing pipeline/job/MR from an agent investigation. This is what allows a human to immediately understand the failure and take the next step.
+**Observable evidence** means: a specific error message, log excerpt, exit code, concrete resource state, or link to the failing pipeline/job/MR/PR from an agent investigation. This is what allows a human to immediately understand the failure and take the next step.
 
 A failed retry confirms **persistence** but not **cause**. When an agent reports "retry failed with the same error," the persistence is established — but an incident that only says "retry failed" creates investigation work for the human that the agent could have done. What does the underlying pipeline, task, or step log actually say?
 
@@ -22,12 +22,12 @@ Before calling `report_incident`, verify:
 
 ### Temporal Drift Check
 
-Agent investigation takes time. The MR may have merged or the pipeline
+Agent investigation takes time. The MR/PR may have merged or the pipeline
 may have recovered during the investigation window.
 
 Before escalating, enter the verify phase (set_phase("verify")).
-This gives you refresh_gitlab_context to check live MR state.
-If the MR has merged or the pipeline has passed, the failure is
+This gives you refresh_gitlab_context to check live MR/PR state.
+If the MR/PR has merged or the pipeline has passed, the failure is
 self-resolved -- skip report_incident and close.
 
 ### Mandatory Triggers
@@ -45,7 +45,7 @@ Call `report_incident` (after investigation) when:
 Skip `report_incident` when:
 
 - The event resolved successfully (pipeline passed, MR/PR merged)
-- Your most recent refresh_gitlab_context (in verify phase) shows MR state is merged or closed
+- Your most recent refresh_gitlab_context (in verify phase) shows MR/PR state is merged or closed
 - Transient failure that resolved on retest
 - User-initiated (chat/slack) events
 
@@ -105,7 +105,7 @@ Close sequence for automated events with failures:
 
 0. `set_phase("verify")` -- refresh live state
 1. `refresh_gitlab_context` (headhunter events)
-2. If MR merged/pipeline passed: `set_phase("close")`, skip to step 6
+2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 6
 3. `set_phase("escalate")`
 4. `notify_user_slack` (each maintainer)
 5. `report_incident` -- you are here

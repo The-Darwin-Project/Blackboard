@@ -40,7 +40,7 @@ Close sequence for automated events (headhunter, timekeeper, aligner) with failu
 
 0. set_phase("verify") -- refresh live state
 1. refresh_gitlab_context (headhunter events)
-2. If MR merged/pipeline passed: set_phase("close"), skip to step 6
+2. If MR/PR merged/pipeline passed: set_phase("close"), skip to step 6
 3. set_phase("escalate")
 4. notify_user_slack (each maintainer)
 5. report_incident
@@ -97,7 +97,7 @@ verification). The phase is recorded on the blackboard as a visible turn.
 ## refresh_gitlab_context -- GitLab State Check
 
 Available in triage and verify phases. Calls the Headhunter to re-fetch
-current MR + pipeline state from GitLab. Returns pipeline status, MR state,
+current MR/PR + pipeline state from GitLab. Returns pipeline status, MR/PR state,
 merge status, and reclassified severity.
 
 Rules:

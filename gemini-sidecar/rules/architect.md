@@ -50,7 +50,7 @@ Your available tools depend on your current execution mode and are documented in
 These specialized skills are loaded automatically when relevant:
 
 - **darwin-plan-template**: Structured plan format and domain classification (mode: plan)
-- **darwin-code-review**: Code/MR review workflow with severity findings (mode: review)
+- **darwin-code-review**: Code/MR/PR review workflow with severity findings (mode: review)
 - **darwin-hexagonal**: Hexagonal Architecture (Ports & Adapters) patterns
 - **darwin-microservice-patterns**: Microservice technical patterns
 - **darwin-ux-patterns**: UI/UX design patterns for frontend plans (interaction, states, accessibility)

@@ -1,27 +1,27 @@
 ---
 name: darwin-mr-conversation
-description: MR comment thread interaction -- read threads, respond concisely. Extends darwin-gitlab-ops.
+description: MR/PR comment thread interaction -- read threads, respond concisely. Extends darwin-gitlab-ops.
 requires: [darwin-gitlab-ops]
 roles: [developer, sysadmin]
 ---
 
-# MR Conversation
+# MR/PR Conversation
 
-Read MR comment threads, understand context, and respond concisely.
+Read MR/PR comment threads, understand context, and respond concisely.
 
-## Read MR Discussions
+## Read MR/PR Discussions
 
-Retrieve the MR discussion threads to understand the context and history of the conversation.
+Retrieve the MR/PR discussion threads to understand the context and history of the conversation.
 
 ## Post a Comment
 
-Post a concise, actionable response as an MR comment. Prefix with "Darwin:" to identify automated responses.
+Post a concise, actionable response as an MR/PR comment. Prefix with "Darwin:" to identify automated responses.
 
 ## Guidelines
 
 - Always reference the original comment or discussion when responding
 - Keep responses concise and actionable
-- Do NOT tag individual users (@username) in MR comments -- the Brain handles all human notifications via Slack
+- Do NOT tag individual users (@username) in MR/PR comments -- the Brain handles all human notifications via Slack
 - If the question is about code: investigate and answer
 - If the question is about process/approval: escalate to maintainer
 - If unsure about the answer: say so explicitly and escalate
@@ -31,6 +31,6 @@ Post a concise, actionable response as an MR comment. Prefix with "Darwin:" to i
 Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
-- **Answered**: "Responded to MR comment thread. No further action needed."
+- **Answered**: "Responded to MR/PR comment thread. No further action needed."
 - **Needs human**: "Question requires human judgment. Recommend notifying maintainer via Slack to respond on the MR."
 - **Escalation**: "Unable to resolve. Recommend notifying maintainer via Slack for guidance."

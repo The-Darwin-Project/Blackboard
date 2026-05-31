@@ -1,15 +1,15 @@
 ---
 name: darwin-mr-lifecycle
-description: MR lifecycle operations -- pipeline check, retest, merge, conflict reporting. Extends darwin-gitlab-ops.
+description: MR/PR lifecycle operations -- pipeline check, retest, merge, conflict reporting. Extends darwin-gitlab-ops.
 requires: [darwin-gitlab-ops, darwin-pipelines-as-code]
 roles: [developer, sysadmin]
 ---
 
-# MR Lifecycle Operations
+# MR/PR Lifecycle Operations
 
-Handles the full MR lifecycle: check pipeline, retest, merge, and conflict reporting.
+Handles the full MR/PR lifecycle: check pipeline, retest, merge, and conflict reporting.
 
-CRITICAL: For the project path and MR URL, always use the values from the event
+CRITICAL: For the project path and MR/PR URL, always use the values from the event
 document's GitLab Context section.
 
 **Use the service tools only for aligner events or when a user asked**
@@ -20,13 +20,13 @@ When the pipeline failure requires a code/config fix (e.g., Dockerfile update, d
 
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
 - Apply the fix, commit, and push to the remote source branch.
-- The MR pipeline retriggers automatically on the push.
-- If the MR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
-- The purpose of MR pipelines is to validate changes BEFORE main. Merging untested fixes to main defeats this.
+- The MR/PR pipeline retriggers automatically on the push.
+- If the MR/PR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
+- The purpose of MR/PR pipelines is to validate changes BEFORE main. Merging untested fixes to main defeats this.
 
 ## Retest Pipeline
 
-To trigger a pipeline retest, post the appropriate PaC GitOps command as an MR comment. See the `darwin-pipelines-as-code` skill for command selection (e.g., `/retest` for transient failures, `/test` for full re-trigger).
+To trigger a pipeline retest, post the appropriate PaC GitOps command as an MR/PR comment. See the `darwin-pipelines-as-code` skill for command selection (e.g., `/retest` for transient failures, `/test` for full re-trigger).
 
 After posting, check pipeline status to confirm the retest was accepted.
 
@@ -46,10 +46,10 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 Before merging, perform these pre-merge checks IN ORDER:
 
 1. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to the Brain.
-2. **CI bot comments**: Read the last 5 MR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to the Brain.
+2. **CI bot comments**: Read the last 5 MR/PR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to the Brain.
 3. **Merge status**: Confirm `merge_status` is `can_be_merged`.
 
-Only merge when ALL three checks pass. Merge the MR via the GitLab API.
+Only merge when ALL three checks pass. Merge the MR/PR via the GitLab API.
 
 ## Safety Rules
 
@@ -66,27 +66,27 @@ If merge_status is `cannot_be_merged`:
 
 **For automated submodule MRs** (branch starts with `submodule-`, author is a bot):
 
-- This means a newer submodule update already merged to main. The MR is obsolete.
-- Close the MR with a comment explaining why (a newer submodule update has already been merged).
+- This means a newer submodule update already merged to main. The MR/PR is obsolete.
+- Close the MR/PR with a comment explaining why (a newer submodule update has already been merged).
 
 **For all other MRs:**
 
-- Post an MR comment describing the conflict (merge conflicts detected, manual rebase required).
+- Post an MR/PR comment describing the conflict (merge conflicts detected, manual rebase required).
 - In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
 ## Critical: No @mentions
 
-Do NOT tag individual users (`@username`) in MR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- the Brain handles all human notifications via Slack.
 
 ## Reporting Results
 
 Always end your response with a clear recommendation for the Brain.
 Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
 
-- **Merged**: "MR merged successfully."
+- **Merged**: "MR/PR merged successfully."
 - **Retest triggered (non-terminal)**: "Retest triggered, pipeline is running/pending. Pipeline outcome is not yet known."
 - **Pipeline running**: "Pipeline triggered, currently running."
 - **Failure**: "Pipeline still failing after retry. Recommend notifying maintainer with failure details."
 - **Merge blocked by CI**: "Cannot merge — CI bot reported warnings or pipeline has not run on HEAD. Details: {summary of CI comments}."
-- **Conflict (submodule)**: "Closed obsolete submodule MR -- newer update already merged to main."
+- **Conflict (submodule)**: "Closed obsolete submodule MR/PR -- newer update already merged to main."
 - **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer to rebase."

@@ -13,7 +13,7 @@ A PR is NOT complete until CI reports back.
 
 ## Terminal vs Non-Terminal Actions
 
-Some MR actions produce an immediate outcome (merge, close). Others start a process whose outcome is not yet known (retest, test). A triggered pipeline has no result yet — the result arrives later.
+Some MR/PR actions produce an immediate outcome (merge, close). Others start a process whose outcome is not yet known (retest, test). A triggered pipeline has no result yet — the result arrives later.
 
 Consider: if the pipeline outcome is unknown, is the event truly resolved?
 
@@ -23,7 +23,7 @@ An MR's CI bot comments are part of its state. A pipeline that passed on a previ
 
 The agent reports what it finds. If the agent reports a merge block, that finding has context worth considering.
 
-When multiple MRs are involved in one event, each MR has its own lifecycle and its own state.
+When multiple MRs are involved in one event, each MR/PR has its own lifecycle and its own state.
 
 ## CI Failure Routing
 

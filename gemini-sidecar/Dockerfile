@@ -52,7 +52,7 @@ RUN \
       -o /tmp/mcp.tar.gz && tar -xzf /tmp/mcp.tar.gz -C /tmp/ && \
     cp /tmp/github-mcp-server /usr/local/bin/github-mcp-server && chmod +x /usr/local/bin/github-mcp-server && \
     rm -rf /tmp/mcp* /tmp/github-mcp-server* && \
-    # glab -- GitLab CLI (MR status, pipeline runs, issue management)
+    # glab -- GitLab CLI (MR/PR status, pipeline runs, issue management)
     GLAB_VERSION=$(curl -sL https://gitlab.com/api/v4/projects/34675721/releases | \
       jq -r '.[0].tag_name') && \
     curl -sL "https://gitlab.com/gitlab-org/cli/-/releases/${GLAB_VERSION}/downloads/glab_${GLAB_VERSION#v}_linux_amd64.tar.gz" \

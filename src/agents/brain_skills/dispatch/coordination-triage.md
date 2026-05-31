@@ -14,7 +14,7 @@ When dispatching work to Developer or QE, use these rules.
 
 Use when the task is:
 
-- MR checks, status queries, or read-only investigation
+- MR/PR checks, status queries, or read-only investigation
 - Simple code changes, config tweaks, small fixes
 - Single write actions: post comment, merge MR, tag release
 - No new tests required; change is low-risk

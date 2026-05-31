@@ -8,9 +8,9 @@ requires:
 
 ## Data Available
 
-Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes domain classification, risk assessment, and step assignments. The GitLab context includes MR details, pipeline status, merge readiness, and maintainer contacts.
+Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes domain classification, risk assessment, and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts.
 
-The MR description may contain structured Bot Instructions with explicit success/failure actions -- follow them as written.
+The MR/PR description may contain structured Bot Instructions with explicit success/failure actions -- follow them as written.
 
 ## Routing
 
@@ -25,22 +25,22 @@ The embedded plan includes a domain classification -- treat it as a hypothesis, 
 - Any outcome requiring human action
 
 **When NOT to notify:**
-- MR already merged with successful pipeline — **self-resolved, close silently**
+- MR/PR already merged with successful pipeline — **self-resolved, close silently**
 - Routine successful merges — these create noise
 - Events where no human action is needed
 
-If the MR is already merged and the pipeline passed, close the event WITHOUT
+If the MR/PR is already merged and the pipeline passed, close the event WITHOUT
 notifying anyone. The maintainers do not need to know about routine success.
 
 ## Close Protocol
 
 Headhunter events are autonomous -- no user confirmation needed.
 
-Before closing, enter verify phase to check current MR state.
+Before closing, enter verify phase to check current MR/PR state.
 Investigation windows drift -- act on refreshed state, not triage state.
-If MR merged or closed: self-resolved, close without incident.
+If MR/PR merged or closed: self-resolved, close without incident.
 
-For pipeline failures where the MR is still open: the failure reason
+For pipeline failures where the MR/PR is still open: the failure reason
 must be known before escalating. Enter escalate phase, notify maintainers,
 create incident, then close.
 
@@ -68,12 +68,12 @@ If the event is already closed, a follow-up event is created
 automatically. The incident row in Smartsheet is the offline tracking
 artifact.
 
-For bot-authored MRs where the failure is non-recoverable: close the MR (the bot will create a fresh one). For human-authored MRs: leave the MR open.
+For bot-authored MRs where the failure is non-recoverable: close the MR/PR (the bot will create a fresh one). For human-authored MRs: leave the MR/PR open.
 
 ## Temporal Reasoning
 
 Headhunter events include three temporal signals: GitLab Event Age (when the
-pipeline/MR event actually happened), Event Created (when Headhunter observed
+pipeline/MR/PR event actually happened), Event Created (when Headhunter observed
 it), and Queue Wait (how long it sat before you processed it).
 
 Use temporal context with deep memory to inform your triage. If a pipeline
