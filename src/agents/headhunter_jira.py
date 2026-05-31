@@ -16,6 +16,8 @@
 # 11. [Pattern]: _get_active_jira_keys() mirrors GitLab headhunter's _get_active_mr_keys() for dedup.
 # 12. [Pattern]: Cold-start recovery: _find_bot_comment() reconstructs Redis state from existing comments.
 #     Capped at 10 comment checks per cycle to avoid Jira rate limits.
+# 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool), not text parsing.
+#     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
 """
 Headhunter Jira: polls Jira issues assigned to bot with a label filter.
 
@@ -81,30 +83,11 @@ Do NOT invent test code. Your output is a plan for the QE agent to follow, not i
 
 BRAIN_PLAN_SYSTEM_PROMPT = """You are a workflow planner for the Darwin autonomous operations system.
 
-Given an analysis of a Jira issue, produce a YAML execution plan that Darwin's Brain can track step-by-step.
-
-## Output Format (EXACT -- Brain parses this)
-
-```
----
-plan: "<one-line description>"
-service: <service-name>
-repository: <repo-url>
-domain: <CLEAR|COMPLICATED|COMPLEX>
-risk: <low|medium|high>
-steps:
-  - id: <short-kebab-id>
-    agent: <qe|developer|architect|sysAdmin>
-    mode: <investigate|test|implement|execute|review>
-    summary: "<what this step does>"
-    status: pending
-  - id: ...
----
-```
+Given an analysis of a Jira issue, produce a structured execution plan using the produce_execution_plan tool.
 
 ## Agent Roles
 
-- architect: code review, analysis, design assessment, plan creation (READ-ONLY -- cannot write files)
+- architect: code review, analysis, design assessment, plan creation (READ-ONLY)
 - developer: implementation, code changes, bug fixes, creating branches/MRs (WRITE access)
 - qe: testing, verification, running test suites, validating fixes (READ + EXECUTE tests)
 - sysAdmin: infrastructure, deployment, cluster operations, pipeline investigation
@@ -118,7 +101,41 @@ steps:
 - Use architect (not developer) for code review and analysis steps
 - Use developer only when the step requires writing/modifying code
 - Keep steps atomic -- one concern per step
-- Reference the Jira issue key and PR in relevant step summaries"""
+- Reference the Jira issue key in relevant step summaries"""
+
+
+# ---------------------------------------------------------------------------
+# Plan tool schema (function calling replaces text-based YAML parsing)
+# ---------------------------------------------------------------------------
+
+PLAN_TOOL_SCHEMA = {
+    "name": "produce_execution_plan",
+    "description": "Submit the structured execution plan for this Jira issue.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "plan": {"type": "string", "description": "One-line plan description"},
+            "service": {"type": "string", "description": "Service or component name"},
+            "repository": {"type": "string", "description": "Git repository URL"},
+            "domain": {"type": "string", "enum": ["CLEAR", "COMPLICATED", "COMPLEX"]},
+            "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Short kebab-case step ID"},
+                        "agent": {"type": "string", "enum": ["qe", "developer", "architect", "sysAdmin"]},
+                        "mode": {"type": "string", "enum": ["investigate", "test", "implement", "execute", "review"]},
+                        "summary": {"type": "string", "description": "What this step does"},
+                    },
+                    "required": ["id", "agent", "mode", "summary"],
+                },
+            },
+        },
+        "required": ["plan", "service", "repository", "domain", "risk", "steps"],
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -480,11 +497,13 @@ class HeadhunterJira:
         return "".join(chunks)
 
     async def _run_brain_plan(self, jira_content: str, analysis: str) -> str:
-        """Run Claude plan generation via streaming. Returns clean YAML plan text."""
+        """Run Claude plan generation via function calling. Returns clean YAML."""
         adapter = self._get_claude_adapter()
         if not adapter:
             raise RuntimeError("Claude adapter not available")
-        chunks: list[str] = []
+
+        text_chunks: list[str] = []
+        function_call = None
         async for chunk in adapter.generate_stream(
             system_prompt=BRAIN_PLAN_SYSTEM_PROMPT,
             contents=(
@@ -492,11 +511,45 @@ class HeadhunterJira:
                 f"Jira issue context:\n{jira_content}\n\n"
                 f"Approved validation plan:\n{analysis}"
             ),
+            tools=[PLAN_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": "produce_execution_plan"},
         ):
             if chunk.text:
-                chunks.append(chunk.text)
-        return self._extract_yaml("".join(chunks))
+                text_chunks.append(chunk.text)
+            if chunk.function_call:
+                function_call = chunk.function_call
 
+        if function_call and function_call.name == "produce_execution_plan":
+            return self._plan_args_to_yaml(function_call.args)
+
+        logger.warning("Claude did not use produce_execution_plan tool -- falling back to text parsing")
+        return self._extract_yaml("".join(text_chunks))
+
+    @staticmethod
+    def _plan_args_to_yaml(args: dict) -> str:
+        """Convert structured tool args to YAML plan format."""
+        import yaml
+        plan_doc = {
+            "plan": args.get("plan", ""),
+            "service": args.get("service", ""),
+            "repository": args.get("repository", ""),
+            "domain": args.get("domain", "COMPLICATED"),
+            "risk": args.get("risk", "medium"),
+            "steps": [
+                {
+                    "id": s.get("id", ""),
+                    "agent": s.get("agent", ""),
+                    "mode": s.get("mode", ""),
+                    "summary": s.get("summary", ""),
+                    "status": "pending",
+                }
+                for s in args.get("steps", [])
+            ],
+        }
+        return yaml.dump(plan_doc, default_flow_style=False, sort_keys=False).strip()
+
+    # TODO: Remove _extract_yaml() after 7 days of production monitoring confirms
+    # zero "did not use produce_execution_plan tool" warnings in logs.
     @staticmethod
     def _extract_yaml(raw: str) -> str:
         """Strip markdown code fences and prose preamble from LLM YAML output."""

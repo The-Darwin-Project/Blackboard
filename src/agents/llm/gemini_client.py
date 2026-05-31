@@ -210,6 +210,7 @@ class GeminiAdapter:
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
         thinking_level: str = "",
+        tool_choice: dict | None = None,
     ) -> LLMResponse:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 
@@ -253,6 +254,7 @@ class GeminiAdapter:
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
         thinking_level: str = "",
+        tool_choice: dict | None = None,
     ) -> AsyncIterator[LLMChunk]:
         config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
 

@@ -7,6 +7,7 @@
 # 5. [Pattern]: Uses AsyncAnthropicVertex for Vertex AI authentication (same SA key as Brain).
 # 6. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 7. [Pattern]: Structured contents map: model->assistant, functionCall->tool_use, functionResponse->tool_result.
+# 8. [Pattern]: tool_choice flows through _build_kwargs -> API kwargs. Only sent when tools are present.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
@@ -47,6 +48,7 @@ class ClaudeAdapter:
         tools: list[dict] | None,
         temperature: float,
         max_output_tokens: int,
+        tool_choice: dict | None = None,
     ) -> dict:
         """Build kwargs dict for messages.create / messages.stream."""
         messages = self._convert_contents(contents)
@@ -61,6 +63,8 @@ class ClaudeAdapter:
             kwargs["system"] = system_prompt
         if tools is not None:
             kwargs["tools"] = self._convert_tools(tools)
+            if tool_choice:
+                kwargs["tool_choice"] = tool_choice
 
         return kwargs
 
@@ -199,10 +203,11 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        tool_choice: dict | None = None,
     ) -> LLMResponse:
         # Normalize temperature: 0.0-2.0 -> 0.0-1.0. Drop top_p (Claude rejects both).
         claude_temp = min(temperature / 2.0, 1.0)
-        kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens)
+        kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
 
         message = await self._client.messages.create(**kwargs)
 
@@ -229,9 +234,10 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        tool_choice: dict | None = None,
     ) -> AsyncIterator[LLMChunk]:
         claude_temp = min(temperature / 2.0, 1.0)
-        kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens)
+        kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
 
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:

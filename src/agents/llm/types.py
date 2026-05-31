@@ -63,6 +63,7 @@ class LLMPort(Protocol):
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
         thinking_level: str = "",
+        tool_choice: dict | None = None,
     ) -> LLMResponse: ...
 
     async def generate_stream(
@@ -74,6 +75,7 @@ class LLMPort(Protocol):
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
         thinking_level: str = "",
+        tool_choice: dict | None = None,
     ) -> AsyncIterator[LLMChunk]: ...
 
 
