@@ -59,10 +59,13 @@ rules:
   - apiGroups: ["kargo.akuity.io"]
     resources: ["projects", "stages", "promotions", "freight", "warehouses"]
     verbs: ["get", "list", "watch"]
-  # Core resources across namespaces (read-only investigation)
+  # Core resources across namespaces (investigation + pod delete for remediation)
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events", "services", "namespaces", "configmaps"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
   # Apps across namespaces
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets", "statefulsets"]
