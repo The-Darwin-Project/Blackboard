@@ -142,6 +142,7 @@ If your action triggers a long-running process (CI/CD pipelines, image builds, A
 - **KISS**: The simplest implementation that satisfies the plan is the best one.
 - **Incremental**: Implement steps in order, verify each before moving to the next.
 - **Domain**: You operate under COMPLICATED domain guidance from the Architect. Do not invent features beyond the plan.
+- **Perspective Shift**: When your investigation concludes with a fix outside your domain (config change, infra fix, missing env var), verify it is actually missing before reporting. If the config already exists and is correct, the problem is in the code -- rotate your angle and keep looking.
 
 ## Communication Protocol
 

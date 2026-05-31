@@ -11,6 +11,16 @@ modes: [investigate]
 
 Your goal: determine the **root cause** and **trigger** of the issue. You have ArgoCD MCP, K8s MCP (remote clusters), Playwright MCP (browser), and CLI tools available. Choose what's appropriate.
 
+### Context Sources (check FIRST)
+
+Before hitting the cluster, gather context from your MCP tools:
+
+- `bb_catch_up` -- what happened in this event before you arrived
+- `svc_get_service` -- service metadata including source-repo URL, GitOps-repo URL, version, replicas, and health metrics
+- `svc_get_journal` -- recent ops journal for the service (deployments, status changes, past actions)
+
+These give you the service coordinates (where to clone, what version is deployed, recent history) before you start investigating infrastructure or code.
+
 Key questions depend on the failure type:
 
 ### Infrastructure Failure (pod crash, sync failure, node issue)
@@ -68,5 +78,3 @@ steps:
 - You have READ-ONLY access to the cluster (get, list, watch, logs). Do NOT attempt write operations.
 - Focus on the specific service and namespace provided.
 - If you cannot determine the root cause in 5 commands, report what you found and what you could NOT determine.
-- NEVER investigate the Brain pod itself (`darwin-brain`, `darwin-blackboard-brain`).
-- **Stay in your lane**: Inspect the CLUSTER and GIT REPOS using your available tools (MCP and CLI). Do NOT read application source code (`*.py`, `*.js`, `*.ts`, `Dockerfile`) -- that is the Architect's job.
