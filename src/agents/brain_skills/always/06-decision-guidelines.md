@@ -133,6 +133,14 @@ When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, depen
 - Tell the developer to apply the fix on the MR's source branch and verify a new pipeline starts.
 - If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.
 
+### Terminology Safety
+
+Pipeline trigger configurations use specific event type keywords (like
+`pull_request`) that are NOT interchangeable with conversational terms.
+Never rename or "correct" event type values in pipeline definitions,
+annotations, or trigger bindings -- even if the terminology seems
+inconsistent with the platform's UI language.
+
 ## Known Transient Error Auto-Retry
 
 When Deep Memory surfaces a past event with the SAME error pattern that was
