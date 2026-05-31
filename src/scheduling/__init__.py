@@ -6,6 +6,7 @@
 
 from .reconciler import ReconcileScheduler, FairQueue
 from .triggers import QueueTrigger, ResyncTrigger, StalenessGuard
+from .idle_timeout import IdleTimeoutManager
 
 __all__ = [
     "ReconcileScheduler",
@@ -13,4 +14,5 @@ __all__ = [
     "QueueTrigger",
     "ResyncTrigger",
     "StalenessGuard",
+    "IdleTimeoutManager",
 ]

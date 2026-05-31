@@ -18,6 +18,7 @@ export type EventStatus =
   | 'active'
   | 'waiting_approval'
   | 'deferred'
+  | 'on_ice'
   | 'resolved'
   | 'closed';
 

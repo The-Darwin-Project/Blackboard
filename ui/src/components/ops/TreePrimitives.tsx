@@ -4,7 +4,7 @@
 // 2. [Constraint]: Pure presentational. No data fetching, no context access.
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
 import { useState, type ReactNode } from 'react';
-import { ChevronRight, Bot, Radio, Bell, StickyNote } from 'lucide-react';
+import { ChevronRight, Bot, Radio, Bell, StickyNote, Snowflake } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 
@@ -56,6 +56,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
 }) {
   const sc = STATUS_COLORS[evt.status];
   const isWaiting = evt.status === 'waiting_approval';
+  const isOnIce = evt.status === 'on_ice';
   return (
     <div className={`flex items-center gap-2 px-3 py-1 rounded text-[14px] cursor-pointer transition-colors ${
       isSelected ? 'bg-accent/15 border border-accent/30'
@@ -73,7 +74,10 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
       {isWaiting && (
         <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
       )}
-      {!isWaiting && (evt.unread_notes ?? 0) > 0 && (
+      {isOnIce && (
+        <Snowflake size={14} className="text-slate-400 flex-shrink-0" />
+      )}
+      {!isWaiting && !isOnIce && (evt.unread_notes ?? 0) > 0 && (
         <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
       )}
       {evt.current_agent && (

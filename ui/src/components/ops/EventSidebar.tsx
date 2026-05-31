@@ -8,9 +8,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
+import { useActiveEvents, useOnIceEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
@@ -90,6 +90,7 @@ export default function EventSidebar() {
 
   // Data sources
   const { data: activeEvents } = useActiveEvents();
+  const { data: onIceEvents } = useOnIceEvents();
   const { data: closedEvents } = useQuery({
     queryKey: ['closedEvents'],
     queryFn: () => getClosedEvents(20),
@@ -130,6 +131,7 @@ export default function EventSidebar() {
   const activeEvts = events.filter(e => e.status === 'active' || e.status === 'new');
   const waitingEvts = events.filter(e => e.status === 'waiting_approval');
   const deferredEvts = events.filter(e => e.status === 'deferred');
+  const onIceEvts = isDemoMode ? [] : (onIceEvents || []);
   const isMockEvent = isDemoMode && selectedEventId?.startsWith('evt-demo');
 
   return (
@@ -247,6 +249,20 @@ export default function EventSidebar() {
               {deferredEvts.length > 0 && (
                 <TreeGroup icon={<Clock size={13} />} label="Deferred" count={deferredEvts.length} nested>
                   {deferredEvts.map(evt => (
+                    <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
+                      onClick={() => selectEvent(evt.id)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setCtxMenu({ x: e.clientX, y: e.clientY, items: eventMenuItems(evt, selectEvent, send, connected) });
+                      }}
+                    />
+                  ))}
+                </TreeGroup>
+              )}
+              {onIceEvts.length > 0 && (
+                <TreeGroup icon={<Snowflake size={13} />} label="On Ice" count={onIceEvts.length} nested
+                  countColor="#475569" forceCollapsed>
+                  {onIceEvts.map(evt => (
                     <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
                       onClick={() => selectEvent(evt.id)}
                       onContextMenu={(e) => {

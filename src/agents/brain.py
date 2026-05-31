@@ -5,7 +5,7 @@
 # 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
 # 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
-# 5. [Gotcha]: _waiting_for_user is cleared by main.py WS handler AND queue.py REST endpoints (clear_waiting), not by Brain internally.
+# 5. [Gotcha]: _waiting_for_user (dict[str,float]: event_id -> wait_start_timestamp) is cleared by main.py WS handler AND queue.py REST endpoints (clear_waiting), not by Brain internally.
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
 # 8. [Pattern]: _event_to_markdown is @staticmethod -- called from both instance methods and queue.py report endpoint.
@@ -396,8 +396,14 @@ class Brain:
         self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Per-event locks -- prevents concurrent process_event calls for same event
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-        # Wait-for-user state: events where LLM called wait_for_user
-        self._waiting_for_user: set[str] = set()
+        # Wait-for-user state: event_id -> wait_start_timestamp (serves idle timeout + on-ice threshold)
+        self._waiting_for_user: dict[str, float] = {}
+        # Idle timeout manager for chat/slack events (warn + auto-close)
+        from ..scheduling.idle_timeout import IdleTimeoutManager
+        self._idle_timeout = IdleTimeoutManager(
+            warn_callback=self._idle_timeout_warn,
+            close_callback=self._idle_timeout_close,
+        )
         self._waiting_for_agent: dict[str, str] = {}  # event_id -> agent_name
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
@@ -1301,7 +1307,8 @@ class Brain:
             await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
             self._last_processed[event_id] = time.time()
             if event.source in ("slack", "chat"):
-                self._waiting_for_user.add(event_id)
+                self._waiting_for_user[event_id] = time.time()
+                self._idle_timeout.schedule(event_id)
 
         self._reasoning_by_event.pop(event_id, None)
         if accumulated_text or accumulated_thoughts:
@@ -2718,7 +2725,7 @@ class Brain:
 
         elif function_name == "request_user_approval":
             plan_summary = args.get("plan_summary", "")
-            self._waiting_for_user.add(event_id)  # Block re-processing until user responds
+            self._waiting_for_user[event_id] = time.time()  # Block re-processing until user responds
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -2736,6 +2743,8 @@ class Brain:
                     f"{self.blackboard.EVENT_PREFIX}{event_id}",
                     json.dumps(event.model_dump()),
                 )
+                if event.source in ("slack", "chat"):
+                    self._idle_timeout.schedule(event_id)
             return False
 
         elif function_name == "re_trigger_aligner":
@@ -2890,7 +2899,7 @@ class Brain:
 
         elif function_name == "wait_for_user":
             summary = args.get("summary", "")
-            self._waiting_for_user.add(event_id)  # State flag (plumbing)
+            self._waiting_for_user[event_id] = time.time()  # State flag (plumbing)
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -2899,6 +2908,9 @@ class Brain:
                 waitingFor="user",
             )
             await self._append_and_broadcast(event_id, turn)
+            event = await self.blackboard.get_event(event_id)
+            if event and event.source in ("slack", "chat"):
+                self._idle_timeout.schedule(event_id)
             return False
 
         elif function_name == "wait_for_agent":
@@ -4820,8 +4832,20 @@ class Brain:
 
     def clear_waiting(self, event_id: str) -> None:
         """Clear the wait_for_user state for an event (called when user responds)."""
-        self._waiting_for_user.discard(event_id)
+        self._waiting_for_user.pop(event_id, None)
+        self._idle_timeout.cancel(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
+
+    async def thaw_if_frozen(self, event_id: str) -> bool:
+        """Thaw an on_ice event back to active. Returns True if thawed."""
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.status != EventStatus.ON_ICE:
+            return False
+        await self.blackboard.thaw_event(event_id)
+        if self._scheduler:
+            self._scheduler.enqueue(event_id)
+        logger.info(f"Thawed on_ice event {event_id} -- re-enqueued")
+        return True
 
     def register_channel(self, channel_broadcast: BroadcastPort) -> None:
         """Register an additional broadcast target (e.g., Slack, Dashboard WS)."""
@@ -4852,7 +4876,7 @@ class Brain:
         No force-close -- the human decides what to do.
         """
         idle_min = int(idle_seconds // 60)
-        self._waiting_for_user.add(event_id)
+        self._waiting_for_user[event_id] = time.time()
 
         email = None
         evidence = event.event.evidence
@@ -4969,7 +4993,8 @@ class Brain:
                     logger.warning(f"Deep memory archive failed (non-fatal): {e}")
         # Clean up all per-event state to prevent memory leaks
         self._routing_depth.pop(event_id, None)
-        self._waiting_for_user.discard(event_id)
+        self._waiting_for_user.pop(event_id, None)
+        self._idle_timeout.cancel(event_id)
         self._waiting_for_agent.pop(event_id, None)
         self._clear_jarvis_wait(event_id)
         self._jarvis_wait_count.pop(event_id, None)
@@ -5432,6 +5457,12 @@ class Brain:
             interval=60.0,
             name="chat",
         ))
+        self._scheduler.register_trigger(StalenessGuard(
+            check_fn=self._check_on_ice_staleness,
+            on_stale=self._freeze_stale_event,
+            interval=120.0,
+            name="on_ice",
+        ))
 
         logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
         await self._scheduler.start()
@@ -5635,12 +5666,73 @@ class Brain:
     async def _close_stale_chat_event(self, event_id: str) -> None:
         """Close a stale chat/slack event that exceeded its approval TTL."""
         logger.warning(f"StalenessGuard[chat]: closing stale chat event {event_id}")
-        self._waiting_for_user.discard(event_id)
+        self._waiting_for_user.pop(event_id, None)
         await self._close_and_broadcast(
             event_id,
             summary="Chat session timed out waiting for user approval",
             close_reason="timeout",
         )
+
+    async def _idle_timeout_warn(self, event_id: str) -> None:
+        """Send idle timeout warning to user (Slack thread or dashboard turn)."""
+        event = await self.blackboard.get_event(event_id)
+        if not event:
+            return
+        warning_text = "If nothing else is needed, I'll close this in 5 minutes."
+        if event.source == "slack" and event.slack_channel_id and event.slack_thread_ts:
+            slack_channel = self._get_slack_channel()
+            if slack_channel:
+                try:
+                    await slack_channel._app.client.chat_postMessage(
+                        channel=event.slack_channel_id,
+                        thread_ts=event.slack_thread_ts,
+                        text=f":hourglass: {warning_text}",
+                    )
+                    logger.info(f"Idle timeout warning posted to Slack thread for {event_id}")
+                    return
+                except Exception as e:
+                    logger.warning(f"Slack idle warning failed for {event_id}, falling back to turn: {e}")
+        turn = ConversationTurn(
+            turn=(await self._next_turn_number(event_id)),
+            actor="brain",
+            action="response",
+            thoughts=warning_text,
+        )
+        await self._append_and_broadcast(event_id, turn)
+        logger.info(f"Idle timeout warning turn for {event_id}")
+
+    async def _idle_timeout_close(self, event_id: str) -> None:
+        """Auto-close event after idle timeout (with race guard)."""
+        if event_id not in self._waiting_for_user:
+            logger.info(f"Idle timeout close aborted for {event_id}: no longer waiting")
+            return
+        logger.warning(f"Idle timeout: auto-closing {event_id}")
+        self._waiting_for_user.pop(event_id, None)
+        await self._close_and_broadcast(
+            event_id,
+            summary="Automatically closed after idle timeout (no user response).",
+            close_reason="idle_timeout",
+        )
+
+    async def _check_on_ice_staleness(self, event_id: str) -> bool:
+        """Check if an automated event has been waiting_for_user beyond ON_ICE_THRESHOLD."""
+        if event_id not in self._waiting_for_user:
+            return False
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.source in ("chat", "slack"):
+            return False
+        wait_start = self._waiting_for_user.get(event_id)
+        if wait_start is None:
+            return False
+        threshold = int(os.getenv("ON_ICE_THRESHOLD_SEC", "14400"))
+        return (time.time() - wait_start) > threshold
+
+    async def _freeze_stale_event(self, event_id: str) -> None:
+        """Freeze an automated event that exceeded ON_ICE_THRESHOLD."""
+        logger.warning(f"StalenessGuard[on_ice]: freezing event {event_id}")
+        await self.blackboard.freeze_event(event_id)
+        self._waiting_for_user.pop(event_id, None)
+        self._release_task_state(event_id)
 
     # =========================================================================
     # Helpers

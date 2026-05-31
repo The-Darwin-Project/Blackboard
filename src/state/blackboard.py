@@ -1276,6 +1276,7 @@ class BlackboardState:
     EVENT_QUEUE = "darwin:queue"
     EVENT_PREFIX = "darwin:event:"
     EVENT_ACTIVE = "darwin:event:active"
+    EVENT_ON_ICE = "darwin:event:on_ice"
     EVENT_CLOSED = "darwin:event:closed"
     # AGENT_NOTIFY_PREFIX removed -- WebSocket replaces Redis agent notifications
 
@@ -1823,6 +1824,63 @@ class BlackboardState:
         await self.redis.srem(self.EVENT_ACTIVE, event_id)
         await self.redis.zadd(self.EVENT_CLOSED, {event_id: time.time()})
         logger.info(f"Closed event: {event_id}")
+
+    # =========================================================================
+    # On Ice (freeze/thaw for automated wait_for_user events)
+    # =========================================================================
+
+    async def freeze_event(self, event_id: str) -> None:
+        """Move event from active to on_ice set + update status atomically."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"freeze_event: {event_id} not found")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    if event.status == EventStatus.ON_ICE:
+                        return  # Already frozen, idempotent
+                    event.status = EventStatus.ON_ICE
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.srem(self.EVENT_ACTIVE, event_id)
+                    pipe.sadd(self.EVENT_ON_ICE, event_id)
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.info(f"Froze event: {event_id} (on_ice)")
+
+    async def thaw_event(self, event_id: str) -> None:
+        """Move event from on_ice back to active set + update status atomically."""
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"thaw_event: {event_id} not found")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    event.status = EventStatus.ACTIVE
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.srem(self.EVENT_ON_ICE, event_id)
+                    pipe.sadd(self.EVENT_ACTIVE, event_id)
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.info(f"Thawed event: {event_id} (active)")
+
+    async def get_on_ice_events(self) -> list[str]:
+        """Return all event IDs in the on_ice set."""
+        return [eid.decode() if isinstance(eid, bytes) else eid
+                for eid in await self.redis.smembers(self.EVENT_ON_ICE)]
 
     # =========================================================================
     # Slack Thread Mapping (reverse index for DM thread replies)

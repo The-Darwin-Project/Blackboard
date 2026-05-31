@@ -250,6 +250,7 @@ class EventStatus(str, Enum):
     ACTIVE = "active"
     WAITING_APPROVAL = "waiting_approval"
     DEFERRED = "deferred"
+    ON_ICE = "on_ice"
     RESOLVED = "resolved"
     CLOSED = "closed"
 

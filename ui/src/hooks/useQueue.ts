@@ -10,7 +10,7 @@
  * - Polling safety net (10s) to catch missed WS messages
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getEventDocument, getHeadhunterPending } from '../api/client';
+import { getActiveEvents, getOnIceEvents, getEventDocument, getHeadhunterPending } from '../api/client';
 import type { ActiveEvent } from '../api/types';
 
 export function useActiveEvents() {
@@ -20,6 +20,15 @@ export function useActiveEvents() {
     // 10s polling safety net: catches ghost events when WS event_closed was
     // sent to a dead connection (e.g., page refresh during active processing).
     refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useOnIceEvents() {
+  return useQuery({
+    queryKey: ['onIceEvents'],
+    queryFn: getOnIceEvents,
+    refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });
 }

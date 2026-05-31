@@ -70,7 +70,7 @@ def _make_brain_with_event(
 ) -> MagicMock:
     """Build a minimal Brain mock exposing only what _check_chat_staleness needs."""
     brain = MagicMock()
-    brain._waiting_for_user = {event.id} if in_waiting_for_user else set()
+    brain._waiting_for_user = {event.id: time.time()} if in_waiting_for_user else {}
     brain.blackboard = MagicMock()
     brain.blackboard.get_event = AsyncMock(return_value=event)
     brain._close_and_broadcast = AsyncMock()

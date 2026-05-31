@@ -83,6 +83,31 @@ async def list_active_events(
     return events
 
 
+@router.get("/on_ice")
+async def list_on_ice_events(
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Get all on-ice event IDs with basic metadata."""
+    event_ids = await blackboard.get_on_ice_events()
+    events = []
+    for eid in event_ids:
+        event = await blackboard.get_event(eid)
+        if event:
+            events.append({
+                "id": event.id,
+                "source": event.source,
+                "service": event.service,
+                "subject_type": getattr(event, "subject_type", "service"),
+                "status": event.status.value,
+                "reason": event.event.reason,
+                "evidence": _serialize_evidence(event),
+                "turns": len(event.conversation),
+                "created": event.event.timeDate,
+                "created_by_email": event.created_by_email,
+            })
+    return events
+
+
 @router.get("/{event_id}/turns")
 async def get_event_turns(
     event_id: str,
@@ -203,6 +228,7 @@ async def approve_event(
     try:
         brain = await get_brain()
         brain.clear_waiting(event_id)
+        await brain.thaw_if_frozen(event_id)
     except RuntimeError:
         pass  # Brain not initialized (unlikely in normal operation)
 
@@ -243,6 +269,7 @@ async def reject_event(
     try:
         brain = await get_brain()
         brain.clear_waiting(event_id)
+        await brain.thaw_if_frozen(event_id)
     except RuntimeError:
         pass  # Brain not initialized (unlikely in normal operation)
 
