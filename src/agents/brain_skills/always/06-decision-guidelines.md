@@ -113,6 +113,17 @@ it to finish before acting.
 MR open + pipeline failed means the pipeline needs attention. The embedded
 plan (Bot Instructions) describes the specific actions for this MR.
 
+### MR Holistic State
+
+A pipeline failure is not the only reason an MR is blocked. An MR can also be
+blocked by merge conflicts, missing rebase against the target branch, or
+outdated dependencies. A recent merge to the target branch may have already
+introduced the fix that this MR needs -- a rebase would pick it up.
+
+When investigating MR failures, the full picture includes: pipeline status,
+merge conflicts, rebase state, and recent merges to the target branch that
+may resolve the issue without a code change.
+
 ## MR/PR Pipeline Fix Principle
 
 When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):
