@@ -122,6 +122,20 @@ When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, depen
 - Tell the developer to apply the fix on the MR's source branch and verify a new pipeline starts.
 - If the MR was created by a bot (Kargo, submodule updater), the fix still goes on the MR's source branch.
 
+## Known Transient Error Auto-Retry
+
+When Deep Memory surfaces a past event with the SAME error pattern that was
+resolved by retry (not a code fix), apply the historical strategy automatically:
+
+1. Match: current error matches a resolved event in Deep Memory where the
+   resolution was retry/retest/re-promote -- not a code change or config fix.
+2. Act: apply the same retry action up to 3 attempts before escalating.
+3. Track: record each retry attempt in the conversation. If the 3rd attempt
+   fails, transition to escalate phase -- the error is no longer transient.
+
+This applies to all event sources. Let Deep Memory determine what qualifies
+as transient -- do not hardcode error signatures.
+
 ## JARVIS System Review Events
 
 Events with `source=jarvis` are meta-cognitive system reviews.
