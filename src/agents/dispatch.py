@@ -3,7 +3,8 @@
 # 1. [Constraint]: Security check (FORBIDDEN_PATTERNS) is the FIRST thing -- before any WS send. Single enforcement point.
 # 2. [Pattern]: Queue loop reads progress/partial_result/huddle_message/result/error/_error_sentinel from TaskBridge.
 # 3. [Pattern]: agent_id parameter enables session affinity (follow-up rounds route to same agent).
-# 4. [Pattern]: Retryable errors return ("__RETRYABLE__", None) sentinel. Caller (Brain) defers the event.
+# 4. [Pattern]: Retryable errors return ("__RETRYABLE__", None) sentinel ONLY if no partial_result exists.
+#    If partial_result was already captured, return it instead -- the agent recovered from the transient error.
 # 5. [Constraint]: finally block: mark_idle only if sidecar accepted the task (accepted flag).
 #    If rejected, restore previous agent state. delete_queue always runs.
 # 6. [Pattern]: consume_wake_task mirrors the receive loop but skips queue creation + task send. Queue pre-created by WS handler.
@@ -190,6 +191,12 @@ async def dispatch_to_agent(
             elif msg_type == "error":
                 error_msg = msg.get("error", msg.get("message", "Unknown error"))
                 if msg.get("retryable"):
+                    if latest_callback_result:
+                        logger.info(
+                            "Retryable error from %s [%s] but partial_result exists (%d chars), returning it",
+                            role, event_id, len(latest_callback_result),
+                        )
+                        return latest_callback_result, returned_session_id
                     logger.warning("Retryable error from %s [%s]: %s", role, event_id, error_msg)
                     return RETRYABLE_SENTINEL, None
                 return f"Error: {error_msg}", returned_session_id
@@ -288,6 +295,12 @@ async def consume_wake_task(
             elif msg_type == "error":
                 error_msg = msg.get("error", msg.get("message", "Unknown error"))
                 if msg.get("retryable"):
+                    if latest_callback_result:
+                        logger.info(
+                            "Retryable wake error from %s [%s] but partial_result exists (%d chars), returning it",
+                            role, event_id, len(latest_callback_result),
+                        )
+                        return latest_callback_result, returned_session_id
                     logger.warning("Retryable wake error from %s [%s]: %s", role, event_id, error_msg)
                     return RETRYABLE_SENTINEL, None
                 return f"Error: {error_msg}", returned_session_id
