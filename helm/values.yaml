@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "d985f0b" # Updated by CI to commit SHA
+  tag: "4f594e6" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -442,8 +442,8 @@ timekeeper:
 # Idle Timeout (auto-close stale chat/slack events after user inactivity)
 # =============================================================================
 idleTimeout:
-  warningSec: "600"   # 10 min -- warning message sent to user
-  closeSec: "300"     # 5 min after warning -- auto-close if no response
+  warningSec: "600" # 10 min -- warning message sent to user
+  closeSec: "300" # 5 min after warning -- auto-close if no response
 # =============================================================================
 # On Ice (freeze automated events stuck in wait_for_user)
 # =============================================================================
