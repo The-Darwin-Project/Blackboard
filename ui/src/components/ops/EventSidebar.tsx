@@ -156,7 +156,8 @@ export default function EventSidebar() {
           }>
             <div className="px-0.5">
             {/* Agents Group */}
-            <TreeGroup icon={<Bot size={16} />} label="Agents" count={registeredAgents.length}
+            <TreeGroup icon={<Bot size={16} />} label="Agents"
+              count={AGENTS.length + registeredAgents.filter(a => a.ephemeral).length}
               countColor={registeredAgents.some(a => a.busy) ? '#22c55e' : '#64748b'}
               forceCollapsed={!!selectedEventId}>
               {AGENTS.map(name => {
@@ -186,6 +187,35 @@ export default function EventSidebar() {
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(name, reg, setHotspot) });
+                    }}
+                  />
+                );
+              })}
+              {/* OnCall (ephemeral) agents */}
+              {registeredAgents.filter(a => a.ephemeral).map(a => {
+                const displayRole = a.current_role || a.role || 'oncall';
+                const color = ACTOR_COLORS[displayRole] || '#8b5cf6';
+                return (
+                  <TreeNode key={a.agent_id}
+                    icon={
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                          style={{
+                            background: a.busy ? '#8b5cf6' : '#8b5cf680',
+                            boxShadow: a.busy ? '0 0 6px #8b5cf680' : 'none',
+                            transition: 'all 0.3s',
+                          }} />
+                        <Bot size={14} style={{ color }} />
+                      </span>
+                    }
+                    label={`${displayRole}`}
+                    labelColor={color}
+                    sublabel={a.bound_event_id?.slice(4, 16) || (a.busy ? 'working' : 'idle')}
+                    sublabelColor={a.busy ? '#8b5cf6' : undefined}
+                    onClick={() => a.bound_event_id && selectEvent(a.bound_event_id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(displayRole, a, setHotspot) });
                     }}
                   />
                 );
