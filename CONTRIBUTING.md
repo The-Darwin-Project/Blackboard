@@ -56,14 +56,27 @@ The Vite dev server starts on port 5174 with hot reload.
 
 ### 5. Build the sidecar image (optional)
 
-The sidecar image contains all agent CLIs (Gemini, Claude, kubectl, oc, argocd, etc.). Only needed if modifying sidecar code.
+The sidecar image contains all agent CLIs (Gemini, Claude, kubectl, oc, argocd, kargo, tkn, helm, gh, glab) plus MCP servers and Playwright/Chromium. Only needed when modifying `gemini-sidecar/` code or testing agent dispatch locally.
 
 ```bash
 cd gemini-sidecar
-docker build -t darwin-sidecar .
+docker build -t darwin-sidecar:local .
+# or: podman build -t darwin-sidecar:local .
 ```
 
-The sidecar Dockerfile is large (~170 lines) because it installs multiple CLIs, MCP servers, and Playwright/Chromium. Build time is ~10 minutes on first run.
+Run a sidecar against a local Brain (reverse WS mode):
+
+```bash
+export AGENT_WS_MODE=reverse
+export BRAIN_WS_URL=ws://localhost:8000/agent/ws
+export AGENT_ROLE=developer
+export AGENT_PORT=9093
+node server.js
+```
+
+The sidecar Dockerfile is large (~170 lines) because it installs multiple CLIs and browser dependencies. First build takes ~10 minutes. CI builds and pushes to GHCR via `.github/workflows/build-gemini-sidecar.yaml`.
+
+Agent rules live in `gemini-sidecar/rules/` (architect, developer, sysadmin, qe). Skills live in `gemini-sidecar/skills/` (26 skills, role/mode filtered).
 
 ### Common targets
 
@@ -86,6 +99,10 @@ python -m pytest tests/ -v
 
 # Specific test file
 python -m pytest tests/test_brain_progressive_skills.py -v
+
+# Specific test areas
+python -m pytest tests/test_headhunter_jira.py -v   # Jira QE mission head
+python -m pytest tests/test_trusted_proxy_auth.py -v  # BFF trusted-proxy auth
 
 # UI lint
 cd ui && npm run lint
@@ -133,16 +150,32 @@ The Dockerfiles use Red Hat UBI 9 base images (`registry.access.redhat.com/ubi9/
 
 The sidecar Dockerfile downloads `latest` for all CLI tools (kubectl, oc, argocd, kargo, tkn, helm, etc.). This is intentional -- agents need current CLI versions to work with real clusters. This is a design decision, not an oversight.
 
+## Documentation Maintenance
+
+When changing code, update the corresponding living doc:
+
+| Change area | Update |
+| :--- | :--- |
+| New/changed REST or WS route | `docs/api-reference.md` |
+| New agent, sidecar, or observer | `docs/agents.md`, `docs/architecture.md` mermaid |
+| New Helm value or env var | `docs/deployment.md`, `helm/README.md` integrations table |
+| New brain skill phase or file | `docs/brain-skills.md` |
+| New Dashboard page | `ui/README.md` |
+
+See [docs/TABLE-OF-CONTENTS.md](docs/TABLE-OF-CONTENTS.md) for the full doc index.
+
 ## Documentation Structure
 
 | Document | Content |
-|:---|:---|
+| :--- | :--- |
 | [README.md](README.md) | Project overview and quick start |
-| [docs/architecture.md](docs/architecture.md) | Architecture, WebSocket protocol, safety model |
-| [docs/agents.md](docs/agents.md) | Agent system, sidecars, skills, MCP servers |
+| [docs/TABLE-OF-CONTENTS.md](docs/TABLE-OF-CONTENTS.md) | Full documentation index |
+| [docs/architecture.md](docs/architecture.md) | Architecture, WebSocket protocol, Cortex/JARVIS, safety model |
+| [docs/agents.md](docs/agents.md) | Agent system (9 specialists), sidecars, skills, MCP servers |
 | [docs/api-reference.md](docs/api-reference.md) | All REST and WebSocket API endpoints |
 | [docs/deployment.md](docs/deployment.md) | Environment variables, Helm deployment |
 | [docs/brain-skills.md](docs/brain-skills.md) | Progressive skill system, phases, configuration |
+| [ui/README.md](ui/README.md) | Dashboard pages and components |
 | [helm/README.md](helm/README.md) | Helm chart installation and values |
 
 ## Questions?

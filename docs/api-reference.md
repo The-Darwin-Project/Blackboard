@@ -43,8 +43,9 @@ POST /chat/
 
 ```text
 GET  /queue/active                    # List active events with metadata
+GET  /queue/on_ice                    # Events frozen after prolonged wait_for_user (automated sources)
 GET  /queue/{event_id}                # Full event document with conversation
-GET  /queue/{event_id}/turns          # Paginated conversation turns
+GET  /queue/{event_id}/turns          # Paginated conversation turns (optional ?role=, ?since=)
 GET  /queue/{event_id}/report         # Generated markdown report for an event
 POST /queue/{event_id}/approve        # Approve a pending plan
 POST /queue/{event_id}/reject         # Reject a pending plan with reason
@@ -62,9 +63,12 @@ GET  /queue/admin/memories            # Browse vector store entries
 POST /queue/admin/correct-memory      # Correct a memory entry
 GET  /queue/admin/lessons             # List extracted lessons
 POST /queue/admin/lessons             # Create a lesson
+PATCH /queue/admin/lessons/{id}/demote  # Demote a lesson (reduce priority)
+PATCH /queue/admin/lessons/{id}/verify  # Mark a lesson as verified
 DELETE /queue/admin/lessons/{id}      # Delete a lesson
 POST /queue/admin/lessons/extract     # LLM-powered lesson extraction
 POST /queue/admin/lessons/apply       # Apply a lesson to an event
+GET  /queue/admin/memories/{event_id} # Single memory entry by event ID
 ```
 
 ## Event History (Reports)
@@ -131,10 +135,40 @@ GET /incidents/list                   # Smartsheet incidents (via adapter)
 
 ```text
 GET /topology/                        # JSON topology
+GET /topology/services                # Service list with metadata
+GET /topology/service/{service_name}  # Single service detail
 GET /topology/graph                   # Cytoscape.js graph data
 GET /topology/mermaid                 # Mermaid diagram
 GET /metrics/{service}                # Current metrics
+GET /metrics/{service}/history        # Historical metrics for a service
 GET /metrics/chart                    # Time-series chart data
+```
+
+## Jira Missions (Headhunter Jira)
+
+Exposes Jira issues tracked by the Headhunter Jira daemon for the Operations Center UI. Returns `[]` when Jira is not configured.
+
+```text
+GET  /jira/missions                   # List tracked issues (Planning/To Do/In Progress, darwin label)
+POST /jira/missions/{key}/approve     # Approve a mission (transition Planning → To Do)
+POST /jira/missions/{key}/reanalyze   # Clear Redis state and trigger re-analysis
+POST /jira/missions/{key}/dismiss     # Dismiss a mission from tracking
+POST /jira/missions/{key}/retry       # Retry event creation for an approved mission
+```
+
+## Cortex / Cognitive Graph
+
+Read-only endpoints for the Cortex UI and JARVIS memory views. Return HTTP 503 when PulseTracker or Archivist is unavailable.
+
+```text
+GET /api/cognitive-graph              # Qdrant neurons (lessons + memories) with Redis heat counters
+GET /api/pulses                       # Pulse log history (?event_id=, ?since=, ?limit=)
+GET /api/cortex/status                # Live adapter status (UI hydration on mount)
+GET /api/cortex/activity              # Recent Cortex activity stream
+GET /api/cortex/shadow                # Shadow-mode intervention log (when SYSTEM2_SHADOW=true)
+GET /api/cortex/shadow/{event_id}     # Shadow interventions for a single event
+GET /api/cortex/handoff-reports       # Session handoff reports from Redis
+GET /api/cortex/proposals             # Cortex proposals awaiting Brain action
 ```
 
 ## Flow Observability
@@ -160,7 +194,8 @@ GET /events/{id}/document             # Full event document (used by ephemeral a
 ## Journal
 
 ```text
-GET /api/journal                      # Read-only ops journal (temporal event history)
+GET /api/journal                      # Read-only ops journal (all services)
+GET /api/journal/{service_name}       # Ops journal filtered by service
 ```
 
 ## Kargo

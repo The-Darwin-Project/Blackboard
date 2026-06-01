@@ -21,10 +21,16 @@ graph TD
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
         Headhunter["Headhunter - GitLab Poller"]
+        HeadhunterJira["Headhunter Jira - QE Missions"]
 
         Architect["Architect :9091 - CLI Sidecar"]
         SysAdmin["SysAdmin :9092 - CLI Sidecar"]
         Developer["Developer :9093 - CLI Sidecar"]
+        QE["QE :9094 - CLI Sidecar"]
+    end
+
+    subgraph meta [Meta-Cognitive Layer]
+        Cortex["Cortex / JARVIS - System 2 Observer"]
     end
 
     subgraph observers [Observers]
@@ -48,11 +54,16 @@ graph TD
     Brain -->|WebSocket| Architect
     Brain -->|WebSocket| SysAdmin
     Brain -->|WebSocket| Developer
+    Brain -->|WebSocket| QE
+
+    Brain -->|pulse stream| Cortex
+    Cortex -->|interventions| Brain
 
     K8sObs -->|anomalies| Aligner
     KargoObs -->|failures| Brain
     TimeKeeper -->|schedules| Brain
     Headhunter -->|MR events| Brain
+    HeadhunterJira -->|Jira missions| Brain
 
     Dashboard <-->|WebSocket| Brain
     SlackApp <-->|Socket Mode| Slack
@@ -66,7 +77,7 @@ All agents communicate via **shared event documents** in Redis. Agents NEVER com
 
 **Event lifecycle:** `new` → `active` → `waiting_approval` → `resolved` → `closed`
 
-**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo), TimeKeeper (scheduled task), Kargo (promotion failure)
+**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo), Headhunter Jira (QE mission), TimeKeeper (scheduled task), Kargo (promotion failure)
 
 ## Reversed WebSocket Architecture
 
@@ -125,6 +136,26 @@ Enabled via `BRAIN_GOOGLE_SEARCH_ENABLED=true`. Evidence citations include sourc
 ## L4 Autonomous AI -- Propose and Prompt
 
 The Brain can proactively propose actions to users and prompt for approval, shifting from reactive (wait for request) to proactive (detect → propose → execute on approval). This enables higher autonomy levels while maintaining human oversight on structural changes.
+
+## On Ice (Stale Event Freeze)
+
+Automated events stuck in `wait_for_user` beyond a configurable threshold are moved to an **on-ice** queue (`GET /queue/on_ice`). On-ice events are excluded from active dispatch until a user unfreezes them. Controlled by `ON_ICE_THRESHOLD_SEC` (Helm: `onIce.thresholdSec`, default 4 hours).
+
+## Cortex / JARVIS (Meta-Cognitive Layer)
+
+Cortex (JARVIS) is a **System 2** observer that watches the Brain's neuron pulse stream without participating in the Conversation Queue directly. It writes turns as `actor="jarvis"` when intervening.
+
+| Mechanism | Purpose |
+| --- | --- |
+| **Pulse stream** | Every Brain tool call, phase transition, agent dispatch, and memory recall emits a pulse |
+| **Friction detection** | SPIRAL (tool fires 5+), PLATEAU (15+ min no phase change), AGENT CHURN (3+ agents), LESSON IGNORED |
+| **Intervention** | `send_event_message` — direct conversation turn that wakes the Brain |
+| **Shadow mode** | When `SYSTEM2_SHADOW=true`, interventions are logged but not delivered (`GET /api/cortex/shadow`) |
+| **Session lifecycle** | On-demand activation; closes after idle timeout; handoff reports on reconnect |
+
+Dashboard routes: `/cortex` (live graph + activity), `/jarvis-memory` (session reports and proposals).
+
+Feature flags (Helm `cortex.*`): `pulseTracking`, `system2.enabled`, `system2.shadow`, `system2.sessionReport`, `system2.handoffReport`.
 
 ## Adaptive Message Routing
 

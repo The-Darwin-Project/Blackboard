@@ -26,12 +26,18 @@ graph TD
         Archivist["Archivist - Deep Memory"]
         Nightwatcher["Nightwatcher - In-process + Flash"]
         Headhunter["Headhunter - GitLab Poller"]
+        HeadhunterJira["Headhunter Jira - QE Missions"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
 
         Architect["Architect - CLI Sidecar"]
         SysAdmin["SysAdmin - CLI Sidecar"]
         Developer["Developer - CLI Sidecar"]
+        QE["QE - CLI Sidecar"]
+    end
+
+    subgraph meta [Meta-Cognitive]
+        Cortex["Cortex / JARVIS"]
     end
 
     subgraph observers [Observers]
@@ -55,11 +61,15 @@ graph TD
     Brain -->|WebSocket| Architect
     Brain -->|WebSocket| SysAdmin
     Brain -->|WebSocket| Developer
+    Brain -->|WebSocket| QE
+
+    Brain -->|pulses| Cortex
 
     K8sObs -->|anomalies| Aligner
     KargoObs -->|failures| Brain
     TimeKeeper -->|schedules| Brain
     Headhunter -->|MR events| Brain
+    HeadhunterJira -->|Jira missions| Brain
 
     Dashboard <-->|WebSocket| Brain
     SlackApp <-->|Socket Mode| Slack
@@ -81,6 +91,7 @@ graph TD
 | **Developer** | Implementation | CLI sidecar, source code changes, MR management |
 | **QE** | Verification | CLI sidecar, independent test verification |
 | **Headhunter** | MR Lifecycle | In-process Python + Flash Lite, GitLab todo automation |
+| **Headhunter Jira** | QE Missions | In-process Python + Claude, Jira Planning→To Do→Brain event flow |
 | **Nightwatcher** | Shift Consolidation | In-process Python + Flash, batch escalation review |
 
 > **Agent details:** [docs/agents.md](docs/agents.md) -- dispatch modes, sidecar CLIs, MCP servers, skills
@@ -103,6 +114,8 @@ graph TD
 - **Nightwatcher Shifts** -- End-of-shift batch processing of escalations into deduplicated incidents
 - **Google Search Grounding** -- Web search during triage/investigate for upstream outage verification
 - **Event History** -- Persisted reports with compound cursor pagination, facet filters, TanStack Table UI
+- **Cortex / JARVIS** -- Meta-cognitive observer on Brain pulse stream; shadow mode, handoff reports, cognitive graph UI
+- **Jira QE Missions** -- Headhunter Jira head polls labeled issues, posts analysis, creates Brain events on approval
 
 ### Integration and UX
 
@@ -167,7 +180,7 @@ BlackBoard/
     state/               # Redis state management (events, metrics, topology)
     routes/              # REST API routers
     observers/           # K8s, Kargo, TimeKeeper, Nightwatcher observers
-    adapters/            # Dashboard WS, Smartsheet, OIDC
+    adapters/            # Dashboard WS, Smartsheet, OIDC, Cortex Live API
     models.py            # Pydantic domain models
     auth.py              # Dex OIDC + trusted-proxy auth
     main.py              # FastAPI app entry point

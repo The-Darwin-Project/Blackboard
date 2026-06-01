@@ -52,9 +52,15 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Ephemeral Agents | `ephemeralAgents.enabled: true` | Requires Tekton Triggers CRDs |
 | Nightwatcher | `nightwatcher.enabled: true` | -- |
 | Headhunter | `headhunter.enabled: true` | Requires `gitlab.enabled: true` |
+| Headhunter Jira (QE Missions) | `jira.enabled: true` | `jira.existingSecret` (email, api-token, bot-account-id) |
+| Smartsheet Incidents | `smartsheet.incident.enabled: true` | `smartsheet.incident.existingSecret` |
 | KargoObserver | `kargoObserver.enabled: true` | Requires `kargo.enabled: true` |
-| Google Search | `brain.googleSearchEnabled: true` | -- |
-| Trusted Proxy (BFF) | `trustedProxy.enabled: true` | `trustedProxy.existingSecret` |
+| Google Search | `googleSearch.enabled: true` | Sets `BRAIN_GOOGLE_SEARCH_ENABLED` |
+| Lesson Enrichment | `lessonEnrichment.enabled: true` | Injects darwin_lessons into Brain prompt |
+| Cortex / JARVIS | `cortex.system2.enabled: true` | Pulse tracking via `cortex.pulseTracking`; shadow via `cortex.system2.shadow` |
+| Registry Pull (runtime) | `registry.enabled: true` | `registry.existingSecret` (dockerconfigjson for agent CLIs) |
+| Remote Clusters (MCP) | `remoteClusters.<name>.enabled: true` | Per-cluster kubeconfig Secret |
+| Trusted Proxy (BFF) | Env only | Set `TRUSTED_PROXY_ENABLED` + `TRUSTED_PROXY_SECRET` via extra env/Secret (see [deployment.md](../docs/deployment.md)) |
 | K8s Observer | `observer.enabled: true` | Pod ServiceAccount |
 
 ## Networking
@@ -95,6 +101,19 @@ Four background observers can be enabled independently:
 | Kargo | Promotion failure/recovery detection | `kargoObserver.enabled: true` |
 | TimeKeeper | Scheduled task execution | `timekeeper.enabled: true` |
 | Nightwatcher | Shift consolidation (cron-based) | `nightwatcher.enabled: true` |
+| Headhunter Jira | Jira QE mission polling | `jira.enabled: true` |
+
+## Behavioral Tuning
+
+These blocks control event lifecycle behavior (no external service required):
+
+| Block | Purpose | Key Values |
+| :--- | :--- | :--- |
+| `onIce` | Freeze automated events stuck in `wait_for_user` | `thresholdSec` (default 4h) |
+| `idleTimeout` | Auto-close stale chat/slack approval threads | `warningSec`, `closeSec` |
+| `brain.reconcileWorkers` | ReconcileScheduler worker pool | `0` = auto-derive from source caps |
+| `app.maxConcurrentDispatches` | Global WIP cap for local sidecar dispatches | `0` = disabled |
+| `app.agentWsMode` | Sidecar WebSocket direction | `reverse` (production) or `legacy` |
 
 ## Full Values Reference
 

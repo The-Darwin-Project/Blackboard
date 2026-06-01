@@ -15,6 +15,8 @@ React + TypeScript + Vite application serving as the primary web UI for the Darw
 | **Dashboard (Ops Center)** | XProtect-inspired adaptive layout with service tiles, conversation feed, agent streaming cards. Side-by-side layout activates with 4+ tiles. |
 | **Event History** | TanStack Table with card grid toggle, server pagination, compound cursor pagination. Facet filters: service, source, domain, severity, time range, text search. |
 | **Memory** | Two views: Memories (vector store entries) and Lessons (extracted lessons learned). Includes LLM-powered Extract wizard with multi-select event picker. |
+| **Cortex** | Cognitive graph visualization — Qdrant neurons with heat counters, live pulse feed, Cortex status. |
+| **JARVIS Memory** | Session handoff reports, shadow-mode interventions, and Cortex proposals. |
 | **Shifts** | Nightwatcher shift reports (morning/evening). Conditional nav tab, visible only when Nightwatcher is enabled. |
 | **TimeKeeper** | Schedule management UI (create, edit, toggle, delete). Requires Dex auth. |
 | **Topology** | Service dependency graph rendered with Cytoscape.js. |

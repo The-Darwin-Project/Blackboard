@@ -12,18 +12,19 @@ alwaysApply: true
 
 ## 2. Separation of Concerns (The "Air Gap")
 
-* **Rule:** Enforcement via architectural patterns and CLI-level constraints:
-  * **Brain** (`brain.py`) uses Vertex AI SDK. May access Redis. Contains ZERO routing logic.
-  * **Architect** (`architect.py`) is a thin HTTP client. Sidecar runs Claude with `--permission-mode plan` (cannot write files, push code, or run shell commands).
-  * **SysAdmin** (`sysadmin.py`) is a thin HTTP client. Sidecar has full git + kubectl. Safety via FORBIDDEN_PATTERNS in security.py.
-  * **Developer** (`developer.py`) is the pair programming manager. Fires Dev + QE sidecars concurrently via `asyncio.gather()`. Flash Manager (Gemini Flash) reviews outputs. See `04-developer-qe-pair.mdc` for invariants.
+* **Rule:** Enforcement via behavioral agent rules, skills, and `FORBIDDEN_PATTERNS` — not CLI permission modes:
+  * **Brain** (`brain.py`) uses Vertex AI SDK. Orchestrates routing, Cynefin classification, and agent dispatch via progressive skills and tool gating.
+  * **Architect** sidecar runs with `permissionMode: bypassPermissions` at the CLI level. Air gap enforced **behaviorally** via `gemini-sidecar/rules/architect.md` — instructed to plan and review only, never execute mutations.
+  * **SysAdmin** sidecar has full git + kubectl read/write for GitOps. Safety via FORBIDDEN_PATTERNS in security.py and agent rules.
+  * **Developer** sidecar handles source code changes. In legacy mode, `developer.py` may fire Dev + QE concurrently via `asyncio.gather()` with Flash Manager review. In reverse-WS mode, Brain dispatches Developer and QE as separate registered sidecars.
   * **Aligner** (`aligner.py`) keeps Vertex AI Flash for filter config. Creates events, does NOT route to agents.
   * **Headhunter** (`headhunter.py`) is an in-process daemon (same pattern as Aligner). Polls GitLab `/todos`, classifies MRs, creates events. Does NOT route to agents -- Brain handles all routing. See `07-headhunter.mdc`.
+  * **Headhunter Jira** (`headhunter_jira.py`) polls Jira for QE missions. Two-phase: Planning → comment, To Do → Brain event. See `docs/agents.md`.
   * **Dispatcher** (`ephemeral_provisioner.py`) provisions ephemeral agents via Tekton webhook. Pure plumbing -- no routing logic, no LLM. Brain decides WHAT to dispatch; Dispatcher decides WHERE (local sidecar vs ephemeral agent based on event source). See `10-ephemeral-agents.mdc`.
 
 ## 3. The Conversation Queue Protocol
 
-* **Event Creation:** Events are created by Aligner (anomaly), Chat (user request), Headhunter (GitLab todo), TimeKeeper (scheduled), or Slack (DM/slash command)
+* **Event Creation:** Events are created by Aligner (anomaly), Chat (user request), Headhunter (GitLab todo), Headhunter Jira (QE mission), TimeKeeper (scheduled), Slack (DM/slash command), or Kargo (promotion failure)
 * **Classification Gate:** Brain MUST call `classify_event` before any agent dispatch. Unclassified events start in DISORDER domain. `select_agent` is structurally unavailable until classified. See `05-event-evidence-contract.mdc`.
 * **Domain-Specific Pipeline:** After classification, tool availability adapts to domain: COMPLEX blocks premature closure, CHAOTIC restricts to act-first. Brain can reclassify mid-event.
 * **Conversation:** Conversation is an append-only log of turns in the event document. Classification produces a `brain.triage` turn.
@@ -53,7 +54,7 @@ alwaysApply: true
 * **Intervention:** `send_event_message` (direct conversation turn that wakes FRIDAY and creates response obligation).
 * **Friction Detection:** SPIRAL (tool fires 5+), PLATEAU (15+ min no phase change), AGENT CHURN (3+ agents without resolution), LESSON IGNORED (lesson fires then Brain does the anti-pattern).
 * **Lifecycle:** On-demand. Activates on first pulse, closes after 5min idle. Session report generated on shutdown (piped to Archivist extract_lessons).
-* **Feature flags:** `PULSE_TRACKING_ENABLED`, `SYSTEM2_ENABLED`, `SYSTEM2_SHADOW` (all in Helm values).
+* **Feature flags:** Helm `cortex.pulseTracking`, `cortex.system2.enabled`, `cortex.system2.shadow` (env: `PULSE_TRACKING_ENABLED`, `SYSTEM2_ENABLED`, `SYSTEM2_SHADOW`). Documented in `docs/architecture.md` and `docs/deployment.md`.
 
 ## 6. Execution Planes
 

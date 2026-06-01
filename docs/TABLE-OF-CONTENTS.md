@@ -11,11 +11,11 @@ Actively maintained reference docs. Updated with each feature release.
 
 | Document | Content |
 | --- | --- |
-| [architecture.md](architecture.md) | System topology, WebSocket protocol, safety model, SDK table, integrations |
-| [agents.md](agents.md) | Agent roster, dispatch modes, sidecar CLIs, MCP servers, 26 skills |
-| [api-reference.md](api-reference.md) | All REST and WebSocket API endpoints |
-| [deployment.md](deployment.md) | Environment variables, Helm deployment, CI/CD, passive service discovery |
-| [brain-skills.md](brain-skills.md) | Progressive skill system, 11 phases, tool gating, FRIDAY personality |
+| [architecture.md](architecture.md) | System topology, WebSocket protocol, Cortex/JARVIS, safety model, SDK table, integrations |
+| [agents.md](agents.md) | Agent roster (9 specialists), dispatch modes, Headhunter Jira, sidecar CLIs, MCP servers, 26 skills |
+| [api-reference.md](api-reference.md) | All REST and WebSocket API endpoints (16 routers) |
+| [deployment.md](deployment.md) | Environment variables, Helm deployment, Jira/Cortex/onIce, CI/CD, passive service discovery |
+| [brain-skills.md](brain-skills.md) | Progressive skill system, 10 phase dirs (47 skills), tool gating, FRIDAY personality |
 | [README.md](README.md) | External service access (ArgoCD, Kargo, RBAC) |
 | [Darwin-Release-Console-Integration-Contract.md](Darwin-Release-Console-Integration-Contract.md) | BFF WebSocket contract, trusted-proxy auth, message protocol |
 

@@ -131,6 +131,50 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `GITLAB_HOST` | GitLab instance hostname | (required if enabled) |
 | `LLM_MODEL_HEADHUNTER` | Headhunter Flash model | (see code) |
 
+### Headhunter Jira (QE Missions)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `JIRA_URL` | Jira Cloud base URL | (required if enabled) |
+| `JIRA_EMAIL` | Jira API user email | (required if enabled) |
+| `JIRA_API_TOKEN` | Jira API token | (required if enabled) |
+| `HEADHUNTER_JIRA_LABEL` | Label filter for tracked issues | `darwin` |
+| `HEADHUNTER_JIRA_BOT_ACCOUNT_ID` | Bot account ID for mention detection | (optional) |
+| `HEADHUNTER_JIRA_SKILL_<LABEL>` | Label → git raw URL for custom system prompts | (optional) |
+
+Helm block: `jira.enabled`, `jira.existingSecret`, `jira.maxActive`, `jira.model`, `jira.skills`.
+
+### On Ice and Idle Timeout
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `ON_ICE_THRESHOLD_SEC` | Freeze automated events stuck in wait_for_user | `14400` (4h) |
+| `IDLE_TIMEOUT_WARNING_SEC` | Inactivity warning before auto-close (chat/slack) | `600` |
+| `IDLE_TIMEOUT_CLOSE_SEC` | Auto-close after warning if no response | `300` |
+
+Helm blocks: `onIce.thresholdSec`, `idleTimeout.warningSec`, `idleTimeout.closeSec`.
+
+### Lesson Enrichment
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `LESSON_ENRICHMENT_ENABLED` | Inject RECALL block from darwin_lessons into Brain prompt | `false` |
+
+Helm block: `lessonEnrichment.enabled`.
+
+### Cortex (System 2)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `PULSE_TRACKING_ENABLED` | Emit pulse events on tool calls, phase changes, memory recall | `true` |
+| `SYSTEM2_ENABLED` | Start Cortex observer (Gemini Live API session) | `true` |
+| `SYSTEM2_SHADOW` | Log interventions without delivering to Brain | `false` |
+| `SYSTEM2_SESSION_REPORT` | Generate session report on idle disconnect | `true` |
+| `SYSTEM2_HANDOFF_REPORT` | Capture session notes on reconnect (go_away) | `true` |
+| `SYSTEM2_MODEL` | Override Cortex Live model (empty = code default) | (empty) |
+
+Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
+
 ### Nightwatcher
 
 | Variable | Description | Default |
