@@ -94,9 +94,9 @@
 
 | File | Status | Action |
 |------|--------|--------|
-| BlackBoard/helm/README.md | Mostly current | Update integration table (Step 5) |
-| BlackBoard/ui/README.md | Vite boilerplate | Replace entirely (Step 4) |
-| BlackBoard/CONTRIBUTING.md | Mostly current | Add sidecar build + test details (Step 7) |
+| BlackBoard/helm/README.md | Updated | Integrations table + behavioral tuning (2026-06-01) |
+| BlackBoard/ui/README.md | Updated | Cortex + JARVIS Memory pages (2026-06-01) |
+| BlackBoard/CONTRIBUTING.md | Updated | Sidecar local run, doc maintenance table (2026-06-01) |
 | BlackBoard/SECURITY.md | Current | No changes needed |
 | BlackBoard/CODE_OF_CONDUCT.md | Current | No changes needed |
 | BlackBoard/docs/README.md | Current | No changes needed (ArgoCD/Kargo access) |
