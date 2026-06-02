@@ -454,6 +454,8 @@ export interface ObservationPoint {
   value: number;
   unit: string;
   phase: string;
+  event_id: string;
+  service: string;
 }
 
 export interface ObservationSeries {

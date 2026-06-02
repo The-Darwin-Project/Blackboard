@@ -655,8 +655,19 @@ export async function getCortexActivity(eventId?: string): Promise<PulseBatch[]>
 }
 
 // =============================================================================
-// Observations API (FRIDAY numeric series per event)
+// Observations API (FRIDAY numeric series -- global + per-event)
 // =============================================================================
+
+export async function getGlobalObservations(filters?: {
+  name?: string;
+  service?: string;
+}): Promise<ObservationsResponse> {
+  const params = new URLSearchParams();
+  if (filters?.name) params.set('name', filters.name);
+  if (filters?.service) params.set('service', filters.service);
+  const qs = params.toString();
+  return fetchApi<ObservationsResponse>(`/api/observations${qs ? `?${qs}` : ''}`);
+}
 
 export async function getEventObservations(eventId: string): Promise<ObservationsResponse> {
   return fetchApi<ObservationsResponse>(`/api/queue/${encodeURIComponent(eventId)}/observations`);

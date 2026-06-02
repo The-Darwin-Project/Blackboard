@@ -2625,18 +2625,24 @@ class BlackboardState:
         return results
 
     # =========================================================================
-    # Observations (FRIDAY numeric series per event)
+    # Observations (FRIDAY numeric series -- event-scoped + global timeline)
     # =========================================================================
-    # Key: darwin:event:{id}:obs:{name} -- ZSET (score=epoch, member={iso}:{value}:{unit}:{phase})
+    # Event key:  darwin:event:{id}:obs:{name}  ZSET (archive, cleaned on close)
+    # Global key: darwin:obs:{name}             ZSET (7-day rolling window)
+    # Index key:  darwin:obs:_index             SET  (all observation names)
+    # Member format (both): {iso}:{value}:{unit}:{phase}:{event_id}:{service}
     # ZADD is atomic; no WATCH needed.
 
     OBS_KEY_PREFIX = "darwin:event:"
     OBS_KEY_INFIX = ":obs:"
+    OBS_GLOBAL_PREFIX = "darwin:obs:"
+    OBS_INDEX_KEY = "darwin:obs:_index"
+    OBS_RETENTION_SECONDS = 604800  # 7 days
 
     async def record_observation(
         self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
     ) -> dict:
-        """Record a numeric observation. Returns metadata for the Brain's tool_result.
+        """Record a numeric observation to both event-scoped and global timelines.
 
         If brain_phase is empty, derives it from the event document (single GET).
         """
@@ -2645,11 +2651,23 @@ class BlackboardState:
         if not brain_phase and event:
             brain_phase = event.brain_phase or "triage"
 
+        service = ""
+        if event:
+            service = getattr(event, "service", "") or ""
+
         iso = datetime.utcfromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%SZ")
-        member = f"{iso}:{value}:{unit}:{brain_phase}"
-        key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
-        await self.redis.zadd(key, {member: now})
-        count = await self.redis.zcard(key)
+        member = f"{iso}:{value}:{unit}:{brain_phase}:{event_id}:{service}"
+
+        event_key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
+        global_key = f"{self.OBS_GLOBAL_PREFIX}{name}"
+
+        pipe = self.redis.pipeline(transaction=False)
+        pipe.zadd(event_key, {member: now})
+        pipe.zadd(global_key, {member: now})
+        pipe.sadd(self.OBS_INDEX_KEY, name)
+        pipe.zremrangebyscore(global_key, "-inf", now - self.OBS_RETENTION_SECONDS)
+        results = await pipe.execute()
+        count = await self.redis.zcard(event_key)
 
         event_opened = ""
         event_age_minutes = 0.0
@@ -2674,53 +2692,61 @@ class BlackboardState:
             "event_age_minutes": event_age_minutes,
         }
 
-    async def list_observations(self, event_id: str) -> dict:
-        """List all observation series for an event with temporal stats."""
-        pattern = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}*"
-        keys: list[str] = []
-        async for key in self.redis.scan_iter(match=pattern, count=100):
-            k = key if isinstance(key, str) else key.decode()
-            keys.append(k)
+    async def list_observations(
+        self,
+        event_id: str | None = None,
+        service: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """List observation series with temporal stats.
 
+        Modes:
+        - event_id set: read event-scoped keys (existing behaviour for archive/drill-down)
+        - event_id None: read global timeline (darwin:obs:{name}), 7-day window
+        Filters: service, name narrow the results post-read.
+        """
         now = time.time()
-        event = await self.get_event(event_id)
+
+        if event_id:
+            keys_map = await self._obs_keys_for_event(event_id, name)
+        else:
+            keys_map = await self._obs_keys_global(name)
+
         event_opened = ""
         event_age_minutes = 0.0
-        if event and event.event:
-            created = event.event.timeDate
-            if created:
-                event_opened = created
-                try:
-                    from datetime import datetime as _dt
-                    opened_ts = _dt.fromisoformat(created.replace("Z", "+00:00")).timestamp()
-                    event_age_minutes = round((now - opened_ts) / 60, 1)
-                except (ValueError, TypeError, AttributeError):
-                    pass
+        if event_id:
+            event = await self.get_event(event_id)
+            if event and event.event:
+                created = event.event.timeDate
+                if created:
+                    event_opened = created
+                    try:
+                        from datetime import datetime as _dt
+                        opened_ts = _dt.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                        event_age_minutes = round((now - opened_ts) / 60, 1)
+                    except (ValueError, TypeError, AttributeError):
+                        pass
 
+        cutoff = now - self.OBS_RETENTION_SECONDS if not event_id else 0
         series_list = []
-        for key in sorted(keys):
-            name = key.split(self.OBS_KEY_INFIX, 1)[1] if self.OBS_KEY_INFIX in key else key
-            members = await self.redis.zrangebyscore(key, "-inf", "+inf", withscores=True)
+        for obs_name, redis_key in sorted(keys_map.items()):
+            min_score = cutoff if cutoff else "-inf"
+            members = await self.redis.zrangebyscore(redis_key, min_score, "+inf", withscores=True)
             if not members:
                 continue
 
             points = []
             for raw_member, score in members:
                 m = raw_member if isinstance(raw_member, str) else raw_member.decode()
-                parts = m.split(":", 4)
-                # format: iso_ts:value:unit:phase (iso has colons so split from right)
-                # Actually member = "{iso}:{value}:{unit}:{phase}" -- iso itself has colons.
-                # Re-parse: last 3 segments are value, unit, phase; rest is iso timestamp.
-                segs = m.rsplit(":", 3)
-                if len(segs) == 4:
-                    ts_str, val_str, u, ph = segs
-                else:
-                    ts_str, val_str, u, ph = m, "0", "", ""
-                try:
-                    v = float(val_str)
-                except ValueError:
-                    v = 0.0
-                points.append({"timestamp": ts_str, "epoch": score, "value": v, "unit": u, "phase": ph})
+                pt = self._parse_obs_member(m, score)
+                if service and pt.get("service", "") != service:
+                    continue
+                if event_id and not pt.get("event_id"):
+                    pt["event_id"] = event_id
+                points.append(pt)
+
+            if not points:
+                continue
 
             values = [p["value"] for p in points]
             first_at = points[0]["timestamp"]
@@ -2737,7 +2763,7 @@ class BlackboardState:
                     trend = "falling"
 
             series_list.append({
-                "name": name,
+                "name": obs_name,
                 "count": len(points),
                 "min": min(values),
                 "max": max(values),
@@ -2751,10 +2777,59 @@ class BlackboardState:
             })
 
         return {
-            "event_id": event_id,
+            "event_id": event_id or "",
             "event_opened": event_opened,
             "event_age_minutes": event_age_minutes,
             "observations": series_list,
+        }
+
+    async def _obs_keys_for_event(self, event_id: str, name: str | None = None) -> dict[str, str]:
+        """Return {obs_name: redis_key} for event-scoped observation keys."""
+        if name:
+            key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
+            return {name: key}
+        pattern = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}*"
+        result: dict[str, str] = {}
+        async for key in self.redis.scan_iter(match=pattern, count=100):
+            k = key if isinstance(key, str) else key.decode()
+            obs_name = k.split(self.OBS_KEY_INFIX, 1)[1] if self.OBS_KEY_INFIX in k else k
+            result[obs_name] = k
+        return result
+
+    async def _obs_keys_global(self, name: str | None = None) -> dict[str, str]:
+        """Return {obs_name: redis_key} from the global observation index."""
+        if name:
+            return {name: f"{self.OBS_GLOBAL_PREFIX}{name}"}
+        raw_names = await self.redis.smembers(self.OBS_INDEX_KEY)
+        result: dict[str, str] = {}
+        for n in raw_names:
+            n_str = n if isinstance(n, str) else n.decode()
+            result[n_str] = f"{self.OBS_GLOBAL_PREFIX}{n_str}"
+        return result
+
+    @staticmethod
+    def _parse_obs_member(m: str, score: float) -> dict:
+        """Parse 6-segment member format: {iso}:{value}:{unit}:{phase}:{event_id}:{service}.
+
+        Falls back to 4-segment legacy format for pre-migration data.
+        """
+        segs = m.rsplit(":", 5)
+        if len(segs) == 6:
+            ts_str, val_str, u, ph, eid, svc = segs
+        else:
+            segs4 = m.rsplit(":", 3)
+            if len(segs4) == 4:
+                ts_str, val_str, u, ph = segs4
+            else:
+                ts_str, val_str, u, ph = m, "0", "", ""
+            eid, svc = "", ""
+        try:
+            v = float(val_str)
+        except ValueError:
+            v = 0.0
+        return {
+            "timestamp": ts_str, "epoch": score, "value": v,
+            "unit": u, "phase": ph, "event_id": eid, "service": svc,
         }
 
     async def get_observation_summary(self, event_id: str) -> Optional[dict]:

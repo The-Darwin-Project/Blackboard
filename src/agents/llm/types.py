@@ -884,10 +884,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "list_observations",
         "description": (
-            "List all observation series for this event with temporal statistics. "
-            "Returns count, min, max, trend (rising/falling/stable), time span, "
-            "and latest value per series. Use before recording a new series to check "
-            "for existing names, and to review trajectories before making decisions."
+            "Review all observations recorded across all events in the last 7 days. "
+            "Returns each series with temporal stats (count, min, max, trend, span) "
+            "and event provenance (event_id, service per point). "
+            "Use before decisions to ground your reasoning in measured history."
         ),
         "input_schema": {
             "type": "object",

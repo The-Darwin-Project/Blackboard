@@ -17,6 +17,7 @@ from .timekeeper import router as timekeeper_router
 from .cognitive_graph import router as cognitive_graph_router
 from .jira import router as jira_router
 from .observations import router as observations_router
+from .observations import global_router as observations_global_router
 
 __all__ = [
     "chat_router",
@@ -28,6 +29,7 @@ __all__ = [
     "kargo_router",
     "metrics_router",
     "observations_router",
+    "observations_global_router",
     "queue_router",
     "reports_router",
     "shifts_router",

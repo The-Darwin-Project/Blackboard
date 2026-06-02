@@ -2746,20 +2746,19 @@ class Brain:
             return True
 
         elif function_name == "list_observations":
-            result = await self.blackboard.list_observations(event_id)
+            result = await self.blackboard.list_observations()
             if not result["observations"]:
-                summary_text = "No observations recorded for this event yet."
+                summary_text = "No observations recorded yet."
             else:
-                lines = [
-                    f"Event {event_id} (age {result['event_age_minutes']}m) — "
-                    f"{len(result['observations'])} series:"
-                ]
+                lines = [f"{len(result['observations'])} observation series (global, last 7 days):"]
                 for s in result["observations"]:
+                    events_in_series = {p.get("event_id", "") for p in s["points"] if p.get("event_id")}
                     lines.append(
                         f"  • {s['name']}: {s['count']} pts, "
                         f"range [{s['min']}–{s['max']}] {s['unit']}, "
                         f"latest={s['latest_value']}, trend={s['trend']}, "
-                        f"span={s['span_minutes']}m"
+                        f"span={s['span_minutes']}m, "
+                        f"events={len(events_in_series)}"
                     )
                 summary_text = "\n".join(lines)
             turn = ConversationTurn(

@@ -42,6 +42,7 @@ from .routes import (
     kargo_router,
     metrics_router,
     observations_router,
+    observations_global_router,
     queue_router,
     reports_router,
     shifts_router,
@@ -650,6 +651,7 @@ app.include_router(telemetry_router)
 app.include_router(topology_router)
 app.include_router(queue_router)
 app.include_router(observations_router)
+app.include_router(observations_global_router)
 app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
 app.include_router(metrics_router)
