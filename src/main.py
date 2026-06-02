@@ -41,6 +41,7 @@ from .routes import (
     journal_router,
     kargo_router,
     metrics_router,
+    observations_router,
     queue_router,
     reports_router,
     shifts_router,
@@ -647,6 +648,7 @@ async def list_agents() -> list[dict]:
 app.include_router(telemetry_router)
 app.include_router(topology_router)
 app.include_router(queue_router)
+app.include_router(observations_router)
 app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
 app.include_router(metrics_router)

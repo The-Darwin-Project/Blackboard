@@ -439,6 +439,39 @@ export interface JiraMission {
 }
 
 // =============================================================================
+// Observations (FRIDAY numeric series per event)
+// =============================================================================
+
+export interface ObservationPoint {
+  timestamp: string;
+  epoch: number;
+  value: number;
+  unit: string;
+  phase: string;
+}
+
+export interface ObservationSeries {
+  name: string;
+  count: number;
+  min: number;
+  max: number;
+  latest_value: number;
+  unit: string;
+  first_at: string;
+  last_at: string;
+  span_minutes: number;
+  trend: 'rising' | 'falling' | 'stable';
+  points: ObservationPoint[];
+}
+
+export interface ObservationsResponse {
+  event_id: string;
+  event_opened: string;
+  event_age_minutes: number;
+  observations: ObservationSeries[];
+}
+
+// =============================================================================
 // Agent Registry (connected sidecars)
 // =============================================================================
 

@@ -850,6 +850,50 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["event_id"],
         },
     },
+    # --- Observation tools (gated: NOT available in close phase) ---
+    {
+        "name": "record_observation",
+        "description": (
+            "Record a numeric observation for this event. Use when you encounter "
+            "a measurable signal worth tracking over time -- error counts, latency, "
+            "replica counts, queue depths, build durations, test pass rates, etc. "
+            "Timestamps are automatic. The series builds a trajectory you can review later."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Short, consistent series name (e.g. 'error_count', 'p99_latency_ms', "
+                        "'replica_count'). Reuse existing names when recording the same metric."
+                    ),
+                },
+                "value": {
+                    "type": "number",
+                    "description": "The numeric value to record",
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "Optional unit label (e.g. 'ms', '%', 'count', 'replicas')",
+                },
+            },
+            "required": ["name", "value"],
+        },
+    },
+    {
+        "name": "list_observations",
+        "description": (
+            "List all observation series for this event with temporal statistics. "
+            "Returns count, min, max, trend (rising/falling/stable), time span, "
+            "and latest value per series. Use before recording a new series to check "
+            "for existing names, and to review trajectories before making decisions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 

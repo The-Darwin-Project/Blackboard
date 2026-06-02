@@ -19,6 +19,7 @@ import ReportsPage from './components/ReportsPage';
 import EventHistory from './components/EventHistory';
 import LoginPage from './components/LoginPage';
 import IncidentsPage from './components/IncidentsPage';
+import InsightsPage from './components/InsightsPage';
 import TimeKeeperPage from './components/timekeeper/TimeKeeperPage';
 import TopologyView from './components/ops/TopologyView';
 import MemoryPage from './components/memory/MemoryPage';
@@ -67,6 +68,7 @@ function AuthGate() {
               : <ReportsPage />
           } />
           <Route path="incidents" element={<IncidentsPage />} />
+          <Route path="insights" element={<InsightsPage />} />
           <Route path="guide" element={<GuidePage />} />
           <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="shifts" element={<ShiftsPage />} />

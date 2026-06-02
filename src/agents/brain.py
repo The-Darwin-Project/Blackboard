@@ -999,6 +999,10 @@ class Brain:
         if brain_phase not in ("escalate", "close"):
             active_tools = [t for t in active_tools if t["name"] not in close_tools]
 
+        observation_tools = {"record_observation", "list_observations"}
+        if brain_phase == "close":
+            active_tools = [t for t in active_tools if t["name"] not in observation_tools]
+
         # Jira tools: comment available during execution + close; transition in investigate/verify/close
         jira_phases = ("investigate", "verify", "escalate", "close")
         if brain_phase not in jira_phases:
@@ -2721,6 +2725,52 @@ class Brain:
                         )
                         await self._append_and_broadcast(event_id, followup)
             return False
+
+        elif function_name == "record_observation":
+            name = args.get("name", "")
+            value = args.get("value", 0)
+            unit = args.get("unit", "")
+            result = await self.blackboard.record_observation(event_id, name, value, unit)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=(
+                    f"Recorded observation '{name}' = {value}"
+                    f"{(' ' + unit) if unit else ''}"
+                    f" (point #{result['count']}, event age {result['event_age_minutes']}m)"
+                ),
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "list_observations":
+            result = await self.blackboard.list_observations(event_id)
+            if not result["observations"]:
+                summary_text = "No observations recorded for this event yet."
+            else:
+                lines = [
+                    f"Event {event_id} (age {result['event_age_minutes']}m) — "
+                    f"{len(result['observations'])} series:"
+                ]
+                for s in result["observations"]:
+                    lines.append(
+                        f"  • {s['name']}: {s['count']} pts, "
+                        f"range [{s['min']}–{s['max']}] {s['unit']}, "
+                        f"latest={s['latest_value']}, trend={s['trend']}, "
+                        f"span={s['span_minutes']}m"
+                    )
+                summary_text = "\n".join(lines)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=summary_text,
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
 
         elif function_name == "close_event":
             summary = args.get("summary", "Event closed.")

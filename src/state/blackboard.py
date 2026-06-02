@@ -2151,6 +2151,19 @@ class BlackboardState:
                 "indexed_at": indexed_at,
             }
 
+            obs_summary = await self.get_observation_summary(event_id)
+            if obs_summary:
+                report_data["observation_summary"] = obs_summary
+
+            # Cleanup observation keys after summary is captured
+            obs_keys: list[str] = []
+            async for k in self.redis.scan_iter(
+                match=f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}*", count=100
+            ):
+                obs_keys.append(k if isinstance(k, str) else k.decode())
+            if obs_keys:
+                await self.redis.delete(*obs_keys)
+
             key = f"{self.REPORT_PREFIX}{event_id}"
             await self.redis.set(key, json.dumps(report_data), ex=self.REPORT_TTL)
             await self.redis.zadd(self.REPORT_INDEX, {event_id: indexed_at})
@@ -2574,3 +2587,170 @@ class BlackboardState:
             })
         results.sort(key=lambda r: r["shift_date"], reverse=True)
         return results
+
+    # =========================================================================
+    # Observations (FRIDAY numeric series per event)
+    # =========================================================================
+    # Key: darwin:event:{id}:obs:{name} -- ZSET (score=epoch, member={iso}:{value}:{unit}:{phase})
+    # ZADD is atomic; no WATCH needed.
+
+    OBS_KEY_PREFIX = "darwin:event:"
+    OBS_KEY_INFIX = ":obs:"
+
+    async def record_observation(
+        self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
+    ) -> dict:
+        """Record a numeric observation. Returns metadata for the Brain's tool_result.
+
+        If brain_phase is empty, derives it from the event document (single GET).
+        """
+        now = time.time()
+        event = await self.get_event(event_id)
+        if not brain_phase and event:
+            brain_phase = event.brain_phase or "triage"
+
+        iso = datetime.utcfromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%SZ")
+        member = f"{iso}:{value}:{unit}:{brain_phase}"
+        key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
+        await self.redis.zadd(key, {member: now})
+        count = await self.redis.zcard(key)
+
+        event_opened = ""
+        event_age_minutes = 0.0
+        if event and event.event:
+            created = event.event.created_at
+            if created:
+                event_opened = created
+                try:
+                    from datetime import datetime as _dt
+                    opened_ts = _dt.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                    event_age_minutes = round((now - opened_ts) / 60, 1)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+
+        return {
+            "recorded": True,
+            "name": name,
+            "value": value,
+            "unit": unit or "",
+            "count": count,
+            "recorded_at": iso,
+            "event_age_minutes": event_age_minutes,
+        }
+
+    async def list_observations(self, event_id: str) -> dict:
+        """List all observation series for an event with temporal stats."""
+        pattern = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}*"
+        keys: list[str] = []
+        async for key in self.redis.scan_iter(match=pattern, count=100):
+            k = key if isinstance(key, str) else key.decode()
+            keys.append(k)
+
+        now = time.time()
+        event = await self.get_event(event_id)
+        event_opened = ""
+        event_age_minutes = 0.0
+        if event and event.event:
+            created = event.event.created_at
+            if created:
+                event_opened = created
+                try:
+                    from datetime import datetime as _dt
+                    opened_ts = _dt.fromisoformat(created.replace("Z", "+00:00")).timestamp()
+                    event_age_minutes = round((now - opened_ts) / 60, 1)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+
+        series_list = []
+        for key in sorted(keys):
+            name = key.split(self.OBS_KEY_INFIX, 1)[1] if self.OBS_KEY_INFIX in key else key
+            members = await self.redis.zrangebyscore(key, "-inf", "+inf", withscores=True)
+            if not members:
+                continue
+
+            points = []
+            for raw_member, score in members:
+                m = raw_member if isinstance(raw_member, str) else raw_member.decode()
+                parts = m.split(":", 4)
+                # format: iso_ts:value:unit:phase (iso has colons so split from right)
+                # Actually member = "{iso}:{value}:{unit}:{phase}" -- iso itself has colons.
+                # Re-parse: last 3 segments are value, unit, phase; rest is iso timestamp.
+                segs = m.rsplit(":", 3)
+                if len(segs) == 4:
+                    ts_str, val_str, u, ph = segs
+                else:
+                    ts_str, val_str, u, ph = m, "0", "", ""
+                try:
+                    v = float(val_str)
+                except ValueError:
+                    v = 0.0
+                points.append({"timestamp": ts_str, "epoch": score, "value": v, "unit": u, "phase": ph})
+
+            values = [p["value"] for p in points]
+            first_at = points[0]["timestamp"]
+            last_at = points[-1]["timestamp"]
+            span_minutes = round((points[-1]["epoch"] - points[0]["epoch"]) / 60, 1) if len(points) > 1 else 0.0
+
+            trend = "stable"
+            if len(values) >= 2:
+                first_half = sum(values[:len(values) // 2]) / max(len(values) // 2, 1)
+                second_half = sum(values[len(values) // 2:]) / max(len(values) - len(values) // 2, 1)
+                if second_half > first_half * 1.1:
+                    trend = "rising"
+                elif second_half < first_half * 0.9:
+                    trend = "falling"
+
+            series_list.append({
+                "name": name,
+                "count": len(points),
+                "min": min(values),
+                "max": max(values),
+                "latest_value": values[-1],
+                "unit": points[-1]["unit"],
+                "first_at": first_at,
+                "last_at": last_at,
+                "span_minutes": span_minutes,
+                "trend": trend,
+                "points": points,
+            })
+
+        return {
+            "event_id": event_id,
+            "event_opened": event_opened,
+            "event_age_minutes": event_age_minutes,
+            "observations": series_list,
+        }
+
+    async def get_observation_summary(self, event_id: str) -> Optional[dict]:
+        """Compact observation summary for Archivist archival. Returns None if no observations."""
+        data = await self.list_observations(event_id)
+        if not data["observations"]:
+            return None
+
+        now = time.time()
+        from datetime import datetime as _dt
+        day_of_week = _dt.utcfromtimestamp(now).strftime("%A")
+        time_of_day_utc = _dt.utcfromtimestamp(now).strftime("%H:%M")
+
+        series_summaries = []
+        for s in data["observations"]:
+            values = [p["value"] for p in s["points"]]
+            mean_val = sum(values) / len(values) if values else 0
+            series_summaries.append({
+                "name": s["name"],
+                "trend": s["trend"],
+                "peak": s["max"],
+                "mean": round(mean_val, 2),
+                "points": s["count"],
+                "unit": s["unit"],
+                "first_at": s["first_at"],
+                "last_at": s["last_at"],
+                "span_minutes": s["span_minutes"],
+            })
+
+        return {
+            "event_duration_minutes": data["event_age_minutes"],
+            "day_of_week": day_of_week,
+            "time_of_day_utc": time_of_day_utc,
+            "series": series_summaries,
+        }

@@ -23,6 +23,7 @@ const BASE_TABS = [
   { id: '/cortex', label: 'Cortex' },
   { id: '/reports', label: 'Event History' },
   { id: '/incidents', label: 'Incidents' },
+  { id: '/insights', label: 'Insights' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
   { id: '/jarvis-memory', label: 'JARVIS Memory' },

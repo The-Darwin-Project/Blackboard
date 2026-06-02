@@ -23,6 +23,7 @@ import type {
   FlowMetrics,
   GraphResponse,
   KargoStageStatus,
+  ObservationsResponse,
   ReportFull,
   ReportMeta,
   Service,
@@ -651,6 +652,14 @@ export async function getCortexActivity(eventId?: string): Promise<PulseBatch[]>
   const params = eventId ? `?event_id=${encodeURIComponent(eventId)}` : '';
   const resp = await fetchApi<{ batches: PulseBatch[]; count: number }>(`/api/cortex/activity${params}`);
   return resp.batches;
+}
+
+// =============================================================================
+// Observations API (FRIDAY numeric series per event)
+// =============================================================================
+
+export async function getEventObservations(eventId: string): Promise<ObservationsResponse> {
+  return fetchApi<ObservationsResponse>(`/api/queue/${encodeURIComponent(eventId)}/observations`);
 }
 
 // =============================================================================
