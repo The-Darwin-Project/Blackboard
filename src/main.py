@@ -361,6 +361,7 @@ async def lifespan(app: FastAPI):
                 smartsheet_adapter=smartsheet_adapter,
                 archivist=archivist,
                 slack_notify=slack_inst.post_nightwatcher_summary if slack_inst else None,
+                broadcast=brain._broadcast,
             )
             await nightwatcher_observer.start()
             logger.info("NightwatcherObserver started")

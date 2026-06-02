@@ -5,6 +5,7 @@
 # 3. [Constraint]: validate_cluster_plan is a pure function -- no side effects, no async.
 # 4. [Pattern]: build_report_tool() and build_summary_tool() generate dynamic tool dicts per iteration.
 # 5. [Pattern]: get_phase_tools() filters static schemas. Dynamic tools are built separately by the cart loop.
+# 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
 
@@ -18,7 +19,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
@@ -54,6 +55,7 @@ class NightwatcherContext:
     bridge: Any
     smartsheet_adapter: Any
     slack_notify: Any
+    broadcast: Callable[[dict], Awaitable[None]] | None = None
     manifest_services: set[str] = field(default_factory=set)
     manifest_ids: set[str] = field(default_factory=set)
     dispatch_count: int = 0
@@ -237,6 +239,17 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
 
     task_prompt = INVESTIGATION_TEMPLATE.format(service=service)
     sweep_event_id = f"nw-sweep-{int(time.time())}"
+
+    async def on_progress(progress_data: dict) -> None:
+        if ctx.broadcast:
+            await ctx.broadcast({
+                "type": "progress",
+                "event_id": sweep_event_id,
+                "actor": progress_data.get("actor", "sysadmin"),
+                "message": progress_data.get("message", ""),
+                "event_source": "nightwatcher",
+            })
+
     start = time.time()
     try:
         from ..agents.ephemeral_provisioner import INFRA_SENTINEL
@@ -249,6 +262,7 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
         result_text, _ = await dispatch_to_agent(
             ctx.registry, ctx.bridge, "sysadmin", sweep_event_id,
             task_prompt, agent_id=agent.agent_id, mode="investigate",
+            on_progress=on_progress,
         )
     except Exception as e:
         result_text = f"Investigation dispatch failed: {e}"

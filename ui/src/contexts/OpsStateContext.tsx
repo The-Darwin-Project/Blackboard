@@ -106,7 +106,11 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         const activeIds = activeEventsRef.current?.map(e => e.id);
         setEphemeralAgents(
           activeIds && activeIds.length > 0
-            ? ephemeral.filter(a => !a.bound_event_id || activeIds.includes(a.bound_event_id))
+            ? ephemeral.filter(a =>
+                !a.bound_event_id
+                || activeIds.includes(a.bound_event_id)
+                || a.bound_event_id.startsWith('nw-sweep-')
+              )
             : ephemeral
         );
         setAgentStreams(prev => {
@@ -181,6 +185,8 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       const isEphemeralEvent = evtId && (
         msg.event_source === 'headhunter'
         || msg.event_source === 'timekeeper'
+        || msg.event_source === 'nightwatcher'
+        || evtId.startsWith('nw-sweep-')
         || (msg as Record<string, unknown>).subject_type === 'kargo_stage'
         || ephemeralAgentsRef.current.some((a) => a.bound_event_id === evtId)
         || activeEventsRef.current?.some((e) => e.id === evtId && (

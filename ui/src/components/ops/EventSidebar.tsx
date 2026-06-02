@@ -214,7 +214,13 @@ export default function EventSidebar() {
                     labelColor={color}
                     sublabel={a.bound_event_id?.slice(4, 16) || (a.busy ? 'working' : 'idle')}
                     sublabelColor={a.busy ? '#8b5cf6' : undefined}
-                    onClick={() => a.bound_event_id && selectEvent(a.bound_event_id)}
+                    onClick={() => {
+                      if (a.bound_event_id?.startsWith('nw-sweep-')) {
+                        setHotspot(a.bound_event_id);
+                      } else if (a.bound_event_id) {
+                        selectEvent(a.bound_event_id);
+                      }
+                    }}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       setCtxMenu({ x: e.clientX, y: e.clientY, items: agentMenuItems(displayRole, a, setHotspot) });

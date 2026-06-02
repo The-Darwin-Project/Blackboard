@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
     from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
@@ -53,6 +53,7 @@ class NightwatcherObserver:
         smartsheet_adapter: "Optional[SmartsheetIncidentAdapter]",
         archivist: "Archivist",
         slack_notify=None,
+        broadcast: "Callable[[dict], Awaitable[None]] | None" = None,
     ):
         self.blackboard = blackboard
         self._registry = registry
@@ -61,6 +62,7 @@ class NightwatcherObserver:
         self._smartsheet = smartsheet_adapter
         self._archivist = archivist
         self._slack_notify = slack_notify
+        self._broadcast: "Callable[[dict], Awaitable[None]] | None" = broadcast
         self._adapter = None
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -195,6 +197,7 @@ class NightwatcherObserver:
             blackboard=self.blackboard, archivist=self._archivist,
             provisioner=self._provisioner, registry=self._registry,
             bridge=self._bridge, smartsheet_adapter=self._smartsheet,
+            broadcast=self._broadcast,
             slack_notify=self._slack_notify,
             manifest_services={e.service for e in escalations},
             manifest_ids={e.event_id for e in escalations},
