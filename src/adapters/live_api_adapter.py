@@ -361,6 +361,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "**Direct message** — the ONLY way FRIDAY hears you. "
             "Text responses are silent to her; she only sees tool actions. "
+            "This WAKES FRIDAY immediately from defer/wait states. "
             "In Observer mode: surfaces an observation when friction is detected. "
             "In Peer mode: this is how you reply in conversation. "
             "Always end with a question when the issue is unresolved."
