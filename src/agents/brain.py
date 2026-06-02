@@ -5015,7 +5015,7 @@ class Brain:
             turns = len(event.conversation)
             await self.blackboard.append_journal(
                 event.service,
-                f"{event.event.reason} -- closed in {turns} turns. {summary}"
+                f"[evt-{event_id[:8]}] {summary}"
             )
             # Invalidate journal cache for this service (immediate freshness)
             self._journal_cache.pop(event.service, None)
