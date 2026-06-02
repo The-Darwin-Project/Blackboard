@@ -166,7 +166,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, optimisticRemoveEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgentsRef = useRef(ephemeralAgents);
@@ -229,6 +229,13 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateHeadhunter();
       }
     } else if (msg.type === 'event_status_changed') {
+      if (msg.event_id && msg.status === 'deferred' && msg.defer_until) {
+        optimisticPatchEvent(msg.event_id as string, {
+          status: 'deferred',
+          defer_until: msg.defer_until as number,
+          defer_started_at: (msg.defer_started_at as number) ?? undefined,
+        });
+      }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'kargo_stages_update') {

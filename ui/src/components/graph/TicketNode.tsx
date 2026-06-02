@@ -1,6 +1,9 @@
 // BlackBoard/ui/src/components/graph/TicketNode.tsx
+// @ai-rules:
+// 1. [Pattern]: Ephemeral ticket node on architecture graph; defer bar when status is deferred.
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
+import DeferCountdownBar from '../DeferCountdownBar';
 import './ArchitectureGraph.css';
 
 const TICKET_COLORS: Record<string, string> = {
@@ -19,6 +22,8 @@ interface TicketNodeData {
   elapsed_seconds: number;
   current_agent: string | null;
   has_work_plan: boolean;
+  defer_until?: number | null;
+  defer_started_at?: number | null;
 }
 
 function TicketNodeComponent({ data }: NodeProps & { data: TicketNodeData }) {
@@ -48,6 +53,16 @@ function TicketNodeComponent({ data }: NodeProps & { data: TicketNodeData }) {
         <div className="ticket-node-detail">
           turns: {data.turn_count} &middot; {elapsed}
         </div>
+
+        {data.status === 'deferred' && (
+          <div className="ticket-node-defer mt-1 px-0.5">
+            <DeferCountdownBar
+              deferUntil={data.defer_until ?? undefined}
+              deferStartedAt={data.defer_started_at ?? undefined}
+              compact
+            />
+          </div>
+        )}
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </>

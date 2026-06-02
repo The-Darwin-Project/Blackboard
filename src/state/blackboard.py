@@ -1611,6 +1611,36 @@ class BlackboardState:
                 except WatchError:
                     continue
 
+    MIN_DEFER_DELAY = 30  # seconds -- matches brain.py clamp floor
+
+    async def resolve_defer_timestamps(
+        self,
+        event_id: str,
+        event: "EventDocument",
+    ) -> tuple[float | None, float | None]:
+        """Return (defer_until, defer_started_at) for a deferred event.
+
+        Reads defer_until from the Redis side key and defer_started_at from the
+        last brain.defer conversation turn.  Clamps started > until to avoid
+        negative-width countdown bars.
+        """
+        defer_until: float | None = None
+        defer_started_at: float | None = None
+        raw = await self.redis.get(f"{self.EVENT_PREFIX}{event_id}:defer_until")
+        if raw:
+            try:
+                defer_until = float(raw)
+            except (TypeError, ValueError):
+                pass
+        for turn in reversed(event.conversation):
+            if turn.actor == "brain" and turn.action == "defer":
+                defer_started_at = turn.timestamp
+                break
+        if defer_until is not None and defer_started_at is not None:
+            if defer_started_at > defer_until:
+                defer_started_at = max(defer_until - float(self.MIN_DEFER_DELAY), 0.0)
+        return defer_until, defer_started_at
+
     async def _get_ticket_nodes(self) -> list[TicketNode]:
         """Batch-load active general/headhunter events as ticket nodes.
 
@@ -1669,6 +1699,10 @@ class BlackboardState:
                             f"thoughts={turn.thoughts[:120]}"
                         )
 
+            defer_until, defer_started_at = await self.resolve_defer_timestamps(
+                eid, event,
+            ) if event.status.value == "deferred" else (None, None)
+
             tickets.append(TicketNode(
                 event_id=eid,
                 status=event.status.value,
@@ -1678,6 +1712,8 @@ class BlackboardState:
                 elapsed_seconds=round(elapsed, 1),
                 current_agent=current_agent,
                 defer_count=defer_count,
+                defer_until=defer_until,
+                defer_started_at=defer_started_at,
                 has_work_plan=has_plan,
             ))
 

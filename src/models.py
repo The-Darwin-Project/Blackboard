@@ -153,6 +153,8 @@ class TicketNode(BaseModel):
     elapsed_seconds: float
     current_agent: str | None = None
     defer_count: int = 0
+    defer_until: float | None = Field(None, description="Unix seconds when defer timer fires")
+    defer_started_at: float | None = Field(None, description="Unix seconds of last brain.defer turn")
     has_work_plan: bool = False
     resolved_service: str | None = None
 

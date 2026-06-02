@@ -26,6 +26,7 @@ import { ConversationFeed } from '../ConversationFeed';
 import { PlanProgress, usePlanState } from '../PlanProgress';
 import ChatInput from '../ChatInput';
 import CollapsibleSection from '../CollapsibleSection';
+import DeferCountdownBar from '../DeferCountdownBar';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 
 const MIN_WIDTH = 64;
@@ -409,22 +410,32 @@ export default function EventSidebar() {
             }
             const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
             const showPlan = hasPlan;
+            const listEvt = events.find(e => e.id === selectedEventId);
             return (
               <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-border">
                 <div className="flex-shrink-0 px-1.5 pt-2 pb-1">
-                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg border"
+                <div className="flex flex-col gap-2 px-3 py-2 rounded-lg border"
                   style={{ background: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}08`, borderColor: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}30` }}>
-                  {isDemoMode && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold flex-shrink-0">DEMO</span>}
-                  <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[doc.status]?.border || '#3b82f6' }} />
-                  <SourceIcon source={doc.source} size={16} />
-                  <span className="text-[13px] font-mono truncate flex-1" style={{ color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>{selectedEventId}</span>
-                  <span className="text-[11px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
-                    style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>
-                    {STATUS_COLORS[doc.status]?.label || doc.status}
-                  </span>
-                  <button onClick={deselectEvent}
-                    className="flex items-center justify-center w-6 h-6 rounded border border-border hover:border-red-500/50 hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors text-sm font-bold flex-shrink-0"
-                    title="Close event">&times;</button>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    {isDemoMode && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold flex-shrink-0">DEMO</span>}
+                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[doc.status]?.border || '#3b82f6' }} />
+                    <SourceIcon source={doc.source} size={16} />
+                    <span className="text-[13px] font-mono truncate flex-1" style={{ color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>{selectedEventId}</span>
+                    <span className="text-[11px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
+                      style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>
+                      {STATUS_COLORS[doc.status]?.label || doc.status}
+                    </span>
+                    <button onClick={deselectEvent}
+                      className="flex items-center justify-center w-6 h-6 rounded border border-border hover:border-red-500/50 hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors text-sm font-bold flex-shrink-0"
+                      title="Close event">&times;</button>
+                  </div>
+                  {doc.status === 'deferred' && (
+                    <DeferCountdownBar
+                      deferUntil={listEvt?.defer_until}
+                      deferStartedAt={listEvt?.defer_started_at}
+                      conversation={doc.conversation as import('../../api/types').ConversationTurn[]}
+                    />
+                  )}
                 </div>
                 </div>
 

@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/queue", tags=["queue"])
 
-
 def _serialize_evidence(event: EventDocument) -> dict:
     """Serialize evidence to dict with fallback for legacy string evidence."""
     evidence_val = event.event.evidence
@@ -57,6 +56,23 @@ def _serialize_evidence(event: EventDocument) -> dict:
     }
 
 
+async def _defer_timeline_fields(
+    blackboard: BlackboardState,
+    event_id: str,
+    event: EventDocument,
+) -> dict[str, float]:
+    """Resolve defer timestamps via shared BlackboardState helper."""
+    defer_until, defer_started_at = await blackboard.resolve_defer_timestamps(
+        event_id, event,
+    )
+    out: dict[str, float] = {}
+    if defer_until is not None:
+        out["defer_until"] = defer_until
+    if defer_started_at is not None:
+        out["defer_started_at"] = defer_started_at
+    return out
+
+
 @router.get("/active")
 async def list_active_events(
     blackboard: BlackboardState = Depends(get_blackboard),
@@ -67,7 +83,7 @@ async def list_active_events(
     for eid in event_ids:
         event = await blackboard.get_event(eid)
         if event:
-            events.append({
+            row = {
                 "id": event.id,
                 "source": event.source,
                 "service": event.service,
@@ -79,7 +95,10 @@ async def list_active_events(
                 "created": event.event.timeDate,
                 "created_by_email": event.created_by_email,
                 "unread_notes": getattr(event, "unread_notes", 0) or 0,
-            })
+            }
+            if event.status == EventStatus.DEFERRED:
+                row.update(await _defer_timeline_fields(blackboard, eid, event))
+            events.append(row)
     return events
 
 

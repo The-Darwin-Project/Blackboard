@@ -2913,7 +2913,8 @@ class Brain:
             self._waiting_for_agent.pop(event_id, None)
             reason = args.get("reason", "Deferred by Brain")
             delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))  # Clamp 30s-60min
-            defer_until = time.time() + delay
+            defer_started_at = time.time()
+            defer_until = defer_started_at + delay
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -2942,6 +2943,8 @@ class Brain:
                     "type": "event_status_changed",
                     "event_id": event_id,
                     "status": EventStatus.DEFERRED.value,
+                    "defer_until": defer_until,
+                    "defer_started_at": defer_started_at,
                 })
             await self.blackboard.record_event(
                 EventType.BRAIN_EVENT_DEFERRED,

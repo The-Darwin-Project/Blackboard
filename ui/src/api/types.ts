@@ -119,6 +119,8 @@ export interface TicketNode {
   elapsed_seconds: number;
   current_agent: string | null;
   defer_count: number;
+  defer_until?: number | null;
+  defer_started_at?: number | null;
   has_work_plan: boolean;
   resolved_service: string | null;
 }
@@ -173,6 +175,10 @@ export interface ActiveEvent {
   turns: number;
   created: string;
   unread_notes?: number;
+  /** Unix seconds when FRIDAY's defer timer fires (from Redis). */
+  defer_until?: number;
+  /** Unix seconds of the last brain.defer turn (conversation). */
+  defer_started_at?: number;
 }
 
 // =============================================================================

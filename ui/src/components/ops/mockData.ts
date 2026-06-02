@@ -25,6 +25,8 @@ export const MOCK_EVENTS = [
     source: 'aligner',
     service: 'redis',
     current_agent: null,
+    defer_started_at: Date.now() / 1000 - 120,
+    defer_until: Date.now() / 1000 + 480,
   },
 ];
 

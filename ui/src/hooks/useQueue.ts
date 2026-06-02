@@ -75,5 +75,10 @@ export function useQueueInvalidation() {
         old ? old.filter((e) => e.id !== eventId) : [],
       );
     },
+    optimisticPatchEvent: (eventId: string, patch: Partial<ActiveEvent>) => {
+      queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
+        old ? old.map((e) => (e.id === eventId ? { ...e, ...patch } : e)) : [],
+      );
+    },
   };
 }

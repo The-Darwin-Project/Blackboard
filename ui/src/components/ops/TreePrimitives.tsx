@@ -7,6 +7,7 @@ import { useState, type ReactNode } from 'react';
 import { ChevronRight, Bot, Radio, Bell, StickyNote, Snowflake } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
+import DeferCountdownBar from '../DeferCountdownBar';
 
 export function TreeGroup({ icon, label, count, countColor, children, nested, forceCollapsed }: {
   icon: ReactNode; label: string; count: number; countColor?: string; children: ReactNode; nested?: boolean; forceCollapsed?: boolean;
@@ -51,40 +52,64 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
 }
 
 export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
-  evt: { id: string; status: string; source: string; service: string; subject_type?: string; current_agent?: string | null; unread_notes?: number };
+  evt: {
+    id: string; status: string; source: string; service: string; subject_type?: string;
+    current_agent?: string | null; unread_notes?: number;
+    defer_until?: number; defer_started_at?: number;
+  };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const sc = STATUS_COLORS[evt.status];
   const isWaiting = evt.status === 'waiting_approval';
   const isOnIce = evt.status === 'on_ice';
+  const isDeferred = evt.status === 'deferred';
   return (
-    <div className={`flex items-center gap-2 px-3 py-1 rounded text-[14px] cursor-pointer transition-colors ${
-      isSelected ? 'bg-accent/15 border border-accent/30'
-        : isWaiting ? 'border border-amber-500/25 hover:border-amber-500/40'
-        : 'hover:bg-bg-tertiary border border-transparent'
-    }`}
+    <div
+      className={`rounded text-[14px] cursor-pointer transition-colors ${
+        isSelected ? 'bg-accent/15 border border-accent/30'
+          : isWaiting ? 'border border-amber-500/25 hover:border-amber-500/40'
+          : isDeferred ? 'border border-violet-500/20 hover:border-violet-500/35'
+          : 'hover:bg-bg-tertiary border border-transparent'
+      }`}
       role="button" tabIndex={0}
-      style={isWaiting && !isSelected ? { background: '#f59e0b08' } : undefined}
+      style={
+        isWaiting && !isSelected ? { background: '#f59e0b08' }
+          : isDeferred && !isSelected ? { background: `${sc?.border || '#8b5cf6'}08` }
+          : undefined
+      }
       onClick={onClick} onContextMenu={onContextMenu}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}>
-      <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
-        style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
-      <SourceIcon source={evt.source} subjectType={evt.subject_type} size={18} />
-      <span className={`truncate ${isWaiting ? 'text-amber-300' : 'text-text-secondary'}`}>{evt.id.slice(4, 12)}</span>
-      {isWaiting && (
-        <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
-      )}
-      {isOnIce && (
-        <Snowflake size={14} className="text-slate-400 flex-shrink-0" />
-      )}
-      {!isWaiting && !isOnIce && (evt.unread_notes ?? 0) > 0 && (
-        <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
-      )}
-      {evt.current_agent && (
-        <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"
-          style={{ color: ACTOR_COLORS[evt.current_agent] || '#64748b', background: `${ACTOR_COLORS[evt.current_agent] || '#64748b'}15` }}>
-          {evt.current_agent}
+      <div className="flex items-center gap-2 px-3 py-1">
+        <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
+          style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
+        <SourceIcon source={evt.source} subjectType={evt.subject_type} size={18} />
+        <span className={`truncate ${isWaiting ? 'text-amber-300' : isDeferred ? 'text-violet-200' : 'text-text-secondary'}`}>
+          {evt.id.slice(4, 12)}
         </span>
+        {isWaiting && (
+          <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
+        )}
+        {isOnIce && (
+          <Snowflake size={14} className="text-slate-400 flex-shrink-0" />
+        )}
+        {!isWaiting && !isOnIce && (evt.unread_notes ?? 0) > 0 && (
+          <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
+        )}
+        {evt.current_agent && (
+          <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"
+            style={{ color: ACTOR_COLORS[evt.current_agent] || '#64748b', background: `${ACTOR_COLORS[evt.current_agent] || '#64748b'}15` }}>
+            {evt.current_agent}
+          </span>
+        )}
+      </div>
+      {isDeferred && (
+        <div className="px-3 pb-1.5 pt-0" onClick={(e) => e.stopPropagation()}>
+          <DeferCountdownBar
+            deferUntil={evt.defer_until}
+            deferStartedAt={evt.defer_started_at}
+            compact
+          />
+        </div>
       )}
     </div>
   );
