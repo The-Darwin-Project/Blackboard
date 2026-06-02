@@ -16,3 +16,5 @@ data:
 {{ .Files.Get "files/developer.md" | indent 4 }}
   qe.md: |
 {{ .Files.Get "files/qe.md" | indent 4 }}
+  security_analyst.md: |
+{{ .Files.Get "files/security_analyst.md" | indent 4 }}

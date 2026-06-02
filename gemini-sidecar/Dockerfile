@@ -100,6 +100,15 @@ RUN npm install -g @playwright/mcp@latest && \
 # Install skopeo (container image inspection -- no daemon required)
 RUN dnf install -y skopeo && dnf clean all && skopeo --version
 
+# Install security scanning tools (vulnerability analysis, SBOM generation, signature verification)
+RUN \
+    curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin && \
+    curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin && \
+    curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin && \
+    curl -sL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+      -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign && \
+    trivy --version && grype version && syft version && cosign version
+
 # Install Python 3.12 + pip + test tools (QE agent needs pytest/httpx)
 # Also install Chromium deps for Playwright headless browser testing
 RUN dnf install -y \
@@ -109,7 +118,7 @@ RUN dnf install -y \
     && dnf clean all && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
-    python3 -m pip install pytest httpx && \
+    python3 -m pip install pytest httpx pip-audit && \
     ln -sf "$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/pip" /usr/local/bin/pip && \
     ln -sf /usr/local/bin/pip /usr/local/bin/pip3 && \
     python3 --version && python3 -m pytest --version && \

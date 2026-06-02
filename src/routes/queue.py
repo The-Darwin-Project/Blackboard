@@ -111,7 +111,7 @@ async def list_on_ice_events(
 @router.get("/{event_id}/turns")
 async def get_event_turns(
     event_id: str,
-    role: Optional[str] = Query(None, description="Agent role for gap calculation (qe, sysadmin, developer, architect)"),
+    role: Optional[str] = Query(None, description="Agent role for gap calculation (qe, sysadmin, developer, architect, security_analyst)"),
     since: Optional[int] = Query(None, description="Return turns after this turn number (overrides role-based gap)"),
     blackboard: BlackboardState = Depends(get_blackboard),
 ):

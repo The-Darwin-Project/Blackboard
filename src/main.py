@@ -552,7 +552,7 @@ async def get_event_flow(event_id: str) -> dict:
 
     agent_turns = sum(
         1 for turn in event.conversation
-        if turn.actor in ("architect", "sysadmin", "developer", "qe")
+        if turn.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst")
     )
 
     return {

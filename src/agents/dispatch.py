@@ -56,6 +56,7 @@ AGENT_VOLUME_PATHS = {
     "sysadmin": "/data/gitops-sysadmin",
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
+    "security_analyst": "/data/workspace",
 }
 
 
@@ -130,7 +131,7 @@ async def dispatch_to_agent(
             "event_id": event_id,
             "role": role,
             "prompt": prompt,
-            "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/gitops"),
+            "cwd": cwd or AGENT_VOLUME_PATHS.get(role, "/data/workspace"),
             "autoApprove": True,
             "session_id": session_id,
             "mode": mode,

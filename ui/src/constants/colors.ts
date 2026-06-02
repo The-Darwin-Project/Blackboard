@@ -12,6 +12,7 @@ export const ACTOR_COLORS: Record<string, string> = {
   developer: '#10b981',
   manager: '#06b6d4',
   qe: '#fb7185',
+  security_analyst: '#ef4444',
   flash: '#06b6d4',
   aligner: '#6b7280',
   jarvis: '#14b8a6',   // Teal -- JARVIS meta-cognitive observer
@@ -71,6 +72,7 @@ export const AGENT_NEURON_COLORS: Record<string, string> = {
   sysadmin:  '#22c55e', // green
   developer: '#f59e0b', // amber
   qe:        '#a855f7', // purple
+  security_analyst: '#ef4444', // red
 };
 
 export const SHIFT_STATUS_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {

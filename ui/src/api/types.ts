@@ -460,7 +460,7 @@ export interface AgentRegistryEntry {
 // Agent Mapping Helper
 // =============================================================================
 
-export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'brain';
+export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'security_analyst' | 'brain';
 
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {

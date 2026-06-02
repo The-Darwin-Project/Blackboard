@@ -253,8 +253,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer", "qe"],
-                    "description": "Which agent to route to",
+                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
+                    "description": (
+                        "Which agent to route to. "
+                        "security_analyst: vulnerability scanning, CVE remediation assessment, "
+                        "dependency audit, container image analysis, RBAC review, supply chain security. "
+                        "Ephemeral only -- always spawns an on-call pod."
+                    ),
                 },
                 "task_instruction": {
                     "type": "string",
@@ -339,7 +344,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer", "qe"],
+                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
                     "description": "Which agent to ask",
                 },
                 "question": {
@@ -461,7 +466,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Role name of the agent to reply to: 'developer', 'qe', 'sysadmin', or 'architect'. The system resolves this to the active agent working on the current event.",
+                    "description": "Role name of the agent to reply to: 'developer', 'qe', 'sysadmin', 'architect', or 'security_analyst'. The system resolves this to the active agent working on the current event.",
                 },
                 "message": {
                     "type": "string",
@@ -479,14 +484,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "the message and the response appears in the conversation. Use for quick "
             "questions, status checks, and coordination -- NOT for work plans (use "
             "select_agent for those). Pass the role name: 'developer', 'qe', 'sysadmin', "
-            "or 'architect'."
+            "'architect', or 'security_analyst'."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Role name of the agent to message: 'developer', 'qe', 'sysadmin', or 'architect'. The system resolves this to the correct agent connection.",
+                    "description": "Role name of the agent to message: 'developer', 'qe', 'sysadmin', 'architect', or 'security_analyst'. The system resolves this to the correct agent connection.",
                 },
                 "message": {
                     "type": "string",
@@ -619,7 +624,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                             "id": {"type": "string", "description": "Step number (e.g., '1', '2')"},
                             "agent": {
                                 "type": "string",
-                                "enum": ["architect", "sysadmin", "developer", "qe"],
+                                "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
                                 "description": "Which agent handles this step",
                             },
                             "summary": {"type": "string", "description": "What this step accomplishes"},

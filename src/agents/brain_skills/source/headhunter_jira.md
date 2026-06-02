@@ -24,8 +24,9 @@ translate the embedded steps into a proper execution plan on the Blackboard.
 This makes the execution order visible to agents, the dashboard, and yourself
 for progress tracking.
 
-The plan may reference any agent (qe, developer, architect, sysadmin) depending
-on the activity label that generated it.
+The plan may reference any agent (qe, developer, architect, sysadmin, security_analyst)
+depending on the activity label that generated it. Plans from `darwin_audit` labels
+typically route scanning steps to security_analyst and fix steps to developer.
 
 Treat the plan's domain classification as a hypothesis, not a fact. If execution
 reveals higher complexity than anticipated, reclassify before proceeding.

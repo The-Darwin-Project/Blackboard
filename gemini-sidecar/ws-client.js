@@ -9,6 +9,7 @@
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 // 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work). wake_register WS includes same `mode` as synthetic task (Brain handle_wake_task / WAKE_REGISTER_MODES).
 // 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
+// 10. [Pattern]: Role-gated pre-warm: security_analyst downloads vuln DBs (trivy, grype) before CLI spawn. Non-blocking on failure. Progress messages sent to Brain via WS.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -246,6 +247,19 @@ async function handleTask(ws, msg) {
     swapActiveRules(role);
     filterSkillsByRole(role);
     filterSkillsByMode(mode);
+
+    // Role-gated pre-warm: security_analyst downloads vulnerability DBs before CLI spawn
+    if (role === 'security_analyst') {
+      const { execSync } = require('child_process');
+      sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'Updating vulnerability databases...' });
+      try {
+        execSync('trivy fs --download-db-only 2>/dev/null', { timeout: 60000 });
+        execSync('grype db update 2>/dev/null', { timeout: 60000 });
+        sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'Databases ready. Starting security scan.' });
+      } catch (err) {
+        sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'DB update skipped (will retry during scan). Proceeding.' });
+      }
+    }
 
     let result;
     let retryDelay = CLI_429_INITIAL_DELAY_MS;

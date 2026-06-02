@@ -164,7 +164,7 @@ domain: <CLEAR|COMPLICATED|COMPLEX>
 risk: <low|medium|high>
 steps:
   - id: <short-kebab-id>
-    agent: <qe|developer|architect|sysAdmin>
+    agent: <qe|developer|architect|sysadmin|security_analyst>
     mode: <investigate|test|implement|execute|review>
     summary: "<what this step does -- include specifics from the analysis>"
     status: pending

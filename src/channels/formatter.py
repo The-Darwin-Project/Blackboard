@@ -36,6 +36,7 @@ AGENT_COLORS: dict[str, str] = {
     "sysadmin": "#f59e0b",
     "developer": "#10b981",
     "qe": "#fb7185",
+    "security_analyst": "#ef4444",
 }
 
 AGENT_EMOJI: dict[str, str] = {
@@ -43,6 +44,7 @@ AGENT_EMOJI: dict[str, str] = {
     "sysadmin": "\U0001f527",
     "developer": "\U0001f4bb",
     "qe": "\U0001f9ea",
+    "security_analyst": "\U0001f6e1",
 }
 
 # Slack shortcodes for Block Kit output (distinct from AGENT_EMOJI Unicode for push text)
@@ -51,6 +53,7 @@ AGENT_SHORTCODE: dict[str, str] = {
     "sysadmin": ":wrench:",
     "developer": ":computer:",
     "qe": ":test_tube:",
+    "security_analyst": ":shield:",
 }
 
 _DISCLAIMER_ACTIONS = frozenset({"execute", "request_approval", "close"})
@@ -279,10 +282,10 @@ def format_turn(turn: "ConversationTurn", event_id: str = "") -> list[dict]:
         text = turn.thoughts or ""
         blocks.append(_section(f"{emoji} *{turn.actor}*\n{text}"))
 
-    elif turn.action == "cancel" and turn.actor in ("architect", "sysadmin", "developer", "qe"):
+    elif turn.action == "cancel" and turn.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst"):
         blocks.append(_section(f":stop_button: *{turn.actor}* task cancelled"))
 
-    elif turn.actor in ("architect", "sysadmin", "developer", "qe") and turn.result:
+    elif turn.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst") and turn.result:
         emoji = AGENT_SHORTCODE.get(turn.actor, ":gear:")
         result = _md_to_mrkdwn(_truncate(turn.result))
         blocks.append(_section(f"{emoji} *{turn.actor}* ({turn.action}):\n{result}"))

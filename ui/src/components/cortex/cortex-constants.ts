@@ -15,7 +15,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
 };
 
 export const PHASES = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
-export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'];
+export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'];
 
 const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
   triage: ['refresh_gitlab_context', 'refresh_kargo_context'],

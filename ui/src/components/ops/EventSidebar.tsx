@@ -8,7 +8,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
 import { useActiveEvents, useOnIceEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
@@ -167,7 +167,7 @@ export default function EventSidebar() {
                 const isBusy = reg?.busy || false;
                 const isRegistered = !!reg;
                 const color = ACTOR_COLORS[name] || '#6b7280';
-                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical } as Record<string, typeof Compass>)[name];
+                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical, security_analyst: Shield } as Record<string, typeof Compass>)[name];
                 return (
                   <TreeNode key={name}
                     icon={

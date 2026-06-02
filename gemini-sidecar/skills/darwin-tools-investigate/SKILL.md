@@ -2,7 +2,7 @@
 name: darwin-tools-investigate
 description: Tool inventory for read-only observation modes. Loaded in investigate, plan, review, and analyze modes.
 modes: [investigate, plan, review, analyze]
-roles: [sysadmin, developer, architect]
+roles: [sysadmin, developer, architect, security_analyst]
 ---
 
 # Available Tools (Observation Modes)

@@ -12,7 +12,7 @@ import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
 import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
-export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
+export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'] as const;
 const MAX_BUFFER = 100;
 
 export interface AgentStreamState {

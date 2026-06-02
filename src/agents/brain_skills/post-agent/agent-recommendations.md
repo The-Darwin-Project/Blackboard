@@ -27,6 +27,8 @@ When history contradicts the agent's recommendation, prefer the historical data 
 
 Skip this only when the agent's report is a simple acknowledgment with no actionable recommendation.
 
+When SecurityAnalyst reports findings with auto-fixable CVEs, dispatch Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
+
 ## Evaluate Recommendations
 
 - When an agent's response includes a recommendation or unresolved issue, you MUST either:

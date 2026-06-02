@@ -335,6 +335,7 @@ VOLUME_PATHS = {
     "sysadmin": "/data/gitops-sysadmin",
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
+    "security_analyst": "/data/workspace",
 }
 
 # Brain-declared phase -> additional skill folders to load alongside plumbing phases.
@@ -472,6 +473,9 @@ class Brain:
     # (chat, slack) are NOT gated here -- their bottleneck is dispatch-time
     # agent availability, not event count.
     _EPHEMERAL_ONLY_SOURCES = frozenset({"aligner", "headhunter", "timekeeper"})
+
+    # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
+    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst"})
 
     def _get_source_wip_limit(self, source: str) -> int:
         """Per-source WIP limit for ephemeral-only sources.
@@ -734,7 +738,7 @@ class Brain:
         # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
         agent_turns = sum(
             1 for t in event.conversation
-            if t.actor in ("architect", "sysadmin", "developer", "qe")
+            if t.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst")
         )
         if agent_turns >= MAX_TURNS_PER_EVENT:
             logger.warning(f"Event {event_id} hit max agent turns ({agent_turns}/{MAX_TURNS_PER_EVENT})")
@@ -4467,16 +4471,23 @@ class Brain:
                     agent_id_override = None
                     event_doc = await self.blackboard.get_event(event_id)
 
-                    # Tier 1: Primary ephemeral sources (never fall back to local)
-                    use_ephemeral = (
-                        self._ephemeral_provisioner
-                        and event_doc
-                        and (
-                            event_doc.source in ("headhunter", "timekeeper")
-                            or getattr(event_doc, "subject_type", "service") == "kargo_stage"
-                        )
-                    )
+                    use_ephemeral = False
                     ephemeral_is_overflow = False
+
+                    # Tier 0: Ephemeral-only roles (no local sidecar exists)
+                    if agent_name in self.EPHEMERAL_ONLY_ROLES and self._ephemeral_provisioner:
+                        use_ephemeral = True
+
+                    # Tier 1: Primary ephemeral sources (never fall back to local)
+                    if not use_ephemeral:
+                        use_ephemeral = (
+                            self._ephemeral_provisioner
+                            and event_doc
+                            and (
+                                event_doc.source in ("headhunter", "timekeeper")
+                                or getattr(event_doc, "subject_type", "service") == "kargo_stage"
+                            )
+                        )
 
                     # Tier 2: MMC overflow -- scale C when local sidecars are full
                     # Local sidecars are role-locked (1 per role = MM1). Ephemeral agents
@@ -4494,10 +4505,34 @@ class Brain:
                                 use_ephemeral = True
                                 ephemeral_is_overflow = True
 
+                    # Safety: ephemeral-only role selected but provisioner unavailable
+                    if agent_name in self.EPHEMERAL_ONLY_ROLES and not use_ephemeral:
+                        logger.warning(
+                            "Ephemeral-only role %s selected but provisioner unavailable for %s -- deferring",
+                            agent_name, event_id,
+                        )
+                        await self._execute_function_call(
+                            event_id, "defer_event",
+                            {"delay_seconds": 60, "reason": f"Role {agent_name} requires ephemeral provisioner (disabled)"},
+                            response_parts=None,
+                        )
+                        return
+
                     if use_ephemeral:
                         provision_result = await self._ephemeral_provisioner.ensure_agent(event_id)
                         if provision_result is None:
-                            if ephemeral_is_overflow:
+                            if agent_name in self.EPHEMERAL_ONLY_ROLES:
+                                logger.warning(
+                                    "Ephemeral-only role %s circuit breaker for %s -- deferring (no sidecar fallback)",
+                                    agent_name, event_id,
+                                )
+                                await self._execute_function_call(
+                                    event_id, "defer_event",
+                                    {"delay_seconds": 60, "reason": f"Security analyst unavailable (ephemeral circuit breaker, no local fallback)"},
+                                    response_parts=None,
+                                )
+                                return
+                            elif ephemeral_is_overflow:
                                 logger.info(
                                     "Ephemeral circuit breaker + local full for %s -- deferring",
                                     event_id,

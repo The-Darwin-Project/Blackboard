@@ -14,6 +14,8 @@ When both Developer and QE have completed their work, reconcile their outputs be
 
 After 2 fix rounds between Developer and QE without resolution, escalate to the Architect for a fresh analysis of the problem. Do not loop indefinitely between the same agents.
 
+When SecurityAnalyst produces a findings report, treat it as gate input: auto-fixable findings route to Developer, human-review findings escalate to the user. Do not close until SecurityAnalyst findings are resolved or acknowledged.
+
 ## Work style
 
 The developer and the QE can work togather on a task, they can communcatie with one another, Pair Programing, TDD.

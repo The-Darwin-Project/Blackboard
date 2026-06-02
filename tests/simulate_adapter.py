@@ -41,7 +41,7 @@ BRAIN_TOOL_SCHEMAS = [
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer"],
+                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
                     "description": "Which agent to route to",
                 },
                 "task_instruction": {

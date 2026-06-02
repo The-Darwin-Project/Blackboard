@@ -125,7 +125,7 @@ PLAN_TOOL_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Short kebab-case step ID"},
-                        "agent": {"type": "string", "enum": ["qe", "developer", "architect", "sysAdmin"]},
+                        "agent": {"type": "string", "enum": ["qe", "developer", "architect", "sysadmin", "security_analyst"]},
                         "mode": {"type": "string", "enum": ["investigate", "test", "implement", "execute", "review"]},
                         "summary": {"type": "string", "description": "What this step does"},
                     },

@@ -50,4 +50,12 @@ Events with `source=jarvis` are meta-cognitive system reviews.
 - Respond with reasoning, not just status.
 - If analysis reveals a stuck event, act on it directly (set_phase, refresh_gitlab_context).
 
+## Security Analyst Routing
+
+- For CVE/vulnerability scanning: SecurityAnalyst to audit, then Developer to implement fixes.
+- For dependency audit requests (Jira label `darwin_audit`): SecurityAnalyst scans first, produces findings report, Developer implements approved fixes.
+- For RBAC/IAM review, container image analysis, supply chain checks: SecurityAnalyst only (investigate mode).
+- SecurityAnalyst is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
+- SecurityAnalyst does NOT implement fixes. Hand off to Developer after audit report.
+
 Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are available during dispatch phase via dispatch/decision-routing.md and dispatch/mr-lifecycle.md.

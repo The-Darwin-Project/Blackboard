@@ -27,6 +27,7 @@ graph TD
         SysAdmin["SysAdmin :9092 - CLI Sidecar"]
         Developer["Developer :9093 - CLI Sidecar"]
         QE["QE :9094 - CLI Sidecar"]
+        SecurityAnalyst["SecurityAnalyst - Ephemeral On-Call"]
     end
 
     subgraph meta [Meta-Cognitive Layer]
@@ -55,6 +56,7 @@ graph TD
     Brain -->|WebSocket| SysAdmin
     Brain -->|WebSocket| Developer
     Brain -->|WebSocket| QE
+    Brain -.->|Tekton TaskRun| SecurityAnalyst
 
     Brain -->|pulse stream| Cortex
     Cortex -->|interventions| Brain
@@ -172,6 +174,7 @@ All sidecars run with `permissionMode: bypassPermissions` at the CLI level. The 
 | Architect | Clone + read repos, argocd/kargo read, oc read | Commit, push, kubectl mutations, argocd sync |
 | SysAdmin | Git clone/push, kubectl/oc read, argocd sync, kargo read, helm | kubectl write, invent Helm sections |
 | Developer | Git clone/push, read Helm, read code | Modify infrastructure, kubectl scale, argocd |
+| SecurityAnalyst | Vulnerability scans, SBOM generation, read-only cluster | Commit, push, kubectl mutations, implement fixes |
 
 The `FORBIDDEN_PATTERNS` in `security.py` provides a secondary safety net by blocking known destructive command patterns before they reach the CLI.
 
@@ -197,4 +200,5 @@ The Brain and in-process daemons use `google-genai` Python SDK. Sidecar agents u
 | SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 | Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
 | QE sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
+| SecurityAnalyst (ephemeral) | Gemini CLI or Claude Code CLI | Inherits sidecar image default |
 | Nightwatcher | `google-genai` Python SDK | `gemini-3-flash-preview` |

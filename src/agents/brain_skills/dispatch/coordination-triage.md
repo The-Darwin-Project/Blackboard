@@ -50,6 +50,26 @@ When dispatching in a sequential pair (Developer then QE):
 - **First agent (Developer)**: Remind them that a teammate will verify after them. They should leave notes about shared concerns -- especially test files they created or modified -- via team coordination.
 - **Second agent (QE)**: Include a summary of what the previous agent changed (files, branches, test modifications) so they don't start blind. If the Developer wrote tests, QE should review and extend them, not duplicate.
 
+## SecurityAnalyst only
+
+Use when the task is:
+
+- Dependency vulnerability scan
+- Container image security analysis
+- RBAC or IAM policy review
+- Supply chain verification
+- SBOM generation request
+
+## SecurityAnalyst then Developer (sequential dispatch)
+
+Use when the task requires:
+
+- CVE remediation (SecurityAnalyst scans, Developer implements bumps)
+- Security fix + verification cycle
+- Dependency audit with auto-fixable findings
+
+Dispatch SecurityAnalyst first for scanning. When SecurityAnalyst completes, evaluate findings. Then dispatch Developer to implement approved fixes.
+
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
 When investigation (sysadmin or oncall) produces a **code fix proposal**:

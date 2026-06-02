@@ -43,30 +43,28 @@ Given a Jira issue, produce:
 
 ## Output Format
 
-Produce a plan with concrete steps the Developer agent will execute (single session, full lifecycle):
+Produce a plan with concrete steps using SecurityAnalyst for scanning and Developer for fixes:
 
 ```
-Step 1: Clone repo, create branch fix/cve-audit-{issue_key}
-Step 2: Run scan tool(s), capture JSON output
-Step 3: For each fixable CVE (Critical/High, non-breaking):
+Step 1 (security_analyst, investigate): Clone repo, detect ecosystem, run vulnerability scans, produce findings report with CVE table
+Step 2 (developer, implement): Clone repo, create branch fix/cve-audit-{issue_key}
+Step 3 (developer, implement): For each auto-fixable CVE from SecurityAnalyst report (Critical/High, non-breaking):
         - Apply fix (version bump in lockfile/manifest)
         - Verify build + test still pass
         - If build breaks: revert that specific fix, flag for human
-Step 4: Re-scan to confirm fixes resolved the CVEs
-Step 5: Commit, push, create MR/PR with CVE summary
-Step 6: Monitor MR pipeline:
+Step 4 (developer, implement): Commit, push, create MR/PR with CVE summary from SecurityAnalyst findings
+Step 5 (developer, execute): Monitor MR pipeline:
         - Poll pipeline status every 60s until terminal state
         - If pipeline passes: report success
         - If pipeline fails: inspect failure logs, attempt fix, re-push
         - Max 2 pipeline fix attempts. After that: report failure with logs.
-Step 7: Report final outcome:
+Step 6 (developer, execute): Report final outcome:
         - MR URL + pipeline status
         - CVEs fixed (table: CVE ID, package, old->new version)
         - CVEs flagged for human (major bumps, no fix available)
-        - Re-scan results (clean/remaining)
 ```
 
-**The agent stays active through the full MR lifecycle.** It does NOT exit after creating the MR -- it monitors until pipeline passes or fails definitively. This runs on an ephemeral/onCall agent so capacity is not a concern.
+**SecurityAnalyst scans first, then Developer implements.** SecurityAnalyst is ephemeral (on-call pod) and produces the findings report. Developer executes the fix cycle based on SecurityAnalyst's report. Developer stays active through the full MR lifecycle.
 
 ## Rules
 
