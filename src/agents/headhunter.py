@@ -544,10 +544,15 @@ class Headhunter:
             },
         )
         resolved_service = await self._resolve_service(project_path)
+        clean_plan = plan_text.strip()
+        if clean_plan.startswith("```"):
+            clean_plan = clean_plan.split("\n", 1)[1] if "\n" in clean_plan else clean_plan
+        if clean_plan.endswith("```"):
+            clean_plan = clean_plan[:-3].rstrip()
         event_id = await self.blackboard.create_event(
             source="headhunter",
             service=resolved_service,
-            reason=plan_text,
+            reason=clean_plan,
             evidence=evidence,
         )
         logger.info(f"Headhunter event created: {event_id} for {todo['action_name']} on !{target['iid']}")
