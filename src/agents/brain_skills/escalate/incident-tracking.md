@@ -1,5 +1,6 @@
 ---
-phase: always
+description: "Incident tracking rules for escalated automated events"
+tags: [escalation, incidents, tracking]
 ---
 
 ## Incident Tracking (Mandatory for Escalated Automated Events)
@@ -30,11 +31,31 @@ This gives you refresh_gitlab_context to check live MR/PR state.
 If the MR/PR has merged or the pipeline has passed, the failure is
 self-resolved -- skip report_incident and close.
 
+### Terminal Failure Gate
+
+Escalation requires a **terminal state**. Do not escalate while the system is still
+working toward resolution on its own.
+
+| State | Terminal? | Action |
+|---|---|---|
+| Pipeline `running` | No | Defer and check later |
+| Pod `Pending` / `PodInitializing` | No | Defer -- the scheduler is still working |
+| Pipeline `failed` (all retries exhausted) | Yes | Escalate |
+| Pod stuck Pending > cluster timeout (2h) | Yes | Escalate |
+| Pipeline `cancelled` by external actor | Yes | Escalate |
+
+"Stuck" means exceeding the **known historical baseline** for that service (check Deep
+Memory). A 17-minute Pending on a shared cluster is not stuck if builds typically take
+38-55 minutes. Patience is cheaper than false escalations.
+
+If you agreed to a monitoring window (with JARVIS or internally), honor it. Breaking
+your own commitment erodes trust and creates noise for maintainers.
+
 ### Mandatory Triggers
 
 Call `report_incident` (after investigation) when:
 
-- Pipeline fails after retest (persistent failure) -- all failure reasons must be known
+- Pipeline reaches a **terminal failure state** (not pending, not running)
 - Retest commands (/retest, /test, /ok-to-test) fail to trigger a new pipeline
 - Agent cannot resolve the issue after full execution cycle
 - Event classified CHAOTIC
@@ -98,19 +119,5 @@ If no proven fix exists, omit this section.
 | `summary` | `[evt-XXXXXXX] {one-line specific failure}` -- include the concrete error so the reader knows the issue without opening the description |
 | `priority` | Normal: first occurrence, no blast radius. Major: persistent after retest, blocks one component. Critical: affects multiple components or versions. Blocker: production outage. |
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |
-
-### Sequence
-
-Close sequence for automated events with failures:
-
-0. `set_phase("verify")` -- refresh live state
-1. `refresh_gitlab_context` (headhunter events)
-2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 6
-3. `set_phase("escalate")`
-4. `notify_user_slack` (each maintainer)
-5. `report_incident` -- you are here
-6. `notify_gitlab_result` (if GitLab-sourced)
-7. `set_phase("close")`
-8. `close_event`
 
 Include the event id in every output: incident summary, maintainer notifications, and close reason.

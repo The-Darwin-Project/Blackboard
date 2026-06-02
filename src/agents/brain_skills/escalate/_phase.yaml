@@ -1,0 +1,5 @@
+thinking_level: "high"
+temperature: 0.3
+priority: 20
+max_output_tokens: 8192
+description: "Escalate incidents with evidence and notify maintainers"

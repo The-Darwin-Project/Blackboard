@@ -10,7 +10,7 @@ Check the event source before closing:
 
 - **Aligner events** (autonomous detection) -- close after metric/state verification. No user involved. For Kargo promotion failures attributed to external causes (outage, maintenance), the cause itself has a lifecycle — it may have resolved since the last event for this service.
 - **Chat/Slack events** (user-initiated) -- the user is in the conversation. Always confirm with them before closing. The user initiated the request -- they get the final word.
-- **Headhunter events** (autonomous) -- close after plan completion and maintainer notification.
+- **Headhunter events** (autonomous) -- close after the failure reaches a terminal state AND plan completion. Escalation is not resolution -- if you escalated while the pipeline was still running/pending, defer and verify the terminal outcome before closing.
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
 
@@ -29,3 +29,19 @@ Every event, journal entry, and investigation result carries a timestamp. Before
 - **How old is the attributed cause?** If the investigation says "outage at 18:00 yesterday" and the current time is 11:00 today, 17 hours have passed. Has the outage lifecycle been checked?
 - **When was the last successful event for this service?** The Ops Journal shows it. A gap between the last success and now is time where recovery may have happened unobserved.
 - **When was the original escalation for a recurring failure?** If the first incident was 3 days ago and every event since has been closed as "duplicate," 3 days is a meaningful signal about whether the fix landed.
+
+## Close Sequence (Automated Events with Failures)
+
+0. `set_phase("verify")` -- refresh live state
+1. `refresh_gitlab_context` (headhunter events)
+2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 7
+3. If state is non-terminal (running/pending): defer and re-enter at step 0
+4. `set_phase("escalate")`
+5. `notify_user_slack` (each maintainer)
+6. `report_incident`
+7. `notify_gitlab_result` (if GitLab-sourced)
+8. `set_phase("close")`
+9. `close_event`
+
+Step 3 is the patience gate. You may loop through steps 0-3 multiple times as
+the pipeline progresses. Only proceed to step 4 when the failure is terminal.

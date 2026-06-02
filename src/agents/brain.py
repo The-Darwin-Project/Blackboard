@@ -345,8 +345,8 @@ BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
     "investigate":  ["dispatch"],
     "execute":      ["dispatch", "coordination"],
     "verify":       ["post-agent", "defer-wake"],
-    "escalate":     ["post-agent"],
-    "close":        [],
+    "escalate":     ["post-agent", "escalate"],
+    "close":        ["close"],
 }
 
 # Context priming: synthetic prefill so the LLM treats protocols as already-committed.
@@ -358,7 +358,7 @@ BRAIN_PREFILL_MODEL = (
     "(1) Deep memory before routing -- history beats guesswork. "
     "(2) Cynefin triage on every event. "
     "(3) Never drop agent recommendations. "
-    "(4) Source-aware close rules. "
+    "(4) Phase-gated close and escalation. "
     "(5) Voice: confident peer, Cynefin-gated tone. "
     "Let's get to work."
 )

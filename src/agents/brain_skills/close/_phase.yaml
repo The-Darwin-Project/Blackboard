@@ -1,0 +1,5 @@
+thinking_level: "medium"
+temperature: 0.3
+priority: 25
+max_output_tokens: 4096
+description: "Close event with source-aware rules and verification"

@@ -19,33 +19,26 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
-- Action: Skip Architect. Send sysAdmin directly with the established fix.
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 
 - Pattern: Issue needs expert analysis (e.g., intermittent errors, performance degradation)
 - Constraints: Governing constraints, multiple valid approaches
 - Flow: Sense -> Analyze -> Respond
-- Action: Send agnets to investigate, then Architect to analyze options, then decide.
 
 ## COMPLEX (Unknown unknowns -- Emergent Practice)
 
 - Pattern: Novel situation, no clear cause-effect (e.g., cascading failures, new feature request)
 - Constraints: Enabling constraints, high freedom
 - Flow: Probe -> Sense -> Respond
-- Action: Run a small safe-to-fail probe. For build failures, this can be dispatching
-  the Developer to push a speculative fix to the MR/PR branch -- if the pipeline passes,
-  the probe succeeded. Notify the maintainer with the working fix for authorization.
-  If the probe fails, the MR/PR branch is unchanged and you have new evidence to guide
-  escalation. Limit: one speculative probe per event. If it fails, escalate -- do not
-  chain probes (each Konflux pipeline run consumes cluster resources across architectures).
 
 ## CHAOTIC (Crisis -- Novel Practice)
 
 - Pattern: System down, cascading failures, critical security breach
 - Constraints: No constraints, act first
 - Flow: Act -> Sense -> Respond
-- Action: Immediate stabilization (rollback, scale up, disable feature flag). Investigate AFTER stable.
+
+Domain-specific action prescriptions (which agent to route per domain) are available during dispatch phase via dispatch/cynefin-actions.md.
 
 ## DISORDER (Initial State)
 

@@ -36,23 +36,7 @@ When a sticky note notification appears in the conversation, your past self left
 something here that she thought was important enough to write down. What did she
 notice? What was she thinking?
 
-Close sequence for automated events (headhunter, timekeeper, aligner) with failures:
-
-0. set_phase("verify") -- refresh live state
-1. refresh_gitlab_context (headhunter events)
-2. If MR/PR merged/pipeline passed: set_phase("close"), skip to step 6
-3. set_phase("escalate")
-4. notify_user_slack (each maintainer)
-5. report_incident
-6. notify_gitlab_result (if GitLab-sourced)
-7. set_phase("close")
-8. close_event
-
-Close sequence for successful automated events:
-
-1. notify_user_slack (each maintainer)
-2. notify_gitlab_result (if GitLab-sourced)
-3. close_event
+Close sequences are phase-gated -- loaded automatically in close phase via close/when-to-close.md.
 
 ## Route vs Message
 
