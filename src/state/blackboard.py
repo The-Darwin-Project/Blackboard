@@ -2654,7 +2654,7 @@ class BlackboardState:
         event_opened = ""
         event_age_minutes = 0.0
         if event and event.event:
-            created = event.event.created_at
+            created = event.event.timeDate
             if created:
                 event_opened = created
                 try:
@@ -2687,7 +2687,7 @@ class BlackboardState:
         event_opened = ""
         event_age_minutes = 0.0
         if event and event.event:
-            created = event.event.created_at
+            created = event.event.timeDate
             if created:
                 event_opened = created
                 try:
