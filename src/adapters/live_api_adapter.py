@@ -910,6 +910,7 @@ class LiveAPIAdapter:
                 self._last_was_watching = True
             elif full_text:
                 self._last_was_watching = False
+                auto_wrapped = False
                 # Auto-wrap (A): if JARVIS replied with text while awaiting reply,
                 # deliver it as send_event_message to the target event automatically.
                 if self._awaiting_jarvis_reply and self._awaiting_jarvis_event_id:
@@ -918,16 +919,20 @@ class LiveAPIAdapter:
                     self._awaiting_jarvis_event_id = None
                     logger.info("Auto-wrapping JARVIS text reply as send_event_message to %s", target_eid)
                     await self._tool_send_event_message(target_eid, full_text)
+                    auto_wrapped = True
                 else:
                     self._awaiting_jarvis_reply = False
                 try:
-                    await self._broadcast({
+                    broadcast_payload: dict = {
                         "type": "cortex_thinking",
                         "event_id": eid,
                         "content_type": "text",
                         "text": full_text,
                         "timestamp": time.time(),
-                    })
+                    }
+                    if auto_wrapped:
+                        broadcast_payload["delivered"] = True
+                    await self._broadcast(broadcast_payload)
                 except Exception:
                     pass
 
