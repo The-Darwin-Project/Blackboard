@@ -4,16 +4,17 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
-// 5. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
-// 6. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
-// 7. [Pattern]: is400SessionError detects Claude thinking-block corruption on --resume. executeCLIStreaming retries once without session (_retryWithoutSession flag prevents loops).
+// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI. Controls adaptive reasoning depth. No-op for Gemini.
+// 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
+// 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
+// 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
+// 8. [Pattern]: is400SessionError detects Claude thinking-block corruption on --resume. executeCLIStreaming retries once without session (_retryWithoutSession flag prevents loops).
 
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
@@ -34,11 +35,14 @@ function buildCLICommand(prompt, options = {}) {
         }
         args.push('--output-format', 'stream-json', '--verbose');
         args.push('--model', AGENT_MODEL || 'claude-opus-4-6');
+        if (AGENT_EFFORT_LEVEL) {
+            args.push('--effort', AGENT_EFFORT_LEVEL);
+        }
         if (options.sessionId) {
             args.push('--resume', options.sessionId);
         }
-        const thinkPrefix = AGENT_ROLE === 'architect' ? 'Think harder. ' : '';
-        args.push('-p', thinkPrefix + prompt);
+        const ultrathinkPrefix = AGENT_ROLE === 'architect' ? 'ultrathink ' : '';
+        args.push('-p', ultrathinkPrefix + prompt);
         return { binary: 'claude', args };
     }
     const args = [];

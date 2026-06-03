@@ -644,6 +644,10 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.architect.modelName }}"
+            {{- if .Values.sidecars.architect.effortLevel }}
+            - name: AGENT_EFFORT_LEVEL
+              value: "{{ .Values.sidecars.architect.effortLevel }}"
+            {{- end }}
             - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
               value: "1"
             {{- end }}
@@ -814,6 +818,10 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.sysadmin.modelName }}"
+            {{- if .Values.sidecars.sysadmin.effortLevel }}
+            - name: AGENT_EFFORT_LEVEL
+              value: "{{ .Values.sidecars.sysadmin.effortLevel }}"
+            {{- end }}
             - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
               value: "1"
             {{- end }}
@@ -985,6 +993,10 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.developer.modelName }}"
+            {{- if .Values.sidecars.developer.effortLevel }}
+            - name: AGENT_EFFORT_LEVEL
+              value: "{{ .Values.sidecars.developer.effortLevel }}"
+            {{- end }}
             - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
               value: "1"
             {{- end }}
@@ -1135,6 +1147,10 @@ spec:
               value: "{{ .Values.gcp.location }}"
             - name: ANTHROPIC_MODEL
               value: "{{ .Values.sidecars.qe.modelName }}"
+            {{- if .Values.sidecars.qe.effortLevel }}
+            - name: AGENT_EFFORT_LEVEL
+              value: "{{ .Values.sidecars.qe.effortLevel }}"
+            {{- end }}
             - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
               value: "1"
             {{- end }}

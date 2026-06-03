@@ -2,8 +2,9 @@
 // @ai-rules:
 // 1. [Constraint]: Pure constants and env-derived values only. No side effects at load time.
 // 2. [Pattern]: TIMEOUT_MS derives from AGENT_ROLE via ROLE_TIMEOUTS; PORT/TIMEOUT_MS can be overridden by env.
-// 3. [Pattern]: AGENT_CLI routes CLI selection (gemini|claude); stripAnsi cleans PTY output for Brain/LLM consumption.
-// 4. [Gotcha]: stripAnsi is the only non-constant export — pure function, safe to call on any string.
+// 3. [Pattern]: AGENT_CLI routes CLI selection (gemini|claude); AGENT_EFFORT_LEVEL controls Claude adaptive reasoning depth.
+// 4. [Pattern]: stripAnsi cleans PTY output for Brain/LLM consumption.
+// 5. [Gotcha]: stripAnsi is the only non-constant export — pure function, safe to call on any string.
 
 const PORT = process.env.PORT || 9090;
 const ROLE_TIMEOUTS = {
@@ -27,6 +28,8 @@ const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';
+// Claude Code effort level -- controls adaptive reasoning depth (low|medium|high|max)
+const AGENT_EFFORT_LEVEL = process.env.AGENT_EFFORT_LEVEL || '';
 
 // Ephemeral agent config -- set by Tekton TriggerTemplate for on-call agents
 const EVENT_ID = process.env.EVENT_ID || '';
@@ -48,6 +51,7 @@ module.exports = {
   AGENT_CLI,
   AGENT_MODEL,
   AGENT_ROLE,
+  AGENT_EFFORT_LEVEL,
   EVENT_ID,
   EPHEMERAL,
   IDLE_TIMEOUT_MS,

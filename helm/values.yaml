@@ -66,7 +66,8 @@ sidecars:
     cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
-    modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI (deep planning, code analysis)
+    modelName: "claude-opus-4-6[1m]" # Claude Opus 4.6 via Vertex AI + 1M context window
+    effortLevel: "high" # Claude Code effort: low|medium|high|max (deep planning needs high)
     permissionMode: "bypassPermissions" # No hard restriction -- soft rules via architect.md + skills
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   sysadmin:
@@ -76,6 +77,7 @@ sidecars:
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
     modelName: "claude-sonnet-4-6" # Claude Sonnet 4.6 via Vertex AI
+    effortLevel: "medium" # Execution tasks are well-scoped; higher effort rarely helps
     permissionMode: "bypassPermissions" # Full access (implements plans)
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   developer:
@@ -84,7 +86,8 @@ sidecars:
     cliType: "claude" # Claude Code for code generation
     gitUserName: "Darwin Developer"
     gitUserEmail: "darwin-developer@darwin-project.io"
-    modelName: "claude-opus-4-6" # Claude Opus 4.6 via Vertex AI
+    modelName: "claude-opus-4-6[1m]" # Claude Opus 4.6 via Vertex AI + 1M context window
+    effortLevel: "low" # Developer follows Architect's plan -- low effort is sufficient for execution
     permissionMode: "bypassPermissions" # Skip permission prompts for autonomous code changes
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
   qe:
@@ -94,6 +97,7 @@ sidecars:
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
     modelName: "claude-sonnet-4-6"
+    effortLevel: "high" # QE needs deep reasoning to find edge cases and write thorough tests
     permissionMode: "bypassPermissions"
     gcpSecret: ""
   # Shared image for all sidecars
@@ -372,7 +376,8 @@ ephemeralAgents:
   idleTimeoutMs: "3600000" # 1h -- agent self-terminates after no tasks
   taskRunTimeout: "24h0m0s" # Hard ceiling. Must exceed idleTimeoutMs.
   cli: "claude" # CLI binary for ephemeral agents
-  model: "claude-opus-4-6" # Single model for all role switches
+  model: "claude-opus-4-6[1m]" # Single model for all role switches + 1M context window
+  effortLevel: "high" # On-call investigations benefit from deep reasoning
   permissionMode: "bypassPermissions"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.

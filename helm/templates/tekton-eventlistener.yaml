@@ -88,6 +88,10 @@ spec:
                   value: {{ .Values.gcp.location | quote }}
                 - name: ANTHROPIC_MODEL
                   value: {{ .Values.ephemeralAgents.model | quote }}
+                {{- if .Values.ephemeralAgents.effortLevel }}
+                - name: AGENT_EFFORT_LEVEL
+                  value: {{ .Values.ephemeralAgents.effortLevel | quote }}
+                {{- end }}
                 - name: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
                   value: "1"
                 {{- if .Values.gitlab.enabled }}
