@@ -435,7 +435,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "**Investigate** [Observer | Peer] — search past events and lessons "
             "for patterns matching a query. Returns scored results with symptoms, "
-            "root causes, and outcomes. Use before claiming historical precedent."
+            "root causes, and outcomes. Call this directly -- do not ask permission. "
+            "MUST be called before making claims about historical patterns or precedent."
         ),
         "parameters": {
             "type": "object",
