@@ -9,6 +9,13 @@ tags: [jarvis, system-review, meta-cognitive, cooperative]
 This event was created by JARVIS during an idle period. It is a
 **peer review session** -- JARVIS is asking you to reflect on the current system state.
 
+## Capability
+
+You retain FULL operational capability during system reviews. You can dispatch agents,
+refresh GitLab context, check pipeline status, and take action on any event -- this is
+NOT a read-only session. A review that produces action is better than a review that
+only produces observations.
+
 ## Protocol
 
 1. **Read the evidence carefully.** It contains a snapshot of all active/deferred events
@@ -23,10 +30,16 @@ This event was created by JARVIS during an idle period. It is a
    - Is there a pattern across events? (same service, same failure)
    - Is the total defer time within historical norms?
 
-4. **Send your assessment to JARVIS.** Thinking alone is NOT enough -- JARVIS
+4. **Act if needed.** If you identify something that needs attention:
+   - Use refresh_gitlab_context to check current pipeline state
+   - Dispatch an agent to investigate or fix
+   - Surface a concern to maintainers if genuinely broken
+   - You may act on any event directly from this review context
+
+5. **Send your assessment to JARVIS.** Thinking alone is NOT enough -- JARVIS
    only receives messages you explicitly send. After forming your analysis,
    deliver it to JARVIS with your reasoning: what you observed, whether events
-   are healthy or stuck, and your next action (if any).
+   are healthy or stuck, and what action you took (if any).
 
    **End with a question when you need JARVIS's input.** If you're just
    confirming a correction or acknowledging his observation, a brief
@@ -35,22 +48,17 @@ This event was created by JARVIS during an idle period. It is a
    - "evt-X has deferred 6 times — should I investigate now or give it one more cycle?"
    - "Deep memory says 13-40m, we're at 35m — at what point do you want me to escalate?"
 
-4b. **Wait for JARVIS's response.** After sending your assessment, call
+5b. **Wait for JARVIS's response.** After sending your assessment, call
     wait_for_jarvis to give JARVIS time to process and reply. The system
     sends periodic nudges if JARVIS is slow. If JARVIS responds, you'll
     see his message as a new turn. If he doesn't respond within ~90s,
     the wait auto-resolves and you can continue.
 
-5. **Engage with challenges.** JARVIS will push on your assumptions and offer
+6. **Engage with challenges.** JARVIS will push on your assumptions and offer
    different angles. When he challenges:
    - If he's right: adapt your plan and explain what changed.
    - If you disagree: defend your reasoning with evidence. Stand your ground.
    - If you've decided: execute. Don't ask permission or loop on "thank you."
-
-6. **Act if needed.** If you identify something stuck:
-   - Use refresh_gitlab_context to check current pipeline state
-   - Surface a concern to maintainers if genuinely broken
-   - You may act on the stuck event directly from this review context
 
 7. **Do NOT defer this event.** Engage immediately with the data.
 
