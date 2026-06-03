@@ -2052,97 +2052,28 @@ class Brain:
         context_cache: if provided, reuse cached Redis data from _extract_context_flags.
         """
         from ..models import EventEvidence
+        from .llm.prompt import build_event_header
 
-        # -- Event context (first user message) --
+        # -- Resolve async data for the event header --
         evidence = event.event.evidence
-        evidence_text = evidence.display_text if isinstance(evidence, EventEvidence) else str(evidence)
-        lines = [
-            f"Event ID: {event.id}",
-            f"Source: {event.source}",
-            f"Service: {event.service}",
-            f"Status: {event.status.value}",
-            f"Phase: {event.brain_phase or 'triage'}",
-            f"Reason: {event.event.reason}",
-            f"Evidence: {evidence_text}",
-            f"Time: {event.event.timeDate}",
-        ]
-        if isinstance(evidence, EventEvidence):
-            if evidence.brain_domain:
-                lines.append(f"Domain: {evidence.brain_domain} (Brain-assessed)")
-            elif evidence.domain_confidence == "assessed":
-                lines.append(f"Domain: {evidence.domain} (source-assessed)")
-            else:
-                lines.append(f"Domain: DISORDER (unclassified -- you must call classify_event)")
-            eff_severity = evidence.brain_severity or evidence.severity
-            lines.append(f"Severity: {eff_severity}")
-            now = time.time()
-            if evidence.gitlab_context:
-                gl = evidence.gitlab_context
-                lines.append("")
-                lines.append("GitLab Context:")
-                lines.append(f"  Project: {gl.get('project_path', '')}")
-                lines.append(f"  MR: !{gl.get('mr_iid', '')} - {gl.get('mr_title', '')}")
-                lines.append(f"  MR URL: {gl.get('target_url', '')}")
-                lines.append(f"  Pipeline: {gl.get('pipeline_status', 'unknown')}")
-                lines.append(f"  Merge Status: {gl.get('merge_status', '')}")
-                lines.append(f"  Source Branch: {gl.get('source_branch', '')}")
-                lines.append(f"  Author: {gl.get('author', '')}")
-                todo_ts = gl.get("todo_created_at", "")
-                if todo_ts:
-                    try:
-                        dt = datetime.fromisoformat(todo_ts.replace("Z", "+00:00"))
-                        gl_age = int(now - dt.timestamp())
-                        gl_min, gl_sec = divmod(gl_age, 60)
-                        lines.append(f"  GitLab Event Age: {gl_min}m {gl_sec}s ago")
-                    except (ValueError, TypeError):
-                        pass
-                maintainer = gl.get("maintainer", {})
-                if maintainer:
-                    emails = maintainer.get("emails", [])
-                    if emails:
-                        lines.append(f"  Maintainer Emails: {', '.join(emails)}")
-                logger.debug("Brain prompt includes gitlab_context for event %s", event.id)
-        else:
-            now = time.time()
+        subject_type = event.subject_type
 
-        if event.queued_at:
-            queue_age = int(now - event.queued_at)
-            q_min, q_sec = divmod(queue_age, 60)
-            lines.append(f"Event Created: {q_min}m {q_sec}s ago")
-        if event.queued_at and event.processing_started_at:
-            wait = int(event.processing_started_at - event.queued_at)
-            w_min, w_sec = divmod(wait, 60)
-            lines.append(f"Queue Wait: {w_min}m {w_sec}s")
+        # Gate get_service: only for K8s deployment subjects
+        svc = None
+        if (subject_type == "service"
+                and event.service not in ("general", "system")
+                and not (isinstance(evidence, EventEvidence) and evidence.gitlab_context)):
+            svc = await self.blackboard.get_service(event.service)
 
-        svc = await self.blackboard.get_service(event.service)
-        if svc:
-            lines.append("")
-            lines.append("Service Metadata:")
-            lines.append(f"  Version: {svc.version}")
-            if svc.gitops_repo:
-                lines.append(f"  GitOps Repo: {svc.gitops_repo}")
-            if svc.gitops_repo_url:
-                lines.append(f"  Repo URL: {svc.gitops_repo_url}")
-            if svc.gitops_config_path:
-                lines.append(f"  Config Path: {svc.gitops_config_path}")
-            if svc.replicas_ready is not None:
-                lines.append(f"  Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
-            lines.append(f"  CPU: {svc.metrics.cpu:.1f}%")
-            lines.append(f"  Memory: {svc.metrics.memory:.1f}%")
-
+        mermaid = ""
         if event.source != "headhunter":
             if context_cache and "_cached_mermaid" in context_cache:
                 mermaid = context_cache["_cached_mermaid"]
             else:
-                mermaid = ""
                 try:
                     mermaid = await self.blackboard.generate_mermaid()
                 except Exception as e:
                     logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
-            if mermaid:
-                lines.append("")
-                lines.append("Architecture Diagram (Mermaid):")
-                lines.append(mermaid)
 
         if context_cache and "_cached_active_ids" in context_cache:
             active_event_ids = context_cache["_cached_active_ids"]
@@ -2167,39 +2098,30 @@ class Brain:
                         related.append(f"  - {eid} (chat): {other.event.reason}")
                         break
 
-        if related:
-            lines.append("")
-            lines.append("Related Active Events (same service -- consider before acting):")
-            lines.extend(related)
-
         if context_cache and "_cached_recent_closed" in context_cache:
             recent_closed = context_cache["_cached_recent_closed"]
         else:
             recent_closed = await self.blackboard.get_recent_closed_for_service(
                 event.service, minutes=15
             )
-        if recent_closed:
-            lines.append("")
-            lines.append("Recently Closed Events (same service, last 15 min):")
-            for cid, close_time, csummary in recent_closed:
-                ago = int(time.time() - close_time)
-                ago_min = ago // 60
-                lines.append(f"  - {cid} (closed {ago_min}m ago): {csummary}")
 
         journal = await self._get_journal_cached(event.service)
-        if journal:
-            lines.append("")
-            last_entry = journal[-1] if journal else "none"
-            lines.append(f"Service ops journal available ({len(journal)} entries). Last: {last_entry}")
-            lines.append("  (Use lookup_journal for full history or other services)")
+
+        # -- Build source-aware header via pure function --
+        header = build_event_header(
+            event,
+            service_meta=svc,
+            journal_entries=journal if journal else None,
+            related_events=related if related else None,
+            recent_closed=recent_closed if recent_closed else None,
+            mermaid=mermaid,
+        )
 
         if not event.conversation:
-            lines.append("")
-            lines.append("(No turns yet -- this is a new event. Triage it.)")
-            lines.append("What is the next action? Call one of your functions.")
-            return [{"role": "user", "parts": [{"text": "\n".join(lines)}]}]
+            new_event_text = header + "\n\n(No turns yet -- this is a new event. Triage it.)\nWhat is the next action? Call one of your functions."
+            return [{"role": "user", "parts": [{"text": new_event_text}]}]
 
-        context_text = "\n".join(lines)
+        context_text = header
 
         # -- Build structured conversation messages --
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
@@ -3054,6 +2976,32 @@ class Brain:
 
         elif function_name == "lookup_service":
             service_name = args.get("service_name", "")
+
+            # Guard: non-K8s subjects get actionable N/A instead of "Not found" noise
+            event_doc = await self.blackboard.get_event(event_id)
+            subject_type = getattr(event_doc, "subject_type", "service") if event_doc else "service"
+            if subject_type != "service":
+                context_label = {
+                    "kargo_stage": "kargo_context",
+                    "jira": "jira_context",
+                    "system": "system-level context",
+                }.get(subject_type, subject_type)
+                result_text = (
+                    f"## lookup_service: Not applicable\n\n"
+                    f"This event's subject is a {subject_type}, not a monitored K8s deployment.\n"
+                    f"The relevant context ({context_label}) is already in your prompt."
+                )
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    waitingFor="lookup_service",
+                    evidence=result_text,
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return False
+
             svc = await self.blackboard.get_service(service_name)
             if svc:
                 rows = [f"| Version | {svc.version} |"]
@@ -3081,7 +3029,6 @@ class Brain:
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
-            # Signal caller to re-invoke LLM so it can act on the lookup result
             return True
 
         elif function_name == "consult_deep_memory":

@@ -104,9 +104,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "lookup_service",
         "description": (
-            "Look up a service's GitOps metadata from telemetry data. Returns repo URL, helm path, "
-            "version, replicas, and current metrics. Use this BEFORE routing to an agent when you "
-            "need a service's repository URL or deployment details."
+            "Look up a monitored K8s deployment's GitOps metadata. Returns repo URL, helm path, "
+            "version, replicas, and current metrics. Only returns results for services discovered "
+            "via K8s annotations (darwin.io/monitored). For Kargo promotions, GitLab MR context, "
+            "or Jira issues, the structured evidence is already in the event prompt."
         ),
         "input_schema": {
             "type": "object",
