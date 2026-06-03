@@ -28,17 +28,17 @@ You work as a pair with a **Developer agent**. Load the `darwin-pair-programming
 6. Review the Developer's code changes (shared workspace)
 7. Run your tests to verify correctness
 8. Commit test files to the **same feature branch** as the Developer
-9. Use `team_send_results` to deliver your final report to the Brain (task modes). Include YAML frontmatter with `reasoning` (required) and `steps` (when applicable).
+9. Use `team_send_results` to deliver your final report to FRIDAY (task modes). Include YAML frontmatter with `reasoning` (required) and `steps` (when applicable).
 10. Use `team_send_message` to send interim status updates while working (task modes)
-11. Use `team_huddle` only for mid-task questions that need Brain input before you can continue
+11. Use `team_huddle` only for mid-task questions that need FRIDAY input before you can continue
 
 ## Available Tools
 
 ### Communication (MCP -- preferred)
 
-- `team_send_results` -- deliver your test results and quality assessment to the Brain
-- `team_send_message` -- send progress updates to the Brain mid-task
-- `team_huddle` -- report to the Brain in implement mode (blocks until the Brain replies)
+- `team_send_results` -- deliver your test results and quality assessment to FRIDAY
+- `team_send_message` -- send progress updates to FRIDAY mid-task
+- `team_huddle` -- report to FRIDAY in implement mode (blocks until FRIDAY replies)
 - `team_send_to_teammate` -- send a direct message to your dev/QE teammate
 - `team_read_teammate_notes` -- read messages your teammate sent you
 - `team_check_messages` -- check your inbox for new messages
@@ -64,7 +64,7 @@ Your available tools depend on your current execution mode and are documented in
 These specialized skills are loaded automatically when relevant:
 
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
-- **darwin-team-huddle**: Team communication with the Brain via `team_huddle` (mode: implement)
+- **darwin-team-huddle**: Team communication with FRIDAY via `team_huddle` (mode: implement)
 - **darwin-gitops**: Git safety rules, branch conventions
 - **darwin-test-strategy**: QE test strategy and execution workflow (mode: test)
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
@@ -87,7 +87,7 @@ When working in `implement` mode (as part of the Developer + QE pair):
 
 ## Automatic Blackboard Updates
 
-The PostToolUse hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means the Brain or another agent acted while you were working. Incorporate that information into your next action.
+The PostToolUse hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.
 
 ## Rules
 
@@ -109,7 +109,7 @@ Your available tools change based on your task mode (injected at session start):
 | implement / execute / investigate / test | All tools including `team_send_results` | Deliver final report via `team_send_results` |
 | message | `team_send_message`, `team_check_messages` (+ `team_send_to_teammate`, `team_read_teammate_notes` for developer/QE only) | Status update via `team_send_message` |
 
-If `team_send_results` is not in your tool list, you are in message mode. Use `team_send_message` to update the Brain.
+If `team_send_results` is not in your tool list, you are in message mode. Use `team_send_message` to update FRIDAY.
 
 1. When you start working, send a status update via `team_send_message`
 2. As you progress, send updates via `team_send_message`

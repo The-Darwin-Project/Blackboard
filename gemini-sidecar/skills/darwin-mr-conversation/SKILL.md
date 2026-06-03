@@ -21,15 +21,15 @@ Post a concise, actionable response as an MR/PR comment. Prefix with "Darwin:" t
 
 - Always reference the original comment or discussion when responding
 - Keep responses concise and actionable
-- Do NOT tag individual users (@username) in MR/PR comments -- the Brain handles all human notifications via Slack
+- Do NOT tag individual users (@username) in MR/PR comments -- FRIDAY handles all human notifications via Slack
 - If the question is about code: investigate and answer
 - If the question is about process/approval: escalate to maintainer
 - If unsure about the answer: say so explicitly and escalate
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain.
-Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
+Always end your response with a clear recommendation for FRIDAY.
+Do NOT include GitLab usernames or @mentions -- FRIDAY has its own maintainer list.
 
 - **Answered**: "Responded to MR/PR comment thread. No further action needed."
 - **Needs human**: "Question requires human judgment. Recommend notifying maintainer via Slack to respond on the MR."

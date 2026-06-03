@@ -1,27 +1,27 @@
 ---
 name: darwin-team-huddle
-description: Team coordination for implement and test modes. Developer and QE use team_send_results for final reports, team_huddle for mid-task questions to the Brain.
+description: Team coordination for implement and test modes. Developer and QE use team_send_results for final reports, team_huddle for mid-task questions to FRIDAY.
 roles: [developer, qe]
 modes: [implement, test]
 ---
 
 # Implement Mode Communication
 
-You are working in implement mode as part of a Developer + QE pair coordinated by the Brain orchestrator.
+You are working in implement mode as part of a Developer + QE pair coordinated by FRIDAY orchestrator.
 
 ## Tool Usage
 
 | Tool | When to use | Who receives |
 |------|------------|--------------|
-| `team_send_results` | **Final report** -- deliver your completed work with YAML frontmatter (`reasoning` + optional `steps`) | Brain (final deliverable) |
-| `team_huddle` | Mid-task questions that need Brain input before you can continue | Brain (blocks until reply) |
-| `team_send_message` | Progress updates while working | Brain UI (informational only) |
+| `team_send_results` | **Final report** -- deliver your completed work with YAML frontmatter (`reasoning` + optional `steps`) | FRIDAY (final deliverable) |
+| `team_huddle` | Mid-task questions that need FRIDAY input before you can continue | FRIDAY (blocks until reply) |
+| `team_send_message` | Progress updates while working | FRIDAY UI (informational only) |
 | `team_send_to_teammate` | Coordinate with your Dev/QE partner | Teammate's inbox |
 | `team_read_teammate_notes` | Check what your partner sent you | Your inbox |
 
 ## `team_send_results` -- Final Report (all modes)
 
-Use `team_send_results` to deliver your final report when your work is complete. This is the Brain's primary input for deciding the next action.
+Use `team_send_results` to deliver your final report when your work is complete. This is FRIDAY's primary input for deciding the next action.
 
 Your report MUST include YAML frontmatter with `reasoning` (required) and `steps` (optional):
 
@@ -44,13 +44,13 @@ Without `reasoning` in frontmatter, `team_send_results` will reject your report.
 
 ## `team_huddle` -- Mid-Task Questions
 
-Use `team_huddle` ONLY when you need the Brain's input to continue your work:
+Use `team_huddle` ONLY when you need FRIDAY's input to continue your work:
 
 - "Should I modify the Helm values or just the application code?"
 - "The tests require a running database -- should I mock or use the live instance?"
 - "CI failed on an unrelated test -- should I rebase or ignore?"
 
-Sends a message to the Brain and **blocks until the Brain replies**. If no reply arrives, continue your work and deliver your report via `team_send_results`.
+Sends a message to FRIDAY and **blocks until FRIDAY replies**. If no reply arrives, continue your work and deliver your report via `team_send_results`.
 
 Do NOT use `team_huddle` for your final report -- use `team_send_results`.
 
@@ -64,13 +64,13 @@ Send a direct message to the other member of your pair (Developer <-> QE). Use f
 
 ## Team Workflow -- PR Gate
 
-The Brain gates the PR. Neither Developer nor QE opens a PR on their own.
+FRIDAY gates the PR. Neither Developer nor QE opens a PR on their own.
 
 1. **Developer** implements code changes, commits to the feature branch. Does NOT open a PR.
 2. **Developer** delivers final report via `team_send_results` with YAML frontmatter.
-3. Brain dispatches **QE** to verify.
+3. FRIDAY dispatches **QE** to verify.
 4. **QE** writes tests, commits to the same feature branch, delivers report via `team_send_results`.
-5. Brain reviews both outputs and tells Developer to open the PR.
+5. FRIDAY reviews both outputs and tells Developer to open the PR.
 
 ## Developer Workflow
 

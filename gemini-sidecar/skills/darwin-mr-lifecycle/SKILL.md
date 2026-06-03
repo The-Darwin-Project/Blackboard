@@ -35,18 +35,18 @@ After posting, check pipeline status to confirm the retest was accepted.
 After retesting:
 
 1. Check pipeline status immediately. If `running` or `pending`:
-   - Report back with current state. The Brain will defer and re-dispatch you later to check the result.
+   - Report back with current state. FRIDAY will defer and re-dispatch you later to check the result.
 2. If `success`: proceed to merge.
 3. If `failed`: read the failed job log and report the error.
 
-Do NOT poll in a loop -- report the current state and let the Brain handle the timing.
+Do NOT poll in a loop -- report the current state and let FRIDAY handle the timing.
 
 ## Merge MR
 
 Before merging, perform these pre-merge checks IN ORDER:
 
-1. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to the Brain.
-2. **CI bot comments**: Read the last 5 MR/PR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to the Brain.
+1. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to FRIDAY.
+2. **CI bot comments**: Read the last 5 MR/PR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to FRIDAY.
 3. **Merge status**: Confirm `merge_status` is `can_be_merged`.
 
 Only merge when ALL three checks pass. Merge the MR/PR via the GitLab API.
@@ -72,16 +72,16 @@ If merge_status is `cannot_be_merged`:
 **For all other MRs:**
 
 - Post an MR/PR comment describing the conflict (merge conflicts detected, manual rebase required).
-- In your response to the Brain, recommend sending a Slack notification. The Brain owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
+- In your response to FRIDAY, recommend sending a Slack notification. FRIDAY owns Slack and knows who to notify -- do NOT include usernames or @mentions in your recommendation.
 
 ## Critical: No @mentions
 
-Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- FRIDAY handles all human notifications via Slack.
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain.
-Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
+Always end your response with a clear recommendation for FRIDAY.
+Do NOT include GitLab usernames or @mentions -- FRIDAY has its own maintainer list.
 
 - **Merged**: "MR/PR merged successfully."
 - **Retest triggered (non-terminal)**: "Retest triggered, pipeline is running/pending. Pipeline outcome is not yet known."

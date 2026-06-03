@@ -98,11 +98,11 @@ When multiple jobs/tasks fail for different reasons, infrastructure failures (im
 After retesting:
 
 1. Check pipeline status immediately. If `running` or `pending`:
-   - Report back with current state. The Brain will defer and re-dispatch you later to check the result.
+   - Report back with current state. FRIDAY will defer and re-dispatch you later to check the result.
 2. If `success`: report that retry resolved the issue.
 3. If `failed`: enumerate failed jobs/tasks again (Step 1) and report updated errors.
 
-Do NOT poll in a loop -- report the current state and let the Brain handle the timing.
+Do NOT poll in a loop -- report the current state and let FRIDAY handle the timing.
 
 ## Scope
 
@@ -116,12 +116,12 @@ Do NOT poll in a loop -- report the current state and let the Brain handle the t
 
 ## Critical: No @mentions
 
-Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- the Brain handles all human notifications via Slack.
+Do NOT tag individual users (`@username`) in MR/PR comments or anywhere else. Do NOT query project/group members to find usernames to tag. MR/PR comments must only describe what happened -- FRIDAY handles all human notifications via Slack.
 
 ## Reporting Results
 
-Always end your response with a clear recommendation for the Brain.
-Do NOT include GitLab usernames or @mentions -- the Brain has its own maintainer list.
+Always end your response with a clear recommendation for FRIDAY.
+Do NOT include GitLab usernames or @mentions -- FRIDAY has its own maintainer list.
 
 Report format when multiple jobs/tasks failed:
 

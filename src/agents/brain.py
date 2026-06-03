@@ -2970,6 +2970,27 @@ class Brain:
             return False
 
         elif function_name == "wait_for_agent":
+            # GUARD: reject if no agent is actively running for this event
+            if event_id not in self._active_agent_for_event:
+                logger.info(
+                    "wait_for_agent rejected: no active agent for %s", event_id
+                )
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=(
+                        "No agent is currently running for this event. "
+                        "The agent already delivered results above. To continue: "
+                        "(1) dispatch another agent with select_agent, or "
+                        "(2) defer the event with defer_event to wait for an "
+                        "external process."
+                    ),
+                    waitingFor="wait_for_agent",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return False
             summary = args.get("summary", "")
             agent_name = self._active_agent_for_event.get(event_id, "unknown")
             self._waiting_for_agent[event_id] = agent_name

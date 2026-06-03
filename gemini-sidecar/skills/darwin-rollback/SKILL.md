@@ -9,7 +9,7 @@ modes: [execute]
 
 ## When to Use
 
-You are in rollback mode. The Brain has determined that the last change caused a problem and needs to be reverted.
+You are in rollback mode. FRIDAY has determined that the last change caused a problem and needs to be reverted.
 
 ## Rollback Steps
 
@@ -22,11 +22,11 @@ You are in rollback mode. The Brain has determined that the last change caused a
 
 ## Rules
 
-- ONLY revert the most recent commit. If multiple commits need reverting, stop and report to the Brain.
+- ONLY revert the most recent commit. If multiple commits need reverting, stop and report to FRIDAY.
 - NEVER use `git reset` -- always use `git revert` to preserve history.
 - NEVER force push.
 - After pushing, report: "Revert committed and pushed. The CD controller will handle the rollout."
-- Do NOT verify ArgoCD sync yourself -- the Brain will trigger verification separately. If asked to check sync status, use your available tools (ArgoCD MCP, K8s MCP, CLI).
+- Do NOT verify ArgoCD sync yourself -- FRIDAY will trigger verification separately. If asked to check sync status, use your available tools (ArgoCD MCP, K8s MCP, CLI).
 
 ## What to Report
 

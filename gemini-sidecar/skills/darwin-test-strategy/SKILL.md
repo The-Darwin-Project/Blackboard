@@ -9,7 +9,7 @@ modes: [implement, test]
 
 ## When to Use
 
-You are in test-only mode. The Brain wants you to write and/or run tests, NOT implement features.
+You are in test-only mode. FRIDAY wants you to write and/or run tests, NOT implement features.
 
 ## Test Workflow
 
@@ -48,4 +48,4 @@ You are in test-only mode. The Brain wants you to write and/or run tests, NOT im
 - You MAY fix trivial bugs found during testing (typos, missing imports) -- document what you fixed.
 - If tests fail, report the failures clearly. Do NOT rewrite the implementation.
 - Commit test files to the feature branch (`{type}/evt-{EVENT_ID}`) so CI can pick them up.
-- Use `team_send_results` to deliver your test report to the Brain.
+- Use `team_send_results` to deliver your test report to FRIDAY.

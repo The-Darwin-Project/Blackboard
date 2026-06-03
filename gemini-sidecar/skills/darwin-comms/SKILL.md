@@ -1,14 +1,14 @@
 ---
 name: darwin-comms
-description: Report findings and status updates to the Darwin Brain. Use team_send_results for final reports (task modes). In message mode, use team_send_message instead.
+description: Report findings and status updates to the Darwin FRIDAY. Use team_send_results for final reports (task modes). In message mode, use team_send_message instead.
 roles: [architect, sysadmin, developer, qe]
 ---
 
-# Communicating with the Darwin Brain
+# Communicating with the Darwin FRIDAY
 
 ## Staying Current with the Blackboard
 
-Call `bb_catch_up` at the START of every task to see what happened since your last involvement. The blackboard shows turns from other agents, Brain decisions, and user messages.
+Call `bb_catch_up` at the START of every task to see what happened since your last involvement. The blackboard shows turns from other agents, FRIDAY decisions, and user messages.
 
 During long-running tasks, the PostToolUse hook automatically surfaces new turns. If you see a "Blackboard update" in your context, acknowledge and adapt.
 
@@ -22,11 +22,11 @@ Additional evidence sources are available: K8s MCP (remote clusters), ArgoCD MCP
 
 ## `team_send_results` -- Final Report (task modes)
 
-Use `team_send_results` to deliver your final report in task modes (execute, investigate, plan, implement, test). In **message** mode, `team_send_results` is not available -- use `team_send_message` to update the Brain instead.
+Use `team_send_results` to deliver your final report in task modes (execute, investigate, plan, implement, test). In **message** mode, `team_send_results` is not available -- use `team_send_message` to update FRIDAY instead.
 
-The Brain uses your last `team_send_results` call as your final deliverable.
+FRIDAY uses your last `team_send_results` call as your final deliverable.
 
-- Each call **overwrites** the previous result (last-write-wins). The Brain receives only the **last** call.
+- Each call **overwrites** the previous result (last-write-wins). FRIDAY receives only the **last** call.
 - Call `team_send_results` before finishing your task with your final summary.
 - Structure your report with YAML frontmatter (required by team_send_results):
 
@@ -57,13 +57,13 @@ Your report must contain at least one **observable condition** -- a specific err
 
 ### `team_send_message` -- Send a progress note (all modes)
 
-Progress notes appear in the Brain's UI. They do **not** replace your deliverable.
+Progress notes appear in FRIDAY's UI. They do **not** replace your deliverable.
 
-Use for status updates, phase transitions, or interim observations during long-running tasks. Available in all modes including message mode (where it is the primary Brain communication tool).
+Use for status updates, phase transitions, or interim observations during long-running tasks. Available in all modes including message mode (where it is the primary FRIDAY communication tool).
 
 ### `team_check_messages` -- Poll for incoming messages
 
-Messages from the Brain and teammates are delivered automatically via CLI hooks. If automatic delivery doesn't fire, call `team_check_messages` between work phases.
+Messages from FRIDAY and teammates are delivered automatically via CLI hooks. If automatic delivery doesn't fire, call `team_check_messages` between work phases.
 
 ## Shell Fallback
 
@@ -77,7 +77,7 @@ If your action triggers a long-running process (CI/CD pipelines, ArgoCD syncs, i
 2. **Confirm it was accepted** (pipeline status changed to `running`)
 3. **Return immediately** with current state and YAML frontmatter (`reasoning`: current state description)
 
-**NEVER** poll, sleep, or loop waiting for completion. The Brain manages all wait cycles and timing.
+**NEVER** poll, sleep, or loop waiting for completion. FRIDAY manages all wait cycles and timing.
 
 ## Workflow (all modes)
 

@@ -9,7 +9,7 @@ modes: [plan]
 
 ## When to Use
 
-You are in review mode. The Brain wants a code review, NOT an implementation plan. Do NOT produce a plan or write code.
+You are in review mode. FRIDAY wants a code review, NOT an implementation plan. Do NOT produce a plan or write code.
 
 ## Review Process
 
@@ -52,4 +52,4 @@ The `reasoning` field is required by `team_send_results`. It must come FIRST, be
 - Do NOT modify any files. Read-only analysis.
 - Be specific: cite file paths and line numbers for every finding.
 - If the changes look good, say so. Do not invent issues.
-- Use `team_send_results` to deliver your review to the Brain.
+- Use `team_send_results` to deliver your review to FRIDAY.

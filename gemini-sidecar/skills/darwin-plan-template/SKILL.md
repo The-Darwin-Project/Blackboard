@@ -54,7 +54,7 @@ steps:
 - [What metric or signal confirms success?]
 ```
 
-The frontmatter YAML header is machine-readable by the Brain and executing agents (Developer, QE).
+The frontmatter YAML header is machine-readable by FRIDAY and executing agents (Developer, QE).
 The `status` field starts as `pending` and the executing team updates it to `in_progress`, `completed`, or `failed` as they work through the steps.
 The Markdown body below the frontmatter contains the full human-readable details for each step.
 
@@ -70,7 +70,7 @@ Assign each step in the frontmatter `steps:` array to an agent and mode:
 - **developer** -- Code implementation agent
   - `investigate` -- Read-only: check MR/PR status, code inspection
   - `execute` -- Single write actions: post comment, merge MR, tag release
-  - `implement` -- Code changes. Brain dispatches Developer first, then QE for verification.
+  - `implement` -- Code changes. FRIDAY dispatches Developer first, then QE for verification.
 
 - **qe** -- Quality verification agent
   - `test` -- Run tests, verify deployments via browser (Playwright MCP or repo Playwright tests)
@@ -83,7 +83,7 @@ Assign each step in the frontmatter `steps:` array to an agent and mode:
 **How to write steps for developer and QE:**
 
 - For code changes that need verification: assign implementation steps to `developer` with `mode: implement`,
-  and verification steps to `qe` with `mode: test`. Brain dispatches them sequentially.
+  and verification steps to `qe` with `mode: test`. FRIDAY dispatches them sequentially.
 - For read-only checks (MR/PR status, code inspection): use `developer` with `mode: investigate`.
 - For single Git actions (merge, comment, tag): use `developer` with `mode: execute`.
 

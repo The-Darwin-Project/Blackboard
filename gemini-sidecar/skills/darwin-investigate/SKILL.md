@@ -45,11 +45,11 @@ Pipeline failures can originate from GitLab (MR, push, tag, scheduled), Kargo pr
 8. Report ALL failing jobs/tasks with their individual error classifications. Do NOT attribute root cause from a single failure when multiple jobs/tasks failed independently.
 
 ### Depth Rule
-**STOP when you have the actual error condition**, not just the component that failed. The Brain needs the specific error to make an escalation decision.
+**STOP when you have the actual error condition**, not just the component that failed. FRIDAY needs the specific error to make an escalation decision.
 
 **Exception -- pipeline failures**: For pipeline failures (GitLab, Kargo, or direct Tekton), you must enumerate ALL failed jobs/tasks before stopping. Finding one error in one job is not sufficient when the pipeline contains multiple failed jobs or tasks. Each may have a different root cause and different remediation path.
 
-Do NOT keep investigating after you have enough evidence. Report and let the Brain decide.
+Do NOT keep investigating after you have enough evidence. Report and let FRIDAY decide.
 
 ## What to Report
 
