@@ -5253,16 +5253,31 @@ class Brain:
             })
         return body or stripped, steps if steps else None, fm
 
+    _MD_SUBJECT_LABEL = {
+        "kargo_stage": "Stage",
+        "system": "Subject",
+        "jira": "Jira Issue",
+    }
+
     @staticmethod
     def _event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = "") -> str:
         """Convert event document to readable Markdown, enriched with service metadata and topology."""
         from ..models import EventEvidence
         evidence = event.event.evidence
+        subject_type = getattr(event, "subject_type", "service")
+        if subject_type != "service":
+            subj_label = Brain._MD_SUBJECT_LABEL.get(subject_type, "Service")
+        elif isinstance(evidence, EventEvidence) and evidence.gitlab_context:
+            subj_label = "Component"
+        elif event.service in ("general", "system", ""):
+            subj_label = "Topic"
+        else:
+            subj_label = "Service"
         lines = [
             f"# Event: {event.id}",
             f"",
             f"- **Source:** {event.source}",
-            f"- **Service:** {event.service}",
+            f"- **{subj_label}:** {event.service}",
             f"- **Status:** {event.status.value}",
             f"- **Reason:** {event.event.reason}",
         ]

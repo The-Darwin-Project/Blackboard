@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from src.agents.brain import Brain
-from src.models import ConversationTurn, EventDocument, EventInput
+from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
 
 
 def _make_event(*turns: ConversationTurn) -> EventDocument:
@@ -91,3 +91,67 @@ def test_user_turn_does_not_render_extra_fields():
     md = Brain._event_to_markdown(_make_event(turn))
     assert "**Message:** user msg" in md
     assert "**Result:**" not in md
+
+
+# ---------------------------------------------------------------------------
+# Source-aware subject label tests
+# ---------------------------------------------------------------------------
+
+def _make_typed_event(
+    *, source="chat", service="test", subject_type="service",
+    gitlab_context=None, kargo_context=None, jira_context=None,
+):
+    evidence = EventEvidence(
+        display_text="test", source_type=source, severity="info",
+        domain_confidence="assessed",
+        gitlab_context=gitlab_context,
+        kargo_context=kargo_context,
+        jira_context=jira_context,
+    )
+    return EventDocument(
+        source=source, service=service, subject_type=subject_type,
+        event=EventInput(reason="test", evidence=evidence),
+    )
+
+
+def test_kargo_stage_label():
+    ev = _make_typed_event(
+        source="aligner", service="kubevirt-v4.16@kargo-kubevirt-v4-16",
+        subject_type="kargo_stage",
+        kargo_context={"stage": "kubevirt-v4.16", "project": "kargo-kubevirt-v4-16"},
+    )
+    md = Brain._event_to_markdown(ev)
+    assert "**Stage:** kubevirt-v4.16@kargo-kubevirt-v4-16" in md
+    assert "**Service:**" not in md
+
+
+def test_headhunter_gitlab_component_label():
+    ev = _make_typed_event(
+        source="headhunter", service="kubevirt-plugin",
+        gitlab_context={"project_path": "org/kubevirt-plugin", "mr_iid": 541},
+    )
+    md = Brain._event_to_markdown(ev)
+    assert "**Component:** kubevirt-plugin" in md
+    assert "**Service:**" not in md
+
+
+def test_jarvis_system_label():
+    ev = _make_typed_event(
+        source="jarvis", service="system", subject_type="system",
+    )
+    md = Brain._event_to_markdown(ev)
+    assert "**Subject:** system" in md
+    assert "**Service:**" not in md
+
+
+def test_chat_general_topic_label():
+    ev = _make_typed_event(source="chat", service="general")
+    md = Brain._event_to_markdown(ev)
+    assert "**Topic:** general" in md
+    assert "**Service:**" not in md
+
+
+def test_aligner_service_default_label():
+    ev = _make_typed_event(source="aligner", service="darwin-store")
+    md = Brain._event_to_markdown(ev)
+    assert "**Service:** darwin-store" in md
