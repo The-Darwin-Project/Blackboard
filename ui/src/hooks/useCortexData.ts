@@ -10,7 +10,7 @@ import { getCognitiveGraph, getCortexActivity, getRecentPulses } from '../api/cl
 import type {
   CognitiveGraphResponse, PulseBatch, CortexThinkingMessage,
   CortexShadowMessage, CortexStatusMessage, CortexHeartbeatMessage,
-  WhisperMessage, FrictionIndicator,
+  WhisperMessage, FrictionIndicator, MessageClass,
 } from '../components/cortex/types';
 
 export function useCortexGraph() {
@@ -182,6 +182,17 @@ export function useCortexWhispers() {
   }, []));
 
   return whispers;
+}
+
+/** Classify a cortex thinking message into a visual category */
+export function classifyCortexMessage(msg: CortexThinkingMessage): MessageClass {
+  if (msg.content_type === 'tool_result') return 'tool_result';
+  if (msg.content_type === 'tool_call') {
+    return msg.tool === 'send_event_message' ? 'delivered' : 'investigation';
+  }
+  if (msg.text?.startsWith('[FRIDAY]')) return 'peer_input';
+  if (msg.delivered) return 'delivered';
+  return 'thinking';
 }
 
 const SPIRAL_THRESHOLD = 5;

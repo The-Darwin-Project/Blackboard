@@ -285,7 +285,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
         {/* Live feed — no status bar here (parent already shows context) */}
         <section>
           <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">JARVIS Stream</h4>
-          <CortexLiveFeed entries={eventThinking} cortexStatus={cortexStatus} heartbeatType={heartbeatType} heartbeatTick={heartbeatTick} className="max-h-60 bg-bg-tertiary rounded" hideStatusBar />
+          <CortexLiveFeed entries={eventThinking} whispers={eventWhispers} cortexStatus={cortexStatus} heartbeatType={heartbeatType} heartbeatTick={heartbeatTick} className="max-h-[300px] bg-bg-tertiary rounded" hideStatusBar />
         </section>
       </div>
     </div>

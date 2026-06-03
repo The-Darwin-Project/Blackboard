@@ -40,7 +40,11 @@ export interface CortexThinkingMessage {
   tool?: string;
   args?: Record<string, unknown>;
   result_preview?: string;
+  delivered?: boolean;
+  timestamp?: number;
 }
+
+export type MessageClass = 'thinking' | 'peer_input' | 'investigation' | 'delivered' | 'tool_result';
 
 export interface CortexStatusMessage {
   type: 'cortex_status';

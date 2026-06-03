@@ -147,6 +147,7 @@ const CortexPage: FC = () => {
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <CortexLiveFeed
                   entries={thinkingEntries}
+                  whispers={whisperEntries}
                   cortexStatus={cortexStatus}
                   heartbeatType={heartbeatType}
                   heartbeatTick={heartbeatTick}
