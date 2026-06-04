@@ -19,10 +19,16 @@ The tag provides readability (which version). The digest provides immutability (
 
 ## When Updating Image References
 
-1. Determine the new tag from the task instruction or maintainer authorization
-2. Resolve the digest for that tag (pull the manifest, extract the sha256)
-3. Write the full pinned reference: `<registry>/<repo>:<new_tag>@sha256:<hash>`
-4. Update ALL components in the repository that reference the old tag
+1. **Read the existing pattern first.** Check how the current image reference is structured
+   in the file before changing it. Match the existing convention:
+   - If the repo uses `tag@sha256:digest` -- keep that format
+   - If the repo uses git-SHA-based tags (e.g., `:a1b2c3d`) -- use the same SHA format
+   - If the repo uses semantic version tags (e.g., `:v1.26.0`) -- use semver
+   - If the repo uses stream tags (e.g., `:rhel_9_1.26`) -- use the same stream pattern
+2. Determine the new tag from the task instruction or maintainer authorization
+3. If the existing pattern includes a digest, resolve the digest for the new tag
+4. Write the reference matching the repo's established format
+5. Update ALL components in the repository that reference the old tag
 
 ## Where Image References Live
 
