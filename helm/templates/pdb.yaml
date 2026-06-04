@@ -2,7 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: Must match deployment.yaml selector labels exactly.
 # 2. [Pattern]: minAvailable: 1 on a single-replica stateful pod blocks voluntary eviction entirely.
-# 3. [Gotcha]: Descheduler respects PDBs. Without this, LowNodeUtilization evicts the brain pod.
+# 3. [Gotcha]: Descheduler respects PDBs. Without this, LowNodeUtilization evicts darwin pods.
+# 4. [Pattern]: One PDB per deployment (brain, qdrant, dex). Blanket namespace coverage.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -17,3 +18,31 @@ spec:
     matchLabels:
       app: darwin-brain
       app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-qdrant
+  labels:
+    app: darwin-qdrant
+    app.kubernetes.io/name: darwin-qdrant
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: darwin-qdrant
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-dex
+  labels:
+    app: darwin-dex
+    app.kubernetes.io/name: darwin-dex
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: darwin-dex
