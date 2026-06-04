@@ -69,7 +69,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: selectedEvent, isError: eventError } = useEventDocument(eventId);
-  const { invalidateActive, invalidateEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, optimisticUpdateTurnStatus } = useQueueInvalidation();
 
   const handleFeedScroll = useCallback(() => {
     const el = feedRef.current;
@@ -94,7 +94,13 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
       });
     } else if (msg.type === 'brain_thinking_done') {
       setBrainThinking(null);
-    } else if (msg.type === 'message_status' || msg.type === 'domain_updated' || msg.type === 'phase_updated') {
+    } else if (msg.type === 'message_status') {
+      if (msg.event_id) {
+        const turns = msg.turns as number[] | 'all';
+        const status = msg.status as 'delivered' | 'evaluated';
+        optimisticUpdateTurnStatus(msg.event_id as string, status, turns);
+      }
+    } else if (msg.type === 'domain_updated' || msg.type === 'phase_updated') {
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'attachment') {
       setAttachments((prev) => {

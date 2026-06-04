@@ -11,7 +11,7 @@
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { getActiveEvents, getOnIceEvents, getEventDocument, getHeadhunterPending } from '../api/client';
-import type { ActiveEvent } from '../api/types';
+import type { ActiveEvent, EventDocument, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
   return useQuery({
@@ -79,6 +79,20 @@ export function useQueueInvalidation() {
       queryClient.setQueryData<ActiveEvent[]>(['activeEvents'], (old) =>
         old ? old.map((e) => (e.id === eventId ? { ...e, ...patch } : e)) : [],
       );
+    },
+    optimisticUpdateTurnStatus: (eventId: string, status: MessageStatus, turns: number[] | 'all') => {
+      queryClient.setQueryData(['eventDocument', eventId], (old: EventDocument | undefined) => {
+        if (!old?.conversation) return old;
+        return {
+          ...old,
+          conversation: old.conversation.map((t) => {
+            if (turns === 'all' || turns.includes(t.turn)) {
+              return { ...t, status };
+            }
+            return t;
+          }),
+        };
+      });
     },
   };
 }
