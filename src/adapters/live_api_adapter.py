@@ -1425,6 +1425,7 @@ class LiveAPIAdapter:
             f"FRIDAY — I've been watching the pulse stream and we've been quiet for a while. "
             f"Here's what I see ({len(active_ids)} events still active):\n\n"
             + "\n".join(summary_lines)
+            + "\n\nSource: https://github.com/The-Darwin-Project/Blackboard"
             + "\n\nGive me your assessment:"
             + "\n1. Health status — are these progressing normally or stuck?"
             + "\n2. Anti-patterns — any lessons being violated (short defers, stale monitors)?"
