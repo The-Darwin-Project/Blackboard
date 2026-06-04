@@ -266,9 +266,9 @@ export default function EventSidebar() {
                   ))}
                 </TreeGroup>
               )}
-              {approvalEvts.length > 0 && (
-                <TreeGroup icon={<Snowflake size={13} />} label="Waiting for Approval" count={approvalEvts.length} nested
-                  countColor="#475569" forceCollapsed>
+              <TreeGroup icon={<Snowflake size={13} />} label="Waiting for Approval" count={approvalEvts.length} nested
+                  countColor={approvalEvts.length > 0 ? '#f59e0b' : '#475569'} forceCollapsed={approvalEvts.length === 0}>
+                  {approvalEvts.length === 0 && <EmptyLabel>No pending approvals</EmptyLabel>}
                   {approvalEvts.map(evt => (
                     <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
                       onClick={() => selectEvent(evt.id)}
@@ -279,7 +279,6 @@ export default function EventSidebar() {
                     />
                   ))}
                 </TreeGroup>
-              )}
               {recentClosed.length > 0 && (
                 <TreeGroup icon={<CheckCircle2 size={13} />} label="Recently Closed" count={recentClosed.length} nested
                   countColor="#22c55e">
