@@ -334,11 +334,6 @@ spec:
             - name: IDLE_TIMEOUT_CLOSE_SEC
               value: "{{ .Values.idleTimeout.closeSec }}"
             {{- end }}
-            {{- if .Values.onIce }}
-            # On Ice (freeze automated wait_for_user events)
-            - name: ON_ICE_THRESHOLD_SEC
-              value: "{{ .Values.onIce.thresholdSec }}"
-            {{- end }}
             {{- if .Values.googleSearch }}
             # Google Search Grounding
             - name: BRAIN_GOOGLE_SEARCH_ENABLED

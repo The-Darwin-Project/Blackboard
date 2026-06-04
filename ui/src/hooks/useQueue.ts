@@ -10,7 +10,7 @@
  * - Polling safety net (10s) to catch missed WS messages
  */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { getActiveEvents, getOnIceEvents, getEventDocument, getHeadhunterPending } from '../api/client';
+import { getActiveEvents, getWaitingApprovalEvents, getEventDocument, getHeadhunterPending } from '../api/client';
 import type { ActiveEvent, EventDocument, MessageStatus } from '../api/types';
 
 export function useActiveEvents() {
@@ -24,10 +24,10 @@ export function useActiveEvents() {
   });
 }
 
-export function useOnIceEvents() {
+export function useWaitingApprovalEvents() {
   return useQuery({
-    queryKey: ['onIceEvents'],
-    queryFn: getOnIceEvents,
+    queryKey: ['waitingApprovalEvents'],
+    queryFn: getWaitingApprovalEvents,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
   });

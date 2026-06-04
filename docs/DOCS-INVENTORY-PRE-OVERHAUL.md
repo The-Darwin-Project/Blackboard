@@ -158,9 +158,9 @@ REDIS_HOST, REDIS_PASSWORD, GCP_PROJECT, GCP_LOCATION, LLM_MODEL_BRAIN, LLM_MODE
 | Inventory Section | Status | Notes |
 | --- | --- | --- |
 | §1 README sections → docs/* | Done | Split complete; README under 200 lines |
-| §3 Features NOT documented | Done | Cortex/JARVIS, Jira missions, on_ice, api-reference gaps addressed |
-| §5 API endpoints NOT documented | Done | See `docs/api-reference.md` — Jira, Cortex, on_ice, topology/services, journal/{service}, lessons PATCH |
-| §6 Env vars NOT documented | Done | See `docs/deployment.md` — Jira, onIce, idleTimeout, cortex, lessonEnrichment |
+| §3 Features NOT documented | Done | Cortex/JARVIS, Jira missions, waiting_approval, api-reference gaps addressed |
+| §5 API endpoints NOT documented | Done | See `docs/api-reference.md` — Jira, Cortex, waiting_approval, topology/services, journal/{service}, lessons PATCH |
+| §6 Env vars NOT documented | Done | See `docs/deployment.md` — Jira, idleTimeout, cortex, lessonEnrichment |
 | `.cursor/rules/02-architecture.mdc` | Reconciled | Behavioral air gap aligned with `docs/architecture.md` |
 | `ui/README.md` | Updated | Cortex + JARVIS Memory pages added |
 

@@ -260,7 +260,7 @@ class SlackChannel:
                     "user_id": user_id, "team_id": team_id,
                 }
                 self._brain.clear_waiting(event_id)
-                await self._brain.thaw_if_frozen(event_id)
+                await self._brain.resume_if_parked(event_id)
             except Exception as e:
                 logger.exception(f"Assistant user_message failed: {e}")
                 await say(f":warning: Something went wrong ({e})")
@@ -353,7 +353,7 @@ class SlackChannel:
                     )
                     await self._blackboard.append_turn(existing_event_id, turn)
                     self._brain.clear_waiting(existing_event_id)
-                    await self._brain.thaw_if_frozen(existing_event_id)
+                    await self._brain.resume_if_parked(existing_event_id)
                     await self._safe_react(client, channel, event["ts"], "eyes")
                     logger.info(f"Slack @mention: reply on {existing_event_id} from {display_name}")
                     return
@@ -437,7 +437,7 @@ class SlackChannel:
                 logger.info(f"Slack infra thread context: appended turn on {event_id} from {display_name} (observe-only, no Brain eval)")
             else:
                 self._brain.clear_waiting(event_id)
-                await self._brain.thaw_if_frozen(event_id)
+                await self._brain.resume_if_parked(event_id)
             if not is_channel_thread and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
                 try:
                     workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
@@ -473,7 +473,7 @@ class SlackChannel:
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
-            await self._brain.thaw_if_frozen(event_id)
+            await self._brain.resume_if_parked(event_id)
             await self._safe_react(client, channel, thread_ts, "white_check_mark")
             logger.info(f"Slack approve on {event_id} by {user}")
 
@@ -498,7 +498,7 @@ class SlackChannel:
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
-            await self._brain.thaw_if_frozen(event_id)
+            await self._brain.resume_if_parked(event_id)
             await self._safe_react(client, channel, thread_ts, "x")
             logger.info(f"Slack reject on {event_id} by {user}")
 

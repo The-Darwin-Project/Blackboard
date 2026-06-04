@@ -10,7 +10,7 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useOnIceEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
+import { useActiveEvents, useWaitingApprovalEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
@@ -91,7 +91,7 @@ export default function EventSidebar() {
 
   // Data sources
   const { data: activeEvents } = useActiveEvents();
-  const { data: onIceEvents } = useOnIceEvents();
+  const { data: waitingApprovalEvents } = useWaitingApprovalEvents();
   const { data: closedEvents } = useQuery({
     queryKey: ['closedEvents'],
     queryFn: () => getClosedEvents(20),
@@ -132,7 +132,7 @@ export default function EventSidebar() {
   const activeEvts = events.filter(e => e.status === 'active' || e.status === 'new');
   const waitingEvts = events.filter(e => e.status === 'waiting_approval');
   const deferredEvts = events.filter(e => e.status === 'deferred');
-  const onIceEvts = isDemoMode ? [] : (onIceEvents || []);
+  const approvalEvts = isDemoMode ? [] : (waitingApprovalEvents || []);
   const isMockEvent = isDemoMode && selectedEventId?.startsWith('evt-demo');
 
   return (
@@ -266,10 +266,10 @@ export default function EventSidebar() {
                   ))}
                 </TreeGroup>
               )}
-              {onIceEvts.length > 0 && (
-                <TreeGroup icon={<Snowflake size={13} />} label="On Ice" count={onIceEvts.length} nested
+              {approvalEvts.length > 0 && (
+                <TreeGroup icon={<Snowflake size={13} />} label="Waiting for Approval" count={approvalEvts.length} nested
                   countColor="#475569" forceCollapsed>
-                  {onIceEvts.map(evt => (
+                  {approvalEvts.map(evt => (
                     <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
                       onClick={() => selectEvent(evt.id)}
                       onContextMenu={(e) => {

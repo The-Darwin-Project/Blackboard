@@ -21,7 +21,7 @@ bump, config change) that matches the current error signature:
    - **report_incident** (offline record for Nightwatcher/Smartsheet): Include the
      proposed fix in the incident description under "Proposed Fix (from Deep Memory)."
      This is the batch tracking artifact -- NOT the authorization channel.
-3. After sending both notifications, call wait_for_user -- do NOT close the event.
+3. After sending both notifications, call request_user_approval with the fix proposal as plan_summary -- do NOT close the event.
    The event stays active. When the maintainer replies in Slack, FRIDAY resumes
    with full investigation context and executes the authorized fix. If the maintainer
    does not respond, the normal idle nudge cascade will eventually escalate or close.

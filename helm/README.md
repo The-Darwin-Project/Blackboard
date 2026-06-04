@@ -109,7 +109,6 @@ These blocks control event lifecycle behavior (no external service required):
 
 | Block | Purpose | Key Values |
 | :--- | :--- | :--- |
-| `onIce` | Freeze automated events stuck in `wait_for_user` | `thresholdSec` (default 4h) |
 | `idleTimeout` | Auto-close stale chat/slack approval threads | `warningSec`, `closeSec` |
 | `brain.reconcileWorkers` | ReconcileScheduler worker pool | `0` = auto-derive from source caps |
 | `app.maxConcurrentDispatches` | Global WIP cap for local sidecar dispatches | `0` = disabled |

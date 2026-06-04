@@ -4,6 +4,8 @@ tags: [waiting, user-interaction, approval, defer]
 ---
 # Wait-for-User Protocol
 
+**Source restriction:** wait_for_user is ONLY available for chat/slack events. For automated events (aligner, headhunter, timekeeper), use request_user_approval instead.
+
 - After requesting user input or approval, the event pauses until the user responds.
 - Do not defer while waiting for user input -- the wait is already in effect.
 - The event resumes when the user sends a message, approves, or rejects.

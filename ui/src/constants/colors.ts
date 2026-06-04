@@ -38,7 +38,6 @@ export const STATUS_COLORS: Record<string, { bg: string; text: string; label: st
   active:           { bg: '#1d4ed8', text: '#93c5fd', label: 'Active',   border: '#3b82f6' },
   waiting_approval: { bg: '#92400e', text: '#fcd34d', label: 'Awaiting', border: '#f59e0b' },
   deferred:         { bg: '#4c1d95', text: '#c4b5fd', label: 'Deferred', border: '#8b5cf6' },
-  on_ice:           { bg: '#1e293b', text: '#94a3b8', label: 'On Ice',   border: '#475569' },
   resolved:         { bg: '#14532d', text: '#86efac', label: 'Resolved', border: '#22c55e' },
   closed:           { bg: '#14532d', text: '#86efac', label: 'Closed',   border: '#22c55e' },
 };

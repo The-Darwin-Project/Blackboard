@@ -43,7 +43,7 @@ POST /chat/
 
 ```text
 GET  /queue/active                    # List active events with metadata
-GET  /queue/on_ice                    # Events frozen after prolonged wait_for_user (automated sources)
+GET  /queue/waiting_approval           # Events parked for human approval (all sources)
 GET  /queue/{event_id}                # Full event document with conversation
 GET  /queue/{event_id}/turns          # Paginated conversation turns (optional ?role=, ?since=)
 GET  /queue/{event_id}/report         # Generated markdown report for an event

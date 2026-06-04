@@ -176,8 +176,8 @@ export async function getActiveEvents(): Promise<ActiveEvent[]> {
   return fetchApi<ActiveEvent[]>('/queue/active');
 }
 
-export async function getOnIceEvents(): Promise<ActiveEvent[]> {
-  return fetchApi<ActiveEvent[]>('/queue/on_ice');
+export async function getWaitingApprovalEvents(): Promise<ActiveEvent[]> {
+  return fetchApi<ActiveEvent[]>('/queue/waiting_approval');
 }
 
 export async function getEventDocument(eventId: string): Promise<EventDocument> {

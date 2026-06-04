@@ -123,73 +123,28 @@ class TestIdleTimeoutManager:
 # =============================================================================
 
 
-class TestOnIceTransitions:
+class TestApprovalParkingTransitions:
 
     @pytest.mark.asyncio
-    async def test_freeze_event_moves_to_on_ice_set(self):
-        """freeze_event atomically moves event from active to on_ice."""
+    async def test_park_for_approval_moves_to_waiting_approval_set(self):
+        """park_for_approval atomically moves event from active to waiting_approval."""
         from src.state.blackboard import BlackboardState
         event = _make_event()
         bb = MagicMock(spec=BlackboardState)
-        bb.freeze_event = AsyncMock()
+        bb.park_for_approval = AsyncMock()
 
-        await bb.freeze_event("evt-test")
-        bb.freeze_event.assert_awaited_once_with("evt-test")
+        await bb.park_for_approval("evt-test")
+        bb.park_for_approval.assert_awaited_once_with("evt-test")
 
     @pytest.mark.asyncio
-    async def test_thaw_event_moves_back_to_active(self):
-        """thaw_event atomically moves event from on_ice back to active."""
+    async def test_resume_from_approval_moves_back_to_active(self):
+        """resume_from_approval atomically moves event from waiting_approval back to active."""
         from src.state.blackboard import BlackboardState
         bb = MagicMock(spec=BlackboardState)
-        bb.thaw_event = AsyncMock()
+        bb.resume_from_approval = AsyncMock()
 
-        await bb.thaw_event("evt-test")
-        bb.thaw_event.assert_awaited_once_with("evt-test")
-
-
-# =============================================================================
-# 3. On-ice staleness guard
-# =============================================================================
-
-
-class TestOnIceStalenessGuard:
-
-    @pytest.mark.asyncio
-    async def test_automated_event_beyond_threshold_is_stale(self):
-        """Automated event waiting > threshold returns True."""
-        from src.agents.brain import Brain
-        event = _make_event(source="aligner")
-        brain = MagicMock()
-        brain._waiting_for_user = {"evt-test": time.time() - 15000}
-        brain.blackboard = MagicMock()
-        brain.blackboard.get_event = AsyncMock(return_value=event)
-
-        with patch.dict("os.environ", {"ON_ICE_THRESHOLD_SEC": "14400"}):
-            result = await Brain._check_on_ice_staleness(brain, "evt-test")
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_chat_event_not_frozen(self):
-        """Chat source events should NOT be frozen (idle timeout handles them)."""
-        from src.agents.brain import Brain
-        event = _make_event(source="chat")
-        brain = MagicMock()
-        brain._waiting_for_user = {"evt-test": time.time() - 15000}
-        brain.blackboard = MagicMock()
-        brain.blackboard.get_event = AsyncMock(return_value=event)
-
-        result = await Brain._check_on_ice_staleness(brain, "evt-test")
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_event_not_in_waiting_not_stale(self):
-        """Event not in _waiting_for_user should not be stale."""
-        from src.agents.brain import Brain
-        brain = MagicMock()
-        brain._waiting_for_user = {}
-
-        result = await Brain._check_on_ice_staleness(brain, "evt-test")
-        assert result is False
+        await bb.resume_from_approval("evt-test")
+        bb.resume_from_approval.assert_awaited_once_with("evt-test")
 
 
 # =============================================================================
@@ -228,35 +183,35 @@ class TestIdleTimeoutRaceGuard:
 # =============================================================================
 
 
-class TestThawIfFrozen:
+class TestResumeIfParked:
 
     @pytest.mark.asyncio
-    async def test_thaw_frozen_event(self):
-        """thaw_if_frozen returns True and re-enqueues for on_ice events."""
+    async def test_resume_parked_event(self):
+        """resume_if_parked returns True and re-enqueues for waiting_approval events."""
         from src.agents.brain import Brain
-        event = _make_event(status=EventStatus.ON_ICE)
+        event = _make_event(status=EventStatus.WAITING_APPROVAL)
         brain = MagicMock()
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=event)
-        brain.blackboard.thaw_event = AsyncMock()
+        brain.blackboard.resume_from_approval = AsyncMock()
         brain._scheduler = MagicMock()
         brain._scheduler.enqueue = MagicMock(return_value=True)
 
-        result = await Brain.thaw_if_frozen(brain, "evt-test")
+        result = await Brain.resume_if_parked(brain, "evt-test")
         assert result is True
-        brain.blackboard.thaw_event.assert_awaited_once_with("evt-test")
+        brain.blackboard.resume_from_approval.assert_awaited_once_with("evt-test")
         brain._scheduler.enqueue.assert_called_once_with("evt-test")
 
     @pytest.mark.asyncio
-    async def test_no_thaw_for_active_event(self):
-        """thaw_if_frozen returns False for non-on_ice events."""
+    async def test_no_resume_for_active_event(self):
+        """resume_if_parked returns False for non-waiting_approval events."""
         from src.agents.brain import Brain
         event = _make_event(status=EventStatus.ACTIVE)
         brain = MagicMock()
         brain.blackboard = MagicMock()
         brain.blackboard.get_event = AsyncMock(return_value=event)
 
-        result = await Brain.thaw_if_frozen(brain, "evt-test")
+        result = await Brain.resume_if_parked(brain, "evt-test")
         assert result is False
 
 

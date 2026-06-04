@@ -307,7 +307,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "request_user_approval",
-        "description": "Pause and ask the user to approve a plan. Use for structural changes (source code, templates).",
+        "description": "Pause and ask a human to authorize an action. Use for structural changes, fix proposals, or any action requiring human approval. This is the ONLY tool that can pause automated events for human input.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -395,9 +395,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "wait_for_user",
         "description": (
-            "Pause processing until a human or agent responds. "
-            "Use ONLY when waiting for a person's decision or an agent's final result. "
-            "NOT for pipelines, timers, or external processes -- use defer_event for those."
+            "Pause processing until the user responds. "
+            "ONLY available for chat and slack events. "
+            "Use ONLY when waiting for the user's decision or confirmation. "
+            "NOT for automated events -- use request_user_approval instead."
         ),
         "input_schema": {
             "type": "object",

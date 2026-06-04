@@ -139,9 +139,9 @@ Enabled via `BRAIN_GOOGLE_SEARCH_ENABLED=true`. Evidence citations include sourc
 
 The Brain can proactively propose actions to users and prompt for approval, shifting from reactive (wait for request) to proactive (detect → propose → execute on approval). This enables higher autonomy levels while maintaining human oversight on structural changes.
 
-## On Ice (Stale Event Freeze)
+## Waiting for Approval (Approval Pool)
 
-Automated events stuck in `wait_for_user` beyond a configurable threshold are moved to an **on-ice** queue (`GET /queue/on_ice`). On-ice events are excluded from active dispatch until a user unfreezes them. Controlled by `ON_ICE_THRESHOLD_SEC` (Helm: `onIce.thresholdSec`, default 4 hours).
+When the Brain calls `request_user_approval`, the event is atomically moved from the active set to the **waiting_approval** pool (`GET /queue/waiting_approval`). These events are excluded from active dispatch and do not consume WIP slots. They sit indefinitely until a human approves or rejects via the dashboard or Slack. The `wait_for_user` tool is restricted to chat/slack events only -- automated events must use `request_user_approval`.
 
 ## Cortex / JARVIS (Meta-Cognitive Layer)
 

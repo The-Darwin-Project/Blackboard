@@ -102,12 +102,12 @@ async def list_active_events(
     return events
 
 
-@router.get("/on_ice")
-async def list_on_ice_events(
+@router.get("/waiting_approval")
+async def list_waiting_approval_events(
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
-    """Get all on-ice event IDs with basic metadata."""
-    event_ids = await blackboard.get_on_ice_events()
+    """Get all waiting-approval event IDs with basic metadata."""
+    event_ids = await blackboard.get_waiting_approval_events()
     events = []
     for eid in event_ids:
         event = await blackboard.get_event(eid)
@@ -238,16 +238,12 @@ async def approve_event(
     )
     await blackboard.append_turn(event_id, turn)
 
-    # Atomically transition status so the Brain picks it up
-    await blackboard.transition_event_status(
-        event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
-    )
-
-    # Clear wait_for_user state so Brain re-processes with approval
     try:
         brain = await get_brain()
         brain.clear_waiting(event_id)
-        await brain.thaw_if_frozen(event_id)
+        resumed = await brain.resume_if_parked(event_id)
+        if not resumed:
+            logger.info(f"approve_event: {event_id} was not in waiting_approval (already resumed or race)")
     except RuntimeError:
         pass  # Brain not initialized (unlikely in normal operation)
 
@@ -279,16 +275,12 @@ async def reject_event(
     )
     await blackboard.append_turn(event_id, turn)
 
-    # Atomically transition status so the Brain re-processes with rejection feedback
-    await blackboard.transition_event_status(
-        event_id, from_status="waiting_approval", to_status=EventStatus.ACTIVE,
-    )
-
-    # Clear wait_for_user state so Brain re-processes with rejection
     try:
         brain = await get_brain()
         brain.clear_waiting(event_id)
-        await brain.thaw_if_frozen(event_id)
+        resumed = await brain.resume_if_parked(event_id)
+        if not resumed:
+            logger.info(f"reject_event: {event_id} was not in waiting_approval (already resumed or race)")
     except RuntimeError:
         pass  # Brain not initialized (unlikely in normal operation)
 

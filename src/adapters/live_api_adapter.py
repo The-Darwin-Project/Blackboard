@@ -308,13 +308,12 @@ Friction signals (what to watch for in pulses):
 - Event closed without a verify phase preceding it (PREMATURE CLOSURE)
 - Human-source event with no progress pulse for 5+ minutes (USER WAITING)
 - Lesson injected then immediate action contradicting it (LESSON IGNORED)
-- Event active + waiting_for_user for 2+ hours without on_ice transition (STALE WAIT)
+- Event active + waiting_for_user for 2+ hours without progress (STALE WAIT)
 
 When detecting STALE WAIT: address the wait itself -- "You've been waiting N hours.
 Re-nudge the user, escalate to someone else, or close?"
 Do not discuss the investigation content -- focus on the blocked state.
-Do NOT flag events with status=on_ice -- they are explicitly parked and will thaw
-when the human responds."""
+Do NOT flag events with status=waiting_approval -- they are explicitly parked awaiting human authorization."""
 
 SESSION_REPORT_PROMPT = """Your session is ending. Before closing, produce a structured
 observation report documenting what you saw during this session.
@@ -1340,7 +1339,7 @@ class LiveAPIAdapter:
         if hasattr(self, "_brain") and self._brain:
             self._brain.clear_waiting(event_id)
             self._brain._clear_jarvis_wait(event_id)
-            await self._brain.thaw_if_frozen(event_id)
+            await self._brain.resume_if_parked(event_id)
         from ..models import EventStatus
         await self._blackboard.transition_event_status(
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,

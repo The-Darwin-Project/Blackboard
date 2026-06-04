@@ -1138,6 +1138,8 @@ class Brain:
         # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
         if brain_phase == "triage" or event.source == "jarvis":
             active_tools = [t for t in active_tools if t["name"] not in ("defer_event", "wait_for_user")]
+        elif event.source not in ("chat", "slack"):
+            active_tools = [t for t in active_tools if t["name"] != "wait_for_user"]
         priority_names = _phase_tool_priority.get(brain_phase, set())
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
         tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
@@ -2710,16 +2712,10 @@ class Brain:
                 waitingFor="user",
             )
             await self._append_and_broadcast(event_id, turn)
-            # Update event status
+            await self.blackboard.park_for_approval(event_id)
             event = await self.blackboard.get_event(event_id)
-            if event:
-                event.status = EventStatus.WAITING_APPROVAL
-                await self.blackboard.redis.set(
-                    f"{self.blackboard.EVENT_PREFIX}{event_id}",
-                    json.dumps(event.model_dump()),
-                )
-                if event.source in ("slack", "chat"):
-                    self._idle_timeout.schedule(event_id)
+            if event and event.source in ("slack", "chat"):
+                self._idle_timeout.schedule(event_id)
             return False
 
         elif function_name == "re_trigger_aligner":
@@ -2876,6 +2872,19 @@ class Brain:
             return False
 
         elif function_name == "wait_for_user":
+            # Hard guard: wait_for_user is only for chat/slack events
+            event = await self.blackboard.get_event(event_id)
+            if event and event.source not in ("chat", "slack"):
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="wait_for_user is not available for automated events. "
+                             "Use request_user_approval to pause for human authorization, "
+                             "or defer_event to wait for external processes.",
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return False
             summary = args.get("summary", "")
             self._waiting_for_user[event_id] = time.time()  # State flag (plumbing)
             turn = ConversationTurn(
@@ -4891,15 +4900,15 @@ class Brain:
         self._idle_timeout.cancel(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
 
-    async def thaw_if_frozen(self, event_id: str) -> bool:
-        """Thaw an on_ice event back to active. Returns True if thawed."""
+    async def resume_if_parked(self, event_id: str) -> bool:
+        """Resume a waiting_approval event back to active. Returns True if resumed."""
         event = await self.blackboard.get_event(event_id)
-        if not event or event.status != EventStatus.ON_ICE:
+        if not event or event.status != EventStatus.WAITING_APPROVAL:
             return False
-        await self.blackboard.thaw_event(event_id)
+        await self.blackboard.resume_from_approval(event_id)
         if self._scheduler:
             self._scheduler.enqueue(event_id)
-        logger.info(f"Thawed on_ice event {event_id} -- re-enqueued")
+        logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
 
     def register_channel(self, channel_broadcast: BroadcastPort) -> None:
@@ -5527,12 +5536,6 @@ class Brain:
             interval=60.0,
             name="chat",
         ))
-        self._scheduler.register_trigger(StalenessGuard(
-            check_fn=self._check_on_ice_staleness,
-            on_stale=self._freeze_stale_event,
-            interval=120.0,
-            name="on_ice",
-        ))
 
         logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
         await self._scheduler.start()
@@ -5783,26 +5786,6 @@ class Brain:
             summary="Automatically closed after idle timeout (no user response).",
             close_reason="idle_timeout",
         )
-
-    async def _check_on_ice_staleness(self, event_id: str) -> bool:
-        """Check if an automated event has been waiting_for_user beyond ON_ICE_THRESHOLD."""
-        if event_id not in self._waiting_for_user:
-            return False
-        event = await self.blackboard.get_event(event_id)
-        if not event or event.source in ("chat", "slack"):
-            return False
-        wait_start = self._waiting_for_user.get(event_id)
-        if wait_start is None:
-            return False
-        threshold = int(os.getenv("ON_ICE_THRESHOLD_SEC", "14400"))
-        return (time.time() - wait_start) > threshold
-
-    async def _freeze_stale_event(self, event_id: str) -> None:
-        """Freeze an automated event that exceeded ON_ICE_THRESHOLD."""
-        logger.warning(f"StalenessGuard[on_ice]: freezing event {event_id}")
-        await self.blackboard.freeze_event(event_id)
-        self._waiting_for_user.pop(event_id, None)
-        self._release_task_state(event_id)
 
     # =========================================================================
     # Helpers

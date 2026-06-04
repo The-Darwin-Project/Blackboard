@@ -148,11 +148,10 @@ Helm block: `jira.enabled`, `jira.existingSecret`, `jira.maxActive`, `jira.model
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `ON_ICE_THRESHOLD_SEC` | Freeze automated events stuck in wait_for_user | `14400` (4h) |
 | `IDLE_TIMEOUT_WARNING_SEC` | Inactivity warning before auto-close (chat/slack) | `600` |
 | `IDLE_TIMEOUT_CLOSE_SEC` | Auto-close after warning if no response | `300` |
 
-Helm blocks: `onIce.thresholdSec`, `idleTimeout.warningSec`, `idleTimeout.closeSec`.
+Helm blocks: `idleTimeout.warningSec`, `idleTimeout.closeSec`.
 
 ### Lesson Enrichment
 
