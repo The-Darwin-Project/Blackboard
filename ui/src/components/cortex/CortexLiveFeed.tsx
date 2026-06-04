@@ -136,7 +136,9 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
         {filteredEntries.map(({ entry, msgClass }, i) => {
           const style = MESSAGE_STYLES[msgClass];
           const Icon = style.icon;
-          const text = entry.text ?? entry.tool ?? entry.result_preview ?? '';
+          const text = msgClass === 'tool_result'
+            ? (entry.result_preview || entry.tool || '')
+            : (entry.text ?? entry.tool ?? entry.result_preview ?? '');
           const isShadow = !!((entry as unknown) as Record<string, unknown>).shadow;
 
           const argsSummary = entry.content_type === 'tool_call' && entry.args
@@ -154,7 +156,7 @@ const CortexLiveFeed: FC<CortexLiveFeedProps> = ({ entries, whispers = [], corte
                   {msgClass === 'peer_input' && <span className="font-semibold text-blue-400 mr-1">FRIDAY</span>}
                   {msgClass === 'investigation' && <span className="font-semibold text-amber-400 mr-1">{entry.tool}</span>}
                   {msgClass === 'delivered' && <span className="font-semibold text-emerald-400 mr-1">✓ Delivered</span>}
-                  {msgClass === 'tool_result' && <span className="font-semibold text-slate-500 mr-1">Result:</span>}
+                  {msgClass === 'tool_result' && <span className="font-semibold text-slate-500 mr-1">{entry.tool}:</span>}
                   {text}
                   {argsSummary && <span className="text-slate-500 ml-1 text-[10px]">{argsSummary}</span>}
                   {isShadow && <span className="ml-1 text-amber-500/60 text-[10px]">[shadow]</span>}
