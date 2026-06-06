@@ -32,7 +32,8 @@ If the agent returned only status labels without observable conditions:
 
 1. Do NOT escalate or create an incident yet.
 2. Re-dispatch the same agent (or a more appropriate one) in `investigate` mode with narrower questions targeting the specific failing component.
-3. Example: if the agent reported "build step failed," re-dispatch with: "Extract the error output from the failing build step. What compiler/dependency/test error appears in the log?"
+3. If the agent's finding is an infrastructure/environmental claim (cluster down, registry inaccessible), use a DIFFERENT agent for re-verification -- the original may have a blind spot.
+4. Example: if the agent reported "build step failed," re-dispatch with: "Extract the error output from the failing build step. What compiler/dependency/test error appears in the log?"
 
 ## When to Accept and Move On
 
