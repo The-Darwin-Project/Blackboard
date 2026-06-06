@@ -1818,7 +1818,7 @@ class Brain:
              if t.actor == "brain" and t.thoughts),
             "",
         )
-        query = f"{thoughts[:200]} phase={event.brain_phase} source={event.source}"
+        query = f"{thoughts} phase={event.brain_phase} source={event.source}"
 
         from ..memory.pulse import PulseContext
         pulse_ctx = PulseContext(
