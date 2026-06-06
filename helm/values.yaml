@@ -463,7 +463,7 @@ lessonEnrichment:
 # Memory Reflex (real-time lesson search during FRIDAY's thinking stream)
 # =============================================================================
 memoryReflex:
-  enabled: false # Set to true to fire async lesson searches during Brain thinking
+  enabled: true # Set to true to fire async lesson searches during Brain thinking
   threshold: "0.60" # Minimum similarity score for lesson matches
   maxSearches: "5" # Max embedding searches per processing cycle
 # =============================================================================
