@@ -1813,12 +1813,16 @@ class Brain:
             logger.debug(f"Brain lessons: skipped (reason=no_archivist) for {event.id}")
             return None
 
-        thoughts = next(
-            (t.thoughts for t in reversed(event.conversation)
-             if t.actor == "brain" and t.thoughts),
-            "",
-        )
-        query = f"{thoughts} phase={event.brain_phase} source={event.source}"
+        # Use reasoning from the current or previous cycle if available (real thinking tokens),
+        # falling back to the last brain turn's thoughts field (action summary).
+        reasoning = self._reasoning_by_event.get(event.id, "")
+        if not reasoning:
+            reasoning = next(
+                (t.thoughts for t in reversed(event.conversation)
+                 if t.actor == "brain" and t.thoughts),
+                "",
+            )
+        query = f"{reasoning} phase={event.brain_phase} source={event.source}"
 
         from ..memory.pulse import PulseContext
         pulse_ctx = PulseContext(
