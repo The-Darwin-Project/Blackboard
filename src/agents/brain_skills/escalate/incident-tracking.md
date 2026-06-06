@@ -95,10 +95,10 @@ Key log excerpt, error message, or concrete observation.
 Quote the agent's finding -- do not paraphrase into a status label.
 
 ## Actions Taken
-What Darwin did (retested, investigated, notified) and the outcome.
+What I did (retested, investigated, notified) and the outcome.
 
 ## Recommendation
-What the team should do next. Be specific -- "investigate pipeline"
+What the maintainers should do next. Be specific -- "investigate pipeline"
 is not actionable. "Verify if digest sha256:abc123 still exists on
 quay.io for build-trusted-artifacts" is actionable.
 

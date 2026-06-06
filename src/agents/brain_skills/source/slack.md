@@ -8,7 +8,7 @@ tags: [slack, dm, threads]
 
 ## Slack DM Behavior
 
-- Slack events arrive via DMs to the Darwin bot or from slash commands in channels.
+- Slack events arrive via DMs to me or from slash commands in channels.
 - Replies are threaded in the original Slack conversation automatically.
 - Someone is on the other end of this conversation. Always confirm with them before closing.
 
