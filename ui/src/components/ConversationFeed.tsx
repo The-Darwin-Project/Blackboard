@@ -62,6 +62,7 @@ interface ConversationFeedProps {
 export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenContentTile }: ConversationFeedProps) {
   const [brainThinking, setBrainThinking] = useState<{ eventId: string; text: string; isThought: boolean } | null>(null);
   const [attachments, setAttachments] = useState<Array<{ eventId: string; filename: string; content: string }>>([]);
+  const [recallHits, setRecallHits] = useState<Set<string>>(new Set());
   const [reportOpen, setReportOpen] = useState(false);
   const [reportContent, setReportContent] = useState<string>('');
   const [turnViewer, setTurnViewer] = useState<{ content: string; filename: string } | null>(null);
@@ -111,6 +112,10 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
           content: msg.content as string,
         }];
       });
+    } else if (msg.type === 'brain_recall_hit') {
+      if (msg.event_id === eventId) {
+        setRecallHits((prev) => new Set(prev).add(msg.event_id as string));
+      }
     }
   });
 
@@ -230,8 +235,13 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             const turnAttachment = (turn.actor === 'brain' && turn.action === 'route')
               ? attachments.find((a) => a.eventId === eventId)
               : null;
+            const prevTurn = i > 0 ? selectedEvent.conversation[i - 1] : null;
+            const hasRecallContext = (
+              (prevTurn?.action === 'reflex' && prevTurn?.actor === 'system') ||
+              (turn.actor === 'brain' && (turn.action === 'response' || turn.action === 'route') && recallHits.has(eventId))
+            );
             return (
-              <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} onStatusChange={handleStatusChange} onViewReport={(content, filename) => {
+              <TurnBubble key={i} turn={turn} eventId={selectedEvent.id} attachment={turnAttachment} recallApplied={hasRecallContext} onStatusChange={handleStatusChange} onViewReport={(content, filename) => {
                 if (onOpenContentTile) {
                   onOpenContentTile(filename, content);
                 } else {
