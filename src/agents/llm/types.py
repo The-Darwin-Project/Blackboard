@@ -230,7 +230,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "issue persists. For automated events, escalation means notifying "
                         "a human who may be asleep -- verify first. "
                         "For chaotic events, enter immediately -- act first. "
-                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, comment_jira_issue, and transition_jira_issue."
+                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, comment_jira_issue, and transition_jira_issue. "
+                        "For user-initiated events: enter ONLY after you have replied to the user. "
+                        "Closing without a visible response leaves the human without an answer."
                     ),
                 },
                 "reasoning": {
@@ -289,7 +291,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     },
     {
         "name": "close_event",
-        "description": "Close the event as resolved. Use when the issue is fixed and verified, or the request is complete.",
+        "description": (
+            "Close the event as resolved. "
+            "For user-initiated events (chat, slack): you MUST have sent a visible reply "
+            "to the user before calling this. The close summary is an internal record -- "
+            "the user needs YOUR response in the conversation, not just a closure notification. "
+            "For automated events (headhunter, aligner, timekeeper): close directly after verification."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
