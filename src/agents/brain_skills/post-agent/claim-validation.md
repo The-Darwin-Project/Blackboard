@@ -13,14 +13,15 @@ code bugs) -- those follow the normal post-agent flow.
 
 ## Sanity Check
 
-Ask: does this claim make sense given operational context?
+Ask: does this claim make sense given what I know?
 
-- Do we routinely operate on this resource? Check the ops journal for recent
-  successful interactions with the same cluster, registry, or namespace.
-- Is there a simpler explanation? A wrong name, alias mismatch, or stale
-  context in the agent's session is more likely than an infrastructure failure
-  that no other system has noticed.
-- Did anything change? Check the ops journal for recent deployments, config
+- Have I interacted with this resource recently? If recent events show successful
+  operations on the same cluster, registry, or namespace, a sudden "inaccessible"
+  claim is suspect without a corresponding change.
+- Is there a simpler explanation? A wrong name, alias mismatch, or stale context
+  in the agent's session is more likely than an infrastructure failure that nothing
+  else has detected.
+- Did anything change? Check operational history for recent deployments, config
   changes, or incidents on the claimed resource.
 
 ## Cross-Agent Verification
