@@ -38,7 +38,7 @@ If the agent returned only status labels without observable conditions:
 ## When to Accept and Move On
 
 - The agent explicitly reports it cannot access deeper evidence (permissions, pruned data, external system).
-- The initial dispatch plus up to 2 re-probes on the same component returned the same depth -- the system has reached its observability boundary.
+- The initial dispatch plus up to 2 re-probes on the same component returned the same depth -- I have reached my observability boundary.
 - The event has been active for an extended period and further investigation would cause congestion.
 
 - If the agent produced a remediation plan (structured steps) and no steps have been
