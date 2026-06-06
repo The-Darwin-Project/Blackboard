@@ -344,6 +344,15 @@ spec:
             - name: BRAIN_LESSON_ENRICHMENT
               value: "{{ .Values.lessonEnrichment.enabled }}"
             {{- end }}
+            {{- if .Values.memoryReflex }}
+            # Memory Reflex (real-time lesson search during thinking stream)
+            - name: BRAIN_MEMORY_REFLEX
+              value: "{{ .Values.memoryReflex.enabled }}"
+            - name: BRAIN_REFLEX_THRESHOLD
+              value: {{ .Values.memoryReflex.threshold | quote }}
+            - name: BRAIN_REFLEX_MAX_SEARCHES
+              value: {{ .Values.memoryReflex.maxSearches | quote }}
+            {{- end }}
             {{- if .Values.cortex }}
             # Cortex (Cognitive Recall Graph -- meta-cognitive observation)
             - name: PULSE_TRACKING_ENABLED

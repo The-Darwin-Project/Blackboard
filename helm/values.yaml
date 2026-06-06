@@ -460,6 +460,13 @@ googleSearch:
 lessonEnrichment:
   enabled: false # Set to true to auto-surface darwin_lessons into Brain system prompt
 # =============================================================================
+# Memory Reflex (real-time lesson search during FRIDAY's thinking stream)
+# =============================================================================
+memoryReflex:
+  enabled: false # Set to true to fire async lesson searches during Brain thinking
+  threshold: "0.60" # Minimum similarity score for lesson matches
+  maxSearches: "5" # Max embedding searches per processing cycle
+# =============================================================================
 # Cortex (Cognitive Recall Graph -- meta-cognitive observation layer)
 # =============================================================================
 cortex:

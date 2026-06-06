@@ -124,6 +124,10 @@
 #     4th+: tool stripped). Cleaned in _clear_jarvis_wait, called from _close_and_broadcast,
 #     _cleanup_stale_events, and event loop resolution scan. NEVER add to _waiting_for_user.
 # 39. [Pattern]: Sticky notes gates: post_sticky_note requires source=jarvis+phase=close; read_sticky_notes requires unread_notes>0.
+# 40. [Pattern]: Memory reflex: SentenceChunker + ReflexSearcher fire async lesson searches
+#     during thinking stream. Decision gate between stream end and _execute_function_call.
+#     Gated by BRAIN_MEMORY_REFLEX env var (default false). Max 1 gate per processing cycle.
+# 41. [Gotcha]: Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -433,6 +437,8 @@ class Brain:
         self._ephemeral_provisioner = None
         self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
         self._lesson_enrichment_enabled = os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true"
+        self._memory_reflex_enabled = os.getenv("BRAIN_MEMORY_REFLEX", "false").lower() == "true"
+        self._reflex_fired_for: set[str] = set()  # event IDs with gate already fired this cycle
         self._last_embedding_warmup: float = 0.0
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
@@ -1180,6 +1186,23 @@ class Brain:
         if want_search and hasattr(self._adapter, 'set_search_enabled'):
             self._adapter.set_search_enabled(True)
 
+        reflex_chunker = None
+        reflex_searcher = None
+        if self._memory_reflex_enabled and event_id not in self._reflex_fired_for:
+            try:
+                from .brain_reflex import SentenceChunker, ReflexSearcher
+                archivist = self.agents.get("_archivist_memory")
+                if archivist and hasattr(archivist, "search_lessons"):
+                    reflex_chunker = SentenceChunker()
+                    reflex_searcher = ReflexSearcher(
+                        archivist,
+                        event_id,
+                        score_threshold=float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60")),
+                        max_searches=int(os.getenv("BRAIN_REFLEX_MAX_SEARCHES", "5")),
+                    )
+            except Exception as e:
+                logger.warning(f"Memory reflex init failed for {event_id}: {e}")
+
         try:
             for attempt in range(max_retries + 1):
                 accumulated_text = ""
@@ -1200,6 +1223,10 @@ class Brain:
                         if chunk.text:
                             if chunk.is_thought:
                                 accumulated_thoughts += chunk.text
+                                if reflex_chunker:
+                                    window = reflex_chunker.feed(chunk.text)
+                                    if window and reflex_searcher:
+                                        reflex_searcher.fire(window)
                             else:
                                 accumulated_text += chunk.text
                             await self._broadcast({
@@ -1288,6 +1315,52 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
+
+            # Flush remaining thinking buffer for final sentence search
+            if reflex_chunker and reflex_searcher:
+                final_window = reflex_chunker.flush()
+                if final_window:
+                    reflex_searcher.fire(final_window)
+
+            # Memory reflex gate: check for lesson matches before executing tool
+            if reflex_searcher and event_id not in self._reflex_fired_for:
+                try:
+                    lessons = await reflex_searcher.gather(timeout=0.5)
+                    if lessons:
+                        lesson_text = "\n".join(
+                            f"- **{l['payload'].get('title', 'Pattern')}**: "
+                            f"{l['payload'].get('pattern', '')}"
+                            for l in lessons
+                        )
+                        gate_turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor="system",
+                            action="reflex",
+                            thoughts=(
+                                f"MEMORY REFLEX: Your reasoning triggered {len(lessons)} "
+                                f"lesson match(es) from past events. Review before proceeding "
+                                f"with `{function_call.name}`:\n\n"
+                                f"{lesson_text}\n\n"
+                                f"Reconsider your decision in light of these patterns."
+                            ),
+                            response_parts=captured_parts,
+                        )
+                        await self._append_and_broadcast(event_id, gate_turn)
+                        await self._broadcast({
+                            "type": "brain_reflex_hit",
+                            "event_id": event_id,
+                            "lessons": [l["payload"].get("title", "") for l in lessons],
+                            "blocked_tool": function_call.name,
+                        })
+                        logger.info(
+                            f"Brain reflex: gate fired for {event_id}, "
+                            f"blocked {function_call.name}, {len(lessons)} lessons injected"
+                        )
+                        self._reflex_fired_for.add(event_id)
+                        return True  # Re-invoke LLM with lesson context visible
+                except Exception as e:
+                    logger.warning(f"Memory reflex gate error for {event_id}: {e}")
+
             self._reasoning_by_event[event_id] = accumulated_thoughts or None
             return await self._execute_function_call(
                 event_id, function_call.name, function_call.args,
@@ -4241,6 +4314,7 @@ class Brain:
         self._active_agent_for_event.pop(event_id, None)
         self._routing_turn_for_event.pop(event_id, None)
         self._waiting_for_agent.pop(event_id, None)
+        self._reflex_fired_for.discard(event_id)
 
     async def handle_wake_task(self, data: dict, agent_id: str) -> None:
         """Process a self-initiated wake task (teammate message woke an idle agent).
@@ -5069,6 +5143,7 @@ class Brain:
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._reasoning_by_event.pop(event_id, None)
+        self._reflex_fired_for.discard(event_id)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
