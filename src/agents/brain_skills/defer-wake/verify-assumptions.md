@@ -20,6 +20,7 @@ to unlock refresh tools before checking current state.
    - The process has exceeded its expected duration (consult deep memory for typical timing)
    - An error condition persists across checks
    Do NOT escalate a healthy monitoring cycle just because the defer count is high.
+4. **Snapshot for trajectory** -- call record_observation with the current quantifiable state (pipeline status code, queue depth, retry count) before deferring. When you wake, list_observations shows whether the number moved -- that is your progress signal.
 
 ## Headhunter Post-Defer: Refresh GitLab State
 

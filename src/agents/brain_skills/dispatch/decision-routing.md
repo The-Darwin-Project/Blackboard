@@ -34,6 +34,12 @@ Before routing, verify the current Cynefin domain still matches the situation. I
 - If an agent asks for another agent's help, route to that agent.
 - If an agent reports "busy" after retries, defer and re-process later instead of closing.
 
+## Baseline Before Dispatch
+
+Before routing an agent, snapshot the current quantifiable state via
+record_observation -- the metric or count that motivated this dispatch.
+When the agent returns, you can measure whether the situation changed.
+
 ## Investigation Dispatch: Questions, Not Conclusions
 
 When dispatching an agent in `investigate` mode, the `task_instruction` must contain

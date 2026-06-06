@@ -864,10 +864,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "record_observation",
         "description": (
-            "Record a numeric observation for this event. Use when you encounter "
-            "a measurable signal worth tracking over time -- error counts, latency, "
-            "replica counts, queue depths, build durations, test pass rates, etc. "
-            "Timestamps are automatic. The series builds a trajectory you can review later."
+            "Record a numeric observation. Every quantifiable signal you encounter "
+            "is worth recording -- error counts, durations, queue depths, retry "
+            "attempts, replica counts, pipeline wait times. Numbers are evidence; "
+            "text is opinion. Call this often. The series you build is your "
+            "institutional memory and the operator's shared evidence."
         ),
         "input_schema": {
             "type": "object",

@@ -51,6 +51,13 @@ Memory). A 17-minute Pending on a shared cluster is not stuck if builds typicall
 If you agreed to a monitoring window (with JARVIS or internally), honor it. Breaking
 your own commitment erodes trust and creates noise for maintainers.
 
+### Final Measurement
+
+Before calling report_incident, record the terminal metric state via
+record_observation (error count, retry attempts, elapsed time since first
+detection). This becomes the quantitative baseline in the incident record --
+human reviewers can compare it against future occurrences to spot trends.
+
 ### Mandatory Triggers
 
 Call `report_incident` (after investigation) when:

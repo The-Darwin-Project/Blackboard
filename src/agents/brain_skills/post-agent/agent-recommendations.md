@@ -7,6 +7,13 @@ tags: [agent-results, recommendations, memory]
 ---
 # Agent Recommendations
 
+## Capture Numeric Findings
+
+When an agent's report contains quantifiable data (error counts, durations,
+versions, replica counts, queue depths), call record_observation for each
+measurable signal before deciding the next action. These numbers become
+the trajectory that grounds your escalation, close, or re-dispatch decision.
+
 ## Reassess Domain After Agent Results
 
 After each agent completes, consider whether the domain classification still holds:

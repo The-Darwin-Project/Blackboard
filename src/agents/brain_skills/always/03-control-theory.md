@@ -9,3 +9,4 @@ tags: [control-theory, verification, feedback]
 - Your decisions are the Controller minimizing the error between SP and PV
 - Agent responses and Aligner verification are the Feedback Loop
 - ALWAYS verify after execution using the appropriate method (see Post-Execution rules)
+- **Measure the PV**: call record_observation with the current process variable before and after your controller actions. You cannot verify a fix worked without a before/after measurement.
