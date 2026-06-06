@@ -37,10 +37,9 @@
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
-# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on post-agent/defer-wake phases.
-#     Gated by BRAIN_LESSON_ENRICHMENT env var (default false). 10s timeout on archivist call (embed + search).
-#     Scores + latency logged at INFO. Embedding keepalive: _scan_active_for_reconcile fires
-#     _warmup_embedding every 60s while active events > 0. Prevents Vertex AI cold-start timeouts.
+# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on ANY phase
+#     where reasoning is available (same gate as Memory Reflex). Deduplicates against lessons
+#     already surfaced by reflex turns in conversation. Gated by BRAIN_LESSON_ENRICHMENT env var.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
@@ -1869,16 +1868,15 @@ class Brain:
 
     async def _enrich_with_lessons(
         self, event: EventDocument, active_phases: list[str],
-        score_threshold: float = 0.55, limit: int = 2,
+        score_threshold: float = 0.55, limit: int = 3,
     ) -> str | None:
-        """Surface relevant lessons from darwin_lessons into the system prompt."""
+        """Surface relevant lessons from darwin_lessons into the system prompt (RECALL block).
+
+        Fires on ANY phase where reasoning is available (same gate as Memory Reflex).
+        Deduplicates against lessons already surfaced by the reflex in conversation.
+        """
         if os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() != "true":
             logger.debug(f"Brain lessons: skipped (reason=feature_off) for {event.id}")
-            return None
-
-        brain_phase = event.brain_phase or "triage"
-        if brain_phase == "triage":
-            logger.debug(f"Brain lessons: skipped (reason=triage_phase) for {event.id}")
             return None
 
         archivist = self.agents.get("_archivist_memory")
@@ -1886,8 +1884,6 @@ class Brain:
             logger.debug(f"Brain lessons: skipped (reason=no_archivist) for {event.id}")
             return None
 
-        # Use reasoning from the current or previous cycle if available (real thinking tokens),
-        # falling back to the last brain turn's thoughts field (action summary).
         reasoning = self._reasoning_by_event.get(event.id, "")
         if not reasoning:
             reasoning = next(
@@ -1895,6 +1891,10 @@ class Brain:
                  if t.actor == "brain" and t.thoughts),
                 "",
             )
+        if not reasoning:
+            logger.debug(f"Brain lessons: skipped (reason=no_reasoning) for {event.id}")
+            return None
+
         query = f"{reasoning} phase={event.brain_phase} source={event.source}"
 
         from ..memory.pulse import PulseContext
@@ -1911,10 +1911,10 @@ class Brain:
             )
         except asyncio.TimeoutError:
             logger.warning(f"Brain lessons: fallback hint (reason=timeout) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning}\"."
+            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning[:200]}\"."
         except Exception as e:
             logger.warning(f"Brain lessons: fallback hint (reason=error: {e}) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning}\"."
+            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning[:200]}\"."
         latency_ms = int((time.time() - t0) * 1000)
 
         hits = [r for r in results if float(r.get("score") or 0) >= score_threshold]
@@ -1922,15 +1922,31 @@ class Brain:
             logger.debug(f"Brain lessons: skipped (reason=no_results) for {event.id}")
             return None
 
+        # Dedup: exclude lessons already surfaced by Memory Reflex in conversation
+        reflex_titles: set[str] = set()
+        for turn in event.conversation:
+            if turn.action == "reflex" and turn.thoughts:
+                for line in turn.thoughts.split("\n"):
+                    if line.startswith("- **") and "**:" in line:
+                        title = line.split("**:")[0].replace("- **", "").strip()
+                        reflex_titles.add(title.lower())
+
         lines = ["## RECALL", "The following patterns were learned from past events similar to this one."]
         scores = []
         for h in hits:
             p = h.get("payload", {})
-            lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+            title = p.get("title", "untitled")
+            if title.lower() in reflex_titles:
+                continue
+            lines.append(f"- {title}: {p.get('pattern', '')}")
             scores.append(f"{float(h.get('score') or 0):.2f}")
 
+        if not scores:
+            logger.debug(f"Brain lessons: skipped (reason=all_deduped_by_reflex) for {event.id}")
+            return None
+
         logger.info(
-            f"Brain lessons: {len(hits)} surfaced "
+            f"Brain lessons: {len(scores)} surfaced "
             f"(scores: {', '.join(scores)}, latency={latency_ms}ms) for {event.id}"
         )
         return "\n".join(lines)
