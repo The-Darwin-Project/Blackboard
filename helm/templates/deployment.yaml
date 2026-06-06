@@ -339,11 +339,6 @@ spec:
             - name: BRAIN_GOOGLE_SEARCH_ENABLED
               value: "{{ .Values.googleSearch.enabled }}"
             {{- end }}
-            {{- if .Values.lessonEnrichment }}
-            # Lesson Enrichment (RECALL block on post-agent/defer-wake)
-            - name: BRAIN_LESSON_ENRICHMENT
-              value: "{{ .Values.lessonEnrichment.enabled }}"
-            {{- end }}
             {{- if .Values.memoryReflex }}
             # Memory Reflex (real-time lesson search during thinking stream)
             - name: BRAIN_MEMORY_REFLEX

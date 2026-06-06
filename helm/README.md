@@ -56,7 +56,6 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Smartsheet Incidents | `smartsheet.incident.enabled: true` | `smartsheet.incident.existingSecret` |
 | KargoObserver | `kargoObserver.enabled: true` | Requires `kargo.enabled: true` |
 | Google Search | `googleSearch.enabled: true` | Sets `BRAIN_GOOGLE_SEARCH_ENABLED` |
-| Lesson Enrichment | `lessonEnrichment.enabled: true` | Injects darwin_lessons into Brain prompt |
 | Cortex / JARVIS | `cortex.system2.enabled: true` | Pulse tracking via `cortex.pulseTracking`; shadow via `cortex.system2.shadow` |
 | Registry Pull (runtime) | `registry.enabled: true` | `registry.existingSecret` (dockerconfigjson for agent CLIs) |
 | Remote Clusters (MCP) | `remoteClusters.<name>.enabled: true` | Per-cluster kubeconfig Secret |

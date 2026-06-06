@@ -37,9 +37,10 @@
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
-# 29. [Pattern]: _enrich_with_lessons() appends RECALL block to system prompt on ANY phase
-#     where reasoning is available (same gate as Memory Reflex). Deduplicates against lessons
-#     already surfaced by reflex turns in conversation. Gated by BRAIN_LESSON_ENRICHMENT env var.
+# 29. [Pattern]: _format_recall_block reads _recall_lessons dict (populated by reflex gate).
+#     Overwrite semantics. Persists across defer-wake (warm SI context). Cleared only in
+#     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
+#     intentionally broken on RECALL re-invoke.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
 #     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
@@ -71,7 +72,7 @@
 #     Ephemeral agents fetch the event document via REST (/events/{id}/document), not the shared volume.
 # 27. [Pattern]: Nudge cascade guard: if an unevaluated automated nudge turn exists, skip injection and fall through to LLM so it evaluates the nudge before escalation fires.
 # 28. [Gotcha]: NEVER add `from datetime import ...` inside _execute_function_call. The module-level import (line 59) covers all branches. A local import shadows it for the ENTIRE function per Python scoping, causing UnboundLocalError in branches that don't execute the import.
-# 29. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
+# 42. [Pattern]: handle_wake_task stores mode from WS wake_register (default implement). Unlike _run_agent_task it does not clear sessions on prior_mode mismatch; wake uses last sidecar context and full-tool mode by design.
 # 30. [Pattern]: _build_event_state_header: live 2-line compass inserted at TOP of system prompt
 #     (insert(0), unlike DEFER/WAIT which append). Line 1: domain/severity/phase/turn/wall-clock.
 #     Line 2: evidence delta since last classify_event. Challenge question "Any new evidence to
@@ -124,9 +125,9 @@
 #     _cleanup_stale_events, and event loop resolution scan. NEVER add to _waiting_for_user.
 # 39. [Pattern]: Sticky notes gates: post_sticky_note requires source=jarvis+phase=close; read_sticky_notes requires unread_notes>0.
 # 40. [Pattern]: Memory reflex: SentenceChunker + ReflexSearcher fire async lesson searches
-#     during thinking stream. Decision gate between stream end and _execute_function_call.
-#     Gated by BRAIN_MEMORY_REFLEX env var (default false). Max 1 gate per processing cycle.
-# 41. [Gotcha]: Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
+#     during thinking stream. Gate stores hits in _recall_lessons (overwrite) and returns True
+#     to re-invoke LLM with RECALL block in SI. BRAIN_MEMORY_REFLEX env var. Max 1 gate per cycle.
+#     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -435,9 +436,9 @@ class Brain:
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
         self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
-        self._lesson_enrichment_enabled = os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() == "true"
         self._memory_reflex_enabled = os.getenv("BRAIN_MEMORY_REFLEX", "false").lower() == "true"
         self._reflex_fired_for: set[str] = set()  # event IDs with gate already fired this cycle
+        self._recall_lessons: dict[str, list] = {}  # event_id -> lesson hits for RECALL SI block
         self._last_embedding_warmup: float = 0.0
         # Progressive skill loading (feature flag)
         self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
@@ -1326,37 +1327,24 @@ class Brain:
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
-                        lesson_text = "\n".join(
-                            f"- **{l['payload'].get('title', 'Pattern')}**: "
-                            f"{l['payload'].get('pattern', '')}"
-                            for l in lessons
-                        )
-                        gate_turn = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor="system",
-                            action="reflex",
-                            thoughts=(
-                                f"MEMORY REFLEX: Your reasoning triggered {len(lessons)} "
-                                f"lesson match(es) from past events. Review before proceeding "
-                                f"with `{function_call.name}`:\n\n"
-                                f"{lesson_text}\n\n"
-                                f"Reconsider your decision in light of these patterns."
-                            ),
-                            response_parts=captured_parts,
-                        )
-                        await self._append_and_broadcast(event_id, gate_turn)
-                        await self._broadcast({
-                            "type": "brain_reflex_hit",
-                            "event_id": event_id,
-                            "lessons": [l["payload"].get("title", "") for l in lessons],
-                            "blocked_tool": function_call.name,
-                        })
-                        logger.info(
-                            f"Brain reflex: gate fired for {event_id}, "
-                            f"blocked {function_call.name}, {len(lessons)} lessons injected"
-                        )
+                        titles = [l["payload"].get("title", "") for l in lessons]
+                        self._recall_lessons[event_id] = lessons
                         self._reflex_fired_for.add(event_id)
-                        return True  # Re-invoke LLM with lesson context visible
+                        try:
+                            await self._broadcast({
+                                "type": "brain_recall_hit",
+                                "event_id": event_id,
+                                "lesson_count": len(lessons),
+                                "titles": titles,
+                                "blocked_tool": function_call.name,
+                            })
+                        except Exception as be:
+                            logger.warning(f"RECALL broadcast failed for {event_id} (non-fatal): {be}")
+                        logger.info(
+                            f"Brain RECALL: gate fired for {event_id}, "
+                            f"blocked {function_call.name}, {len(lessons)} lessons stored"
+                        )
+                        return True  # Re-invoke LLM with RECALL block in SI
                 except Exception as e:
                     logger.warning(f"Memory reflex gate error for {event_id}: {e}")
 
@@ -1854,7 +1842,7 @@ class Brain:
                 f"or wait_for_user to ask the user what to do."
             )
 
-        lesson_block = await self._enrich_with_lessons(event, active_phases)
+        lesson_block = self._format_recall_block(event)
         if lesson_block:
             resolved_contents.append(lesson_block)
 
@@ -1866,89 +1854,24 @@ class Brain:
 
         return prompt
 
-    async def _enrich_with_lessons(
-        self, event: EventDocument, active_phases: list[str],
-        score_threshold: float = 0.55, limit: int = 3,
-    ) -> str | None:
-        """Surface relevant lessons from darwin_lessons into the system prompt (RECALL block).
+    def _format_recall_block(self, event: "EventDocument") -> str | None:
+        """Format the RECALL system-instruction block from stored reflex lessons.
 
-        Fires on ANY phase where reasoning is available (same gate as Memory Reflex).
-        Deduplicates against lessons already surfaced by the reflex in conversation.
+        Reads from _recall_lessons (populated by the reflex gate on previous cycle).
+        Overwrite semantics: latest reflex hit replaces prior content.
+        Persists across defer-wake (warm SI context). Cleared only in _close_and_broadcast.
         """
-        if os.getenv("BRAIN_LESSON_ENRICHMENT", "false").lower() != "true":
-            logger.debug(f"Brain lessons: skipped (reason=feature_off) for {event.id}")
+        lessons = self._recall_lessons.get(event.id)
+        if not lessons:
             return None
-
-        archivist = self.agents.get("_archivist_memory")
-        if not archivist or not hasattr(archivist, "search_lessons"):
-            logger.debug(f"Brain lessons: skipped (reason=no_archivist) for {event.id}")
-            return None
-
-        reasoning = self._reasoning_by_event.get(event.id, "")
-        if not reasoning:
-            reasoning = next(
-                (t.thoughts for t in reversed(event.conversation)
-                 if t.actor == "brain" and t.thoughts),
-                "",
-            )
-        if not reasoning:
-            logger.debug(f"Brain lessons: skipped (reason=no_reasoning) for {event.id}")
-            return None
-
-        query = f"{reasoning} phase={event.brain_phase} source={event.source}"
-
-        from ..memory.pulse import PulseContext
-        pulse_ctx = PulseContext(
-            event_id=event.id,
-            turn=len(event.conversation),
-            event_elapsed_s=int(time.time() - event.conversation[0].timestamp) if event.conversation else 0,
-        )
-
-        t0 = time.time()
-        try:
-            results = await asyncio.wait_for(
-                archivist.search_lessons(query, limit=limit, context=pulse_ctx), timeout=10.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Brain lessons: fallback hint (reason=timeout) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning[:200]}\"."
-        except Exception as e:
-            logger.warning(f"Brain lessons: fallback hint (reason=error: {e}) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning[:200]}\"."
-        latency_ms = int((time.time() - t0) * 1000)
-
-        hits = [r for r in results if float(r.get("score") or 0) >= score_threshold]
-        if not hits:
-            logger.debug(f"Brain lessons: skipped (reason=no_results) for {event.id}")
-            return None
-
-        # Dedup: exclude lessons already surfaced by Memory Reflex in conversation
-        reflex_titles: set[str] = set()
-        for turn in event.conversation:
-            if turn.action == "reflex" and turn.thoughts:
-                for line in turn.thoughts.split("\n"):
-                    if line.startswith("- **") and "**:" in line:
-                        title = line.split("**:")[0].replace("- **", "").strip()
-                        reflex_titles.add(title.lower())
 
         lines = ["## RECALL", "The following patterns were learned from past events similar to this one."]
-        scores = []
-        for h in hits:
-            p = h.get("payload", {})
+        for lesson in lessons:
+            p = lesson.get("payload", {})
             title = p.get("title", "untitled")
-            if title.lower() in reflex_titles:
-                continue
             lines.append(f"- {title}: {p.get('pattern', '')}")
-            scores.append(f"{float(h.get('score') or 0):.2f}")
 
-        if not scores:
-            logger.debug(f"Brain lessons: skipped (reason=all_deduped_by_reflex) for {event.id}")
-            return None
-
-        logger.info(
-            f"Brain lessons: {len(scores)} surfaced "
-            f"(scores: {', '.join(scores)}, latency={latency_ms}ms) for {event.id}"
-        )
+        logger.debug(f"Brain RECALL: {len(lessons)} lessons in SI for {event.id}")
         return "\n".join(lines)
 
     async def _warmup_embedding(self) -> None:
@@ -5159,6 +5082,7 @@ class Brain:
         self._last_processed.pop(event_id, None)
         self._orphan_requeue_count.pop(event_id, None)
         self._reasoning_by_event.pop(event_id, None)
+        self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
@@ -5549,6 +5473,7 @@ class Brain:
             if event.conversation:
                 self._clear_jarvis_wait(eid)
                 self._jarvis_wait_count.pop(eid, None)
+                self._recall_lessons.pop(eid, None)
                 stale_summary = (
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
                     f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
@@ -5676,7 +5601,7 @@ class Brain:
         active = await self.blackboard.get_active_events()
 
         # Keep embedding warm while events are in flight (60s throttle)
-        if active and self._lesson_enrichment_enabled:
+        if active and self._memory_reflex_enabled:
             now = time.time()
             if now - self._last_embedding_warmup > 60:
                 self._last_embedding_warmup = now
