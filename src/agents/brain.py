@@ -1838,10 +1838,10 @@ class Brain:
             )
         except asyncio.TimeoutError:
             logger.warning(f"Brain lessons: fallback hint (reason=timeout) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{thoughts[:100]}\"."
+            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning}\"."
         except Exception as e:
             logger.warning(f"Brain lessons: fallback hint (reason=error: {e}) for {event.id}")
-            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{thoughts[:100]}\"."
+            return f"Before deciding your next action, check for relevant past patterns: consult deep memory about \"{reasoning}\"."
         latency_ms = int((time.time() - t0) * 1000)
 
         hits = [r for r in results if float(r.get("score") or 0) >= score_threshold]
