@@ -238,6 +238,22 @@ export default function TurnBubble({ turn, eventId, attachment, onStatusChange, 
     );
   }
 
+  if (turn.action === 'reflex' && turn.actor === 'system') {
+    const lessonCount = (turn.thoughts || '').match(/(\d+) lesson match/)?.[1] || '?';
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '4px 16px',
+        margin: '4px 0', borderRadius: 6,
+        background: 'rgba(168, 85, 247, 0.06)', borderLeft: '3px solid rgba(168, 85, 247, 0.4)',
+      }}>
+        <span style={{ fontSize: 10, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+        <span style={{ fontSize: 13 }}>🧠</span>
+        <span style={{ fontSize: 11, fontWeight: 600, color: '#a78bfa' }}>RECALL</span>
+        <span style={{ fontSize: 11, color: '#9ca3af' }}>{lessonCount} lesson(s) applied</span>
+      </div>
+    );
+  }
+
   return (
     <div style={{ ...(isHuman ? { borderRight: `3px solid ${color}`, paddingRight: 12, marginLeft: 'auto', maxWidth: '85%', textAlign: 'right' as const } : { borderLeft: `3px solid ${color}`, paddingLeft: 12 }), marginBottom: 12 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, ...(isHuman ? { justifyContent: 'flex-end' } : {}) }}>
