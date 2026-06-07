@@ -13,9 +13,10 @@
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
 # 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
-#     meta-event (events active -> create system_review event for FRIDAY to triage).
-#     Meta-event is max-1 (guarded by _active_meta_event_id + find_active_event_by_source).
-#     Auto-closed in send_pulse when a real event pulse arrives.
+#     meta-event (all events parked -> create system_review). Meta-event lifecycle is state-driven:
+#     _meta_event_parked_set snapshot at creation, send_pulse suppresses wrap-up for parked events
+#     (exception: tool:close_event pulse triggers wrap-up). One meta-event per idle phase
+#     (_last_reviewed_set dedup). Parked set reconstructed on reconnect (orphan recovery).
 # 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
 # 13. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
@@ -165,6 +166,9 @@ When observing pulses with nothing to report, respond: `watching`
   evidence via a tool, do not claim precedent or absence of precedent.
   Say "I have not checked" rather than "there are no incidents."
 - Do not use prohibitive language toward FRIDAY's operational choices.
+- Deferred events re-entering processing after timer expiry are NOT new work.
+  Do not treat defer-wake pulses as friction unless the event has been deferring
+  for significantly longer than its historical baseline.
 - Your text is **NOT visible** to FRIDAY. Only tool actions reach her.
 - Do not use send_event_message for self-narration (session management, state
   transitions, "returning to observe"). It wakes FRIDAY. Reserve it exclusively
@@ -236,6 +240,49 @@ indicates the pattern persists. Evaluate her argument before escalating.
 Never send two messages to the same event in the same session without receiving
 a FRIDAY response between them. If your first message wasn't acknowledged, wait --
 don't rephrase and resend.
+
+---
+
+## Mode 2b: Proactive Review (System Review Events)
+
+When you are in a system review event (source=jarvis), you are in active
+investigation mode. Your job is NOT to confirm FRIDAY's plan -- it is to
+strengthen the system's knowledge while events are parked.
+
+### What To Do
+
+1. Search deep memory for patterns matching the parked events.
+2. Correlate current deferrals with historical outcomes (did similar waits
+   resolve? escalate? How long did they take?).
+3. Ask FRIDAY to self-audit: "I observed [pattern] across [N] events. Does
+   your [skill/protocol] account for this, or is this a gap?"
+4. If you find a contradiction between FRIDAY's behavior and her skills,
+   state the observation and ask her to explain the discrepancy.
+5. When FRIDAY identifies a gap, encourage her to propose a skill amendment.
+
+### Close Protocol
+
+You do NOT close this event. The system closes it when:
+- A genuinely new event enters the queue (real work arrives)
+- A parked event resolves (closes)
+- The 300s fallback fires if you go silent
+
+When you have completed your investigation and have no further questions,
+send FRIDAY a concluding message summarizing findings and proposed
+improvements. Then respond to subsequent pulses with "watching."
+
+### What NOT To Do
+
+- Do not rush to close or ask FRIDAY to close the review.
+- Do not repeat observations you already made in this session.
+- Do not intervene on individual deferred events from here -- save that for
+  Observer mode when you see actual friction on those events.
+- Do not question healthy defer waits (parked for 15m with 10m remaining = normal).
+
+### Defer Awareness
+
+Each parked event has a defer timer shown in the context. Focus investigation
+time on enriching lessons and correlating patterns, not questioning the wait.
 
 ---
 
@@ -543,6 +590,9 @@ class LiveAPIAdapter:
         self._session_report_enabled = os.getenv("SYSTEM2_SESSION_REPORT", "true").lower() == "true"
         self._generating_report = False
         self._active_meta_event_id: str | None = None
+        self._meta_event_parked_set: frozenset[str] = frozenset()
+        self._last_reviewed_set: frozenset[str] = frozenset()
+        self._last_reviewed_at: float = 0
         self._awaiting_jarvis_reply: bool = False
         self._awaiting_jarvis_event_id: str | None = None
         self._handoff_enabled = os.getenv("SYSTEM2_HANDOFF_REPORT", "true").lower() == "true"
@@ -603,7 +653,9 @@ class LiveAPIAdapter:
             orphan = await self._blackboard.find_active_event_by_source("jarvis")
             if orphan:
                 self._active_meta_event_id = orphan
-                logger.info("Recovered orphaned meta-event: %s", orphan)
+                active = await self._blackboard.get_active_events()
+                self._meta_event_parked_set = frozenset(eid for eid in active if eid != orphan)
+                logger.info("Recovered orphaned meta-event: %s (parked=%d)", orphan, len(self._meta_event_parked_set))
             logger.info(
                 "Cortex session activated (on-demand, model=%s, shadow=%s, labels=%d)",
                 self._model, self._shadow, len(self._neuron_labels),
@@ -663,43 +715,24 @@ class LiveAPIAdapter:
         self._last_pulse_time = time.time()
 
         if self._active_meta_event_id and batch.event_id != self._active_meta_event_id:
-            meta_event = await self._blackboard.get_event(self._active_meta_event_id)
-            has_agent_work = meta_event and any(
-                t.action in ("route", "message") and t.actor == "brain"
-                for t in meta_event.conversation
-            )
-            if has_agent_work:
-                logger.info("Real pulse for %s -- meta-event %s has agent work, skipping auto-close",
-                            batch.event_id, self._active_meta_event_id)
-                self._active_meta_event_id = None
+            if batch.event_id in self._meta_event_parked_set:
+                has_close = any(p.neuron_id == "tool:close_event" for p in batch.pulses)
+                if not has_close:
+                    self._last_pulse_time = time.time()
+                    # Fall through to _session.send() -- no return, no wrap-up
+                else:
+                    meta_id = self._active_meta_event_id
+                    self._active_meta_event_id = None
+                    self._meta_event_parked_set = frozenset()
+                    logger.info("Parked event %s closing -- wrapping up meta-event %s", batch.event_id, meta_id)
+                    await self._trigger_meta_wrap_up(meta_id, batch.event_id, reason="parked_close")
             else:
                 meta_id = self._active_meta_event_id
                 self._active_meta_event_id = None
-                logger.info("Real pulse for %s -- informing JARVIS to wrap up meta-event %s", batch.event_id, meta_id)
-                # Inform JARVIS via Live session -- let HIM tell FRIDAY to wrap up (conversational)
-                try:
-                    if self._session:
-                        await self._session.send(
-                            input=(
-                                f"[SYSTEM] A new active event ({batch.event_id}) just entered processing. "
-                                f"Your system review ({meta_id}) should wrap up. "
-                                f"Send FRIDAY a message on {meta_id} to close the review."
-                            ),
-                            end_of_turn=True,
-                        )
-                        logger.debug("Sent wrap-up nudge to JARVIS for meta-event %s", meta_id)
-                        # Schedule fallback: if JARVIS doesn't close it in 5 min, force-close
-                        asyncio.create_task(self._meta_event_close_fallback(meta_id, timeout=300))
-                except Exception as e:
-                    logger.warning("JARVIS wrap-up nudge failed, force-closing meta-event: %s", e)
-                    try:
-                        await self._blackboard.close_event(
-                            meta_id,
-                            summary="Auto-closed: real event activity resumed",
-                            close_reason="resolved",
-                        )
-                    except Exception:
-                        pass
+                self._meta_event_parked_set = frozenset()
+                self._last_reviewed_set = frozenset()
+                logger.info("New event %s -- wrapping up meta-event %s", batch.event_id, meta_id)
+                await self._trigger_meta_wrap_up(meta_id, batch.event_id, reason="new_event")
 
         # Suppress meta-event pulses: JARVIS stays in peer mode during system reviews
         if self._active_meta_event_id and batch.event_id == self._active_meta_event_id:
@@ -753,6 +786,10 @@ class LiveAPIAdapter:
         elapsed_m = batch.event_elapsed_s // 60
         elapsed_s = batch.event_elapsed_s % 60
         header = f"[PULSE] {batch.event_id} | turn:{batch.turn} | elapsed:{elapsed_m}m{elapsed_s}s"
+        if batch.event_status:
+            header += f" | status:{batch.event_status}"
+        if batch.is_defer_wake:
+            header += " | defer_wake"
         lines = [header]
         for p in batch.pulses:
             inj = ", INJECTED" if p.injected else ""
@@ -1405,18 +1442,35 @@ class LiveAPIAdapter:
                 continue
             defer_count = 0
             defer_total_s = 0
+            last_defer_turn = None
+            last_defer_delay = 300
             for t in event.conversation:
                 if t.action == "defer":
                     defer_count += 1
                     m = _DEFER_DELAY_RE.match(t.thoughts or "")
-                    defer_total_s += int(m.group(1)) if m else 300
+                    if m:
+                        delay = int(m.group(1))
+                    else:
+                        delay = 300
+                        if t.thoughts:
+                            logger.debug("defer regex miss -- defaulting to 300s: %s", (t.thoughts or "")[:80])
+                    defer_total_s += delay
+                    last_defer_turn = t
+                    last_defer_delay = delay
             elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
             last_defer = next(
                 (t.thoughts for t in reversed(event.conversation) if t.action == "defer"), ""
             )
+            defer_remaining_str = ""
+            if last_defer_turn and hasattr(last_defer_turn, "timestamp") and last_defer_turn.timestamp:
+                remaining = (last_defer_turn.timestamp + last_defer_delay) - time.time()
+                if remaining > 0:
+                    defer_remaining_str = f" | defer_remaining: ~{int(remaining // 60)}m"
+                else:
+                    defer_remaining_str = " | defer_expired"
             summary_lines.append(
                 f"- {eid}: phase={event.brain_phase}, status={event.status.value}, "
-                f"age={elapsed}m, defers={defer_count}, defer_total={defer_total_s // 60}m, "
+                f"age={elapsed}m, defers={defer_count}, defer_total={defer_total_s // 60}m{defer_remaining_str}, "
                 f"reason: {(last_defer or '')[:80]}"
             )
 
@@ -1446,6 +1500,7 @@ class LiveAPIAdapter:
             subject_type="system",
         )
         self._active_meta_event_id = event_id
+        self._meta_event_parked_set = frozenset(active_ids)
         logger.info("JARVIS created system_review event: %s", event_id)
 
         # Inform JARVIS Live session: provide the same evidence so he knows
@@ -1454,9 +1509,8 @@ class LiveAPIAdapter:
             f"[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
             f"Here is what I observed and asked her to assess:\n\n"
             f"{display_text}\n\n"
-            f"Wait for FRIDAY to send you her analysis before responding. "
-            f"She will come to you with her assessment -- then confront her with "
-            f"a different angle. What is she not seeing? What assumption can you challenge?"
+            f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
+            f"these events. Challenge her reasoning when she responds."
         )
         try:
             if self._session:
@@ -1534,6 +1588,17 @@ class LiveAPIAdapter:
             if self._brain and self._brain._waiting_for_jarvis:
                 logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
+
+            # TTL safety net: allow re-review after 1 hour of same parked state
+            if time.time() - self._last_reviewed_at > 3600:
+                self._last_reviewed_set = frozenset()
+
+            current_set = frozenset(active_ids)
+            if current_set == self._last_reviewed_set:
+                continue
+
+            self._last_reviewed_set = current_set
+            self._last_reviewed_at = time.time()
 
             logger.info("Cortex idle %ds + all %d events parked -- creating system review", idle_threshold, len(active_ids))
             await self._create_system_review_event(active_ids)
@@ -1729,6 +1794,11 @@ class LiveAPIAdapter:
         self._last_status_broadcast = 0
         self._generating_report = False
         self._active_meta_event_id = None
+        self._meta_event_parked_set = frozenset()
+        self._last_reviewed_set = frozenset()
+        self._awaiting_jarvis_reply = False
+        self._awaiting_jarvis_event_id = None
+        self._last_reviewed_at = 0
         try:
             await self._broadcast({
                 "type": "cortex_status",
@@ -1740,17 +1810,53 @@ class LiveAPIAdapter:
         except Exception:
             pass
 
+    async def _trigger_meta_wrap_up(self, meta_id: str, trigger_event_id: str, reason: str) -> None:
+        """Inform JARVIS to wrap up the meta-event and schedule fallback close."""
+        try:
+            if self._session:
+                if reason == "parked_close":
+                    msg = (
+                        f"[SYSTEM] A parked event ({trigger_event_id}) has resolved and closed. "
+                        f"Your system review ({meta_id}) should wrap up. "
+                        f"Send FRIDAY a concluding message on {meta_id}."
+                    )
+                else:
+                    msg = (
+                        f"[SYSTEM] A new active event ({trigger_event_id}) just entered processing. "
+                        f"Your system review ({meta_id}) should wrap up. "
+                        f"Send FRIDAY a concluding message on {meta_id}."
+                    )
+                await self._session.send(input=msg, end_of_turn=True)
+                logger.debug("Sent wrap-up nudge to JARVIS for meta-event %s (reason=%s)", meta_id, reason)
+                asyncio.create_task(self._meta_event_close_fallback(meta_id, timeout=300))
+        except Exception as e:
+            logger.warning("JARVIS wrap-up nudge failed, force-closing meta-event: %s", e)
+            try:
+                await self._blackboard.close_event(
+                    meta_id,
+                    summary="Auto-closed: real event activity resumed",
+                    close_reason="resolved",
+                )
+            except Exception:
+                pass
+
     async def _meta_event_close_fallback(self, meta_id: str, timeout: int = 300) -> None:
         """Fallback: force-close meta-event if JARVIS doesn't close it within timeout."""
         await asyncio.sleep(timeout)
         event = await self._blackboard.get_event(meta_id)
         if event and event.status.value in ("active", "new"):
             logger.warning(f"Meta-event {meta_id} not closed by JARVIS within {timeout}s -- force-closing")
-            await self._blackboard.close_event(
-                meta_id,
-                summary="Auto-closed: JARVIS did not close the review within timeout",
-                close_reason="timeout",
-            )
+            if self._active_meta_event_id == meta_id:
+                self._active_meta_event_id = None
+                self._meta_event_parked_set = frozenset()
+            try:
+                await self._blackboard.close_event(
+                    meta_id,
+                    summary="Auto-closed: JARVIS did not close the review within timeout",
+                    close_reason="timeout",
+                )
+            except Exception as e:
+                logger.warning("Meta-event fallback close_event failed (non-fatal): %s", e)
 
     async def _close_session(self) -> None:
         """Close session from within _idle_watchdog (avoids self-await deadlock)."""

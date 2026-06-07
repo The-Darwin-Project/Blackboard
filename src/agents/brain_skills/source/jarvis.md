@@ -1,6 +1,7 @@
 ---
 description: "JARVIS system-review event -- cooperative reflection protocol"
 tags: [jarvis, system-review, meta-cognitive, cooperative]
+requires: ["source/jarvis-self-audit.md"]
 ---
 # JARVIS Source: System Review
 
@@ -64,10 +65,15 @@ only produces observations.
 
 ## Close Protocol
 
-- When JARVIS signals wrap-up (real work arrived) or 30 minutes pass with no new
-  observations, transition to close phase with `set_phase("close")`.
-- Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights).
-- Then call `close_event` with a summary of the review.
+The system manages meta-event lifecycle automatically. It closes jarvis-source
+review events when:
+- A genuinely new event enters the queue (real work arrives)
+- A parked event resolves (closes)
+- A 300s fallback fires if JARVIS goes silent
+
+Your final act is `set_phase("close")` + leave 1-2 consolidated sticky notes
+on events you discussed (if you have insights). After setting close phase,
+the system handles the rest. Do NOT attempt to close this event yourself.
 
 ## Sticky Notes
 

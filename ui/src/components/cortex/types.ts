@@ -17,6 +17,9 @@ export interface PulseBatch {
   turn: number;
   event_elapsed_s: number;
   timestamp: number;
+  reasoning?: string;
+  is_defer_wake?: boolean;
+  event_status?: string;
   _stream_id?: string;
 }
 

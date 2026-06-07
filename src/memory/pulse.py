@@ -6,6 +6,8 @@
 # 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "tool", "phase", "agent".
 # 5. [Semantic]: Tool pulse scores: 1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
 # 6. [Pattern]: PulseBatch.reasoning carries FRIDAY's thinking text (optional, 500-char truncated by JARVIS adapter).
+# 7. [Pattern]: PulseBatch.is_defer_wake is a one-shot flag (True on first pulse after defer re-activation).
+#    PulseBatch.event_status carries ev.status.value (null-guarded: None if event deleted mid-flight).
 """
 Pulse data models for the Cognitive Recall Graph.
 
@@ -49,6 +51,8 @@ class PulseBatch:
     event_elapsed_s: int = 0
     timestamp: float = field(default_factory=time.time)
     reasoning: str | None = None
+    is_defer_wake: bool = False
+    event_status: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +70,8 @@ class PulseBatch:
             "event_elapsed_s": self.event_elapsed_s,
             "timestamp": self.timestamp,
             "reasoning": self.reasoning,
+            "is_defer_wake": self.is_defer_wake,
+            "event_status": self.event_status,
         }
 
 

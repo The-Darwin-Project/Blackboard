@@ -421,6 +421,8 @@ class Brain:
         self._orphan_requeue_count: dict[str, int] = {}
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
+        # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
+        self._defer_wake_events: set[str] = set()
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
         self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
@@ -2348,7 +2350,11 @@ class Brain:
                 turn=len(ev.conversation) if ev else 0,
                 event_elapsed_s=int(time.time() - ev.conversation[0].timestamp) if ev and ev.conversation else 0,
                 reasoning=reasoning,
+                event_status=ev.status.value if ev else None,
             )
+            if event_id in self._defer_wake_events:
+                batch.is_defer_wake = True
+                self._defer_wake_events.discard(event_id)
             await self.pulse_port.on_pulse_batch(batch)
         except Exception as e:
             logger.debug(f"Executive pulse emission failed (non-fatal): {e}")
@@ -5673,6 +5679,7 @@ class Brain:
                         logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
                     else:
                         logger.info(f"Deferred event {eid} re-activated")
+                        self._defer_wake_events.add(eid)
                         to_enqueue.append(eid)
                 else:
                     refetched = await self.blackboard.get_event(eid)
