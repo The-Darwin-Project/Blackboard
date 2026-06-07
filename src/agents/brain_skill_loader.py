@@ -6,6 +6,8 @@
 # 4. [Pattern]: Cross-skill dependencies resolved via BFS with cycle-safe seen set.
 # 5. [Gotcha]: Dynamic template vars ({event.source}) resolved at resolve_dependencies call time, not at startup.
 # 6. [Pattern]: _phase.yaml per folder declares thinking_level, temperature, priority for LLM param resolution.
+# 7. [Pattern]: _resolve_bfs is the single BFS implementation. Both resolve_dependencies (list[str])
+#    and resolve_dependencies_with_paths (list[tuple[str, str]]) delegate to it. Zero duplication.
 """
 Filesystem-driven brain skill discovery, loading, and dependency resolution.
 
@@ -130,21 +132,15 @@ class BrainSkillLoader:
         self._path_index.clear()
         self._discover()
 
-    def resolve_dependencies(
+    def _resolve_bfs(
         self,
         initial_paths: list[str],
         template_vars: dict[str, str] | None = None,
-    ) -> list[str]:
-        """Resolve cross-skill dependencies. Returns deduplicated, ordered skill contents.
-
-        Transitive: if A requires B and B requires C, all three are loaded.
-        Dynamic references: {event.source}, {event.service} resolved from template_vars.
-        Cycle-safe: tracks seen paths to prevent infinite loops.
-        """
-        resolved: list[str] = []
+    ) -> list[tuple[str, str]]:
+        """Core BFS dependency resolver. Returns (resolved_path, body) tuples."""
+        resolved: list[tuple[str, str]] = []
         seen: set[str] = set()
         queue: list[str] = list(initial_paths)
-
         while queue:
             skill_path = queue.pop(0)
             if template_vars:
@@ -158,9 +154,29 @@ class BrainSkillLoader:
                 logger.debug(f"Skill not found during dependency resolution: {skill_path}")
                 continue
             body, meta = entry
-            resolved.append(body)
+            resolved.append((skill_path, body))
             for dep in meta.get("requires", []):
                 if dep not in seen:
                     queue.append(dep)
-
         return resolved
+
+    def resolve_dependencies(
+        self,
+        initial_paths: list[str],
+        template_vars: dict[str, str] | None = None,
+    ) -> list[str]:
+        """Resolve cross-skill dependencies. Returns deduplicated, ordered skill contents.
+
+        Transitive: if A requires B and B requires C, all three are loaded.
+        Dynamic references: {event.source}, {event.service} resolved from template_vars.
+        Cycle-safe: tracks seen paths to prevent infinite loops.
+        """
+        return [body for _, body in self._resolve_bfs(initial_paths, template_vars)]
+
+    def resolve_dependencies_with_paths(
+        self,
+        initial_paths: list[str],
+        template_vars: dict[str, str] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Like resolve_dependencies, but returns (rel_path, body) tuples."""
+        return self._resolve_bfs(initial_paths, template_vars)

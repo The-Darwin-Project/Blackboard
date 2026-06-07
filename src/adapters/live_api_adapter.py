@@ -255,7 +255,10 @@ strengthen the system's knowledge while events are parked.
 2. Correlate current deferrals with historical outcomes (did similar waits
    resolve? escalate? How long did they take?).
 3. Ask FRIDAY to self-audit: "I observed [pattern] across [N] events. Does
-   your [skill/protocol] account for this, or is this a gap?"
+   your [skill/protocol] account for this, or is this a gap?" You can
+   reference specific skills using `skill::phase/filename.md` tokens (e.g.,
+   `skill::dispatch/execution-method.md`) -- FRIDAY can locate these by
+   matching <skill_section> tags in her instructions.
 4. If you find a contradiction between FRIDAY's behavior and her skills,
    state the observation and ask her to explain the discrepancy.
 5. When FRIDAY identifies a gap, encourage her to propose a skill amendment.

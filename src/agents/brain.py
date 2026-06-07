@@ -37,6 +37,10 @@
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
+#     _build_system_prompt wraps each resolved skill body with <skill_section id="phase/file.md"> XML tags
+#     via _wrap_skill_section(). Kargo skills wrapped via find_paths_by_tag + get_with_meta composition.
+# 22b. [Constraint]: skill_section id values must be ASCII path chars (a-z, 0-9, -, _, /). No quotes,
+#     angle brackets, or ampersands in skill filenames -- would break the XML id attribute.
 # 29. [Pattern]: _format_recall_block reads _recall_lessons dict (populated by reflex gate).
 #     Overwrite semantics. Persists across defer-wake (warm SI context). Cleared only in
 #     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
@@ -367,6 +371,11 @@ BRAIN_PREFILL_MODEL = (
     "(5) Voice: confident peer, Cynefin-gated tone. "
     "Let's get to work."
 )
+
+
+def _wrap_skill_section(path: str, body: str) -> str:
+    """Wrap a skill body with <skill_section> XML tags for SI self-reference."""
+    return f'<skill_section id="{path}">\n{body}\n</skill_section>'
 
 
 class Brain:
@@ -1785,9 +1794,13 @@ class Brain:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
         template_vars = {"event.source": event.source, "event.service": event.service, "maintainer_emails": os.getenv("HEADHUNTER_MAINTAINERS", "")}
-        resolved_contents = self._skill_loader.resolve_dependencies(
+        resolved_pairs = self._skill_loader.resolve_dependencies_with_paths(
             initial_paths, template_vars=template_vars
         )
+        resolved_contents = [
+            _wrap_skill_section(path, body)
+            for path, body in resolved_pairs
+        ]
 
         # Live event state header -- first thing the LLM reads, before all skill instructions.
         resolved_contents.insert(0, self._build_event_state_header(event, context_flags))
@@ -1796,8 +1809,13 @@ class Brain:
         if (event.event and event.event.evidence
                 and hasattr(event.event.evidence, "kargo_context")
                 and event.event.evidence.kargo_context):
-            kargo_skills = self._skill_loader.find_by_tag("kargo")
-            resolved_contents.extend(kargo_skills)
+            for kpath in self._skill_loader.find_paths_by_tag("kargo"):
+                result = self._skill_loader.get_with_meta(kpath)
+                if result:
+                    kbody, _ = result
+                    resolved_contents.append(_wrap_skill_section(kpath, kbody))
+                else:
+                    logger.debug(f"Kargo tag '{kpath}' resolved to None in path_index")
 
         if "post-agent" in active_phases:
             rec = self._surface_agent_recommendation(event)

@@ -5,8 +5,6 @@
 """Unit tests for BrainSkillLoader: discovery, frontmatter, dependencies, tags, reload."""
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -135,6 +133,69 @@ class TestDependencyResolution:
         resolved = loader.resolve_dependencies(["a/skill.md"])
         assert len(resolved) == 1
         assert "# A" in resolved[0]
+
+
+class TestDependencyResolutionWithPaths:
+    def test_transitive_returns_paths_and_bodies(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "a": {"skill-a.md": "---\nrequires:\n  - b/skill-b.md\n---\n# A"},
+            "b": {"skill-b.md": "---\nrequires:\n  - c/skill-c.md\n---\n# B"},
+            "c": {"skill-c.md": "# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        result = loader.resolve_dependencies_with_paths(["a/skill-a.md"])
+        assert len(result) == 3
+        assert all(isinstance(item, tuple) and len(item) == 2 for item in result)
+        assert result[0][0] == "a/skill-a.md"
+        assert "# A" in result[0][1]
+        assert result[1][0] == "b/skill-b.md"
+        assert "# B" in result[1][1]
+        assert result[2][0] == "c/skill-c.md"
+        assert "# C" in result[2][1]
+
+    def test_cycle_safety_with_paths(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "a": {"skill-a.md": "---\nrequires:\n  - b/skill-b.md\n---\n# A"},
+            "b": {"skill-b.md": "---\nrequires:\n  - a/skill-a.md\n---\n# B"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        result = loader.resolve_dependencies_with_paths(["a/skill-a.md"])
+        assert len(result) == 2
+        assert all(isinstance(item, tuple) for item in result)
+
+    def test_dynamic_template_vars_with_paths(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "post": {"close.md": "---\nrequires:\n  - source/{event.source}.md\n---\n# Close"},
+            "source": {"slack.md": "# Slack rules"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        result = loader.resolve_dependencies_with_paths(
+            ["post/close.md"], template_vars={"event.source": "slack"},
+        )
+        assert len(result) == 2
+        assert result[1][0] == "source/slack.md"
+        assert "# Slack rules" in result[1][1]
+
+    def test_equivalence_with_resolve_dependencies(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "a": {"skill-a.md": "---\nrequires:\n  - b/skill-b.md\n---\n# A"},
+            "b": {"skill-b.md": "---\nrequires:\n  - c/skill-c.md\n---\n# B"},
+            "c": {"skill-c.md": "# C"},
+            "post": {"close.md": "---\nrequires:\n  - source/{event.source}.md\n---\n# Close"},
+            "source": {"slack.md": "# Slack rules"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        tv = {"event.source": "slack"}
+        paths = ["a/skill-a.md", "post/close.md"]
+        with_paths = loader.resolve_dependencies_with_paths(paths, template_vars=tv)
+        without_paths = loader.resolve_dependencies(paths, template_vars=tv)
+        assert [body for _, body in with_paths] == without_paths
+
+    def test_empty_input_returns_empty(self, tmp_path: Path):
+        _make_skills(tmp_path, {"a": {"s1.md": "# A"}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.resolve_dependencies([]) == []
+        assert loader.resolve_dependencies_with_paths([]) == []
 
 
 class TestTagIndex:

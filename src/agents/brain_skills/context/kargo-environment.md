@@ -4,7 +4,7 @@ tags: [kargo, promotions, autonomous]
 ---
 # Kargo Promotion Environment
 
-NOTE: This skill is injected via evidence-driven tag matching (find_by_tag), not dependency resolution. It does not participate in resolve_dependencies and should not use requires: frontmatter.
+NOTE: This skill is injected via evidence-driven tag matching (find_paths_by_tag + get_with_meta), not dependency resolution. It does not participate in resolve_dependencies and should not use requires: frontmatter.
 
 ## Close Protocol (Setpoint Enforcement)
 
