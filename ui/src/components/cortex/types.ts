@@ -3,6 +3,7 @@
 // 1. [Constraint]: All interfaces use snake_case to match Python API (PulseBatch, Pulse, CognitiveGraphResponse).
 // 2. [Pattern]: neuron_type union matches backend PulsePort neuron categories exactly.
 // 3. [Gotcha]: Executive hemisphere neurons (tool/phase/agent) have score=1.0 always; knowledge neurons have variable scores.
+// 4. [Pattern]: event_source on PulseBatch mirrors EventDocument.source from backend (chat|slack|aligner|headhunter|timekeeper|jarvis). Optional -- None when source unavailable.
 
 export interface Pulse {
   neuron_id: string;
@@ -20,6 +21,7 @@ export interface PulseBatch {
   reasoning?: string;
   is_defer_wake?: boolean;
   event_status?: string;
+  event_source?: string;
   _stream_id?: string;
 }
 

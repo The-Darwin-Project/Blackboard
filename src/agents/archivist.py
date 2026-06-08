@@ -542,6 +542,7 @@ class Archivist:
                 pulses=pulses,
                 turn=ctx.turn or 0,
                 event_elapsed_s=ctx.event_elapsed_s,
+                event_source=ctx.event_source,
             )
             await self.pulse_port.on_pulse_batch(batch)
         except Exception as e:

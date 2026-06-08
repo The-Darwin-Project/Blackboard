@@ -8,6 +8,9 @@
 # 6. [Pattern]: PulseBatch.reasoning carries FRIDAY's thinking text (optional, 500-char truncated by JARVIS adapter).
 # 7. [Pattern]: PulseBatch.is_defer_wake is a one-shot flag (True on first pulse after defer re-activation).
 #    PulseBatch.event_status carries ev.status.value (null-guarded: None if event deleted mid-flight).
+# 8. [Pattern]: event_source threads EventDocument.source through PulseContext -> PulseBatch -> to_dict().
+#    Values match models.EventDocument.source Literal (chat, slack, aligner, headhunter, timekeeper, jarvis).
+#    None when source is unavailable (e.g. nightwatcher_tools.py context).
 """
 Pulse data models for the Cognitive Recall Graph.
 
@@ -29,6 +32,7 @@ class PulseContext:
     event_id: str | None = None
     turn: int | None = None
     event_elapsed_s: int = 0
+    event_source: str | None = None
 
 
 @dataclass
@@ -53,6 +57,7 @@ class PulseBatch:
     reasoning: str | None = None
     is_defer_wake: bool = False
     event_status: str | None = None
+    event_source: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -72,6 +77,7 @@ class PulseBatch:
             "reasoning": self.reasoning,
             "is_defer_wake": self.is_defer_wake,
             "event_status": self.event_status,
+            "event_source": self.event_source,
         }
 
 

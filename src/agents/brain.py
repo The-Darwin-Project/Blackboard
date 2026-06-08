@@ -2365,6 +2365,7 @@ class Brain:
                 event_elapsed_s=int(time.time() - ev.conversation[0].timestamp) if ev and ev.conversation else 0,
                 reasoning=reasoning,
                 event_status=ev.status.value if ev else None,
+                event_source=ev.source if ev else None,
             )
             if event_id in self._defer_wake_events:
                 batch.is_defer_wake = True
@@ -3163,6 +3164,7 @@ class Brain:
                 event_id=event_id,
                 turn=len(ev_for_ctx.conversation) if ev_for_ctx else 0,
                 event_elapsed_s=int(time.time() - ev_for_ctx.conversation[0].timestamp) if ev_for_ctx and ev_for_ctx.conversation else 0,
+                event_source=ev_for_ctx.source if ev_for_ctx else None,
             )
 
             # Search lessons learned first (classification guidance)
