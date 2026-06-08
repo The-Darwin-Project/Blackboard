@@ -5809,6 +5809,10 @@ class Brain:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
+            # waiting_for_agent: skip re-enqueue while agent is working
+            if eid in self._waiting_for_agent:
+                continue
+
             # hold_watch: zero-cost parking for jarvis meta-events
             if eid in self._hold_watch_events:
                 parked_deferred = self._hold_watch_events[eid]
