@@ -52,14 +52,14 @@ def build_event_header(
 def _build_identity_block(
     event: EventDocument, is_structured: bool, evidence: object
 ) -> list[str]:
-    from src.models import EventEvidence
+    from src.models import EventEvidence, _resolve_phase
     ev = evidence if is_structured else None
     evidence_text = ev.display_text if isinstance(ev, EventEvidence) else str(evidence)
     lines = [
         f"Event ID: {event.id}",
         f"Source: {event.source}",
         f"Status: {event.status.value}",
-        f"Phase: {event.brain_phase or 'triage'}",
+        f"Phase: {_resolve_phase(event.brain_phase)}",
         f"Reason: {event.event.reason}",
         f"Evidence: {evidence_text}",
         f"Time: {event.event.timeDate}",

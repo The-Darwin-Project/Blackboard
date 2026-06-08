@@ -50,11 +50,13 @@ export const SEVERITY_COLORS: Record<string, { bg: string; text: string; label: 
 
 export const PHASE_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {
   triage:      { bg: '#1e3a5f', text: '#7dd3fc', border: '#3b82f6', label: 'Triage' },
-  investigate: { bg: '#1e3a5f', text: '#93c5fd', border: '#60a5fa', label: 'Investigate' },
-  execute:     { bg: '#14532d', text: '#86efac', border: '#22c55e', label: 'Execute' },
+  dispatch:    { bg: '#14532d', text: '#86efac', border: '#22c55e', label: 'Dispatch' },
   verify:      { bg: '#4c1d95', text: '#c4b5fd', border: '#8b5cf6', label: 'Verify' },
   escalate:    { bg: '#7f1d1d', text: '#fca5a5', border: '#ef4444', label: 'Escalate' },
   close:       { bg: '#1c1917', text: '#a8a29e', border: '#57534e', label: 'Close' },
+  // Alias entries during transition (backend _resolve_phase normalizes, but stale WS data may hit these)
+  investigate: { bg: '#14532d', text: '#86efac', border: '#22c55e', label: 'Dispatch' },
+  execute:     { bg: '#14532d', text: '#86efac', border: '#22c55e', label: 'Dispatch' },
 };
 
 /** Cortex neuron type colors (used by Sigma.js graph renderer) */

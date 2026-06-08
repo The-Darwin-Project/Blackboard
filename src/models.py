@@ -339,6 +339,27 @@ class ConversationTurn(BaseModel):
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
 
 
+_PHASE_ALIASES: dict[str, str] = {
+    "investigate": "dispatch",
+    "execute": "dispatch",
+}
+
+_CANONICAL_PHASES = {"triage", "dispatch", "verify", "escalate", "close"}
+
+
+def _resolve_phase(phase: str | None) -> str:
+    """Normalize legacy phase names to canonical values.
+
+    Applies alias mapping and allowlist guard. Unknown values default to
+    'triage' (fail-secure: unknown phase strips all phase-gated tools).
+    """
+    raw = phase or "triage"
+    resolved = _PHASE_ALIASES.get(raw, raw)
+    if resolved not in _CANONICAL_PHASES:
+        return "triage"
+    return resolved
+
+
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
@@ -346,8 +367,15 @@ class EventDocument(BaseModel):
     status: EventStatus = EventStatus.NEW
     brain_phase: Optional[str] = Field(
         None,
-        description="Brain-declared processing phase (triage, investigate, execute, verify, escalate, close)"
+        description="Brain-declared processing phase (triage, dispatch, verify, escalate, close)"
     )
+
+    @field_validator("brain_phase", mode="before")
+    @classmethod
+    def _normalize_phase(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _PHASE_ALIASES.get(v, v)
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
     subject_type: Literal["service", "kargo_stage", "system", "jira"] = Field(
         "service", description="What the service field refers to: K8s service, Kargo stage, system-level, or Jira issue"

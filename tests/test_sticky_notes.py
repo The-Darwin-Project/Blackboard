@@ -60,7 +60,7 @@ class TestStickyNotesGating:
         from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
         tools = [t.copy() for t in BRAIN_TOOL_SCHEMAS]
         event = MagicMock(source="jarvis", unread_notes=0)
-        brain_phase = "investigate"
+        brain_phase = "dispatch"
         if not (event.source == "jarvis" and brain_phase == "close"):
             tools = [t for t in tools if t["name"] != "post_sticky_note"]
         assert not any(t["name"] == "post_sticky_note" for t in tools)
@@ -89,7 +89,7 @@ class TestStickyNotesHeaderRemoved:
         from src.agents.brain import Brain
         event = MagicMock()
         event.conversation = []
-        event.brain_phase = "investigate"
+        event.brain_phase = "dispatch"
         event.event.evidence.brain_domain = "complicated"
         event.event.evidence.domain = "complicated"
         event.event.evidence.brain_severity = "info"

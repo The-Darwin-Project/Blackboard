@@ -113,7 +113,7 @@
 #     Returning False without a turn leaves event.conversation empty, triggering the orphan blank-event
 #     guard on the next scan (3 retries, force close). The LLM deterministically calls set_phase("triage")
 #     on fresh headhunter events because brain_phase defaults to "triage" at creation.
-# 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/investigate).
+# 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/dispatch).
 #     Brain calls adapter.set_search_enabled() before/after generate_stream via try/finally. hasattr guard for Claude.
 #     Grounding metadata formatted as evidence, not thoughts. Graceful fallback if search unavailable.
 # 36b. [Pattern]: _resolve_grounding_urls() follows Vertex grounding-api-redirect URIs to canonical URLs
@@ -166,7 +166,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import httpx
 
-from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus
+from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_phase
 from ..ports import BroadcastPort
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
@@ -355,12 +355,11 @@ VOLUME_PATHS = {
 # Plumbing phases (always, source, context, multi-user) are auto-detected from data presence.
 # System states (intermediate, waiting) preempt Brain phase via early-return in _match_phases.
 BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
-    "triage":       [],
-    "investigate":  ["dispatch"],
-    "execute":      ["dispatch", "coordination"],
-    "verify":       ["post-agent", "defer-wake"],
-    "escalate":     ["post-agent", "escalate"],
-    "close":        ["close"],
+    "triage":    [],
+    "dispatch":  ["dispatch", "coordination"],
+    "verify":    ["post-agent", "defer-wake"],
+    "escalate":  ["post-agent", "escalate"],
+    "close":     ["close"],
 }
 
 # Context priming: synthetic prefill so the LLM treats protocols as already-committed.
@@ -1011,7 +1010,7 @@ class Brain:
         # === Phase-driven tool gating ===
         # Code reads the Brain's declared phase and provides matching tools.
         # Same pattern as domain gating (CLEAR strips create_plan, etc.).
-        brain_phase = event.brain_phase or "triage"
+        brain_phase = _resolve_phase(event.brain_phase)
 
         # Phase gates: tools gated to specific phases
         escalate_tools = {"report_incident"}
@@ -1034,13 +1033,11 @@ class Brain:
         if brain_phase == "close":
             active_tools = [t for t in active_tools if t["name"] not in observation_tools]
 
-        # Jira tools: comment available during execution + close; transition in investigate/verify/close
-        jira_phases = ("investigate", "verify", "escalate", "close")
+        jira_phases = ("dispatch", "verify", "escalate", "close")
         if brain_phase not in jira_phases:
             active_tools = [t for t in active_tools if t["name"] not in {"comment_jira_issue", "transition_jira_issue"}]
 
-        # Refresh tools: available in triage and verify, with strip-after-use guard
-        refresh_tools = {"refresh_gitlab_context", "refresh_kargo_context", "fetch_jira_issue"}
+        # Refresh tools: event-scoped budget (3 + agent_completions - usage)
         has_kargo = (
             event.event and event.event.evidence
             and hasattr(event.event.evidence, "kargo_context")
@@ -1049,43 +1046,25 @@ class Brain:
         if not has_kargo:
             active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
 
-        if brain_phase not in ("triage", "verify"):
-            active_tools = [t for t in active_tools if t["name"] not in refresh_tools]
-        else:
-            if is_defer_wake:
-                last_window_ts = next(
-                    (t.timestamp for t in reversed(event.conversation)
-                     if t.actor == "brain" and t.action == "defer"),
-                    0,
-                )
-            else:
-                # Window boundary = the most recent phase transition into the CURRENT phase.
-                # Refreshes from a prior phase (e.g., triage) don't block the new phase's refresh.
-                # Phase turns store "Phase: VERIFY. ..." in thoughts -- match current brain_phase.
-                last_window_ts = next(
-                    (t.timestamp for t in reversed(event.conversation)
-                     if t.actor == "brain" and t.action == "phase"
-                     and (t.thoughts or "").lower().startswith(f"phase: {brain_phase}")),
-                    0,
-                )
-            recent_gl_refresh = any(
-                t.actor == "brain" and t.waitingFor == "refresh_gitlab_context"
-                and t.timestamp >= last_window_ts
-                for t in event.conversation
-            )
-            if recent_gl_refresh:
-                active_tools = [t for t in active_tools if t["name"] != "refresh_gitlab_context"]
-                logger.info(f"Refresh window guard: stripped refresh_gitlab_context for {event_id}")
+        # fetch_jira_issue: simple phase gate (triage + dispatch + verify), excluded from budget
+        if brain_phase not in ("triage", "dispatch", "verify"):
+            active_tools = [t for t in active_tools if t["name"] != "fetch_jira_issue"]
 
-            if has_kargo:
-                recent_kargo_refresh = any(
-                    t.actor == "brain" and t.waitingFor == "refresh_kargo_context"
-                    and t.timestamp >= last_window_ts
-                    for t in event.conversation
-                )
-                if recent_kargo_refresh:
-                    active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
-                    logger.info(f"Refresh window guard: stripped refresh_kargo_context for {event_id}")
+        # Budget-gated refresh tools (GitLab + Kargo only)
+        refresh_tools_budgeted = {"refresh_gitlab_context", "refresh_kargo_context"}
+        refresh_count = sum(
+            1 for t in event.conversation
+            if t.actor == "brain" and t.waitingFor in refresh_tools_budgeted
+        )
+        agent_completions = sum(
+            1 for t in event.conversation
+            if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
+            and t.action in ("execute", "plan")
+        )
+        budget = min(3 + agent_completions, 10) - refresh_count
+        if budget <= 0:
+            active_tools = [t for t in active_tools if t["name"] not in refresh_tools_budgeted]
+            logger.info(f"Refresh budget exhausted ({refresh_count} used, {agent_completions} refills) for {event_id}")
 
         # === Domain classification gate (mandatory before routing) ===
         if context_flags and not context_flags.get("brain_has_classified", False):
@@ -1163,12 +1142,11 @@ class Brain:
         # Gives the LLM a signal about what's most useful for the current phase.
         _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
         _phase_tool_priority: dict[str, set[str]] = {
-            "triage":      {"refresh_gitlab_context", "refresh_kargo_context"},
-            "investigate":  {"select_agent", "create_plan", "message_agent", "defer_event"},
-            "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event"},
-            "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
-            "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
-            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
+            "triage":    {"refresh_gitlab_context", "refresh_kargo_context"},
+            "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
+            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
+            "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
+            "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
         }
         # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
         if brain_phase == "triage" or event.source == "jarvis":
@@ -1211,7 +1189,7 @@ class Brain:
         raw_parts = None
         last_grounding = None
 
-        want_search = self._search_enabled and brain_phase in ("triage", "investigate")
+        want_search = self._search_enabled and brain_phase in ("triage", "dispatch")
         if want_search and hasattr(self._adapter, 'set_search_enabled'):
             self._adapter.set_search_enabled(True)
 
@@ -1767,8 +1745,8 @@ class Brain:
             active.append("waiting")
             return active
 
-        # Normal processing: Brain-declared phase
-        brain_phase = event.brain_phase or "triage"
+        # Normal processing: Brain-declared phase (aliases resolve legacy names)
+        brain_phase = _resolve_phase(event.brain_phase)
 
         # In-flight migration: events without brain_phase that have agent results
         # get verify-equivalent skills until the Brain calls set_phase (one-release bridge)
@@ -1937,7 +1915,7 @@ class Brain:
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%H:%M UTC")
         turn_count = len(event.conversation)
-        phase = event.brain_phase or "triage"
+        phase = _resolve_phase(event.brain_phase)
 
         evidence = event.event.evidence if event.event else None
         if isinstance(evidence, EventEvidence):
@@ -3057,7 +3035,7 @@ class Brain:
             event = await self.blackboard.get_event(event_id)
             if not event:
                 return False
-            if event.source != "jarvis" or (event.brain_phase or "triage") != "close":
+            if event.source != "jarvis" or _resolve_phase(event.brain_phase) != "close":
                 reject_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
@@ -3819,12 +3797,15 @@ class Brain:
             return True
 
         elif function_name == "set_phase":
-            phase = args.get("phase", "triage")
+            phase = _resolve_phase(args.get("phase", "triage"))
             reasoning = args.get("reasoning", "")
             event_doc = await self.blackboard.get_event(event_id)
-            current_phase = event_doc.brain_phase if event_doc else None
+            current_phase = _resolve_phase(event_doc.brain_phase) if event_doc else None
             if current_phase is not None and phase == current_phase:
                 logger.debug(f"set_phase: confirmed {phase} for {event_id}")
+                # Persist canonical value even on confirmation (migrates legacy stored phases)
+                if event_doc and event_doc.brain_phase != phase:
+                    await self.blackboard.update_event_phase(event_id, phase)
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
@@ -4053,7 +4034,7 @@ class Brain:
             age_str = f"{age_h}h {age_m}m"
             header = (
                 f"## Event: {target_id}\n"
-                f"Phase: {target_event.brain_phase or 'triage'} | "
+                f"Phase: {_resolve_phase(target_event.brain_phase)} | "
                 f"Status: {target_event.status.value if target_event.status else 'unknown'} | "
                 f"Age: {age_str}\n"
                 f"Source: {target_event.source or 'unknown'} | "

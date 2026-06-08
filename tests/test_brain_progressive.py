@@ -84,12 +84,27 @@ class TestMatchPhases:
         assert "source" in active
         assert "dispatch" not in active
 
-    def test_investigate_loads_dispatch(self):
+    def test_dispatch_loads_dispatch_and_coordination(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="dispatch")
+        active = Brain._match_phases(None, event, ctx)
+        assert "dispatch" in active
+        assert "coordination" in active
+        assert "post-agent" not in active
+
+    def test_legacy_investigate_alias_resolves_to_dispatch(self):
         ctx = self._make_ctx()
         event = self._make_event_stub(brain_phase="investigate")
         active = Brain._match_phases(None, event, ctx)
         assert "dispatch" in active
-        assert "post-agent" not in active
+        assert "coordination" in active
+
+    def test_legacy_execute_alias_resolves_to_dispatch(self):
+        ctx = self._make_ctx()
+        event = self._make_event_stub(brain_phase="execute")
+        active = Brain._match_phases(None, event, ctx)
+        assert "dispatch" in active
+        assert "coordination" in active
 
     def test_verify_loads_post_agent_and_defer_wake(self):
         ctx = self._make_ctx()
@@ -108,7 +123,7 @@ class TestMatchPhases:
 
     def test_intermediate_preempts_brain_phase(self):
         ctx = self._make_ctx(is_intermediate=True)
-        event = self._make_event_stub(brain_phase="investigate")
+        event = self._make_event_stub(brain_phase="dispatch")
         active = Brain._match_phases(None, event, ctx)
         assert "intermediate" in active
         assert "dispatch" not in active
@@ -144,12 +159,12 @@ class TestMatchPhases:
         assert "defer-wake" in active
 
     def test_brain_phase_skills_mapping_complete(self):
-        expected_phases = {"triage", "investigate", "execute", "verify", "escalate", "close"}
+        expected_phases = {"triage", "dispatch", "verify", "escalate", "close"}
         assert set(BRAIN_PHASE_SKILLS.keys()) == expected_phases
 
     def test_intermediate_with_huddle_includes_coordination(self):
         ctx = self._make_ctx(is_intermediate=True, has_pending_huddle=True)
-        event = self._make_event_stub(brain_phase="investigate")
+        event = self._make_event_stub(brain_phase="dispatch")
         active = Brain._match_phases(None, event, ctx)
         assert "intermediate" in active
         assert "coordination" in active
@@ -310,3 +325,121 @@ class TestParsePlanFrontmatter:
         body, steps, fm = Brain._parse_plan_frontmatter(raw)
         assert fm.get("reasoning") == 42
         assert body == "Body."
+
+
+class TestResolvePhase:
+    """Unit tests for _resolve_phase normalization."""
+
+    def test_investigate_resolves_to_dispatch(self):
+        from src.models import _resolve_phase
+        assert _resolve_phase("investigate") == "dispatch"
+
+    def test_execute_resolves_to_dispatch(self):
+        from src.models import _resolve_phase
+        assert _resolve_phase("execute") == "dispatch"
+
+    def test_canonical_phases_pass_through(self):
+        from src.models import _resolve_phase
+        for phase in ("triage", "dispatch", "verify", "escalate", "close"):
+            assert _resolve_phase(phase) == phase
+
+    def test_none_defaults_to_triage(self):
+        from src.models import _resolve_phase
+        assert _resolve_phase(None) == "triage"
+
+    def test_unknown_value_defaults_to_triage(self):
+        from src.models import _resolve_phase
+        assert _resolve_phase("garbage") == "triage"
+        assert _resolve_phase("TRIAGE") == "triage"
+        assert _resolve_phase("escalate ") == "triage"
+
+    def test_field_validator_normalizes_investigate(self):
+        from src.models import EventDocument
+        assert EventDocument._normalize_phase("investigate") == "dispatch"
+
+    def test_field_validator_normalizes_execute(self):
+        from src.models import EventDocument
+        assert EventDocument._normalize_phase("execute") == "dispatch"
+
+    def test_field_validator_preserves_none(self):
+        from src.models import EventDocument
+        assert EventDocument._normalize_phase(None) is None
+
+    def test_field_validator_passes_canonical(self):
+        from src.models import EventDocument
+        assert EventDocument._normalize_phase("dispatch") == "dispatch"
+        assert EventDocument._normalize_phase("triage") == "triage"
+
+
+class TestRefreshBudget:
+    """Tests for the conversation-turn-based refresh budget."""
+
+    def _make_turn(self, actor="brain", action="phase", waiting_for=None):
+        from src.models import ConversationTurn
+        return ConversationTurn(
+            turn=1, actor=actor, action=action,
+            waitingFor=waiting_for,
+        )
+
+    def _compute_budget(self, turns):
+        refresh_tools_budgeted = {"refresh_gitlab_context", "refresh_kargo_context"}
+        refresh_count = sum(
+            1 for t in turns
+            if t.actor == "brain" and t.waitingFor in refresh_tools_budgeted
+        )
+        agent_completions = sum(
+            1 for t in turns
+            if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
+            and t.action in ("execute", "plan")
+        )
+        return min(3 + agent_completions, 10) - refresh_count
+
+    def test_new_event_has_budget_3(self):
+        assert self._compute_budget([]) == 3
+
+    def test_three_refreshes_exhausts_budget(self):
+        turns = [
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_kargo_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+        ]
+        assert self._compute_budget(turns) == 0
+
+    def test_fourth_refresh_goes_negative(self):
+        turns = [self._make_turn(waiting_for="refresh_gitlab_context") for _ in range(4)]
+        assert self._compute_budget(turns) < 0
+
+    def test_agent_completion_refills(self):
+        turns = [
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(actor="sysadmin", action="execute"),
+        ]
+        assert self._compute_budget(turns) == 1
+
+    def test_cancel_does_not_refill(self):
+        turns = [
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(actor="sysadmin", action="cancel"),
+        ]
+        assert self._compute_budget(turns) == 0
+
+    def test_huddle_does_not_refill(self):
+        turns = [
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(waiting_for="refresh_gitlab_context"),
+            self._make_turn(actor="developer", action="huddle"),
+        ]
+        assert self._compute_budget(turns) == 0
+
+    def test_budget_capped_at_10(self):
+        turns = [self._make_turn(actor="sysadmin", action="execute") for _ in range(20)]
+        assert self._compute_budget(turns) == 10
+
+    def test_aligner_excluded_from_refill(self):
+        turns = [self._make_turn(actor="aligner", action="execute")]
+        assert self._compute_budget(turns) == 3

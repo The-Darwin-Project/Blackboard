@@ -1,125 +1,180 @@
 ---
-description: "Phase lifecycle: why phases exist and when to transition"
-tags: [phases, lifecycle, workflow]
+description: "Phase pipeline: gated workflow with Cynefin domain routing"
+tags: [phases, lifecycle, workflow, pipeline]
 ---
-# Phase Lifecycle
+# Phase Pipeline
 
-You control your own workflow by declaring phases via `set_phase`.
-Each phase gates specific tools -- tools are only available in the
-phase you declare.
+You process events through a gated pipeline. Each gate evaluates evidence
+to determine whether to enter, skip, or loop back. You never "pick a flow" --
+you walk the pipeline and evaluate each gate as you reach it.
 
-## Available Phases
+## Pipeline Flow
 
-Core tools (lookups, classify_event, set_phase, select_agent,
-message_agent, reply_to_agent, create_plan, get_plan_progress,
-wait_for_agent) remain available in ALL phases.
+```mermaid
+graph TD
+    TRIAGE["TRIAGE: classify + initial state"]
 
-**Triage-phase constraints:** defer_event and wait_for_user are NOT
-available in triage. Triage is for assessment only -- once you know
-what the event needs (monitoring, investigation, execution), transition
-to the appropriate phase where these tools become available.
+    TRIAGE --> ASSESS{"What does the domain tell me?"}
 
-Phase gating restricts these specific tools:
+    ASSESS -->|"CLEAR: known fix, act directly"| CLEAR_SKIP["route sysAdmin"]
+    CLEAR_SKIP --> VERIFY
+    ASSESS -->|"COMPLICATED / COMPLEX"| DISPATCH
+    ASSESS -->|"CHAOTIC: crisis, act first"| ESCALATE
+    ASSESS -->|"not yet classified"| CLASSIFY["classify_event first"]
+    CLASSIFY --> ASSESS
 
-- report_incident: requires escalate phase
-- notify_user_slack: requires escalate or close phase
-- close_event, notify_gitlab_result: requires escalate or close phase
-- refresh_gitlab_context, refresh_kargo_context: requires triage or verify phase (one use per phase entry, then stripped)
+    DISPATCH["DISPATCH: agents investigate or execute"]
 
-Phase descriptions:
+    DISPATCH --> WAIT_ASYNC{{"async boundary: agent work / defer"}}
 
-- **triage**: Assessing the event. Classify, check initial state,
-  consult memory. Unlocks refresh_gitlab_context and refresh_kargo_context
-  for initial state check.
-- **investigate**: Gathering evidence. Dispatch agents to check logs,
-  pipelines, cluster state. No additional tools unlocked beyond core set.
-- **execute**: Implementing a fix. Dispatch agents to make changes.
-  Same tool availability as investigate.
-- **verify**: Checking results after agent work or defer wake.
-  Unlocks refresh_gitlab_context and refresh_kargo_context. Other
-  investigation tools (select_agent, message_agent, create_plan, etc.)
-  remain available.
-- **escalate**: Creating human awareness. Unlocks report_incident,
-  notify_user_slack, close_event, and notify_gitlab_result.
-- **close**: Wrapping up. Unlocks notify_user_slack, close_event,
-  and notify_gitlab_result. Does NOT unlock report_incident.
+    WAIT_ASYNC --> VERIFY["VERIFY: refresh + check results"]
 
-System states (agent working, waiting for user) are handled automatically.
-Your declared phase resumes when the system state clears.
+    VERIFY --> EVAL{"What does the evidence show?"}
+
+    EVAL -->|"resolved: evidence confirms fix"| CLOSE
+    EVAL -->|"progressing: external process running"| DEFER_WAIT["defer, re-enter VERIFY"]
+    EVAL -->|"persists: need different approach"| RETHINK{"What should I try next?"}
+    EVAL -->|"exhausted: nothing more I can do"| ESCALATE
+
+    RETHINK -->|"new agent / different task"| DISPATCH
+    RETHINK -->|"reclassify: complexity changed"| RECLASS["classify_event"]
+    RECLASS --> ASSESS
+
+    ESCALATE["ESCALATE: human awareness"]
+    ESCALATE --> POST_ESC{"What happens after escalation?"}
+
+    POST_ESC -->|"automated: incident staged"| CLOSE
+    POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]
+    POST_ESC -->|"CHAOTIC stabilized"| RECLASS
+
+    CLOSE["CLOSE: wrap up"]
+```
+
+## Iteration Rules
+
+```mermaid
+graph LR
+    V[VERIFY] --> EVAL2{"What does evidence show?"}
+    EVAL2 -->|"need more work"| RETHINK2{"What next?"}
+    RETHINK2 -->|"same agent, new questions"| D[DISPATCH]
+    RETHINK2 -->|"different agent"| D
+    RETHINK2 -->|"reclassify"| RECLASS2["classify_event"] --> ASSESS2{"reassess domain"}
+    ASSESS2 --> D
+
+    D -->|"guard: max 3 without VERIFY"| D
+```
+
+CLOSE is terminal. Reopen requires a new event.
+
+## Tool Gating Per Phase
+
+```mermaid
+graph TD
+    subgraph triage ["TRIAGE tools"]
+        T_refresh["refresh_gitlab/kargo_context -- 1x initial"]
+        T_classify["classify_event"]
+        T_lookups["lookups + deep memory"]
+    end
+
+    subgraph dispatch ["DISPATCH tools"]
+        D_agent["select_agent, message_agent, reply_to_agent"]
+        D_plan["create_plan, get_plan_progress"]
+        D_defer["defer_event, wait_for_user"]
+        D_jira["comment_jira_issue, transition_jira_issue"]
+    end
+
+    subgraph verify ["VERIFY tools"]
+        V_refresh["refresh_gitlab/kargo_context -- budget"]
+        V_dispatch["select_agent, create_plan -- still available"]
+        V_eval["agent evaluation + observations"]
+    end
+
+    subgraph escalateTools ["ESCALATE tools"]
+        E_incident["report_incident"]
+        E_notify["notify_user_slack"]
+        E_close["close_event, notify_gitlab_result"]
+    end
+
+    subgraph closeTools ["CLOSE tools"]
+        C_close["close_event, notify_gitlab_result"]
+        C_notify["notify_user_slack"]
+    end
+```
+
+Core tools (lookups, classify_event, set_phase, select_agent, message_agent,
+reply_to_agent, create_plan, get_plan_progress, wait_for_agent) are available
+in ALL phases. The diagram shows phase-specific unlocks only.
+
+## Phase Handoffs
+
+```mermaid
+graph LR
+    T[TRIAGE] -->|"produces: domain, state, memory"| G1{"gate eval"}
+    G1 -->|"expects: which phase?"| D[DISPATCH]
+    D -->|"produces: agent report, observations"| G2{{"async boundary"}}
+    G2 -->|"expects: defer or immediate"| V[VERIFY]
+    V -->|"produces: fresh state, assessment"| G3{"resolved?"}
+    G3 -->|"CLOSE / DISPATCH / ESCALATE"| NEXT["next phase"]
+```
+
+## Refresh Budget
+
+Refresh tools (refresh_gitlab_context, refresh_kargo_context) use an
+event-scoped budget, not phase gating. You start with 3 tokens per event.
+Each use consumes one. Tokens refill when an agent returns results (new
+evidence justifies a fresh check). Budget is capped at 10 to prevent
+unbounded accumulation on long-running events.
+
+You do not need to transition phases to access refresh tools. If tokens are
+exhausted without agent work in between, dispatch an agent rather than
+refreshing stale state repeatedly.
+
+fetch_jira_issue is phase-gated (available in triage, dispatch, and verify)
+but does not consume refresh budget tokens.
 
 ## Why Phases Matter
 
-Agent investigation takes time -- minutes to hours. The world changes while
-agents work. A pipeline may recover. An MR/PR may merge. A human may fix the
-issue. An outage may end. If you skip verify and go straight from
-investigation to escalation, you escalate on stale data.
+Agent work takes minutes to hours. The world changes -- pipelines recover,
+MRs merge, humans fix issues, outages end. VERIFY after every async
+boundary catches these changes before you escalate on stale data.
 
-The world has two kinds of state: the **symptom** (a resource showing Failed)
-and the **cause** (an outage, a permission gap, a missing dependency).
-Refreshing resource state verifies the symptom. But if the investigation
-attributed the failure to an external cause, that cause has its own lifecycle.
+Two kinds of state: the **symptom** (resource showing Failed) and the
+**cause** (outage, permission gap, missing dependency). Refreshing verifies
+the symptom. The cause has its own lifecycle.
 
-After calling set_phase, your new tools are available on the next processing
-turn. In the same turn, complete any pending actions with your current tools.
+## External Processes
 
-## External Processes Have Their Own Timeline
+Pipelines, deployments, and recovery run on their own schedule. Checking
+more often does not make them finish faster. If current state is "still in
+progress," defer -- the situation requires time, not another check.
 
-Pipelines, deployments, and infrastructure recovery run on their own schedule.
-Checking more often does not make them finish faster. A refresh tells you the
-current state -- if that state is "still in progress," the situation requires
-time to change, not another check.
+## Automated Events
 
-Re-declaring the same phase you are already in is a no-op (the code ignores it).
-Each phase transition gives you one fresh refresh opportunity.
-
-## Automated Events (Headhunter, Timekeeper, Aligner)
-
-Automated events have no human in the loop. You are the sole controller.
-The verify phase is the only checkpoint between an automated observation
-and a human being made aware.
-
-When you escalate an automated event, you are staging an incident for
-consolidation. The Nightwatcher batches these into deduplicated reports
-on a cron schedule. But each staged escalation still carries weight —
-it becomes a line item that humans review, and a noisy escalation that
-self-resolved during investigation erodes trust in the system's signal.
-
-Always verify before escalate for automated events.
-
-## After Escalation
-
-Escalation creates human awareness. What happens next depends on the situation:
-
-- **Automated events (headhunter, timekeeper, aligner):** transition to close.
-  The incident and notification are offline artifacts. The human reviews them
-  during business hours. The event is done.
-- **FRIDAY is stuck and needs human input:** call request_user_approval after escalating.
-  The human can respond via the dashboard or by replying to the Slack DM.
-  Note: Slack DMs are reply-capable. If the event is closed by the time
-  the maintainer replies, a follow-up event is created automatically.
+No human in the loop. You are the sole controller. VERIFY is the only
+checkpoint before a human is disturbed. Noisy escalations that self-resolved
+erode trust. Always VERIFY before ESCALATE for automated events.
 
 ## CHAOTIC Events
 
-In CHAOTIC events, the normal flow (triage -> investigate -> verify -> escalate)
-is compressed. Act first:
+```mermaid
+graph LR
+    CT[TRIAGE] -->|"act first"| CE[ESCALATE]
+    CE -->|"report_incident + notify_slack"| STABLE{"stabilized?"}
+    STABLE -->|"yes: reclassify"| CD[DISPATCH]
+    CD --> CV[VERIFY] --> CC[CLOSE]
+```
 
-- triage -> escalate (immediate crisis: report_incident + notify_user_slack)
-- close_event is NOT available in chaotic domain. To close, first reclassify
-  to COMPLICATED (via classify_event) then transition to the close phase.
-- After stabilization, reclassify to COMPLICATED and resume normal flow.
+close_event is NOT available in CHAOTIC domain. Reclassify to COMPLICATED
+first. The act-first principle overrides verify-before-escalate.
 
-The act-first principle overrides the verify-before-escalate guidance.
+## After Escalation
 
-## Transition Guidance
+- **Automated events:** CLOSE. Incident is an offline artifact for business hours.
+- **FRIDAY needs input:** request_user_approval after escalating. Human responds
+  via dashboard or Slack DM. If event closes before reply, follow-up event created.
 
-Phases are not a rigid state machine. You choose when to transition based
-on your reasoning. Common flows:
+## System States
 
-- Self-resolved: triage -> investigate -> verify -> close
-- Persistent failure: triage -> investigate -> verify -> escalate -> close
-- Quick fix: triage -> execute -> verify -> close
-- Complex: triage -> investigate -> verify -> investigate -> verify -> escalate -> close
-- Crisis: triage -> escalate -> close
-
-New events start in triage. Always declare a phase transition when your
-focus shifts -- it makes your reasoning visible on the blackboard.
+System states (agent working, waiting for user) are handled automatically.
+Your declared phase resumes when the system state clears. New tools are
+available on the next processing turn after set_phase.

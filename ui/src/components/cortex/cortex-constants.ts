@@ -3,7 +3,7 @@
 // 1. [Constraint]: Executive hemisphere neurons are hardcoded -- they mirror Brain tool declarations.
 // 2. [Pattern]: Tool groups map to functional clusters in the Brain's tool dispatcher.
 // 3. [Gotcha]: Keep in sync with Brain's function tool list in brain.py.
-// 4. [Pattern]: PHASE_TOOL_PRIORITY mirrors Brain's _phase_tool_priority (~brain.py line 963).
+// 4. [Pattern]: PHASE_TOOL_PRIORITY mirrors Brain's _phase_tool_priority in brain.py.
 import type { Neuron } from './types';
 
 export const TOOL_GROUPS: Record<string, string[]> = {
@@ -14,16 +14,15 @@ export const TOOL_GROUPS: Record<string, string[]> = {
   communication: ['notify_user_slack', 'notify_gitlab_result', 'report_incident', 'get_plan_progress'],
 };
 
-export const PHASES = ['triage', 'investigate', 'execute', 'verify', 'escalate', 'close'];
+export const PHASES = ['triage', 'dispatch', 'verify', 'escalate', 'close'];
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'];
 
 const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
   triage: ['refresh_gitlab_context', 'refresh_kargo_context'],
-  investigate: ['select_agent', 'create_plan', 'message_agent'],
-  execute: ['select_agent', 'create_plan', 'message_agent', 'reply_to_agent'],
-  verify: ['refresh_gitlab_context', 'refresh_kargo_context', 'get_plan_progress'],
-  escalate: ['report_incident', 'notify_user_slack', 'notify_gitlab_result', 'close_event'],
-  close: ['close_event', 'notify_gitlab_result', 'notify_user_slack'],
+  dispatch: ['select_agent', 'create_plan', 'message_agent', 'reply_to_agent', 'defer_event', 'comment_jira_issue', 'transition_jira_issue'],
+  verify: ['refresh_gitlab_context', 'refresh_kargo_context', 'get_plan_progress', 'defer_event'],
+  escalate: ['report_incident', 'notify_user_slack', 'notify_gitlab_result', 'close_event', 'defer_event'],
+  close: ['close_event', 'notify_gitlab_result', 'notify_user_slack', 'post_sticky_note', 'hold_watch'],
 };
 
 export function getExecutiveNeurons(): Neuron[] {
@@ -102,7 +101,7 @@ interface StructuralEdge {
 export function getStructuralEdges(): StructuralEdge[] {
   const edges: StructuralEdge[] = [];
 
-  // Phase chain: triage -> investigate -> ... -> close
+  // Phase chain: triage -> dispatch -> ... -> close
   for (let i = 0; i < PHASES.length - 1; i++) {
     edges.push({ source: `phase:${PHASES[i]}`, target: `phase:${PHASES[i + 1]}` });
   }

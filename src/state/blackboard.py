@@ -59,6 +59,7 @@ from ..models import (
     TelemetryPayload,
     TicketNode,
     TopologySnapshot,
+    _resolve_phase,
 )
 
 if TYPE_CHECKING:
@@ -1996,6 +1997,7 @@ class BlackboardState:
 
     async def update_event_phase(self, event_id: str, brain_phase: str) -> None:
         """Set Brain's declared processing phase on an EventDocument (WATCH/MULTI)."""
+        brain_phase = _resolve_phase(brain_phase)
         key = f"{self.EVENT_PREFIX}{event_id}"
         async with self.redis.pipeline(transaction=True) as pipe:
             while True:
@@ -2673,7 +2675,7 @@ class BlackboardState:
         now = time.time()
         event = await self.get_event(event_id)
         if not brain_phase and event:
-            brain_phase = event.brain_phase or "triage"
+            brain_phase = _resolve_phase(event.brain_phase)
 
         service = ""
         if event:

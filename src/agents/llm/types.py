@@ -198,8 +198,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "set_phase",
         "description": (
             "Declare your current processing phase. Tools are gated to the "
-            "phase you declare -- e.g., report_incident requires escalate phase, "
-            "refresh_gitlab_context requires triage or verify phase. "
+            "phase you declare -- e.g., report_incident requires escalate phase. "
             "Call once when transitioning to a new phase. Re-declaring the "
             "same phase is a no-op -- only transitions change the tool set. "
             "The phase is recorded on the blackboard as a visible turn. "
@@ -211,28 +210,27 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "phase": {
                     "type": "string",
-                    "enum": ["triage", "investigate", "execute", "verify", "escalate", "close"],
+                    "enum": [
+                        "triage", "dispatch", "verify", "escalate", "close",
+                        "investigate", "execute",
+                    ],
                     "description": (
-                        "triage: assessing event, classifying, checking initial state. "
-                        "Unlocks refresh_gitlab_context for initial MR state check. "
-                        "investigate: dispatching agents to gather evidence. "
-                        "Unlocks select_agent in investigate and plan modes. "
-                        "execute: dispatching agents to implement fixes. "
-                        "Unlocks select_agent in execute and implement modes. "
-                        "verify: checking results after agent work or defer wake. "
-                        "Unlocks refresh_gitlab_context and refresh_kargo_context. "
-                        "Enter after agent results to check if the issue self-resolved "
-                        "during investigation -- MR may have merged. For automated events "
-                        "this is the only checkpoint before a human is disturbed. "
-                        "escalate: this issue needs human awareness. "
-                        "Unlocks report_incident and notify_user_slack for failures. "
-                        "For non-chaotic events, enter only after verify confirms the "
-                        "issue persists. For automated events, escalation means notifying "
-                        "a human who may be asleep -- verify first. "
-                        "For chaotic events, enter immediately -- act first. "
-                        "close: wrapping up. Unlocks close_event, notify_gitlab_result, comment_jira_issue, and transition_jira_issue. "
-                        "For user-initiated events: enter ONLY after you have replied to the user. "
-                        "Closing without a visible response leaves the human without an answer."
+                        "triage: assess event, classify domain, check initial state. "
+                        "Gate: entry phase for all events. "
+                        "dispatch: agents investigate and execute. All agent routing, "
+                        "Jira tools, and search grounding available. "
+                        "Gate: enter when domain is COMPLICATED or COMPLEX. "
+                        "CLEAR events skip dispatch -- route sysAdmin directly from triage. "
+                        "verify: refresh state and check results after agent work or defer wake. "
+                        "Gate: enter after every async boundary (agent return, defer wake). "
+                        "This is the only checkpoint before a human is disturbed. "
+                        "escalate: issue needs human awareness. "
+                        "Gate: enter only after verify confirms the issue persists. "
+                        "For CHAOTIC events, enter immediately from triage -- act first. "
+                        "close: wrap up. Enter ONLY after you have replied to the user. "
+                        "Gate: terminal phase. Reopen requires a new event. "
+                        "investigate: legacy alias for dispatch (auto-resolved). "
+                        "execute: legacy alias for dispatch (auto-resolved)."
                     ),
                 },
                 "reasoning": {

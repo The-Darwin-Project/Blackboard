@@ -16,7 +16,7 @@ For informational queries (event history, service status, past incidents, "what 
 
 ## Web Search Context (Google Search Grounding)
 
-When web search results are available (triage and investigate phases), the model
+When web search results are available (triage and dispatch phases), the model
 may automatically query the web for context about the current failure. Grounded
 results appear as source citations in the evidence.
 

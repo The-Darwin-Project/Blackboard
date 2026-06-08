@@ -44,7 +44,7 @@ degradation). Place fetched context on the Blackboard for agent visibility.
 ## Jira Lifecycle Management
 
 The Jira issue status must reflect the event's execution state:
-- On event start (entering investigate phase): transition to "In Progress"
+- On event start (entering dispatch phase): transition to "In Progress"
 - On event close (success): transition to "Dev Complete"
 - On event close (failure/escalation): transition to "Dev Complete" with findings
 

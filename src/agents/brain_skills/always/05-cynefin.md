@@ -19,6 +19,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
+- Action: Skip DISPATCH. Route sysAdmin directly with the established fix, then VERIFY.
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 
@@ -38,7 +39,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: No constraints, act first
 - Flow: Act -> Sense -> Respond
 
-Domain-specific action prescriptions (which agent to route per domain) are available during dispatch phase via dispatch/cynefin-actions.md.
+Domain-specific action prescriptions (which agent to route per domain, multi-step planning guidance) are loaded during dispatch phase via dispatch/cynefin-actions.md.
 
 ## DISORDER (Initial State)
 

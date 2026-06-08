@@ -185,7 +185,7 @@ class TestPhaseConditionsWithHeadhunter:
         assert has_agent is False
 
         event_stub = MagicMock()
-        event_stub.brain_phase = "investigate"
+        event_stub.brain_phase = "dispatch"
         ctx = self._make_ctx(
             turn_count=5, has_agent_result=False, brain_has_classified=True,
         )

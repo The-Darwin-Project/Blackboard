@@ -44,6 +44,7 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ..memory.pulse import PulseBatch
+from ..models import _resolve_phase
 
 if TYPE_CHECKING:
     from ..agents.archivist import Archivist
@@ -309,7 +310,7 @@ Archivist for lesson extraction and memory storage.
 
 ### How FRIDAY Operates
 
-- **Phases**: triage, investigate, execute, verify, escalate, close.
+- **Phases**: triage, dispatch, verify, escalate, close.
 - **Agent dispatch**: asynchronous, takes minutes to hours.
 - **Defers**: sleep for a duration, then wake and re-evaluate. Each includes a reason.
 - **Deep memory**: past events and lessons. Does not replace live checks.
@@ -1050,7 +1051,7 @@ class LiveAPIAdapter:
             if event.queued_at:
                 elapsed_m = int((time.time() - event.queued_at) / 60)
             turns = len(event.conversation)
-            phase = event.brain_phase or "triage"
+            phase = _resolve_phase(event.brain_phase)
             service = getattr(event, "service", "?")
             lines.append(
                 f"  {eid} | {phase} | {elapsed_m}m | {service} | {turns} turns"
@@ -1066,7 +1067,7 @@ class LiveAPIAdapter:
         elapsed_m = 0
         if event.queued_at:
             elapsed_m = int((time.time() - event.queued_at) / 60)
-        phase = event.brain_phase or "triage"
+        phase = _resolve_phase(event.brain_phase)
         evidence = event.event.evidence if event.event else None
         domain = (evidence.brain_domain or evidence.domain) if evidence else "unknown"
         source = event.source or "unknown"
@@ -1452,7 +1453,7 @@ class LiveAPIAdapter:
                 else:
                     defer_remaining_str = " | defer_expired"
             summary_lines.append(
-                f"- {eid}: phase={event.brain_phase}, status={event.status.value}, "
+                f"- {eid}: phase={_resolve_phase(event.brain_phase)}, status={event.status.value}, "
                 f"age={elapsed}m, defers={defer_count}, defer_total={defer_total_s // 60}m{defer_remaining_str}, "
                 f"reason: {(last_defer or '')[:80]}"
             )
@@ -1854,7 +1855,7 @@ class LiveAPIAdapter:
                 if not event:
                     continue
                 elapsed = int((time.time() - event.queued_at) / 60) if event.queued_at else 0
-                phase = event.brain_phase or "triage"
+                phase = _resolve_phase(event.brain_phase)
                 turns = len(event.conversation)
                 last_action = ""
                 if event.conversation:
