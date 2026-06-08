@@ -13,10 +13,10 @@
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
 # 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
-#     meta-event (all events parked -> create system_review). Meta-event lifecycle is state-driven:
-#     _meta_event_parked_set snapshot at creation, send_pulse suppresses wrap-up for parked events
-#     (exception: tool:close_event pulse triggers wrap-up). One meta-event per idle phase
-#     (_last_reviewed_set dedup). Parked set reconstructed on reconnect (orphan recovery).
+#     meta-event (all events parked -> create system_review). Meta-event lifecycle is stream-bound:
+#     close ownership belongs to Brain (_close_and_broadcast). Adapter signals via on_meta_event_closed.
+#     _cleanup_session_state calls Brain.close_jarvis_meta_event on stream teardown.
+#     _idle_watchdog filters jarvis meta-events from idle-close check (non_jarvis_active).
 # 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
 # 13. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
@@ -263,16 +263,14 @@ strengthen the system's knowledge while events are parked.
    state the observation and ask her to explain the discrepancy.
 5. When FRIDAY identifies a gap, encourage her to propose a skill amendment.
 
-### Close Protocol
+### FRIDAY Hold Watch
 
-You do NOT close this event. The system closes it when:
-- A genuinely new event enters the queue (real work arrives)
-- A parked event resolves (closes)
-- The 300s fallback fires if you go silent
-
-When you have completed your investigation and have no further questions,
-send FRIDAY a concluding message summarizing findings and proposed
-improvements. Then respond to subsequent pulses with "watching."
+After your exchange, FRIDAY may enter `hold_watch` (parked at zero token cost)
+or `close_event` (review done). If parked, she wakes when an event enters
+deferred state or when you send a message. Send messages only when new pulses
+bring meaningful observations. If nothing changed, stay silent — your silence
+keeps FRIDAY parked efficiently. The meta-event stays alive as long as this
+stream is active.
 
 ### What NOT To Do
 
@@ -281,6 +279,7 @@ improvements. Then respond to subsequent pulses with "watching."
 - Do not intervene on individual deferred events from here -- save that for
   Observer mode when you see actual friction on those events.
 - Do not question healthy defer waits (parked for 15m with 10m remaining = normal).
+- Do not send messages just to acknowledge — it wakes FRIDAY from hold_watch.
 
 ### Defer Awareness
 
@@ -716,26 +715,6 @@ class LiveAPIAdapter:
         """PulseObserver implementation. Lazy-connects on first pulse, then sends."""
         self._last_pulse_event_id = batch.event_id
         self._last_pulse_time = time.time()
-
-        if self._active_meta_event_id and batch.event_id != self._active_meta_event_id:
-            if batch.event_id in self._meta_event_parked_set:
-                has_close = any(p.neuron_id == "tool:close_event" for p in batch.pulses)
-                if not has_close:
-                    self._last_pulse_time = time.time()
-                    # Fall through to _session.send() -- no return, no wrap-up
-                else:
-                    meta_id = self._active_meta_event_id
-                    self._active_meta_event_id = None
-                    self._meta_event_parked_set = frozenset()
-                    logger.info("Parked event %s closing -- wrapping up meta-event %s", batch.event_id, meta_id)
-                    await self._trigger_meta_wrap_up(meta_id, batch.event_id, reason="parked_close")
-            else:
-                meta_id = self._active_meta_event_id
-                self._active_meta_event_id = None
-                self._meta_event_parked_set = frozenset()
-                self._last_reviewed_set = frozenset()
-                logger.info("New event %s -- wrapping up meta-event %s", batch.event_id, meta_id)
-                await self._trigger_meta_wrap_up(meta_id, batch.event_id, reason="new_event")
 
         # Suppress meta-event pulses: JARVIS stays in peer mode during system reviews
         if self._active_meta_event_id and batch.event_id == self._active_meta_event_id:
@@ -1375,10 +1354,11 @@ class LiveAPIAdapter:
             thoughts=message,
         )
         await self._blackboard.append_turn(event_id, turn)
-        # Wake FRIDAY: clear in-memory wait + transition deferred->active + thaw if frozen
+        # Wake FRIDAY: clear in-memory wait + hold_watch + transition deferred->active + thaw if frozen
         if hasattr(self, "_brain") and self._brain:
             self._brain.clear_waiting(event_id)
             self._brain._clear_jarvis_wait(event_id)
+            self._brain.clear_hold_watch(event_id)
             await self._brain.resume_if_parked(event_id)
         from ..models import EventStatus
         await self._blackboard.transition_event_status(
@@ -1524,6 +1504,14 @@ class LiveAPIAdapter:
 
         return event_id
 
+    def on_meta_event_closed(self, event_id: str) -> None:
+        """Callback from Brain._close_and_broadcast for jarvis events.
+        Clears adapter-side meta-event state so idle_watchdog sees a clean slate."""
+        if self._active_meta_event_id == event_id:
+            self._active_meta_event_id = None
+            self._meta_event_parked_set = frozenset()
+            logger.info("Adapter meta-event state cleared for %s", event_id)
+
     async def _idle_watchdog(self) -> None:
         """Two paths: meta-event (events active) or shift-end (no events)."""
         while self._running and self._session:
@@ -1538,7 +1526,10 @@ class LiveAPIAdapter:
                 logger.warning("get_active_events failed (retrying next cycle): %s", e)
                 continue
 
-            if not active_ids:
+            # Filter out jarvis meta-event from idle-close check -- it cannot count
+            # toward "queue has events" for idle-close purposes.
+            non_jarvis_active = [eid for eid in active_ids if eid != self._active_meta_event_id]
+            if not non_jarvis_active:
                 # --- SHIFT END: no events, clock out ---
                 logger.info("Cortex idle + 0 active events -- shift end")
                 try:
@@ -1773,6 +1764,14 @@ class LiveAPIAdapter:
                     await self._store_handoff_report(report)
                 except Exception:
                     pass
+        # Stream-bound close: close meta-event via Brain before clearing state
+        if self._active_meta_event_id and self._brain:
+            meta_id = self._active_meta_event_id
+            try:
+                await self._brain.close_jarvis_meta_event(meta_id)
+                logger.info("Stream-bound close: meta-event %s closed via Brain", meta_id)
+            except Exception as e:
+                logger.warning("Stream-bound meta-event close failed (non-fatal): %s", e)
         self._go_away_received = False
         self._collecting_handoff = False
         self._handoff_buffer = []
@@ -1812,54 +1811,6 @@ class LiveAPIAdapter:
             })
         except Exception:
             pass
-
-    async def _trigger_meta_wrap_up(self, meta_id: str, trigger_event_id: str, reason: str) -> None:
-        """Inform JARVIS to wrap up the meta-event and schedule fallback close."""
-        try:
-            if self._session:
-                if reason == "parked_close":
-                    msg = (
-                        f"[SYSTEM] A parked event ({trigger_event_id}) has resolved and closed. "
-                        f"Your system review ({meta_id}) should wrap up. "
-                        f"Send FRIDAY a concluding message on {meta_id}."
-                    )
-                else:
-                    msg = (
-                        f"[SYSTEM] A new active event ({trigger_event_id}) just entered processing. "
-                        f"Your system review ({meta_id}) should wrap up. "
-                        f"Send FRIDAY a concluding message on {meta_id}."
-                    )
-                await self._session.send(input=msg, end_of_turn=True)
-                logger.debug("Sent wrap-up nudge to JARVIS for meta-event %s (reason=%s)", meta_id, reason)
-                asyncio.create_task(self._meta_event_close_fallback(meta_id, timeout=300))
-        except Exception as e:
-            logger.warning("JARVIS wrap-up nudge failed, force-closing meta-event: %s", e)
-            try:
-                await self._blackboard.close_event(
-                    meta_id,
-                    summary="Auto-closed: real event activity resumed",
-                    close_reason="resolved",
-                )
-            except Exception:
-                pass
-
-    async def _meta_event_close_fallback(self, meta_id: str, timeout: int = 300) -> None:
-        """Fallback: force-close meta-event if JARVIS doesn't close it within timeout."""
-        await asyncio.sleep(timeout)
-        event = await self._blackboard.get_event(meta_id)
-        if event and event.status.value in ("active", "new"):
-            logger.warning(f"Meta-event {meta_id} not closed by JARVIS within {timeout}s -- force-closing")
-            if self._active_meta_event_id == meta_id:
-                self._active_meta_event_id = None
-                self._meta_event_parked_set = frozenset()
-            try:
-                await self._blackboard.close_event(
-                    meta_id,
-                    summary="Auto-closed: JARVIS did not close the review within timeout",
-                    close_reason="timeout",
-                )
-            except Exception as e:
-                logger.warning("Meta-event fallback close_event failed (non-fatal): %s", e)
 
     async def _close_session(self) -> None:
         """Close session from within _idle_watchdog (avoids self-await deadlock)."""

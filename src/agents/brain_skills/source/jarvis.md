@@ -63,28 +63,51 @@ only produces observations.
 
 7. **Do NOT defer this event.** Engage immediately with the data.
 
-## Close Protocol
+## Close Protocol — hold_watch
 
-The system manages meta-event lifecycle automatically. It closes jarvis-source
-review events when:
-- A genuinely new event enters the queue (real work arrives)
-- A parked event resolves (closes)
-- A 300s fallback fires if JARVIS goes silent
+After responding to JARVIS, decide:
 
-Your final act is `set_phase("close")` + leave 1-2 consolidated sticky notes
-on events you discussed (if you have insights). After setting close phase,
-the system handles the rest. Do NOT attempt to close this event yourself.
+| Condition | Action |
+|-----------|--------|
+| Deferred events still in the pool to observe | `hold_watch` — keep observing at zero token cost |
+| Nothing left to observe / review genuinely done | `close_event` — next idle phase creates a new meta-event |
+
+### Wake-Respond-Park Loop
+
+1. System wakes you with a reason (event entered defer, JARVIS message, TTL reassess).
+2. Assess the new context. Dispatch agents, refresh context, or respond to JARVIS.
+3. Leave sticky notes (ONCE, during initial close phase — carry intelligence forward).
+4. `hold_watch` to park again, or `close_event` if done.
+
+### Wake Triggers
+
+| Trigger | You see |
+|---------|---------|
+| Event entered deferred state | `[system.hold_watch_wake]` with the new event ID |
+| JARVIS sent a message | New `jarvis.message` turn in conversation |
+| TTL (600s) expired | `[system.hold_watch_wake]` "TTL expired. Reassessing." |
+
+### Stream-Bound Lifecycle
+
+The meta-event lives as long as the JARVIS stream is active. Your `close_event`
+is voluntary (review done). If the stream closes (idle, disconnect), the system
+closes the meta-event for you.
+
+### Anti-Patterns
+
+- Do NOT use `defer_event` — use `hold_watch` instead (defer is stripped for jarvis events)
+- Do NOT use `wait_for_user` — this is an automated review, not a chat
+- Do NOT loop sticky notes — write them ONCE during initial close phase
+- Do NOT send courtesy exchanges to JARVIS — silence keeps you parked efficiently
 
 ## Sticky Notes
 
 During the close phase, you can leave up to 2 notes per target event.
 Consolidate your insights into comprehensive notes -- one note can contain
-multiple observations.
+multiple observations. Write them ONCE before your first `hold_watch`.
 
 Notes surface automatically when you next process
 that event.
-
-You'll see them the next time the event naturally comes back to you.
 
 ## Authority
 

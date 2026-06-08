@@ -860,6 +860,28 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["event_id"],
         },
     },
+    # --- hold_watch (gated: jarvis-sourced + close phase only) ---
+    {
+        "name": "hold_watch",
+        "description": (
+            "Park with zero token cost while keeping this meta-event alive. The system "
+            "wakes you when an event enters the deferred state (new idle member to observe) "
+            "or when JARVIS sends a new message. Use in the close phase of jarvis-sourced "
+            "events when you want to keep observing the deferred pool. Upon waking, assess "
+            "the new context, respond, then hold_watch again. If nothing remains to observe, "
+            "use close_event instead."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "context": {
+                    "type": "string",
+                    "description": "Brief note on what you observed before parking (for the wake turn log)",
+                },
+            },
+            "required": ["context"],
+        },
+    },
     # --- Observation tools (gated: NOT available in close phase) ---
     {
         "name": "record_observation",

@@ -1561,6 +1561,30 @@ class BlackboardState:
         """Get all active event IDs."""
         return list(await self.redis.smembers(self.EVENT_ACTIVE))
 
+    async def get_active_events_with_status(self) -> dict[str, str]:
+        """Get all active event IDs with their current status.
+
+        Returns dict[event_id, status_string]. Uses pipeline for efficiency.
+        Covers all IDs in the EVENT_ACTIVE set (new, active, deferred).
+        """
+        members = list(await self.redis.smembers(self.EVENT_ACTIVE))
+        if not members:
+            return {}
+        pipe = self.redis.pipeline(transaction=False)
+        for eid in members:
+            pipe.get(f"{self.EVENT_PREFIX}{eid}")
+        results = await pipe.execute()
+        status_map: dict[str, str] = {}
+        for eid, raw in zip(members, results):
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+                status_map[eid] = data.get("status", "active")
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return status_map
+
     async def find_active_event_by_source(self, source: str) -> str | None:
         """Find an active event by source. Returns event_id or None."""
         for eid in await self.redis.smembers(self.EVENT_ACTIVE):

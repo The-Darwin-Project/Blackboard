@@ -28,6 +28,11 @@
 # 31. [Pattern]: _reasoning_by_event (dict[str, str | None]) keyed by event_id. Set in _process_with_llm
 #     before _execute_function_call, consumed via .pop() in _emit_executive_pulse, cleared on error/text-only
 #     paths, _process_intermediate, and _close_and_broadcast. JARVIS sees reasoning via PulseBatch.reasoning.
+# 32. [Pattern]: _hold_watch_events + _hold_watch_park_time: zero-cost FRIDAY parking for jarvis meta-events.
+#     Scan wakes on new deferred ID (set-diff), unread system turns, or 600s TTL. Cleared in
+#     clear_hold_watch(), _close_and_broadcast(). Orphan recovery in _recover_hold_watch_orphans().
+# 33. [Pattern]: _active_meta_event_id (Brain-side mirror): set in _process_event_inner for jarvis events,
+#     cleared in _close_and_broadcast. Enables defer_event notification injection without cross-component calls.
 # 28. [Debt]: defer_event handler (~2064) uses read-modify-write (get_event -> set status -> redis.set) without
 #     WATCH/MULTI/EXEC. Protected by per-event asyncio.Lock, but external concurrent writes (REST endpoints)
 #     could theoretically lose turns. Pre-existing pattern -- refactor to use transition_event_status() or
@@ -432,6 +437,11 @@ class Brain:
         self._reasoning_by_event: dict[str, str | None] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
         self._defer_wake_events: set[str] = set()
+        # hold_watch: zero-cost FRIDAY parking for jarvis meta-events
+        self._hold_watch_events: dict[str, set[str]] = {}       # meta_event_id -> deferred IDs at park time
+        self._hold_watch_park_time: dict[str, float] = {}       # meta_event_id -> epoch when parked
+        # Brain-side mirror of active meta-event ID (set on creation, cleared on close)
+        self._active_meta_event_id: str | None = None
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
         self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
@@ -658,6 +668,10 @@ class Brain:
         if event.status == EventStatus.CLOSED:
             logger.debug(f"Skipping closed event {event_id}")
             return
+
+        # Mirror active meta-event ID on first process of a jarvis event
+        if event.source == "jarvis" and self._active_meta_event_id != event_id:
+            self._active_meta_event_id = event_id
 
         # WAITING-FOR-AGENT guard: skip processing until a participant responds.
         # Any DELIVERED turn (from agent, JARVIS, user, aligner) clears the wait --
@@ -1133,6 +1147,10 @@ class Brain:
         if event.source != "jarvis":
             active_tools = [t for t in active_tools if t["name"] != "inspect_event"]
 
+        # === hold_watch gate ===
+        if not (event.source == "jarvis" and brain_phase == "close"):
+            active_tools = [t for t in active_tools if t["name"] != "hold_watch"]
+
         # === Sticky notes gates ===
         if not (event.source == "jarvis" and brain_phase == "close"):
             active_tools = [t for t in active_tools if t["name"] != "post_sticky_note"]
@@ -1150,7 +1168,7 @@ class Brain:
             "execute":      {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event"},
             "verify":       {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
             "escalate":     {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
-            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note"},
+            "close":        {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
         }
         # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
         if brain_phase == "triage" or event.source == "jarvis":
@@ -2909,6 +2927,18 @@ class Brain:
                 narrative=f"Event {event_id} deferred for {delay}s: {reason[:80]}",
             )
             logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
+            # Notify active meta-event: inject [SYSTEM] turn if FRIDAY is mid-processing (not parked)
+            meta_id = self._active_meta_event_id
+            if meta_id and meta_id != event_id and meta_id not in self._hold_watch_events:
+                service = event.service if event else "unknown"
+                notify_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(meta_id)),
+                    actor="system",
+                    action="notification",
+                    thoughts=f"[SYSTEM] evt-{event_id[:8]} ({service}) entered deferred state.",
+                )
+                await self._append_and_broadcast(meta_id, notify_turn)
+                logger.debug("Injected defer notification into active meta-event %s for %s", meta_id, event_id)
             return False
 
         elif function_name == "wait_for_user":
@@ -3021,6 +3051,43 @@ class Brain:
             max_nudges = max(0, 3 - self._jarvis_wait_count[event_id])
             task = asyncio.create_task(self._jarvis_nudge_loop(event_id, max_nudges))
             self._jarvis_wait_tasks[event_id] = task
+            return False
+
+        elif function_name == "hold_watch":
+            event = await self.blackboard.get_event(event_id)
+            if not event:
+                return False
+            if event.source != "jarvis" or (event.brain_phase or "triage") != "close":
+                reject_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts="hold_watch is only available for jarvis-sourced events in the close phase.",
+                    response_parts=response_parts,
+                )
+                await self._append_and_broadcast(event_id, reject_turn)
+                return True
+            self._clear_jarvis_wait(event_id)
+            active_status_map = await self.blackboard.get_active_events_with_status()
+            parked_deferred = {
+                eid for eid, status in active_status_map.items()
+                if eid != event_id and status == "deferred"
+            }
+            self._hold_watch_events[event_id] = parked_deferred
+            self._hold_watch_park_time[event_id] = time.time()
+            context = args.get("context", "")
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="hold_watch",
+                thoughts=f"Parking: {context}" if context else "Parking in hold_watch",
+                waitingFor="hold_watch",
+            )
+            await self._append_and_broadcast(event_id, turn)
+            logger.info(
+                "hold_watch parked %s (deferred_snapshot=%d)",
+                event_id, len(parked_deferred),
+            )
             return False
 
         elif function_name == "lookup_service":
@@ -4952,6 +5019,23 @@ class Brain:
         logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
 
+    def clear_hold_watch(self, event_id: str) -> None:
+        """Clear hold_watch state. Called by LiveAPIAdapter on JARVIS message wake."""
+        self._hold_watch_events.pop(event_id, None)
+        self._hold_watch_park_time.pop(event_id, None)
+
+    async def close_jarvis_meta_event(self, event_id: str) -> None:
+        """Called by adapter on stream teardown. Routes to _close_and_broadcast."""
+        try:
+            event = await self.blackboard.get_event(event_id)
+            if event and event.source == "jarvis":
+                await self._close_and_broadcast(
+                    event_id, "Stream teardown", close_reason="stream_close",
+                )
+        finally:
+            if self._active_meta_event_id == event_id:
+                self._active_meta_event_id = None
+
     def register_channel(self, channel_broadcast: BroadcastPort) -> None:
         """Register an additional broadcast target (e.g., Slack, Dashboard WS)."""
         self._broadcast_targets.append(channel_broadcast)
@@ -5070,10 +5154,12 @@ class Brain:
 
     async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
         """Close an event and broadcast the closure to UI."""
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.status.value == "closed":
+            return
         if self._ephemeral_provisioner:
             await self._ephemeral_provisioner.terminate_agent(event_id)
         await self.cancel_active_task(event_id, f"Event closing: {summary}")
-        event = await self.blackboard.get_event(event_id)
         await self.blackboard.close_event(event_id, summary, close_reason=close_reason)
         # Persist report snapshot (non-fatal)
         try:
@@ -5097,6 +5183,11 @@ class Brain:
                 except Exception as e:
                     logger.warning(f"Deep memory archive failed (non-fatal): {e}")
         # Clean up all per-event state to prevent memory leaks
+        self.clear_hold_watch(event_id)
+        if event and event.source == "jarvis":
+            self._active_meta_event_id = None
+            if self._live_adapter and hasattr(self._live_adapter, "on_meta_event_closed"):
+                self._live_adapter.on_meta_event_closed(event_id)
         self._routing_depth.pop(event_id, None)
         self._waiting_for_user.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
@@ -5495,6 +5586,13 @@ class Brain:
 
             # Close events that have turns (were being processed) -- they're stale from the previous instance
             if event.conversation:
+                # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
+                if (
+                    event.source == "jarvis"
+                    and event.conversation[-1].waitingFor == "hold_watch"
+                ):
+                    logger.info(f"Exempting hold_watch orphan from stale cleanup: {eid}")
+                    continue
                 self._clear_jarvis_wait(eid)
                 self._jarvis_wait_count.pop(eid, None)
                 self._recall_lessons.pop(eid, None)
@@ -5542,6 +5640,23 @@ class Brain:
         if stale_count:
             logger.info(f"Startup cleanup: closed {stale_count} stale events from previous instance")
 
+    async def _recover_hold_watch_orphans(self) -> None:
+        """Reconstruct hold_watch state for jarvis meta-events that survived stale cleanup."""
+        try:
+            active_ids = await self.blackboard.get_active_events()
+            for eid in active_ids:
+                event = await self.blackboard.get_event(eid)
+                if not event or event.source != "jarvis" or not event.conversation:
+                    continue
+                if event.conversation[-1].waitingFor != "hold_watch":
+                    continue
+                self._hold_watch_events[eid] = set()
+                self._hold_watch_park_time[eid] = time.time()
+                self._active_meta_event_id = eid
+                logger.info("Recovered hold_watch orphan: %s (baseline=empty set)", eid)
+        except Exception as e:
+            logger.warning("hold_watch orphan recovery failed (non-fatal): %s", e)
+
     async def start_event_loop(self) -> None:
         """Start the ReconcileScheduler with trigger-based event processing.
 
@@ -5555,6 +5670,7 @@ class Brain:
 
         self._running = True
         await self._cleanup_stale_events()
+        await self._recover_hold_watch_orphans()
 
         self._scheduler = ReconcileScheduler(
             reconcile_fn=self.process_event,
@@ -5622,7 +5738,8 @@ class Brain:
         orphan handling, defer re-activation. Pure decision logic
         delegates to the validated _scan_logic pattern from Probe B.
         """
-        active = await self.blackboard.get_active_events()
+        active_status_map = await self.blackboard.get_active_events_with_status()
+        active = list(active_status_map.keys())
 
         # Keep embedding warm while events are in flight (60s throttle)
         if active and self._memory_reflex_enabled:
@@ -5710,6 +5827,62 @@ class Brain:
             if unseen:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
+
+            # hold_watch: zero-cost parking for jarvis meta-events
+            if eid in self._hold_watch_events:
+                parked_deferred = self._hold_watch_events[eid]
+                current_deferred = {
+                    e for e, status in active_status_map.items()
+                    if e != eid and status == "deferred"
+                }
+                new_deferred = current_deferred - parked_deferred
+                if new_deferred:
+                    self._hold_watch_events.pop(eid)
+                    self._hold_watch_park_time.pop(eid, None)
+                    wake_reason = f"entered defer: {', '.join(sorted(new_deferred))}"
+                    wake_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(eid)),
+                        actor="system",
+                        action="hold_watch_wake",
+                        thoughts=f"hold_watch woke: {wake_reason}",
+                    )
+                    await self._append_and_broadcast(eid, wake_turn)
+                    to_enqueue.append(eid)
+                    continue
+                hw_idx = next(
+                    (i for i in range(len(event.conversation) - 1, -1, -1)
+                     if event.conversation[i].action == "hold_watch"),
+                    -1,
+                )
+                if hw_idx < 0:
+                    logger.warning("hold_watch state without hold_watch turn for %s, force-waking", eid)
+                    self._hold_watch_events.pop(eid)
+                    self._hold_watch_park_time.pop(eid, None)
+                    to_enqueue.append(eid)
+                    continue
+                has_unread_hw = any(
+                    t.status.value == "delivered"
+                    for t in event.conversation[hw_idx + 1:]
+                )
+                if has_unread_hw:
+                    self._hold_watch_events.pop(eid)
+                    self._hold_watch_park_time.pop(eid, None)
+                    to_enqueue.append(eid)
+                    continue
+                park_time = self._hold_watch_park_time.get(eid, 0)
+                if time.time() - park_time > 600:
+                    self._hold_watch_events.pop(eid)
+                    self._hold_watch_park_time.pop(eid, None)
+                    ttl_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(eid)),
+                        actor="system",
+                        action="hold_watch_wake",
+                        thoughts="hold_watch TTL expired (600s). Reassessing.",
+                    )
+                    await self._append_and_broadcast(eid, ttl_turn)
+                    to_enqueue.append(eid)
+                    continue
+                continue  # Skip standard enqueue AND safety net for hold_watch events
 
             # JARVIS wait check
             if eid in self._waiting_for_jarvis:
