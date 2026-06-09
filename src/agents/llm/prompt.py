@@ -123,6 +123,8 @@ def _build_subject_block(
         lines.append(f"  MR: !{gl.get('mr_iid', '')} - {gl.get('mr_title', '')}")
         lines.append(f"  MR URL: {gl.get('target_url', '')}")
         lines.append(f"  Pipeline: {gl.get('pipeline_status', 'unknown')}")
+        if gl.get("pipeline_id"):
+            lines.append(f"  Pipeline ID: {gl['pipeline_id']}")
         lines.append(f"  Merge Status: {gl.get('merge_status', '')}")
         lines.append(f"  Source Branch: {gl.get('source_branch', '')}")
         lines.append(f"  Author: {gl.get('author', '')}")

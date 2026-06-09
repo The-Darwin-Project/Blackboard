@@ -3,7 +3,7 @@
 # 1. [Pattern]: Follows Aligner pattern -- in-process daemon, lazy-loaded LLM adapter via _get_adapter().
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
 # 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
-# 4. [Pattern]: Single-tier LLM analysis via HEADHUNTER_SYSTEM_INSTRUCTION. Bot Instructions flow as MR description context in prompt. Emergency _emergency_plan() when LLM unavailable.
+# 4. [Pattern]: Single-tier LLM analysis via _load_gitlab_si() from headhunter_skills/gitlab-mr-triage.md. Bot Instructions flow as MR description context in prompt. _EMERGENCY_SI fallback when skill file missing; _emergency_plan() when LLM unavailable.
 # 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
 # 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up. Brain calls
@@ -33,6 +33,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+from pathlib import Path
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
@@ -57,76 +58,44 @@ MAX_CHANGED_FILES = 20
 FAILED_LOG_TAIL = 50
 MAX_CI_NOTES = 10
 
-HEADHUNTER_SYSTEM_INSTRUCTION = """\
-# Headhunter — GitLab MR Triage Agent
+_SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
 
-You are the Headhunter, a triage agent in the Darwin autonomous AI operations platform.
-Your job: read GitLab MR context, classify the situation, and produce a structured work plan
-that the operations Brain can execute through its agents.
-
-## Your Output
-
-Produce ONLY a YAML frontmatter plan wrapped in `---` delimiters. Nothing else.
-
-The `steps` array must match the Brain's plan activation schema exactly:
+_EMERGENCY_SI = """\
+You are a triage agent for GitLab MRs. Read the MR context and produce ONLY
+a YAML frontmatter plan wrapped in --- delimiters. Nothing else.
 
 ```yaml
 ---
 plan: "[Action verb] [target] in [repository]"
-service: [component name from the project path]
+service: [component name]
 repository: [GitLab project path]
 domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
-reasoning: "[One sentence: why this plan sequence]"
+reasoning: "[One sentence]"
 steps:
   - id: "1"
-    agent: [agent name]
-    summary: "[What this step accomplishes — include MR IID, branch, error details]"
-  - id: "2"
-    agent: [agent name]
-    summary: "[What this step accomplishes]"
+    agent: [sysadmin|developer|qe|architect]
+    summary: "[What this step accomplishes -- include MR IID, branch, error details]"
 ---
 ```
 
-## Domain Classification
-
-Classify the MR situation using evidence from the context provided:
-
-| Domain | When | Plan shape |
-|---|---|---|
-| CLEAR | Known fix: pipeline retry, routine merge, bot MR with explicit instructions | 1-3 steps, direct execution |
-| COMPLICATED | Needs analysis: test failures with unclear cause, merge conflicts, multiple failing jobs | 2-4 steps, investigation then action |
-| COMPLEX | Novel or contradictory: never-seen error pattern, cascading failures across services | 1-2 probe steps (safe-to-fail investigation) |
-
-## Available Agents
-
-Assign each step to exactly one agent:
-
-| Agent | Use for |
-|---|---|
-| sysadmin | Kubernetes operations, GitOps mutations, cluster inspection, Kargo promotions |
-| developer | Code changes, MR/PR operations (comment, merge, retest), code inspection, pipeline log analysis |
-| qe | Test execution, deployment verification, browser-based UI checks |
-| architect | Architecture analysis, code review, structured planning |
-
-## Risk Assessment
-
-| Risk | Criteria |
-|---|---|
-| low | Read-only investigation, routine merge, pipeline retry |
-| medium | Code changes, configuration updates, merge with conflicts |
-| high | Production deployments, rollbacks, changes to shared infrastructure |
-
-## Rules
-
-1. Steps describe WHAT needs to happen. The Brain decides WHEN and handles dispatch.
-2. If the MR description contains a "Bot Instructions" section, incorporate those instructions \
-into your plan steps. They are explicit directives from the MR author.
-3. For pipeline failures, include the failed job names and error context in the step summary.
-4. Keep step summaries specific: include MR IID, project path, branch names, and error details.
-5. For COMPLICATED situations, explain your reasoning in the plan summary line.
-6. If the MR is already merged or closed, produce a single-step plan to verify and close.
+Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review).
+Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
 """
+
+
+def _load_gitlab_si() -> str:
+    """Load GitLab MR triage system instruction from skills directory."""
+    skill_path = _SKILLS_DIR / "gitlab-mr-triage.md"
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+        if content.strip():
+            return content
+        logger.warning("GitLab MR triage skill file is empty, using emergency fallback")
+        return _EMERGENCY_SI
+    except OSError as e:
+        logger.warning(f"GitLab MR triage skill not loadable ({e}), using emergency fallback")
+        return _EMERGENCY_SI
 
 def _get_static_maintainer_emails() -> list[str]:
     """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
@@ -311,7 +280,7 @@ class Headhunter:
             "mr_title": target.get("title", ""),
             "mr_description": (target.get("description") or "")[:2000],
             "mr_state": target.get("state", ""),
-            "merge_status": target.get("merge_status", ""),
+            "merge_status": target.get("detailed_merge_status") or target.get("merge_status", ""),
             "source_branch": target.get("source_branch", ""),
             "target_branch": target.get("target_branch", ""),
             "author": target.get("author", {}).get("username", ""),
@@ -344,26 +313,28 @@ class Headhunter:
                 pipelines = pipe_resp.json()
                 if pipelines:
                     pipeline_status = pipelines[0].get("status", "unknown")
+                    context["pipeline_id"] = pipelines[0].get("id")
                     if action == "build_failed" and pipeline_status == "failed":
-                        pipe_id = pipelines[0]["id"]
-                        jobs_resp = await client.get(
-                            self._api_url(f"/projects/{project_id}/pipelines/{pipe_id}/jobs"),
-                            headers=headers,
-                        )
-                        if jobs_resp.is_success:
-                            all_jobs = jobs_resp.json()
-                            failed_jobs = [j for j in all_jobs if j.get("status") == "failed"]
-                            context["failed_job_count"] = len(failed_jobs)
-                            context["total_job_count"] = len(all_jobs)
-                            if failed_jobs:
-                                context["failed_job_names"] = [j.get("name", "unknown") for j in failed_jobs]
-                                trace_resp = await client.get(
-                                    self._api_url(f"/projects/{project_id}/jobs/{failed_jobs[0]['id']}/trace"),
-                                    headers=headers,
-                                )
-                                if trace_resp.is_success:
-                                    lines = trace_resp.text.splitlines()
-                                    failed_job_log = "\n".join(lines[-FAILED_LOG_TAIL:])
+                        pipe_id = context.get("pipeline_id")
+                        if pipe_id:
+                            jobs_resp = await client.get(
+                                self._api_url(f"/projects/{project_id}/pipelines/{pipe_id}/jobs"),
+                                headers=headers,
+                            )
+                            if jobs_resp.is_success:
+                                all_jobs = jobs_resp.json()
+                                failed_jobs = [j for j in all_jobs if j.get("status") == "failed"]
+                                context["failed_job_count"] = len(failed_jobs)
+                                context["total_job_count"] = len(all_jobs)
+                                if failed_jobs:
+                                    context["failed_job_names"] = [j.get("name", "unknown") for j in failed_jobs]
+                                    trace_resp = await client.get(
+                                        self._api_url(f"/projects/{project_id}/jobs/{failed_jobs[0]['id']}/trace"),
+                                        headers=headers,
+                                    )
+                                    if trace_resp.is_success:
+                                        lines = trace_resp.text.splitlines()
+                                        failed_job_log = "\n".join(lines[-FAILED_LOG_TAIL:])
 
             context["pipeline_status"] = pipeline_status
             context["failed_job_log"] = failed_job_log
@@ -400,7 +371,7 @@ class Headhunter:
         return context
 
     # =========================================================================
-    # LLM Analysis (placeholder -- Step 3 probe will finalize the prompt)
+    # LLM Analysis
     # =========================================================================
 
     async def analyze_and_plan(self, context: dict) -> tuple[str, str]:
@@ -419,7 +390,7 @@ class Headhunter:
         prompt = self._build_analysis_prompt(context)
         try:
             response = await adapter.generate(
-                system_prompt=HEADHUNTER_SYSTEM_INSTRUCTION,
+                system_prompt=_load_gitlab_si(),
                 contents=prompt,
                 temperature=self._temperature,
                 max_output_tokens=10000,
@@ -436,28 +407,34 @@ class Headhunter:
     @staticmethod
     def _emergency_plan(context: dict) -> str:
         """Minimal YAML plan when LLM is unavailable. Assigns developer/investigate."""
+        action = context.get("action_name", "unknown")
+        title = context.get("mr_title", "unknown MR")
+        project = context.get("project_path", "unknown")
+        iid = context.get("mr_iid", "?")
         return (
-            f"---\nplan: Investigate {context['action_name']} on {context['mr_title']}\n"
-            f"service: {context['project_path'].rsplit('/', 1)[-1]}\n"
-            f"repository: {context['project_path']}\n"
+            f"---\nplan: Investigate {action} on {title}\n"
+            f"service: {project.rsplit('/', 1)[-1]}\n"
+            f"repository: {project}\n"
             f"domain: COMPLICATED\nrisk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
             f"steps:\n  - id: \"1\"\n    agent: developer\n"
-            f"    summary: \"Investigate {context['action_name']} on !{context.get('mr_iid', '?')} "
-            f"in {context['project_path']}. LLM triage failed -- review MR manually.\"\n---"
+            f"    summary: \"Investigate {action} on !{iid} "
+            f"in {project}. LLM triage failed -- review MR manually.\"\n---"
         )
 
     def _build_analysis_prompt(self, context: dict) -> str:
         """Build structured prompt with full MR context for LLM analysis."""
         parts = [
-            f"Action: {context['action_name']}",
-            f"MR: {context['mr_title']}",
-            f"State: {context['mr_state']} | Merge status: {context['merge_status']}",
-            f"Branch: {context['source_branch']} -> {context['target_branch']}",
-            f"Author: {context['author']}",
-            f"Pipeline: {context['pipeline_status']}",
-            f"Project: {context['project_path']}",
+            f"Action: {context.get('action_name', 'unknown')}",
+            f"MR: {context.get('mr_title', 'unknown')}",
+            f"State: {context.get('mr_state', 'unknown')} | Merge status: {context.get('merge_status', 'unknown')}",
+            f"Branch: {context.get('source_branch', '?')} -> {context.get('target_branch', '?')}",
+            f"Author: {context.get('author', 'unknown')}",
+            f"Pipeline: {context.get('pipeline_status', 'unknown')}",
         ]
+        if context.get("pipeline_id"):
+            parts.append(f"Pipeline ID: {context['pipeline_id']}")
+        parts.append(f"Project: {context['project_path']}")
         if context.get("mr_description"):
             parts.append(f"MR Description:\n{context['mr_description']}")
         if context.get("changed_files"):
@@ -532,12 +509,13 @@ class Headhunter:
                 "mr_iid": target["iid"],
                 "mr_title": target["title"],
                 "mr_state": target.get("state", ""),
-                "merge_status": target.get("merge_status", ""),
+                "merge_status": context.get("merge_status", ""),
                 "source_branch": target.get("source_branch", ""),
                 "target_branch": target.get("target_branch", ""),
                 "author": target.get("author", {}).get("username", ""),
                 "target_url": todo.get("target_url", "").split("#")[0],
                 "pipeline_status": pipeline_status,
+                "pipeline_id": context.get("pipeline_id"),
                 "todo_created_at": todo.get("created_at", ""),
                 "mr_description": (target.get("description") or "")[:2000],
                 "maintainer": maintainer,
@@ -607,7 +585,17 @@ class Headhunter:
                     merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
                     if mr_state in ("merged", "closed"):
                         state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
+                else:
+                    logger.warning(f"refresh_mr_state: MR fetch HTTP {mr_resp.status_code} for {event_id}")
+                    return {
+                        "error": f"MR fetch failed: HTTP {mr_resp.status_code}",
+                        "pipeline_status": gl_ctx.get("pipeline_status", "unknown"),
+                        "mr_state": gl_ctx.get("mr_state", "unknown"),
+                        "merge_status": gl_ctx.get("merge_status", "unknown"),
+                        "severity": event.event.evidence.severity if event.event.evidence else "warning",
+                    }
 
+                pipeline_id = gl_ctx.get("pipeline_id")
                 pipe_resp = await client.get(
                     self._api_url(f"/projects/{project_id}/pipelines"),
                     headers=headers,
@@ -618,6 +606,7 @@ class Headhunter:
                     pipelines = pipe_resp.json()
                     if pipelines:
                         pipeline_status = pipelines[0].get("status", "unknown")
+                        pipeline_id = pipelines[0].get("id")
 
         except Exception as e:
             logger.warning(f"refresh_mr_state: GitLab API error for {event_id}: {e}")
@@ -628,6 +617,7 @@ class Headhunter:
         severity = self._classify_severity(action_name, pipeline_status)
         result = {
             "pipeline_status": pipeline_status,
+            "pipeline_id": pipeline_id,
             "mr_state": mr_state,
             "merge_status": merge_status,
             "severity": severity,

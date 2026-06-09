@@ -3738,6 +3738,7 @@ class Brain:
                 lines = [
                     f"MR State: {mr_state}",
                     f"Pipeline: {state['pipeline_status']}",
+                    f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}",
                     f"Severity: {state['severity']}",
                 ]
                 changed_at = state.get("state_changed_at", "")
@@ -3764,6 +3765,7 @@ class Brain:
                 result_text = (
                     f"MR State: {mr_state}\n"
                     f"Pipeline: {state['pipeline_status']}\n"
+                    f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}\n"
                     f"{merge_line}\n"
                     f"Severity: {state['severity']}"
                 )
@@ -5294,6 +5296,8 @@ class Brain:
                 lines.append(f"- **MR URL:** {gl.get('target_url', '')}")
                 lines.append(f"- **Action:** {gl.get('action_name', '')}")
                 lines.append(f"- **Pipeline:** {gl.get('pipeline_status', 'unknown')}")
+                if gl.get("pipeline_id"):
+                    lines.append(f"- **Pipeline ID:** {gl['pipeline_id']}")
                 lines.append(f"- **Merge Status:** {gl.get('merge_status', '')}")
                 lines.append(f"- **Source Branch:** {gl.get('source_branch', '')}")
                 lines.append(f"- **Target Branch:** {gl.get('target_branch', '')}")

@@ -15,14 +15,14 @@ alwaysApply: true
 
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). Single-tier LLM analysis with `HEADHUNTER_SYSTEM_INSTRUCTION`.
+* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
 * **Flow Gate:** `maxActive` controls both headhunter event creation AND ephemeral agent concurrency. It is the single knob for headhunter throughput. Read by both Headhunter (event creation) and EphemeralProvisioner (agent spawning via `HEADHUNTER_MAX_ACTIVE` env var).
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
 
 ## LLM Analysis
 
-All MRs go through Flash Lite analysis with `HEADHUNTER_SYSTEM_INSTRUCTION` (module-level constant, Aligner SI pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, and risk assessment.
+All MRs go through Flash Lite analysis with the system instruction from `headhunter_skills/gitlab-mr-triage.md` (loaded via `_load_gitlab_si()`, externalized skill file pattern). The SI defines output format (YAML frontmatter matching `create_plan` schema), domain classification, agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules).
 
 | Path | Trigger | How |
 |---|---|---|

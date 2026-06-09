@@ -85,8 +85,8 @@ The Brain reads the `steps:` array, batches same-agent steps, and dispatches wit
 
 The Headhunter polls GitLab `/todos` for the Darwin bot account and classifies incoming MRs:
 
-- **LLM Analysis:** All MRs pass through Flash Lite with `HEADHUNTER_SYSTEM_INSTRUCTION`. The SI defines YAML frontmatter output format, domain classification (CLEAR/COMPLICATED/COMPLEX), agent assignment, and risk assessment. Bot Instructions in MR descriptions are included as prompt context for the LLM.
-- **Emergency Fallback:** When LLM is unavailable, `_emergency_plan()` produces a minimal COMPLICATED/developer plan.
+- **LLM Analysis:** All MRs pass through Flash Lite with the system instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()`. The SI defines YAML frontmatter output format, domain classification (CLEAR/COMPLICATED/COMPLEX), agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules). Bot Instructions in MR descriptions are included as prompt context for the LLM.
+- **Emergency Fallback:** When LLM is unavailable or the skill file cannot be loaded, `_EMERGENCY_SI` provides a minimal schema-only fallback and `_emergency_plan()` produces a COMPLICATED/developer plan.
 - Creates events with `source=headhunter` and GitLab context (MR URL, pipeline status, description).
 - Brain routes the event like any other -- Headhunter creates events, Brain handles routing.
 
