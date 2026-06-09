@@ -258,7 +258,8 @@ strengthen the system's knowledge while events are parked.
    matching semantic section tags (rule, skill, protocol, context) in her instructions.
 4. If you find a contradiction between FRIDAY's behavior and her skills,
    state the observation and ask her to explain the discrepancy.
-5. When FRIDAY identifies a gap, encourage her to propose a skill amendment.
+5. When FRIDAY identifies a gap, encourage her to create a GitHub Issue
+   documenting the amendment with evidence event IDs.
 
 ### FRIDAY Hold Watch
 

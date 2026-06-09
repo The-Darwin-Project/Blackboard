@@ -17,6 +17,9 @@
 #     close ownership belongs to Brain (_close_and_broadcast). Adapter signals via on_meta_event_closed.
 #     _cleanup_session_state calls Brain.close_jarvis_meta_event on stream teardown.
 #     _idle_watchdog filters jarvis meta-events from idle-close check (non_jarvis_active).
+# 13. [Pattern]: _create_system_review_event injects a skill manifest (operator-facing phases from
+#     BrainSkillLoader) into the evidence display_text. Filtered by _OPERATOR_PHASES module-level
+#     frozenset. Degrades gracefully via getattr when _skill_loader is unavailable.
 # 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
 # 13. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
@@ -68,6 +71,7 @@ SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
+_OPERATOR_PHASES = frozenset({"always", "dispatch", "post-agent", "source", "escalate", "close"})
 
 
 class LiveAPIAdapter:
@@ -978,15 +982,36 @@ class LiveAPIAdapter:
                 f"reason: {(last_defer or '')[:80]}"
             )
 
+        skill_manifest = ""
+        loader = getattr(self._brain, "_skill_loader", None) if self._brain else None
+        if loader:
+            manifest_lines = []
+            file_count = 0
+            for phase in loader.available_phases():
+                if phase not in _OPERATOR_PHASES:
+                    continue
+                paths = loader.get_all_paths_for_phase(phase)
+                if paths:
+                    file_count += len(paths)
+                    manifest_lines.append(f"- {phase}: {', '.join(paths)}")
+            if manifest_lines:
+                skill_manifest = (
+                    "\n\nYour available skills (by phase):\n"
+                    + "\n".join(manifest_lines)
+                )
+                logger.debug("Skill manifest: %d phases, %d files", len(manifest_lines), file_count)
+
         display_text = (
             f"FRIDAY — I've been watching the pulse stream and we've been quiet for a while. "
             f"Here's what I see ({len(active_ids)} events still active):\n\n"
             + "\n".join(summary_lines)
+            + skill_manifest
             + "\n\nSource: https://github.com/The-Darwin-Project/Blackboard"
             + "\n\nGive me your assessment:"
-            + "\n1. Health status — are these progressing normally or stuck?"
-            + "\n2. Anti-patterns — any lessons being violated (short defers, stale monitors)?"
-            + "\n3. Recommended action — should we intervene, or let them ride?"
+            + "\n1. Event health — which events are progressing, which are stuck or drifting?"
+            + "\n2. Patterns — any recurring anti-patterns across events (same failure, same phase drift, same service)?"
+            + "\n3. Actions taken — for anything stuck, what did you do or what needs doing?"
+            + "\n4. Alignment — review your available skills above. Did your behavior this session match them? Any gaps worth a GitHub Issue?"
         )
 
         from ..models import EventEvidence

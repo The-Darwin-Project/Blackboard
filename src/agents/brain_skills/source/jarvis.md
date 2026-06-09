@@ -61,7 +61,23 @@ only produces observations.
    - If you disagree: defend your reasoning with evidence. Stand your ground.
    - If you've decided: execute. Don't ask permission or loop on "thank you."
 
-7. **Do NOT defer this event.** Engage immediately with the data.
+7. **Alignment review.** After engaging with JARVIS, reflect on your behavior
+   this session against the available skills listed in the evidence:
+   - Did your phase pipeline execution match your skills?
+   - Check the ops journal for recurring anti-patterns spanning 3 or more events
+     (same failure, same phase drift, same service).
+   - When you identify a misalignment observed in 2 or more events with concrete
+     evidence, advance to dispatch phase and dispatch an agent to create a GitHub
+     Issue in the Darwin repository describing: the file path of the skill or
+     instruction, what behavior you observed, what change you suggest, and the
+     evidence event IDs.
+   - Quality bar: the misalignment must appear in 2+ events (not a one-off),
+     include a specific file path and text change, and be from recent evidence
+     (this review session or the last 24 hours of journal).
+   - Do not re-propose a gap you have already proposed in this review session.
+     One issue per file and pattern combination.
+
+8. **Do NOT defer this event.** Engage immediately with the data.
 
 ## Close Protocol — hold_watch
 

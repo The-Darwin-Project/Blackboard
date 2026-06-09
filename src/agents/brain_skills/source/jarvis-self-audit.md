@@ -39,12 +39,14 @@ The skill/protocol does NOT cover the observed pattern. State:
 - What the skill covers vs what JARVIS observed
 - Whether this is a genuine gap (missing coverage) or an edge case
 
-When you identify a gap, propose a concrete amendment using propose_enhancement:
+When you identify a gap, advance to dispatch phase and dispatch an agent to
+create a GitHub Issue in the Darwin repository documenting the amendment:
 - Title: the missing capability in 1-2 sentences
 - Description: what was observed, why the current skill doesn't cover it,
-  and what the amended skill should say
-- Severity: "would_improve" for most gaps, "blocking" only if the gap causes
-  repeated incorrect behavior
+  and what the amended skill should say. Include the Alignment/Gap/Drift
+  classification and evidence event IDs.
+- Apply the same quality bar as the alignment review protocol: 2+ events,
+  specific file path, recent evidence.
 
 ### 3. Drift
 
