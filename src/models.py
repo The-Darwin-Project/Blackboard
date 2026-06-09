@@ -17,6 +17,8 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from .event_types import EventSource
+
 
 # =============================================================================
 # Telemetry Protocol (matches DESIGN.md lines 94-107)
@@ -363,7 +365,7 @@ def _resolve_phase(phase: str | None) -> str:
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")
-    source: Literal["aligner", "chat", "slack", "headhunter", "timekeeper", "jarvis"]
+    source: EventSource
     status: EventStatus = EventStatus.NEW
     brain_phase: Optional[str] = Field(
         None,

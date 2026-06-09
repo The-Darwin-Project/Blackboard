@@ -113,7 +113,7 @@ async def run_probe(run_id: int) -> dict:
 
     # Read the full SYSTEM_INSTRUCTION from the source
     si_path = os.path.join(
-        os.path.dirname(__file__), "..", "src", "adapters", "live_api_adapter.py"
+        os.path.dirname(__file__), "..", "src", "agents", "jarvis_instructions.py"
     )
     full_si = ""
     if os.path.exists(si_path):
@@ -127,7 +127,7 @@ async def run_probe(run_id: int) -> dict:
                 full_si = content[start:end]
 
     if not full_si:
-        print("  WARNING: Could not extract SYSTEM_INSTRUCTION from live_api_adapter.py")
+        print("  WARNING: Could not extract SYSTEM_INSTRUCTION from jarvis_instructions.py")
         print("  Using minimal Mode 2b context instead")
         full_si = (
             "You are JARVIS -- the meta-cognitive observer in Darwin's autonomous AI platform.\n"

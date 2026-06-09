@@ -1,0 +1,41 @@
+---
+description: Prompt semantic tag vocabulary -- reusable template for XML tag differentiation in agent system instructions
+alwaysApply: false
+globs: "**/jarvis_instructions.py,**/brain_skills/**/*.md,**/nightwatcher_prompt.py"
+---
+
+# Prompt Semantic Tag Template
+
+## Pattern: `<{agent}_{type} id="{name}">`
+
+Five-type vocabulary with fixed compliance gradient:
+
+| Type | Compliance | LLM Interpretation | Use for |
+|---|---|---|---|
+| `rule` | Highest | Hard constraint -- violating feels wrong | Boundaries, prohibitions, invariants |
+| `protocol` | High | Procedural sequence -- steps to follow | Workflows, decision trees, handoffs |
+| `mode` | Medium-high | Behavioral state -- act like X when Y | Input-activated persona switching |
+| `skill` | Medium | Contextual capability -- know-how for this situation | Phase-dependent procedures, progressive loading (BrainSkillLoader agents only) |
+| `context` | Low | Reference material -- inform, don't direct | Taxonomies, format docs, shared knowledge |
+
+## Naming Convention
+
+- Tag: `<{agent}_{type} id="{section-name}">`
+- {agent} = agent identity (jarvis, friday, architect, sysadmin)
+- {type} = one of: rule, protocol, mode, skill, context
+- {section-name} = kebab-case section identifier
+
+## Folder Convention (for BrainSkillLoader agents)
+
+- always/ → {agent}_rule (always-on constraints)
+- source/ → {agent}_rule (per-source behavioral constraints)
+- context/ → {agent}_context (environment, reference)
+- Progressive phase folders → {agent}_skill (contextual capabilities)
+
+## Scaling
+
+Adding a new compliance level (e.g., `guideline` between protocol and mode) is a vocabulary extension, not a structural change. Update this rule file and apply to affected agents.
+
+## Structural Invariant
+
+Every opening `<{agent}_{type} id="...">` MUST have a matching closing `</{agent}_{type}>` with the same type. The CI test `test_event_source_consistency.py::test_jarvis_tag_pairs_structural` enforces this for JARVIS. Extend for FRIDAY when semantic differentiation ships.

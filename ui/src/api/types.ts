@@ -212,9 +212,11 @@ export interface ConversationTurn {
   timestamp: number;
 }
 
+export type EventSource = 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';
+
 export interface EventDocument {
   id: string;
-  source: 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';
+  source: EventSource;
   status: EventStatus;
   brain_phase?: string;
   service: string;

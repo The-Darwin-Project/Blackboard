@@ -16,7 +16,7 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 | Field | Required | Description |
 |---|---|---|
 | `display_text` | Yes | The user's actual message or anomaly description. Never a generic label. |
-| `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"`, `"timekeeper"` |
+| `source_type` | Yes | Must match the event `source`: `"aligner"`, `"chat"`, `"slack"`, `"headhunter"`, `"timekeeper"`, `"jarvis"` |
 | `domain` | Yes | Initial Cynefin state. `"disorder"` for unclassified sources (chat, slack, timekeeper). Real domain for assessed sources (headhunter, aligner). |
 | `domain_confidence` | Yes | `"assessed"` when source did real LLM triage (headhunter, aligner). `"default"` for unclassified sources. |
 | `brain_domain` | No | Set by Brain's `classify_event` function call. Overrides `domain` once set. Starts `None`. |
@@ -47,6 +47,11 @@ The `_coerce_evidence` validator in `EventInput` exists only for backward compat
 
 * **Chat/Slack**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`, `display_text` = user message.
 * **TimeKeeper**: `domain="disorder"`, `domain_confidence="default"`, `severity="info"`.
+* **JARVIS** (meta-events): `source_type="jarvis"`, `domain="complicated"`, `domain_confidence="assessed"`, `severity="info"`. Created by LiveAPIAdapter when all events are parked (system review).
+
+## Nightwatcher Dispatcher Distinction
+
+The `event_source` field on WebSocket progress messages (e.g., `"nightwatcher"`) is a **UI routing label**, not an `EventDocument.source` value. It controls which UI panel receives the progress update. The canonical `EventSource` type (`event_types.py`, `api/types.ts`) does NOT include `"nightwatcher"` -- it exists only in the WS dispatcher contract (`OpsStateContext.tsx`).
 
 ## Why This Matters
 

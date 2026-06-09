@@ -1,6 +1,7 @@
 # BlackBoard/src/memory/pulse.py
 # @ai-rules:
-# 1. [Constraint]: Pure data models + protocol. No I/O, no Redis, no imports beyond stdlib.
+# 1. [Constraint]: Pure data models + protocol. No I/O, no Redis, no Pydantic.
+#    Imports from stdlib and project stdlib-only modules (e.g., event_types) are permitted.
 # 2. [Pattern]: PulsePort is a Protocol -- implementors (PulseTracker) live in separate modules.
 # 3. [Pattern]: PulseContext is caller-provided; PulseBatch is emitter-constructed.
 # 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "tool", "phase", "agent".
@@ -9,8 +10,7 @@
 # 7. [Pattern]: PulseBatch.is_defer_wake is a one-shot flag (True on first pulse after defer re-activation).
 #    PulseBatch.event_status carries ev.status.value (null-guarded: None if event deleted mid-flight).
 # 8. [Pattern]: event_source threads EventDocument.source through PulseContext -> PulseBatch -> to_dict().
-#    Values match models.EventDocument.source Literal (chat, slack, aligner, headhunter, timekeeper, jarvis).
-#    None when source is unavailable (e.g. nightwatcher_tools.py context).
+#    Typed as event_types.EventSource | None. None when source is unavailable (e.g. nightwatcher_tools.py context).
 """
 Pulse data models for the Cognitive Recall Graph.
 
@@ -24,6 +24,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from ..event_types import EventSource
+
 
 @dataclass
 class PulseContext:
@@ -32,7 +34,7 @@ class PulseContext:
     event_id: str | None = None
     turn: int | None = None
     event_elapsed_s: int = 0
-    event_source: str | None = None
+    event_source: EventSource | None = None
 
 
 @dataclass
@@ -57,7 +59,7 @@ class PulseBatch:
     reasoning: str | None = None
     is_defer_wake: bool = False
     event_status: str | None = None
-    event_source: str | None = None
+    event_source: EventSource | None = None
 
     def to_dict(self) -> dict:
         return {
