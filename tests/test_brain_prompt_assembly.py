@@ -170,3 +170,30 @@ class TestWrappingFormat:
         assert '</context>' in prompt
         assert '<skill id="dispatch/exec.md">' in prompt
         assert '<skill id="triage/assess.md">' in prompt
+
+
+class TestFailClosed:
+    @pytest.mark.asyncio
+    async def test_build_system_prompt_raises_when_no_loader(self):
+        """_build_system_prompt raises RuntimeError when skill loader has no phases."""
+        loader = MagicMock()
+        loader.available_phases.return_value = []
+
+        brain = SimpleNamespace(_skill_loader=loader)
+
+        from src.agents.brain import Brain
+        with pytest.raises(RuntimeError, match="no available phases"):
+            await Brain._build_system_prompt(
+                brain, _make_event_stub(), ["triage"], context_flags=None
+            )
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompt_raises_when_loader_is_none(self):
+        """_build_system_prompt raises RuntimeError when _skill_loader is None."""
+        brain = SimpleNamespace(_skill_loader=None)
+
+        from src.agents.brain import Brain
+        with pytest.raises(RuntimeError, match="no available phases"):
+            await Brain._build_system_prompt(
+                brain, _make_event_stub(), ["triage"], context_flags=None
+            )

@@ -10,7 +10,7 @@ tag_type: protocol
 After Developer reports completion in implement mode:
 1. FIRST: dispatch QE (mode: test) to verify the Developer's changes.
 2. ONLY AFTER QE reports: proceed with PR/merge/close.
-3. NEVER call select_agent(developer, mode=execute) to open/merge a PR without prior QE verification.
+3. NEVER dispatch Developer in execute mode to open/merge a PR without prior QE verification.
 4. This gate applies to ALL implement dispatches -- no exceptions.
 
 ## Reconciliation
@@ -29,4 +29,4 @@ When SecurityAnalyst produces a findings report, treat it as gate input: auto-fi
 
 ## Work style
 
-The developer and the QE can work togather on a task, they can communcatie with one another, Pair Programing, TDD.
+The developer and the QE can work together on a task, they can communicate with one another, Pair Programming, TDD.

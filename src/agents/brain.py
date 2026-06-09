@@ -41,7 +41,7 @@
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
-# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
+# 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
 #     _build_system_prompt wraps each resolved skill body with semantic XML tags (rule, skill,
 #     protocol, context) via _wrap_section(path, body, tag_type). Tag type resolved by
 #     BrainSkillLoader.get_tag_type(): frontmatter override > folder default > "skill".
@@ -330,17 +330,16 @@ class Brain:
         self._reflex_fired_for: set[str] = set()  # event IDs with gate already fired this cycle
         self._recall_lessons: dict[str, list] = {}  # event_id -> lesson hits for RECALL SI block
         self._last_embedding_warmup: float = 0.0
-        # Progressive skill loading (feature flag)
-        self._progressive_skills = os.getenv("BRAIN_PROGRESSIVE_SKILLS", "true").lower() == "true"
+        # Brain skill loading (required -- monolith fallback removed)
+        self._progressive_skills = True
         self._skill_loader = None
-        if self._progressive_skills:
-            try:
-                from .brain_skill_loader import BrainSkillLoader
-                skills_path = Path(__file__).parent / "brain_skills"
-                self._skill_loader = BrainSkillLoader(str(skills_path))
-            except Exception as e:
-                logger.warning(f"Failed to load brain skills: {e}. Falling back to monolith.")
-                self._skill_loader = None
+        try:
+            from .brain_skill_loader import BrainSkillLoader
+            skills_path = Path(__file__).parent / "brain_skills"
+            self._skill_loader = BrainSkillLoader(str(skills_path))
+        except Exception as e:
+            logger.error(f"Failed to load brain skills: {e}. Brain will raise on first event.")
+            self._skill_loader = None
         # Global dispatch WIP cap (flow engineering: Peak Throughput Principle)
         max_dispatches = int(os.getenv("BRAIN_MAX_CONCURRENT_DISPATCHES", "0"))
         self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
@@ -866,7 +865,7 @@ class Brain:
         else:
             raise RuntimeError(
                 "BrainSkillLoader is required. BRAIN_SYSTEM_PROMPT monolith has been removed. "
-                "Set BRAIN_PROGRESSIVE_SKILLS=true (default) and ensure brain_skills/ directory exists."
+                "Ensure brain_skills/ directory exists."
             )
 
         # Strip defer_event on first iteration of defer-wake -- forces Brain to act

@@ -301,3 +301,46 @@ class TestGetTagType:
         from src.agents.brain_skill_loader import _VALID_TAG_TYPES
         expected = {"rule", "skill", "protocol", "context"}
         assert _VALID_TAG_TYPES == expected
+
+    def test_unhashable_frontmatter_ignored(self, tmp_path: Path):
+        """Non-string tag_type (list/dict) falls back to folder default, no crash."""
+        content = "---\ntag_type: [protocol]\n---\n# List value"
+        _make_skills(tmp_path, {"always": {"bad.md": content}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("always/bad.md") == "rule"
+
+
+class TestIntegrationTagWrapping:
+    """Integration test: real BrainSkillLoader + _wrap_section produce correct tags."""
+
+    @pytest.mark.asyncio
+    async def test_real_loader_produces_correct_semantic_tags(self, tmp_path: Path):
+        from src.agents.brain import _wrap_section
+
+        _make_skills(tmp_path, {
+            "always": {"identity.md": "# Identity rules"},
+            "context": {"env.md": "# Environment"},
+            "dispatch": {"exec.md": "---\ntag_type: protocol\n---\n# Execution protocol"},
+            "triage": {"assess.md": "# Assessment"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        initial_paths: list[str] = []
+        for phase in loader.available_phases():
+            initial_paths.extend(loader.get_all_paths_for_phase(phase))
+
+        resolved_pairs = loader.resolve_dependencies_with_paths(initial_paths)
+        results = [
+            _wrap_section(path, body, loader.get_tag_type(path))
+            for path, body in resolved_pairs
+        ]
+
+        joined = "\n".join(results)
+        assert '<rule id="always/identity.md">' in joined
+        assert '</rule>' in joined
+        assert '<context id="context/env.md">' in joined
+        assert '</context>' in joined
+        assert '<protocol id="dispatch/exec.md">' in joined
+        assert '</protocol>' in joined
+        assert '<skill id="triage/assess.md">' in joined
+        assert '</skill>' in joined

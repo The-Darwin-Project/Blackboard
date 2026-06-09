@@ -123,7 +123,7 @@ class BrainSkillLoader:
             _, meta = entry
             if isinstance(meta, dict):
                 override = meta.get("tag_type")
-                if override and override in _VALID_TAG_TYPES:
+                if isinstance(override, str) and override in _VALID_TAG_TYPES:
                     return override
         folder = rel_path.split("/")[0]
         return _FOLDER_TAG_TYPE.get(folder, "skill")

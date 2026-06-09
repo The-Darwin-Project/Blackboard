@@ -38,31 +38,37 @@ Adding a new compliance level (e.g., `guideline` between protocol and mode) is a
 
 ## Structural Invariant
 
-Every opening `<{agent}_{type} id="...">` MUST have a matching closing `</{agent}_{type}>` with the same type. The CI test `test_event_source_consistency.py::test_jarvis_tag_pairs_structural` enforces this for JARVIS. Extend for FRIDAY when semantic differentiation ships.
+Every opening tag MUST have a matching closing tag with the same type. The CI test `test_event_source_consistency.py::test_jarvis_tag_pairs_structural` enforces this for JARVIS. FRIDAY's tags are validated by `test_brain_prompt_assembly.py::test_semantic_tag_type_selection`.
 
-## FRIDAY Variant: `{type}_section` Naming
+## FRIDAY Variant: Bare `{type}` Naming
 
-FRIDAY uses a simplified naming pattern without the agent prefix:
+FRIDAY uses bare type names without agent prefix or `_section` suffix:
 
 | Tag | Resolved from | Count |
 |---|---|---|
-| `rule_section` | `always/` or `source/` folder default | 17 |
-| `skill_section` | All other folders (dispatch, triage, etc.) | 18 |
-| `context_section` | `context/` folder default | 6 |
-| `protocol_section` | Frontmatter override `tag_type: protocol_section` | 4 |
+| `rule` | `always/` or `source/` folder default | 17 |
+| `skill` | All other folders (dispatch, triage, etc.) | 18 |
+| `context` | `context/` folder default | 6 |
+| `protocol` | Frontmatter override `tag_type: protocol` | 5 |
+
+Output format: `<rule id="always/identity.md">...</rule>`, `<skill id="dispatch/exec.md">...</skill>`, etc.
 
 ### Resolution Order
 
-1. **Frontmatter override**: `tag_type: protocol_section` in YAML frontmatter (validated against `_VALID_TAG_TYPES` allowlist)
+1. **Frontmatter override**: `tag_type: protocol` in YAML frontmatter (validated against `_VALID_TAG_TYPES` allowlist)
 2. **Folder default**: `_FOLDER_TAG_TYPE` mapping (`always` -> rule, `source` -> rule, `context` -> context)
-3. **Fallback**: `"skill_section"` for all unmapped folders
+3. **Fallback**: `"skill"` for all unmapped folders
 
 ### Why Not `friday_rule`?
 
-FRIDAY's tags use `{type}_section` (e.g., `rule_section`) rather than the `{agent}_{type}` pattern used by JARVIS (`jarvis_rule`). This is because FRIDAY's skills are loaded dynamically by BrainSkillLoader -- the agent prefix adds no disambiguation value when there's only one consumer. Contributors MUST NOT use `friday_rule` in frontmatter; the `_VALID_TAG_TYPES` allowlist silently rejects it and falls back to the folder default.
+FRIDAY's tags use bare `{type}` (e.g., `rule`) rather than the `{agent}_{type}` pattern used by JARVIS (which also now uses bare types: `rule`, `mode`, `protocol`, `context`). Both agents use the same bare naming convention. The `_VALID_TAG_TYPES` allowlist rejects any non-bare value (including `friday_rule` or `rule_section`) and falls back to the folder default.
 
 ### Allowlist
 
 ```python
-_VALID_TAG_TYPES = frozenset({"rule_section", "skill_section", "protocol_section", "context_section"})
+_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context"})
 ```
+
+### Boundary: No Prompt Composition
+
+JARVIS and FRIDAY prompts are never concatenated into the same context window. JARVIS observes FRIDAY's pulse stream (tool calls, not raw SI). Tag collision between agents is architecturally prevented.
