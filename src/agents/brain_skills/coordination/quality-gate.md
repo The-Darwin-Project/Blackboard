@@ -1,10 +1,11 @@
 ---
 description: "Quality gate: reconcile Developer and QE outputs before closing."
 tags: [coordination, quality, review]
+tag_type: protocol
 ---
 # Quality Gate
 
-## QE Verification Gate (implement mode)
+## QE Verification Gate (implement)
 
 After Developer reports completion in implement mode:
 1. FIRST: dispatch QE (mode: test) to verify the Developer's changes.
