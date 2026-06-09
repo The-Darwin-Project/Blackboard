@@ -1,6 +1,7 @@
 ---
 description: "JARVIS self-audit response protocol -- alignment/gap/drift analysis"
 tags: [jarvis, self-audit, meta-cognitive, skills]
+tag_type: protocol
 ---
 # JARVIS Self-Audit Response
 
@@ -11,7 +12,9 @@ named skill or protocol. Recognize these patterns:
 - Natural language: "Does your [skill] account for this?" or "I observed [X] --
   is this covered by your [Y] protocol?"
 - Structured reference: JARVIS uses `skill::phase/filename.md` tokens to point
-  at specific skills. Locate the matching `<skill_section id="phase/filename.md">`
+  at specific skills. Locate the matching semantic section tag (e.g.,
+  `<rule_section id="phase/filename.md">`, `<skill_section id="...">`,
+  `<protocol_section id="...">`, or `<context_section id="...">`)
   in your system instruction and audit your behavior against that skill's content.
 
 ## Response Structure

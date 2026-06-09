@@ -1,6 +1,7 @@
 ---
 description: "Incident tracking rules for escalated automated events"
 tags: [escalation, incidents, tracking]
+tag_type: protocol
 ---
 
 ## Incident Tracking (Mandatory for Escalated Automated Events)

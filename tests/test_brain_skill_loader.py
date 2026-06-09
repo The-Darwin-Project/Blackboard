@@ -257,3 +257,47 @@ class TestReload:
         (tmp_path / "a" / "s1.md").write_text("# V2")
         loader.reload()
         assert "# V2" in loader.get_phase("a")[0]
+
+
+class TestGetTagType:
+    def test_folder_defaults(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"rule.md": "# Rule"},
+            "source": {"slack.md": "# Slack"},
+            "context": {"env.md": "# Env"},
+            "dispatch": {"exec.md": "# Exec"},
+            "triage": {"assess.md": "# Assess"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("always/rule.md") == "rule"
+        assert loader.get_tag_type("source/slack.md") == "rule"
+        assert loader.get_tag_type("context/env.md") == "context"
+        assert loader.get_tag_type("dispatch/exec.md") == "skill"
+        assert loader.get_tag_type("triage/assess.md") == "skill"
+
+    def test_frontmatter_override(self, tmp_path: Path):
+        content = "---\ntag_type: protocol\n---\n# Protocol"
+        _make_skills(tmp_path, {"always": {"lifecycle.md": content}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("always/lifecycle.md") == "protocol"
+
+    def test_invalid_frontmatter_ignored(self, tmp_path: Path):
+        content = "---\ntag_type: bogus\n---\n# Invalid"
+        _make_skills(tmp_path, {"always": {"invalid.md": content}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("always/invalid.md") == "rule"
+
+    def test_unknown_folder_defaults_to_skill(self, tmp_path: Path):
+        _make_skills(tmp_path, {"custom": {"file.md": "# Custom"}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("custom/file.md") == "skill"
+
+    def test_unknown_path_defaults_to_skill(self, tmp_path: Path):
+        _make_skills(tmp_path, {"a": {"s1.md": "# A"}})
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("nonexistent/missing.md") == "skill"
+
+    def test_valid_tag_types_allowlist(self):
+        from src.agents.brain_skill_loader import _VALID_TAG_TYPES
+        expected = {"rule", "skill", "protocol", "context"}
+        assert _VALID_TAG_TYPES == expected

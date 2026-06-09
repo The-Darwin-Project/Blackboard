@@ -8,6 +8,8 @@
 # 6. [Pattern]: _phase.yaml per folder declares thinking_level, temperature, priority for LLM param resolution.
 # 7. [Pattern]: _resolve_bfs is the single BFS implementation. Both resolve_dependencies (list[str])
 #    and resolve_dependencies_with_paths (list[tuple[str, str]]) delegate to it. Zero duplication.
+# 8. [Pattern]: Semantic tag types resolved by get_tag_type(rel_path): frontmatter tag_type override
+#    (validated against _VALID_TAG_TYPES allowlist) > _FOLDER_TAG_TYPE folder default > "skill".
 """
 Filesystem-driven brain skill discovery, loading, and dependency resolution.
 
@@ -25,6 +27,14 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+
+_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context"})
+
+_FOLDER_TAG_TYPE: dict[str, str] = {
+    "always": "rule",
+    "source": "rule",
+    "context": "context",
+}
 
 
 class BrainSkillLoader:
@@ -102,6 +112,21 @@ class BrainSkillLoader:
     def get_phase_meta(self, name: str) -> dict:
         """Return _phase.yaml metadata for a phase (thinking_level, temperature, priority)."""
         return self._phase_meta.get(name, {})
+
+    def get_tag_type(self, rel_path: str) -> str:
+        """Return the semantic tag type for a skill path.
+
+        Resolution order: frontmatter override (validated against allowlist) > folder default.
+        """
+        entry = self._path_index.get(rel_path)
+        if entry:
+            _, meta = entry
+            if isinstance(meta, dict):
+                override = meta.get("tag_type")
+                if override and override in _VALID_TAG_TYPES:
+                    return override
+        folder = rel_path.split("/")[0]
+        return _FOLDER_TAG_TYPE.get(folder, "skill")
 
     def get_all_paths_for_phase(self, name: str) -> list[str]:
         """Return list of relative paths in a phase."""

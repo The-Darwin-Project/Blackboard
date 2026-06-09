@@ -74,9 +74,9 @@ class TestEventSourceConsistency:
         assert "nightwatcher" not in py_values
 
     def test_jarvis_tag_pairs_structural(self):
-        """Every opening <jarvis_*> tag must have a matching closing tag."""
-        opening_pattern = re.compile(r"<(jarvis_(?:rule|mode|protocol|context))\s+id=\"([^\"]+)\">")
-        closing_pattern = re.compile(r"</(jarvis_(?:rule|mode|protocol|context))>")
+        """Every opening semantic tag must have a matching closing tag."""
+        opening_pattern = re.compile(r"<((?:rule|mode|protocol|context))\s+id=\"([^\"]+)\">")
+        closing_pattern = re.compile(r"</((?:rule|mode|protocol|context))>")
 
         openings = opening_pattern.findall(SYSTEM_INSTRUCTION)
         closings = closing_pattern.findall(SYSTEM_INSTRUCTION)

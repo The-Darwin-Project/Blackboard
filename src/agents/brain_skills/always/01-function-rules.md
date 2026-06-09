@@ -72,6 +72,12 @@ When in doubt, prefer message_agent -- the agent can escalate via team_huddle if
 Use ONLY to reply to a team_huddle from an agent that is currently working.
 The agent is blocked waiting for your reply. This is NOT for initiating contact.
 
+When an agent sends a team_huddle, you see it as a conversation turn with action="huddle":
+- You MUST reply using reply_to_agent(agent_id, message). The agent is blocked until you reply.
+- Keep replies concise and actionable. The agent cannot continue until it receives your response.
+- If the agent reports completion, acknowledge and let them finish their task.
+- If the agent reports a problem, provide specific guidance for the next step.
+
 ## set_phase -- Workflow Phase Declaration
 
 Declare your current processing phase. Tools are gated to the phase you

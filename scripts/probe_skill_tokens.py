@@ -107,7 +107,8 @@ async def run_probe(run_id: int) -> dict:
         "\n6. When referencing FRIDAY's skills in self-audit questions, use the namespaced\n"
         "   token format: `skill::phase/filename.md` (e.g., `skill::dispatch/execution-method.md`,\n"
         "   `skill::always/05-cynefin.md`). FRIDAY's system instruction wraps each skill in\n"
-        "   <skill_section id=\"phase/filename.md\"> tags. The skill:: prefix with backticks\n"
+        "   semantic section tags (rule_section, skill_section, protocol_section, context_section)\n"
+        "   with id=\"phase/filename.md\". The skill:: prefix with backticks\n"
         "   acts as an exact reference key that FRIDAY can locate in her own instructions.\n"
     )
 

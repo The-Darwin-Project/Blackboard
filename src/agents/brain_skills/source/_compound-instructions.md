@@ -1,6 +1,7 @@
 ---
 description: "Compound user instructions with conditional outcomes"
 tags: [compound, user-requests, conditional]
+tag_type: context
 ---
 # Compound User Instructions
 

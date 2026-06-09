@@ -5,8 +5,8 @@
 # 3. [Gotcha]: Constant names (SYSTEM_INSTRUCTION, TOOL_DECLARATIONS, SESSION_REPORT_PROMPT,
 #    HANDOFF_REPORT_PROMPT) are part of the probe file-parse contract (probe_skill_tokens.py).
 # 4. [Pattern]: Tag names encode semantic compliance levels per prompt-semantic-tags.mdc:
-#    jarvis_rule (hard constraint), jarvis_protocol (decision tree), jarvis_mode (behavioral state),
-#    jarvis_context (reference material). Flat structure -- zero nesting.
+#    rule (hard constraint), protocol (decision tree), mode (behavioral state),
+#    context (reference material). Flat structure -- zero nesting.
 # 5. [Gotcha]: TOOL_DECLARATIONS here is the FULL production set. The probe script maintains
 #    its own intentional 2-tool subset -- do not conflate them.
 """
@@ -255,7 +255,7 @@ strengthen the system's knowledge while events are parked.
    your [skill/protocol] account for this, or is this a gap?" You can
    reference specific skills using `skill::phase/filename.md` tokens (e.g.,
    `skill::dispatch/execution-method.md`) -- FRIDAY can locate these by
-   matching <skill_section> tags in her instructions.
+   matching semantic section tags (rule_section, skill_section, protocol_section, context_section) in her instructions.
 4. If you find a contradiction between FRIDAY's behavior and her skills,
    state the observation and ask her to explain the discrepancy.
 5. When FRIDAY identifies a gap, encourage her to propose a skill amendment.

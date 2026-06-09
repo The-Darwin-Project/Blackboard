@@ -41,6 +41,9 @@ def _make_brain_stub(resolved_pairs, kargo_paths=None, kargo_bodies=None):
     loader.resolve_dependencies_with_paths.return_value = resolved_pairs
     loader.get_all_paths_for_phase.return_value = []
     loader.find_paths_by_tag.return_value = kargo_paths or []
+    loader.get_tag_type.side_effect = lambda p: {
+        "always": "rule", "source": "rule", "context": "context"
+    }.get(p.split("/")[0], "skill")
 
     if kargo_bodies is not None:
         loader.get_with_meta.side_effect = lambda p: kargo_bodies.get(p)
@@ -58,7 +61,7 @@ def _make_brain_stub(resolved_pairs, kargo_paths=None, kargo_bodies=None):
 
 class TestWrappingFormat:
     @pytest.mark.asyncio
-    async def test_skills_wrapped_with_skill_section_tags(self):
+    async def test_skills_wrapped_with_semantic_tags(self):
         pairs = [
             ("phase/file-a.md", "# Skill A content"),
             ("dispatch/exec.md", "# Execution rules"),
@@ -70,11 +73,11 @@ class TestWrappingFormat:
             brain, _make_event_stub(), ["triage"], context_flags=None
         )
 
-        assert '<skill_section id="phase/file-a.md">' in prompt
+        assert '<skill id="phase/file-a.md">' in prompt
         assert "# Skill A content" in prompt
-        assert '<skill_section id="dispatch/exec.md">' in prompt
+        assert '<skill id="dispatch/exec.md">' in prompt
         assert "# Execution rules" in prompt
-        assert "</skill_section>" in prompt
+        assert "</skill>" in prompt
 
     @pytest.mark.asyncio
     async def test_empty_resolved_list_no_crash(self):
@@ -86,7 +89,7 @@ class TestWrappingFormat:
         )
 
         assert "## EVENT STATE HEADER" in prompt
-        assert "<skill_section" not in prompt
+        assert "<skill" not in prompt
 
     @pytest.mark.asyncio
     async def test_kargo_none_guard(self, caplog):
@@ -122,9 +125,9 @@ class TestWrappingFormat:
             brain, event, ["triage"], context_flags=None
         )
 
-        assert '<skill_section id="context/kargo-environment.md">' in prompt
+        assert '<context id="context/kargo-environment.md">' in prompt
         assert "# Kargo Promotion Environment" in prompt
-        assert "</skill_section>" in prompt
+        assert "</context>" in prompt
 
     @pytest.mark.asyncio
     async def test_mixed_wrapped_unwrapped_join(self):
@@ -140,5 +143,30 @@ class TestWrappingFormat:
         )
 
         assert "\n\n---\n\n" in prompt
-        assert '<skill_section id="always/identity.md">' in prompt
+        assert '<rule id="always/identity.md">' in prompt
         assert "WAIT LOOP DETECTED" in prompt
+
+    @pytest.mark.asyncio
+    async def test_semantic_tag_type_selection(self):
+        """Verify each folder maps to its correct semantic tag type."""
+        pairs = [
+            ("always/rules.md", "# Rules"),
+            ("source/slack.md", "# Slack"),
+            ("context/env.md", "# Env"),
+            ("dispatch/exec.md", "# Exec"),
+            ("triage/assess.md", "# Assess"),
+        ]
+        brain = _make_brain_stub(pairs)
+
+        from src.agents.brain import Brain
+        prompt = await Brain._build_system_prompt(
+            brain, _make_event_stub(), ["triage"], context_flags=None
+        )
+
+        assert '<rule id="always/rules.md">' in prompt
+        assert '</rule>' in prompt
+        assert '<rule id="source/slack.md">' in prompt
+        assert '<context id="context/env.md">' in prompt
+        assert '</context>' in prompt
+        assert '<skill id="dispatch/exec.md">' in prompt
+        assert '<skill id="triage/assess.md">' in prompt

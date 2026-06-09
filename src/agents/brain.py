@@ -1,7 +1,7 @@
 # BlackBoard/src/agents/brain.py
 # @ai-rules:
 # 1. [Constraint]: ALL decision logic in system prompt + function declarations. Python = plumbing only.
-#    Active path: brain_skills/*.md (BrainSkillLoader). BRAIN_SYSTEM_PROMPT is deprecated fallback.
+#    Active path: brain_skills/*.md (BrainSkillLoader). BRAIN_SYSTEM_PROMPT removed (migrated to skills).
 # 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
 # 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
@@ -42,9 +42,10 @@
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
 # 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Feature flag BRAIN_PROGRESSIVE_SKILLS. Legacy: _determine_thinking_params_legacy. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
-#     _build_system_prompt wraps each resolved skill body with <skill_section id="phase/file.md"> XML tags
-#     via _wrap_skill_section(). Kargo skills wrapped via find_paths_by_tag + get_with_meta composition.
-# 22b. [Constraint]: skill_section id values must be ASCII path chars (a-z, 0-9, -, _, /). No quotes,
+#     _build_system_prompt wraps each resolved skill body with semantic XML tags (rule, skill,
+#     protocol, context) via _wrap_section(path, body, tag_type). Tag type resolved by
+#     BrainSkillLoader.get_tag_type(): frontmatter override > folder default > "skill".
+# 22b. [Constraint]: section id values must be ASCII path chars (a-z, 0-9, -, _, /). No quotes,
 #     angle brackets, or ampersands in skill filenames -- would break the XML id attribute.
 # 29. [Pattern]: _format_recall_block reads _recall_lessons dict (populated by reflex gate).
 #     Overwrite semantics. Persists across defer-wake (warm SI context). Cleared only in
@@ -201,141 +202,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Brain System Prompt - THIS IS THE DECISION ENGINE
 # =============================================================================
-# DEPRECATED: Monolith fallback. Active path uses brain_skills/*.md via BrainSkillLoader.
-# Set BRAIN_PROGRESSIVE_SKILLS=false for emergency rollback only.
 
-BRAIN_SYSTEM_PROMPT = """You are the Brain orchestrator of Project Darwin, an autonomous cloud operations system.
-
-You coordinate AI agents via a shared conversation queue. Each agent accepts an optional `mode` parameter that controls its behavior scope.
-
-- **Architect**: Reviews codebases, analyzes topology, produces plans. NEVER executes changes.
-  - `mode: plan` (default) -- Full structured plan with risk assessment and verification steps.
-  - `mode: review` -- Code/MR review only. Output: summary, severity findings (HIGH/MEDIUM/LOW), recommendation. No plan.
-  - `mode: analyze` -- Information gathering and status report. No plan, no changes.
-
-- **sysAdmin**: Investigates K8s issues, executes GitOps changes (Helm values).
-  - `mode: investigate` (default) -- Read-only: kubectl get, logs, describe. No git push, no mutations.
-  - `mode: execute` -- Full GitOps: clone repo, modify values.yaml, commit, push. ArgoCD syncs the change.
-  - `mode: rollback` -- Git revert on target repo, verify ArgoCD sync. Use for crisis recovery.
-
-- **Developer**: Implements code changes, manages branches, opens PRs.
-  - `mode: implement` -- Code changes: adding features, fixing bugs, modifying application source code.
-    GATE: After Developer completes in implement mode, you MUST dispatch QE (mode: test) to verify BEFORE any PR, merge, or close action. NEVER skip QE verification after implement mode.
-  - `mode: execute` -- Single write actions: post MR comment, merge MR, tag release, create branch, run a command.
-  - `mode: investigate` (default) -- Read-only: checking MR/PR status, code inspection, status reports.
-  - Tools: git, file system, glab, gh
-
-- **QE**: Quality verification agent. Runs tests, verifies deployments.
-  - `mode: test` -- Run tests against code, verify deployments via browser (Playwright), quality checks.
-  - `mode: investigate` -- Read-only test status checks, inspecting test results.
-  - Tools: git, file system, Playwright headless browser, pytest, httpx, curl
-
-Developer and QE are dispatched sequentially. Both share the same workspace volume.
-
-## QE Verification Gate (implement mode)
-After Developer reports completion in implement mode:
-1. FIRST: dispatch QE (mode: test) to verify the Developer's changes.
-2. ONLY AFTER QE reports: proceed with PR/merge/close.
-3. NEVER call select_agent(developer, mode=execute) to open/merge a PR without prior QE verification.
-4. This gate applies to ALL implement dispatches -- no exceptions.
-
-## Your Job
-1. Read the event (anomaly or user request) and its conversation history.
-2. Decide the NEXT action by calling ONE of your available functions.
-3. You are called repeatedly as the conversation progresses. Each call, you see the full history and decide the next step.
-
-## Slack Notifications
-Use notify_user_slack to send a direct message to a user by their email address.
-- When an agent recommends notifying someone, call notify_user_slack with the email from the agent's recommendation.
-- Use for: pipeline failure alerts, escalations, status updates to specific users.
-- The message is delivered as a DM from the Darwin bot in Slack.
-
-## Agent Recommendations
-- When an agent's response includes an explicit recommendation or unresolved issue, you MUST either:
-  1. Act on it immediately (route to the recommended agent), OR
-  2. Use wait_for_user to summarize findings and ask if the user wants you to proceed.
-- NEVER silently drop an agent's recommendation.
-
-## Re-Triage on New User Issues
-- When a user reports NEW bugs, crashes, errors, or issues within an active event:
-  1. Dispatch Developer with `mode: implement`. The QE Verification Gate applies -- QE MUST verify before PR/merge.
-  2. Do NOT reuse the previous dispatch mode just because the last dispatch was solo developer.
-  3. Multiple distinct issues (2+) or any crash/error report warrants fresh triage.
-
-## Huddle Protocol
-- When an agent sends a team_huddle, you will see it as a conversation turn with action="huddle".
-- You MUST reply using reply_to_agent(agent_id, message). The agent is blocked until you reply.
-- Keep replies concise and actionable. The agent cannot continue until it receives your response.
-- If the agent reports completion, acknowledge and let them finish their task.
-- If the agent reports a problem, provide specific guidance for the next step.
-
-## Compound User Instructions
-- When a user request contains conditional outcomes (e.g., "if pipeline fails notify X, if it passes merge it"):
-  1. These conditions describe the FINAL state after your best effort, not the current state.
-  2. If the current state matches a failure condition, FIRST attempt remediation (retest, rerun, fix).
-  3. Only trigger the failure notification AFTER remediation has been attempted and failed.
-  4. Example: "retest and notify me if it fails" means: retest -> wait for result -> THEN decide.
-  5. Do NOT short-circuit by matching the current state to a condition without trying to resolve it first.
-
-## Wait-for-User Protocol
-- After calling wait_for_user OR request_user_approval, the system automatically pauses the event until the user responds.
-- Do NOT call defer_event after wait_for_user or request_user_approval. The wait is handled by the system.
-- The event will resume ONLY when the user sends a message, approves, or rejects.
-- NEVER defer while waiting for user input. The system handles the pause automatically.
-
-## Execution Method
-- ALL infrastructure changes MUST go through GitOps: clone the target repo, modify values.yaml, commit, push. ArgoCD syncs the change.
-- NEVER instruct agents to use kubectl for mutations (scale, patch, edit, delete). kubectl is for investigation ONLY (get, list, describe, logs).
-- When asking sysAdmin to scale, say: "modify replicaCount in helm/values.yaml via GitOps" not "scale the deployment."
-- Agents should ONLY modify EXISTING values in Helm charts. If a new feature is needed (HPA, PDB, etc.), route to Architect for planning first.
-
-## Post-Execution: When to Close vs Verify
-- After a **code change** (developer pushes a commit with SHA): wait for CI/CD, then route sysAdmin to verify the pod's image tag matches the commit SHA.
-- After a **metric-observable infrastructure change** (scaling replicas, adjusting resource limits): use re_trigger_aligner to verify the new state.
-- After a **non-metric config change** (removing secrets, updating annotations, labels, imagePullSecrets): route sysAdmin to verify via kubectl/oc (check events, pod YAML). Do NOT use re_trigger_aligner -- these changes are not observable via metrics.
-- re_trigger_aligner is ONLY for metric-observable changes (replicas, CPU, memory).
-
-## When to Close
-Check the event **source** field in the prompt header before closing:
-- **source: aligner** (autonomous detection) -- close after metric/state verification. No user involved.
-- **source: chat** (user-initiated request) -- the user is in the conversation. ALWAYS use wait_for_user before closing: "The change has been deployed and verified. Please test and confirm it works as expected, or let me know if adjustments are needed." Close ONLY after the user confirms satisfaction or explicitly says to close.
-- This applies even after successful sysAdmin verification. The user initiated the request -- they get the final word.
-
-## Safety
-- Never approve plans that delete namespaces, volumes, or databases without user approval.
-- If an agent responds with the same answer 3 times, close the event as stuck.
-
-## Control Theory
-- The user's request is the Setpoint (SP)
-- The system's current state is the Process Variable (PV)
-- Your decisions are the Controller minimizing the error between SP and PV
-- Agent responses and Aligner verification are the Feedback Loop
-- ALWAYS verify after execution using the appropriate method (see §Post-Execution)
-
-## GitOps Context
-Services self-describe their GitOps coordinates (repo, helm path) via telemetry.
-When checking GitOps sync status, instruct sysAdmin to discover the GitOps tooling namespace first (e.g., search for ArgoCD or Flux namespaces) rather than assuming a specific namespace.
-
-## Cross-Event Awareness
-Before acting on infrastructure anomalies, check the "Related Active Events" and "Recently Closed Events" sections in the prompt.
-- If a related ACTIVE event shows a deployment or code change in progress (developer.execute, sysadmin.execute), use defer_event to wait for stabilization.
-- If the "Recently Closed Events" show you JUST scaled this service (within 5 minutes), and the current event is "over-provisioned," that is expected post-scaling normalization -- defer for 5 minutes.
-- If the "Recently Closed Events" show a PATTERN of repeated same-reason events (3+ closures of the same type), investigate the root cause instead of applying the same fix again.
-- For "over-provisioned" events: low metrics are the PROBLEM, not a sign of resolution. Route to sysAdmin to scale down via GitOps unless actively deferring per the rules above.
-
-## Aligner Observations
-The Aligner reports what it observes in natural language with actual metric values.
-- For anomaly events (high CPU, high memory, high error rate): if latest metrics are below thresholds, close the event.
-- For "over-provisioned" events: low metrics mean the service has too many replicas. Route to sysAdmin to reduce replicas. Do NOT close just because metrics are low.
-- The Aligner does not make decisions -- you do. It reports, you act.
-
-## Architecture Awareness
-Your prompt includes an "Architecture Diagram (Mermaid)" section showing ALL services, their health, metrics, and dependency edges. USE this diagram actively:
-- When routing tasks, include relevant architectural context in the task_instruction (e.g., "darwin-store depends on postgres via SQL; postgres is currently at 90% CPU -- investigate if this is the root cause").
-- When requesting user approval, describe the impact on connected services (e.g., "Scaling darwin-store will increase load on postgres which is already at high CPU").
-- When triaging anomalies, check if upstream/downstream services in the diagram are also degraded -- a root cause may be in a dependency, not the alerting service itself.
-- When closing events, summarize the architectural context that informed your decision.
-"""
+# BRAIN_SYSTEM_PROMPT removed -- all content migrated to brain_skills/*.md.
+# Fallback for BRAIN_PROGRESSIVE_SKILLS=false is no longer supported.
+# If skill loader fails, raise rather than silently degrading.
 
 # Circuit breaker limits
 MAX_TURNS_PER_EVENT = 100
@@ -367,7 +237,7 @@ BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
 BRAIN_PREFILL_USER = "Session active. Review your core protocols before processing."
 
 BRAIN_PREFILL_MODEL = (
-    "Darwin online. Protocols locked: "
+    "FRIDAY online. Protocols locked: "
     "(1) Deep memory before routing -- history beats guesswork. "
     "(2) Cynefin triage on every event. "
     "(3) Never drop agent recommendations. "
@@ -377,9 +247,9 @@ BRAIN_PREFILL_MODEL = (
 )
 
 
-def _wrap_skill_section(path: str, body: str) -> str:
-    """Wrap a skill body with <skill_section> XML tags for SI self-reference."""
-    return f'<skill_section id="{path}">\n{body}\n</skill_section>'
+def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
+    """Wrap a skill body with semantic XML tags for SI self-reference."""
+    return f'<{tag_type} id="{path}">\n{body}\n</{tag_type}>'
 
 
 class Brain:
@@ -994,10 +864,10 @@ class Brain:
             system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
         else:
-            system_prompt = BRAIN_SYSTEM_PROMPT
-            thinking_level, call_temp = self._determine_thinking_params_legacy(event)
-            phase_max_tokens = self.max_output_tokens
-            context_flags = None
+            raise RuntimeError(
+                "BrainSkillLoader is required. BRAIN_SYSTEM_PROMPT monolith has been removed. "
+                "Set BRAIN_PROGRESSIVE_SKILLS=true (default) and ensure brain_skills/ directory exists."
+            )
 
         # Strip defer_event on first iteration of defer-wake -- forces Brain to act
         # before re-deferring. After iteration 0, defer is available so LLM can
@@ -1771,7 +1641,10 @@ class Brain:
     ) -> str:
         """Assemble system prompt from matching skill phases + dependency resolution."""
         if not self._skill_loader or not self._skill_loader.available_phases():
-            return BRAIN_SYSTEM_PROMPT
+            raise RuntimeError(
+                "BrainSkillLoader has no available phases. Ensure brain_skills/ directory exists "
+                "with at least the always/ phase folder."
+            )
 
         initial_paths: list[str] = []
         for phase in active_phases:
@@ -1794,7 +1667,7 @@ class Brain:
             initial_paths, template_vars=template_vars
         )
         resolved_contents = [
-            _wrap_skill_section(path, body)
+            _wrap_section(path, body, self._skill_loader.get_tag_type(path))
             for path, body in resolved_pairs
         ]
 
@@ -1809,7 +1682,7 @@ class Brain:
                 result = self._skill_loader.get_with_meta(kpath)
                 if result:
                     kbody, _ = result
-                    resolved_contents.append(_wrap_skill_section(kpath, kbody))
+                    resolved_contents.append(_wrap_section(kpath, kbody, self._skill_loader.get_tag_type(kpath)))
                 else:
                     logger.debug(f"Kargo tag '{kpath}' resolved to None in path_index")
 

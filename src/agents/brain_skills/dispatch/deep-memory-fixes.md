@@ -3,6 +3,7 @@ description: "Deep Memory fix proposal workflow (Propose and Prompt)"
 requires:
   - always/04-deep-memory.md
 tags: [memory, fixes, authorization]
+tag_type: protocol
 ---
 # Deep Memory Fix Proposals (Propose and Prompt)
 
