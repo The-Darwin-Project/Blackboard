@@ -9,7 +9,7 @@ valid approaches. Sampling interval (Ts) is the core controller output.
 
 <source_context ref="source/{event.source}">
 Ts calibration per source:
-- headhunter: pipeline duration from deep memory (typical: 15-45min)
+- headhunter: pipeline duration from deep memory
 - aligner: metric recovery baseline from operational history
 - chat/slack: user IS the feedback loop — no defer between exchanges
 - timekeeper: scheduled task interval defines natural Ts
