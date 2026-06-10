@@ -19,8 +19,8 @@ Probe strategy per source:
 
 | Severity | Observation window | Probe limit                        |
 |----------|-------------------|------------------------------------|
-| info     | hours-days        | 2 probes before pattern assessment |
-| warning  | 30-60min          | 1 probe before reassessment        |
+| info     | extended observation (consult deep memory) | 2 probes before pattern assessment |
+| warning  | deep memory baseline | 1 probe before reassessment        |
 | critical | immediate         | reclassify to CHAOTIC              |
 
 </severity_modulation>

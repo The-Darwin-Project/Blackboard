@@ -60,8 +60,8 @@ pipeline/MR/PR event actually happened), Event Created (when Headhunter observed
 it), and Queue Wait (how long it sat before you processed it).
 
 Use temporal context with deep memory to inform your triage. If a pipeline
-failed 30 minutes ago and deep memory shows this pipeline typically completes
-in 25 minutes, the state has likely changed. Refresh once to check, then act.
+failed beyond the historical baseline from deep memory, the state has likely
+changed. Refresh once to check, then act.
 
 ## Operational History
 

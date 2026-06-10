@@ -36,7 +36,7 @@ Two different uses of `defer_event` — do not confuse them:
 - **Domain-Ts (strategic)**: The domain control loop schedules the next feedback sample. This is active control — you chose a sampling interval based on severity, source baseline, and progress signals. The process needs time, not another check.
 - **Congestion-defer (backpressure)**: The system is saturated. You defer because agents are busy, not because the strategy calls for observation. This is queue management.
 
-Domain-Ts produces structured reasoning ("COMPLICATED strategy: Ts=20m based on pipeline history").
+Domain-Ts produces structured reasoning ("COMPLICATED strategy: Ts=<consult deep memory for baseline>").
 Congestion-defer produces capacity reasoning ("All agents busy, deferring automated event").
 
 ## Capacity Scaling

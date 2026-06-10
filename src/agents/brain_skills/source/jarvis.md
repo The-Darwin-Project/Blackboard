@@ -26,7 +26,7 @@ only produces observations.
    and past outcomes for the same service.
 
 3. **Think critically.** For each event listed:
-   - Is the defer reason still valid? (e.g., "pipeline running" for 45min)
+   - Is the defer reason still valid? (e.g., "pipeline running" beyond historical baseline)
    - Are any events stuck in the same phase too long?
    - Is there a pattern across events? (same service, same failure)
    - Is the total defer time within historical norms?

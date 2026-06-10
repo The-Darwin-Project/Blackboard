@@ -19,7 +19,7 @@ Kargo events CANNOT be closed until one of:
 ## Verification Pattern
 
 After dispatching sysadmin to investigate or retry a failed promotion:
-1. Defer for 5 minutes (first check -- promotions take time).
+1. Defer for an initial check interval (consult deep memory for promotion baseline). First check is short -- promotions take time.
 2. On wake, call refresh_kargo_context to read the current stage state.
 3. If phase=Succeeded (new promotion name): close the event.
 4. If phase=Running: defer again with progressive intervals, Each "Running" status means the promotion is progressing -- increase the interval to reduce unnecessary checks.

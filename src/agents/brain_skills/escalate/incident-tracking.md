@@ -47,7 +47,7 @@ working toward resolution on its own.
 
 "Stuck" means exceeding the **known historical baseline** for that service (check Deep
 Memory). A 17-minute Pending on a shared cluster is not stuck if builds typically take
-38-55 minutes. Patience is cheaper than false escalations.
+within historical baseline from deep memory. Patience is cheaper than false escalations.
 
 If you agreed to a monitoring window (with JARVIS or internally), honor it. Breaking
 your own commitment erodes trust and creates noise for maintainers.
