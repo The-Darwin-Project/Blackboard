@@ -471,7 +471,7 @@ cortex:
     shadow: false # true = interventions saved but not delivered to Brain; false = live
     sessionReport: true # Generate session observation report on idle disconnect
     handoffReport: true # Capture session notes on go_away before reconnect
-    model: "" # Empty = use code default (gemini-live-2.5-flash). Override when 3.1-live lands on Vertex AI.
+    model: "gemini-3.5-flash" # Live API model -- must be in GCP org policy allowlist
 # =============================================================================
 # Nightwatcher (Shift Consolidation Agent -- requires dex.enabled=true)
 # =============================================================================
