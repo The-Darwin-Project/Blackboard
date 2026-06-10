@@ -93,7 +93,7 @@ class LiveAPIAdapter:
         self._session = None
         self._session_ctx = None
         self._shadow = os.getenv("SYSTEM2_SHADOW", "true").lower() == "true"
-        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-3.5-flash")
+        self._model = os.getenv("LLM_MODEL_SYSTEM2", "gemini-live-2.5-flash-native-audio")
         self._project = os.getenv("GCP_PROJECT", "")
         self._location = os.getenv("GCP_LOCATION", "global")
         self._seen_neurons: set[str] = set()
