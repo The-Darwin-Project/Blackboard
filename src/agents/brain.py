@@ -325,7 +325,7 @@ class Brain:
         self.location = os.getenv("GCP_LOCATION", "global")
         self.provider = os.getenv("LLM_PROVIDER", "gemini")
         self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
-        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro")
+        self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._scheduler = None  # ReconcileScheduler | None -- set by start_event_loop()
