@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
-EMBEDDING_MODEL = "text-embedding-005"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.5-flash")
 EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-6")
 
