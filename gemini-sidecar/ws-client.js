@@ -9,7 +9,8 @@
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 // 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work). wake_register WS includes same `mode` as synthetic task (Brain handle_wake_task / WAKE_REGISTER_MODES).
 // 9. [Pattern]: Mode-based skill filtering: restoreAllSkills() (defensive) + filterSkillsByMode(mode) before CLI spawn; restoreAllSkills() in finally block.
-// 10. [Pattern]: Role-gated pre-warm: security_analyst downloads vuln DBs (trivy, grype) before CLI spawn. MUST use async exec (not execSync) -- sync blocks event loop, starving WS heartbeats, causing Brain disconnect. Non-blocking on failure.
+// 10. [Pattern]: Role-gated pre-warm: security_analyst downloads vuln DBs (trivy, grype) before CLI spawn. MUST use async exec (not execSync). Non-blocking on failure.
+// 11. [Gotcha]: Pong handler MUST fire before `await handleTask` -- ws library delivers messages sequentially. If pong is after the await, it's gated behind handleTask completion (pre-warm ~77s), causing Brain heartbeat timeout disconnect.
 
 const WebSocket = require('ws');
 const os = require('os');
@@ -80,6 +81,8 @@ function startWSClient(brainUrl) {
     ws.on('message', async (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+      // Pong must fire immediately -- never gated behind awaited handlers
+      if (msg.type === 'ping') { wsSend(ws, { type: 'pong' }); return; }
       if (msg.type === 'task') { resetIdleTimer(); await handleTask(ws, msg); }
       else if (msg.type === 'cancel') handleCancel(msg);
       else if (msg.type === 'terminate') {
@@ -88,7 +91,6 @@ function startWSClient(brainUrl) {
         if (_activeWs) try { _activeWs.close(); } catch {}
         process.exit(0);
       }
-      else if (msg.type === 'ping') wsSend(ws, { type: 'pong' });
       else if (msg.type === 'huddle_reply') {
         // Brain replied to a HuddleSendMessage -- resolve the held HTTP response
         const pending = state.getPendingHuddleReply();
