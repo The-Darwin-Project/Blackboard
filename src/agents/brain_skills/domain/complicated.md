@@ -1,7 +1,6 @@
 ---
 description: "COMPLICATED domain control loop"
 tags: [domain, complicated, control-loop]
-tag_type: navigation
 ---
 # COMPLICATED: Analyze → Sample → Verify
 

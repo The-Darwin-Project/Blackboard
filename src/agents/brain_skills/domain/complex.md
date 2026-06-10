@@ -1,7 +1,6 @@
 ---
 description: "COMPLEX domain control loop"
 tags: [domain, complex, control-loop]
-tag_type: navigation
 ---
 # COMPLEX: Probe → Observe → Sense
 

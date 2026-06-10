@@ -50,6 +50,7 @@ FRIDAY uses bare type names without agent prefix or `_section` suffix:
 | `skill` | All other folders (dispatch, triage, etc.) | 18 |
 | `context` | `context/` folder default | 6 |
 | `protocol` | Frontmatter override `tag_type: protocol` | 5 |
+| `navigation` | `domain/` folder default | 4 |
 
 Output format: `<rule id="always/identity.md">...</rule>`, `<skill id="dispatch/exec.md">...</skill>`, etc.
 
@@ -66,7 +67,7 @@ FRIDAY's tags use bare `{type}` (e.g., `rule`) rather than the `{agent}_{type}` 
 ### Allowlist
 
 ```python
-_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context"})
+_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context", "navigation"})
 ```
 
 ### Boundary: No Prompt Composition

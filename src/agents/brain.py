@@ -1261,6 +1261,8 @@ class Brain:
             self._last_processed[event_id] = time.time()
             if event.source in ("slack", "chat"):
                 self._waiting_for_user[event_id] = time.time()
+                conversation_timeout = int(os.getenv("IDLE_TIMEOUT_CONVERSATION_SEC", "3600"))
+                self._idle_timeout.schedule(event_id, warning_sec=conversation_timeout)
 
         self._reasoning_by_event.pop(event_id, None)
         if accumulated_text or accumulated_thoughts:
@@ -1636,9 +1638,9 @@ class Brain:
                     active.append(folder)
 
         # Domain-gated control loop (after phase skills, before huddle)
-        event_domain = ctx.get("event_domain") or getattr(event, "brain_domain", None)
-        if event_domain and event_domain in BRAIN_DOMAIN_SKILLS:
-            for folder in BRAIN_DOMAIN_SKILLS[event_domain]:
+        event_domain = ctx.get("event_domain")
+        if event_domain:
+            for folder in BRAIN_DOMAIN_SKILLS.get(event_domain, []):
                 if folder not in active:
                     active.append(folder)
 
@@ -1671,6 +1673,12 @@ class Brain:
                     initial_paths.append(source_file)
                 else:
                     logger.warning(f"No source skill for '{event.source}' (subject_type={subject_type})")
+            elif phase.startswith("domain/"):
+                domain_file = f"{phase}.md"
+                if self._skill_loader.get_with_meta(domain_file):
+                    initial_paths.append(domain_file)
+                else:
+                    logger.warning(f"Domain skill not found: {domain_file}")
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
@@ -5781,9 +5789,11 @@ class Brain:
 
             # User-message bypass: if waiting but user sent a DELIVERED message,
             # the user IS the response — their message invalidates the wait state.
+            # Scoped to recent turns to avoid matching stale history if mark_turns_evaluated fails.
+            # Auth boundary: actor=="user" is set by authenticated ingestion (chat/slack endpoints).
             has_user_unread = has_unread and any(
                 t.status.value == "delivered" and t.actor == "user"
-                for t in event.conversation
+                for t in event.conversation[-10:]
             )
             if has_user_unread and is_waiting:
                 self.clear_waiting(eid)

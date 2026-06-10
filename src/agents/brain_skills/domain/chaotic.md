@@ -1,7 +1,6 @@
 ---
 description: "CHAOTIC domain control loop"
 tags: [domain, chaotic, control-loop]
-tag_type: navigation
 ---
 # CHAOTIC: Act → Sense → Stabilize
 

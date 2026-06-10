@@ -1,7 +1,6 @@
 ---
 description: "CLEAR domain control loop"
 tags: [domain, clear, control-loop]
-tag_type: navigation
 ---
 # CLEAR: Categorize → Act → Verify
 

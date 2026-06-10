@@ -19,7 +19,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
-- Action: Skip DISPATCH. Route sysAdmin directly with the established fix, then VERIFY.
+- Action: Enter the CLEAR domain loop (see domain/clear.md for the dual-rhombus strategy).
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 

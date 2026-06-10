@@ -34,6 +34,8 @@ _FOLDER_TAG_TYPE: dict[str, str] = {
     "always": "rule",
     "source": "rule",
     "context": "context",
+    # "navigation" describes what the tag DOES (steers the LLM through decision graphs),
+    # "domain" is where it LIVES (folder name). Intentional split: folder = content origin, tag = compliance signal.
     "domain": "navigation",
 }
 
