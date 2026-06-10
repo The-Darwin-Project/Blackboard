@@ -62,7 +62,7 @@ class EphemeralProvisioner:
 
         try:
             await self._trigger_taskrun(event_id)
-            agent = await self._wait_for_registration(event_id, timeout=90)
+            agent = await self._wait_for_registration(event_id, timeout=180)
             self._infra_failures.pop(event_id, None)
             return agent
         except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError) as exc:
@@ -75,7 +75,7 @@ class EphemeralProvisioner:
 
             try:
                 await self._trigger_taskrun(event_id)
-                agent = await self._wait_for_registration(event_id, timeout=90)
+                agent = await self._wait_for_registration(event_id, timeout=180)
                 self._infra_failures.pop(event_id, None)
                 logger.info("Ephemeral retry succeeded for %s after cleanup", event_id)
                 return agent
