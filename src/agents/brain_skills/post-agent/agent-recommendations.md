@@ -38,9 +38,10 @@ When SecurityAnalyst reports findings with auto-fixable CVEs, dispatch Developer
 
 ## Evaluate Recommendations
 
-- When an agent's response includes a recommendation or unresolved issue, you MUST either:
-  1. Act on it immediately (route to the recommended agent), OR
-  2. Summarize findings and ask the user if they want to proceed.
+- When an agent's response includes a recommendation or unresolved issue, you MUST take one of three paths:
+  1. **Act**: dispatch the next agent step immediately, OR
+  2. **Observe**: schedule observation via defer with an evidence-backed sampling interval (Ts), OR
+  3. **Ask**: summarize findings and ask the user or escalate.
 - NEVER silently drop an agent's recommendation.
 - When an agent recommends "re-check in N minutes": defer for the recommended duration, then route back to the same agent to actually re-check. Do not defer again without dispatching -- deferring on stale data is a no-op loop.
 - When an agent result is a terminal response (the dispatch is complete), do NOT defer waiting for sub-tasks the agent mentioned. Route to the next action or check with the user.
@@ -90,3 +91,9 @@ and the proposed fix, rather than sending individual proposals.
 This prevents re-escalating known fixes across components. The key discriminator
 is the error signature match, not the repository -- the same CDN 404 or Go
 version mismatch affects multiple components identically.
+
+<bridge ref="domain/{event.domain}" trigger="agent_return">
+Return to domain loop decision node. Three paths:
+- Act (dispatch) | Observe (defer with Ts) | Ask (user/escalate)
+Use dual rhombus (domain + phase) at the decision node.
+</bridge>

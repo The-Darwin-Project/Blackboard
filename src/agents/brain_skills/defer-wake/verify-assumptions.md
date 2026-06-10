@@ -22,7 +22,17 @@ to unlock refresh tools before checking current state.
    Do NOT escalate a healthy monitoring cycle just because the defer count is high.
 4. **Snapshot for trajectory** -- call record_observation with the current quantifiable state (pipeline status code, queue depth, retry count) before deferring. When you wake, list_observations shows whether the number moved -- that is your progress signal.
 
+Re-defer after fresh measurement is the correct controller output when the
+process is still progressing. Repeated defers with progress signals = healthy
+sampling at interval Ts. The system enforces verify-before-re-defer — this IS
+the measurement step in the control loop.
+
 ## Headhunter Post-Defer: Refresh GitLab State
 
 For headhunter events waking from defer, call refresh_gitlab_context ONCE to
 check the current MR/pipeline state. Then act on the result.
+
+<bridge ref="domain/{event.domain}" trigger="defer_wake">
+You woke from defer. Re-enter domain loop at the VERIFY waypoint.
+Measure PV, then use dual rhombus (domain + phase) for next step.
+</bridge>

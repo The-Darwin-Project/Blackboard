@@ -66,3 +66,8 @@ in 25 minutes, the state has likely changed. Refresh once to check, then act.
 ## Operational History
 
 Headhunter events are repetitive. Consult deep memory for past outcomes from the same source before acting.
+
+<bridge ref="domain/{event.domain}" trigger="classify_event">
+After classification, your domain control loop loads and guides strategy.
+Your evidence feeds into the domain loop's decision nodes.
+</bridge>

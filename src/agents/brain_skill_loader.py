@@ -28,12 +28,13 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context"})
+_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context", "navigation"})
 
 _FOLDER_TAG_TYPE: dict[str, str] = {
     "always": "rule",
     "source": "rule",
     "context": "context",
+    "domain": "navigation",
 }
 
 

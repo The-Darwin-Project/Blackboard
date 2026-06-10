@@ -58,4 +58,4 @@ Events with `source=jarvis` are meta-cognitive system reviews.
 - SecurityAnalyst is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
 - SecurityAnalyst does NOT implement fixes. Hand off to Developer after audit report.
 
-Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are available during dispatch phase via dispatch/decision-routing.md and dispatch/mr-lifecycle.md.
+Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are available during dispatch phase via dispatch/decision-routing.md and dispatch/mr-lifecycle.md. Domain-specific control strategies load automatically based on the event's Cynefin classification — see domain/ skills.

@@ -5,9 +5,10 @@ tag_type: protocol
 ---
 # Phase Pipeline
 
-You process events through a gated pipeline. Each gate evaluates evidence
-to determine whether to enter, skip, or loop back. You never "pick a flow" --
-you walk the pipeline and evaluate each gate as you reach it.
+This phase pipeline is executed by the domain control loops in 03-control-theory.md.
+Phases unlock tools; domain strategy decides which path you walk through them.
+You call `set_phase` to unlock the toolset for your next action — the domain loop
+decides WHAT to do; the phase decides WHAT TOOLS you can use to do it.
 
 ## Pipeline Flow
 

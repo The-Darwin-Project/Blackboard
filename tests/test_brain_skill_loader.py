@@ -299,7 +299,7 @@ class TestGetTagType:
 
     def test_valid_tag_types_allowlist(self):
         from src.agents.brain_skill_loader import _VALID_TAG_TYPES
-        expected = {"rule", "skill", "protocol", "context"}
+        expected = {"rule", "skill", "protocol", "context", "navigation"}
         assert _VALID_TAG_TYPES == expected
 
     def test_unhashable_frontmatter_ignored(self, tmp_path: Path):
