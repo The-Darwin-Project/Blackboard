@@ -2,7 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: archive_event() is fire-and-forget. MUST NOT block event closure.
 # 2. [Pattern]: Summarization via GeminiAdapter (create_adapter, shared QuotaTracker). Embeddings stay on direct genai.Client (separate 5M TPM quota).
-# 3. [Gotcha]: embed_content returns 768-dim vector. Qdrant collection must match.
+# 3. [Gotcha]: embed_content with output_dimensionality=768 (gemini-embedding-2 native is 3072). Qdrant collections must match 768.
 # 4. [Pattern]: All errors caught and logged. Failure falls back to existing append_journal().
 # 5. [Pattern]: store_feedback() reuses the same embedding pipeline for user feedback on AI responses.
 # 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
@@ -16,8 +16,8 @@
 Archivist: Summarizes closed events into vectorized deep memory.
 
 Triggered by Brain._close_and_broadcast(). Runs async, non-blocking.
-Uses Gemini (LLM_MODEL_ARCHIVIST) for summarization, text-embedding-005 for vectors,
-and Qdrant for storage.
+Uses Gemini (LLM_MODEL_ARCHIVIST) for summarization, gemini-embedding-2 for vectors
+(truncated to 768 dims via output_dimensionality), and Qdrant for storage.
 """
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
+EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.5-flash")
 EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-6")
 
@@ -130,6 +131,16 @@ class Archivist:
                 self._adapter = None
         return self._adapter
 
+    async def _embed(self, text: str) -> list[float]:
+        """Generate embedding vector, truncated to EMBEDDING_DIMS."""
+        from google.genai import types
+        r = await self._client.aio.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIMS),
+        )
+        return r.embeddings[0].values
+
     async def archive_event(self, event: EventDocument) -> None:
         """
         Summarize and vectorize a closed event. Fire-and-forget.
@@ -220,11 +231,7 @@ class Archivist:
                 f"{summary.get('procedures', '')} "
                 f"{summary.get('outcome', '')}"
             )
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=embed_text,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(embed_text)
 
             # Step 3: Store in Qdrant
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"darwin:{event.id}"))
@@ -293,11 +300,7 @@ class Archivist:
             if not await self._ensure_initialized():
                 return []
 
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=query,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(query)
 
             results = await self._vector_store.search(
                 collection=COLLECTION_NAME,
@@ -330,11 +333,7 @@ class Archivist:
             if not await self._ensure_initialized():
                 return False
 
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=turn_text[:500],
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(turn_text[:500])
             point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"feedback:{event_id}:{turn_number}"))
             payload = {
                 "event_id": event_id,
@@ -399,11 +398,7 @@ class Archivist:
                 f"{payload.get('procedures', '')} "
                 f"{payload.get('outcome', '')}"
             )
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=embed_text,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(embed_text)
 
             await self._vector_store.upsert(
                 collection=COLLECTION_NAME,
@@ -461,11 +456,7 @@ class Archivist:
                 f"{title} {pattern} {anti_pattern} "
                 f"{' '.join(keywords or [])}"
             )
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=embed_text,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(embed_text)
 
             await self._vector_store.upsert(
                 collection=LESSONS_COLLECTION,
@@ -492,11 +483,7 @@ class Archivist:
             if not await self._ensure_initialized():
                 return []
 
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=query,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(query)
             results = await self._vector_store.search(
                 collection=LESSONS_COLLECTION,
                 vector=vector,
@@ -667,11 +654,7 @@ class Archivist:
                 f"{payload.get('title', '')} {payload.get('pattern', '')} "
                 f"{payload.get('anti_pattern', '')} {' '.join(payload.get('keywords', []))}"
             )
-            embed_response = await self._client.aio.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=embed_text,
-            )
-            vector = embed_response.embeddings[0].values
+            vector = await self._embed(embed_text)
 
             await self._vector_store.upsert(
                 collection=LESSONS_COLLECTION,
