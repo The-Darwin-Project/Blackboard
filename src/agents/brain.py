@@ -2477,6 +2477,28 @@ class Brain:
             agent_name = args.get("agent_id", "")
             message = args.get("message", "")
 
+            # Ephemeral-only roles have no persistent sidecar -- message_agent cannot reach them
+            if agent_name in self.EPHEMERAL_ONLY_ROLES:
+                running_agent = self._active_agent_for_event.get(event_id)
+                if running_agent != agent_name:
+                    logger.info(
+                        "message_agent: %s is ephemeral-only and not active on %s -- redirecting to select_agent",
+                        agent_name, event_id,
+                    )
+                    followup = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="tool_result",
+                        thoughts=(
+                            f"{agent_name} is an ephemeral-only agent (no persistent sidecar). "
+                            f"Use select_agent to dispatch it -- this provisions an on-call pod. "
+                            f"message_agent only works for agents that are already running."
+                        ),
+                        response_parts=response_parts,
+                    )
+                    await self._append_and_broadcast(event_id, followup)
+                    return True
+
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
