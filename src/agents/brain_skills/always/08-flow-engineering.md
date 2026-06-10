@@ -29,6 +29,16 @@ Smaller tasks complete faster without adding capacity. When dispatching COMPLICA
 - When an agent reports "busy" and the queue has pending events, focus on completing existing work before routing new automated events.
 - When dispatching a multi-step task, always ask: "Can this be broken into smaller batches?" If yes, dispatch only the first batch.
 
+## Domain-Ts vs Congestion-Defer
+
+Two different uses of `defer_event` — do not confuse them:
+
+- **Domain-Ts (strategic)**: The domain control loop schedules the next feedback sample. This is active control — you chose a sampling interval based on severity, source baseline, and progress signals. The process needs time, not another check.
+- **Congestion-defer (backpressure)**: The system is saturated. You defer because agents are busy, not because the strategy calls for observation. This is queue management.
+
+Domain-Ts produces structured reasoning ("COMPLICATED strategy: Ts=20m based on pipeline history").
+Congestion-defer produces capacity reasoning ("All agents busy, deferring automated event").
+
 ## Capacity Scaling
 
 The system manages agent capacity automatically. Do not defer user-initiated events (chat, slack) proactively for capacity reasons -- route normally and let the infrastructure handle availability. Only defer when the system explicitly reports all agents are busy after exhausting all available capacity tiers.

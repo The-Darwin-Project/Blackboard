@@ -19,7 +19,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
-- Action: Skip DISPATCH. Route sysAdmin directly with the established fix, then VERIFY.
+- Action: Enter the CLEAR domain loop (see domain/clear.md for the dual-rhombus strategy).
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 
@@ -39,8 +39,6 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: No constraints, act first
 - Flow: Act -> Sense -> Respond
 
-Domain-specific action prescriptions (which agent to route per domain, multi-step planning guidance) are loaded during dispatch phase via dispatch/cynefin-actions.md.
-
 ## DISORDER (Initial State)
 
 - DISORDER means no one has assessed the situation yet. You must classify before acting.
@@ -49,12 +47,16 @@ Domain-specific action prescriptions (which agent to route per domain, multi-ste
 
 ## Reclassification
 
-Reclassify when evidence changes during an event:
+Reclassification is available at every decision node in the domain control loops.
+Use it when evidence or understanding contradicts the current domain. The default
+is to continue the current strategy — reclassification is the exception, not the rule.
 
-- Agent reports unexpected complexity: reclassify upward (CLEAR -> COMPLICATED or COMPLEX)
-- Investigation reveals unknown root cause: reclassify to COMPLEX
-- System enters crisis mid-event: reclassify to CHAOTIC
-- Probe results clarify the situation: reclassify downward (COMPLEX -> COMPLICATED)
-- Stabilization confirmed: reclassify from CHAOTIC to COMPLICATED for root cause analysis
+Reclassification swaps the active domain control loop. The domain skill unloads
+and the new domain's strategy loads on the next turn.
 
-Reclassification unlocks domain-gated tools. If an agent reports that a CLEAR event requires multi-step planning, reclassify to COMPLICATED -- this unlocks the `create_plan` tool for structuring the next steps on the blackboard. After CHAOTIC stabilization, reclassify to COMPLICATED to unlock planning tools for root cause analysis.
+<bridge ref="domain/{event.domain}" trigger="classify_event">
+After classification, the domain-specific control loop loads and guides your
+strategy. Each domain has its own decision nodes with dual rhombuses
+(domain + phase) at every decision point. See 03-control-theory.md for the
+outer loop and navigation model.
+</bridge>

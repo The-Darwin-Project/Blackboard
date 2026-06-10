@@ -232,6 +232,13 @@ BRAIN_PHASE_SKILLS: dict[str, list[str]] = {
     "close":     ["close"],
 }
 
+BRAIN_DOMAIN_SKILLS: dict[str, list[str]] = {
+    "clear":       ["domain/clear"],
+    "complicated": ["domain/complicated"],
+    "complex":     ["domain/complex"],
+    "chaotic":     ["domain/chaotic"],
+}
+
 # Context priming: synthetic prefill so the LLM treats protocols as already-committed.
 # Update BRAIN_PREFILL_MODEL if always/ skill protocols change materially.
 BRAIN_PREFILL_USER = "Session active. Review your core protocols before processing."
@@ -1254,7 +1261,8 @@ class Brain:
             self._last_processed[event_id] = time.time()
             if event.source in ("slack", "chat"):
                 self._waiting_for_user[event_id] = time.time()
-                self._idle_timeout.schedule(event_id)
+                conversation_timeout = int(os.getenv("IDLE_TIMEOUT_CONVERSATION_SEC", "3600"))
+                self._idle_timeout.schedule(event_id, warning_sec=conversation_timeout)
 
         self._reasoning_by_event.pop(event_id, None)
         if accumulated_text or accumulated_thoughts:
@@ -1629,6 +1637,13 @@ class Brain:
                 if folder not in active:
                     active.append(folder)
 
+        # Domain-gated control loop (after phase skills, before huddle)
+        event_domain = ctx.get("event_domain")
+        if event_domain:
+            for folder in BRAIN_DOMAIN_SKILLS.get(event_domain, []):
+                if folder not in active:
+                    active.append(folder)
+
         if ctx.get("has_pending_huddle", False):
             active.append("coordination")
 
@@ -1658,6 +1673,12 @@ class Brain:
                     initial_paths.append(source_file)
                 else:
                     logger.warning(f"No source skill for '{event.source}' (subject_type={subject_type})")
+            elif phase.startswith("domain/"):
+                domain_file = f"{phase}.md"
+                if self._skill_loader.get_with_meta(domain_file):
+                    initial_paths.append(domain_file)
+                else:
+                    logger.warning(f"Domain skill not found: {domain_file}")
             else:
                 initial_paths.extend(self._skill_loader.get_all_paths_for_phase(phase))
 
@@ -5765,6 +5786,18 @@ class Brain:
             has_unread = any(t.status.value == "delivered" for t in event.conversation)
             is_waiting = eid in self._waiting_for_user
             is_locked = eid in self._event_locks and self._event_locks[eid].locked()
+
+            # User-message bypass: if waiting but user sent a DELIVERED message,
+            # the user IS the response — their message invalidates the wait state.
+            # Scoped to recent turns to avoid matching stale history if mark_turns_evaluated fails.
+            # Auth boundary: actor=="user" is set by authenticated ingestion (chat/slack endpoints).
+            has_user_unread = has_unread and any(
+                t.status.value == "delivered" and t.actor == "user"
+                for t in event.conversation[-10:]
+            )
+            if has_user_unread and is_waiting:
+                self.clear_waiting(eid)
+                is_waiting = False
 
             if has_unread and not is_waiting and not is_locked:
                 to_enqueue.append(eid)

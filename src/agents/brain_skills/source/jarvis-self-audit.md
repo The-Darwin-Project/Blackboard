@@ -14,7 +14,7 @@ named skill or protocol. Recognize these patterns:
 - Structured reference: JARVIS uses `skill::phase/filename.md` tokens to point
   at specific skills. Locate the matching semantic section tag (e.g.,
   `<rule id="phase/filename.md">`, `<skill id="...">`,
-  `<protocol id="...">`, or `<context id="...">`)
+    `<protocol id="...">`, `<context id="...">`, or `<navigation id="...">`)
   in your system instruction and audit your behavior against that skill's content.
 
 ## Response Structure

@@ -28,12 +28,15 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context"})
+_VALID_TAG_TYPES = frozenset({"rule", "skill", "protocol", "context", "navigation"})
 
 _FOLDER_TAG_TYPE: dict[str, str] = {
     "always": "rule",
     "source": "rule",
     "context": "context",
+    # "navigation" describes what the tag DOES (steers the LLM through decision graphs),
+    # "domain" is where it LIVES (folder name). Intentional split: folder = content origin, tag = compliance signal.
+    "domain": "navigation",
 }
 
 

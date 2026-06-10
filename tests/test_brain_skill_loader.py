@@ -299,7 +299,7 @@ class TestGetTagType:
 
     def test_valid_tag_types_allowlist(self):
         from src.agents.brain_skill_loader import _VALID_TAG_TYPES
-        expected = {"rule", "skill", "protocol", "context"}
+        expected = {"rule", "skill", "protocol", "context", "navigation"}
         assert _VALID_TAG_TYPES == expected
 
     def test_unhashable_frontmatter_ignored(self, tmp_path: Path):
@@ -344,3 +344,159 @@ class TestIntegrationTagWrapping:
         assert '</protocol>' in joined
         assert '<skill id="triage/assess.md">' in joined
         assert '</skill>' in joined
+
+
+class TestDomainSkillLoading:
+    """T1+T2: Domain skills must resolve via _path_index and produce navigation tags."""
+
+    def test_domain_phase_returns_empty_from_get_all_paths(self, tmp_path: Path):
+        """get_all_paths_for_phase('domain/clear') returns [] because cache keys by folder."""
+        _make_skills(tmp_path, {
+            "domain": {"clear.md": "# CLEAR loop"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_all_paths_for_phase("domain/clear") == []
+        assert loader.get_all_paths_for_phase("domain") == ["domain/clear.md"]
+
+    def test_domain_file_accessible_via_path_index(self, tmp_path: Path):
+        """Domain files are reachable via get_with_meta (the H1 fix path)."""
+        _make_skills(tmp_path, {
+            "domain": {"clear.md": "# CLEAR control loop"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        result = loader.get_with_meta("domain/clear.md")
+        assert result is not None
+        body, _ = result
+        assert "CLEAR control loop" in body
+
+    def test_domain_files_get_navigation_tag_type(self, tmp_path: Path):
+        """domain/ folder default resolves to 'navigation' tag type."""
+        _make_skills(tmp_path, {
+            "domain": {
+                "clear.md": "# CLEAR",
+                "complicated.md": "# COMPLICATED",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tag_type("domain/clear.md") == "navigation"
+        assert loader.get_tag_type("domain/complicated.md") == "navigation"
+
+    @pytest.mark.asyncio
+    async def test_domain_skill_in_system_prompt(self, tmp_path: Path):
+        """H1 integration: domain/clear in active_phases produces <navigation> tag in prompt."""
+        from src.agents.brain import _wrap_section
+
+        _make_skills(tmp_path, {
+            "domain": {"clear.md": "# CLEAR: Categorize then Act"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        active_phases = ["domain/clear"]
+        initial_paths: list[str] = []
+        for phase in active_phases:
+            if phase.startswith("domain/"):
+                domain_file = f"{phase}.md"
+                if loader.get_with_meta(domain_file):
+                    initial_paths.append(domain_file)
+
+        assert initial_paths == ["domain/clear.md"]
+
+        resolved_pairs = loader.resolve_dependencies_with_paths(initial_paths)
+        results = [
+            _wrap_section(path, body, loader.get_tag_type(path))
+            for path, body in resolved_pairs
+        ]
+
+        joined = "\n".join(results)
+        assert '<navigation id="domain/clear.md">' in joined
+        assert "CLEAR: Categorize then Act" in joined
+        assert "</navigation>" in joined
+
+    def test_all_four_domains_resolvable(self, tmp_path: Path):
+        """All four domain files resolve via the H1 fix path."""
+        _make_skills(tmp_path, {
+            "domain": {
+                "clear.md": "# CLEAR",
+                "complicated.md": "# COMPLICATED",
+                "complex.md": "# COMPLEX",
+                "chaotic.md": "# CHAOTIC",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        for domain in ("clear", "complicated", "complex", "chaotic"):
+            result = loader.get_with_meta(f"domain/{domain}.md")
+            assert result is not None, f"domain/{domain}.md not found in path_index"
+
+
+class TestIdleTimeoutConversation:
+    """T4: Idle timeout schedule with conversation-length override."""
+
+    @pytest.mark.asyncio
+    async def test_schedule_with_warning_override(self):
+        from src.scheduling.idle_timeout import IdleTimeoutManager
+
+        warned = []
+        closed = []
+
+        async def warn_cb(eid: str) -> None:
+            warned.append(eid)
+
+        async def close_cb(eid: str) -> None:
+            closed.append(eid)
+
+        mgr = IdleTimeoutManager(warn_callback=warn_cb, close_callback=close_cb)
+        mgr.schedule("evt-1", warning_sec=3600)
+        assert mgr.has_timer("evt-1")
+        mgr.cancel("evt-1")
+        assert not mgr.has_timer("evt-1")
+
+    @pytest.mark.asyncio
+    async def test_schedule_without_override_uses_default(self):
+        from src.scheduling.idle_timeout import IdleTimeoutManager
+
+        async def noop(eid: str) -> None:
+            pass
+
+        mgr = IdleTimeoutManager(warn_callback=noop, close_callback=noop)
+        mgr.schedule("evt-2")
+        assert mgr.has_timer("evt-2")
+        mgr.cancel_all()
+
+
+class TestUserMessageBypass:
+    """T3: DELIVERED user turn clears _waiting_for_user in scan logic."""
+
+    def test_user_delivered_turn_detected_in_recent_window(self):
+        """Verify the scan pattern: actor=='user' + status=='delivered' in last 10 turns."""
+        from collections import namedtuple
+        Status = namedtuple("Status", ["value"])
+        Turn = namedtuple("Turn", ["actor", "status", "action"])
+
+        old_brain_turn = Turn(actor="brain", status=Status("evaluated"), action="response")
+        old_user_turn = Turn(actor="user", status=Status("evaluated"), action="message")
+        new_user_turn = Turn(actor="user", status=Status("delivered"), action="message")
+        conversation = [old_brain_turn, old_user_turn] + [old_brain_turn] * 15 + [new_user_turn]
+
+        has_unread = any(t.status.value == "delivered" for t in conversation)
+        has_user_unread = has_unread and any(
+            t.status.value == "delivered" and t.actor == "user"
+            for t in conversation[-10:]
+        )
+        assert has_user_unread is True
+
+    def test_stale_user_turns_not_matched(self):
+        """Old delivered user turns beyond the 10-turn window are not matched."""
+        from collections import namedtuple
+        Status = namedtuple("Status", ["value"])
+        Turn = namedtuple("Turn", ["actor", "status", "action"])
+
+        stale_user = Turn(actor="user", status=Status("delivered"), action="message")
+        brain_turn = Turn(actor="brain", status=Status("evaluated"), action="response")
+        conversation = [stale_user] + [brain_turn] * 15
+
+        has_unread = any(t.status.value == "delivered" for t in conversation)
+        has_user_unread = has_unread and any(
+            t.status.value == "delivered" and t.actor == "user"
+            for t in conversation[-10:]
+        )
+        assert has_user_unread is False

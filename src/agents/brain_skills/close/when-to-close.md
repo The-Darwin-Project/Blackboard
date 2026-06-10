@@ -14,6 +14,16 @@ Check the event source before closing:
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
 
+## Domain-Gated Close Criteria
+
+In addition to source-specific rules above, the event's Cynefin domain determines
+what counts as "resolved":
+
+- **CLEAR**: Fix verified = done. Single dispatch-verify cycle.
+- **COMPLICATED**: Expert analysis confirmed resolution. Evidence: verified state change or terminal state.
+- **COMPLEX**: Emergent pattern proven to hold. NOT "I tried something" — "the solution held across verification."
+- **CHAOTIC**: NEVER close from CHAOTIC. Reclassify to COMPLICATED when stable, then close from there.
+
 ## Recurring Known Failures
 
 The Ops Journal may show the same error appearing repeatedly over days, each closed as "duplicate of ongoing incident." A known error is not the same as a handled error. If the journal shows 3+ identical closures without a resolution entry, the question is no longer "what is wrong?" — it is "has the fix been applied?"

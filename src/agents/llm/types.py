@@ -379,20 +379,21 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "defer_event",
         "description": (
-            "Set a timer and pause this event. Use for pipeline completions, "
-            "cooldown periods, or any timed wait. Works like an alarm clock -- "
-            "you will be woken after delay_seconds to check again."
+            "Schedule the next feedback sample for this event. Use when the "
+            "domain strategy calls for observation at a calibrated interval "
+            "(Ts). You will be woken after delay_seconds to measure the "
+            "process variable and decide the next action."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "Why this event is being deferred (e.g., 'agent busy', 'waiting for cooldown')",
+                    "description": "Why this sampling interval was chosen (e.g., 'pipeline typically completes in 20min, sampling at Ts=15min')",
                 },
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "How many seconds to wait before re-processing (30-3600, i.e. up to 60 minutes)",
+                    "description": "Sampling interval Ts in seconds (30-3600). Calibrate from deep memory baseline, severity multiplier, and progress signals.",
                 },
             },
             "required": ["reason", "delay_seconds"],
