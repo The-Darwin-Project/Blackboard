@@ -237,7 +237,7 @@ export function useFrictionIndicators(eventId: string, batches: PulseBatch[]): F
     const agentKnowledge = new Map<string, Set<string>>();
     for (const b of eventBatches) {
       const agents = b.pulses.filter(p => p.neuron_type === 'agent').map(p => p.neuron_id);
-      const knowledge = b.pulses.filter(p => p.neuron_type === 'lesson' || p.neuron_type === 'memory').map(p => p.neuron_id);
+      const knowledge = b.pulses.filter(p => p.neuron_type === 'lesson' || p.neuron_type === 'memory' || p.neuron_type === 'knowledge').map(p => p.neuron_id);
       for (const a of agents) {
         if (!agentKnowledge.has(a)) agentKnowledge.set(a, new Set());
         for (const k of knowledge) agentKnowledge.get(a)!.add(k);

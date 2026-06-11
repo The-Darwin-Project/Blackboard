@@ -4,7 +4,7 @@
 #    Imports from stdlib and project stdlib-only modules (e.g., event_types) are permitted.
 # 2. [Pattern]: PulsePort is a Protocol -- implementors (PulseTracker) live in separate modules.
 # 3. [Pattern]: PulseContext is caller-provided; PulseBatch is emitter-constructed.
-# 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "tool", "phase", "agent".
+# 4. [Gotcha]: neuron_type must be one of: "lesson", "memory", "knowledge", "tool", "phase", "agent".
 # 5. [Semantic]: Tool pulse scores: 1.0 = success, 0.3 = completed with error, 0.0 = infra failure.
 # 6. [Pattern]: PulseBatch.reasoning carries FRIDAY's thinking text (optional, 500-char truncated by JARVIS adapter).
 # 7. [Pattern]: PulseBatch.is_defer_wake is a one-shot flag (True on first pulse after defer re-activation).

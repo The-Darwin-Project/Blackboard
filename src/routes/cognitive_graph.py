@@ -43,6 +43,7 @@ async def get_cognitive_graph():
 
     lessons = await archivist.list_lessons(limit=500)
     memories = await archivist.list_memories(limit=500)
+    knowledge = await archivist.list_knowledge(limit=500) if hasattr(archivist, "list_knowledge") else []
 
     neurons = []
     for p in lessons:
@@ -67,6 +68,19 @@ async def get_cognitive_graph():
         neurons.append({
             "id": nid,
             "type": "memory",
+            "label": label,
+            "payload": payload,
+            "heat": heat.get(nid, 0),
+        })
+    for p in knowledge:
+        nid = f"knowledge:{p.get('id', '')}"
+        payload = p.get("payload", {})
+        topic = payload.get("topic", "")
+        scope = payload.get("scope", "")
+        label = f"{topic} [{scope}]" if topic and scope else topic
+        neurons.append({
+            "id": nid,
+            "type": "knowledge",
             "label": label,
             "payload": payload,
             "heat": heat.get(nid, 0),

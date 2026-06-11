@@ -6,6 +6,8 @@
 # 4. [Pattern]: vector_size=768 for text-embedding-005 model.
 # 5. [Pattern]: scroll() returns (points, next_offset) tuple for cursor-based pagination.
 # 6. [Pattern]: get_points() retrieves by ID list. delete() removes by ID list. Both follow Qdrant REST conventions.
+# 7. [Pattern]: search() accepts optional keyword-only `filter` dict (Qdrant filter DSL). Passed as sibling key in request body.
+# 8. [Pattern]: create_payload_index() is idempotent -- 409 means index already exists (same as ensure_collection).
 """
 Thin async wrapper around Qdrant REST API.
 No additional pip dependencies -- uses httpx (already installed).
@@ -89,16 +91,21 @@ class VectorStore:
         collection: str,
         vector: list[float],
         limit: int = 5,
+        *,
+        filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search. Returns list of {id, score, payload}."""
         client = await self._get_client()
+        body: dict[str, Any] = {
+            "vector": vector,
+            "limit": limit,
+            "with_payload": True,
+        }
+        if filter is not None:
+            body["filter"] = filter
         resp = await client.post(
             f"/collections/{collection}/points/search",
-            json={
-                "vector": vector,
-                "limit": limit,
-                "with_payload": True,
-            },
+            json=body,
         )
         resp.raise_for_status()
         results = resp.json().get("result", [])
@@ -110,6 +117,23 @@ class VectorStore:
             }
             for r in results
         ]
+
+    async def create_payload_index(
+        self,
+        collection: str,
+        field_name: str,
+        field_schema: str,
+    ) -> None:
+        """Create a payload field index. Idempotent -- 409 means already exists."""
+        client = await self._get_client()
+        resp = await client.put(
+            f"/collections/{collection}/index",
+            json={"field_name": field_name, "field_schema": field_schema},
+        )
+        if resp.status_code in (200, 409):
+            logger.info(f"Payload index '{field_name}' ready on '{collection}'")
+            return
+        resp.raise_for_status()
 
     async def scroll(
         self,

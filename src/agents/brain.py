@@ -3045,14 +3045,14 @@ class Brain:
             # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
             ev = await self.blackboard.get_event(event_id)
             already_consulted = any(
-                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep memory" in (t.evidence or "")
+                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep Memory" in (t.evidence or "")
                 for t in (ev.conversation if ev else [])
             )
             if already_consulted:
                 logger.info(f"Deep memory already consulted for {event_id} -- returning cached results")
                 cached_evidence = next(
                     (t.evidence for t in (ev.conversation if ev else [])
-                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep memory" in t.evidence),
+                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep Memory" in t.evidence),
                     "Deep memory was already consulted (no cached results).",
                 )
                 turn = ConversationTurn(
@@ -3082,10 +3082,39 @@ class Brain:
                 event_source=ev_for_ctx.source if ev_for_ctx else None,
             )
 
-            # Search lessons learned first (classification guidance)
+            # Embed once, pass vector to all 3 search methods
+            query_vector = None
+            if archivist and hasattr(archivist, "embed_query"):
+                try:
+                    query_vector = await archivist.embed_query(query)
+                except Exception as e:
+                    logger.debug(f"embed_query failed, each search will embed individually: {e}")
+
+            # Search knowledge facts first (reference data)
+            if archivist and hasattr(archivist, "search_knowledge"):
+                try:
+                    knowledge = await archivist.search_knowledge(query, limit=3, context=pulse_ctx, vector=query_vector)
+                except Exception as e:
+                    logger.warning(f"Deep memory knowledge search failed: {e}")
+                    knowledge = None
+                if knowledge:
+                    has_results = True
+                    memory_text += "### Reference Facts\n"
+                    for i, r in enumerate(knowledge, 1):
+                        p = r.get("payload", {})
+                        stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
+                        fact_text = p.get("fact", "?")[:200]
+                        memory_text += (
+                            f"{i}. **{p.get('topic', '?')}** ({p.get('scope', '?')}, confidence: {p.get('confidence', '?')}){stale_tag}\n"
+                            f"   - {fact_text}\n"
+                            f"   - Source: {p.get('source', '?')}\n"
+                        )
+                    memory_text += "\n"
+
+            # Search lessons learned (classification guidance)
             if archivist and hasattr(archivist, "search_lessons"):
                 try:
-                    lessons = await archivist.search_lessons(query, limit=3, context=pulse_ctx)
+                    lessons = await archivist.search_lessons(query, limit=3, context=pulse_ctx, vector=query_vector)
                 except Exception as e:
                     logger.warning(f"Deep memory lesson search failed: {e}")
                     lessons = None
@@ -3105,7 +3134,7 @@ class Brain:
             # Search past events (pattern first, temporal data preserved)
             if archivist and hasattr(archivist, "search"):
                 try:
-                    results = await archivist.search(query, limit=5, context=pulse_ctx)
+                    results = await archivist.search(query, limit=5, context=pulse_ctx, vector=query_vector)
                 except Exception as e:
                     logger.warning(f"Deep memory event search failed: {e}")
                     results = None

@@ -93,7 +93,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
   const coFiring = useMemo(() => {
     const pairCount = new Map<string, number>();
     for (const b of eventBatches) {
-      const ids = b.pulses.filter(p => p.neuron_type === 'lesson' || p.neuron_type === 'memory').map(p => p.neuron_id);
+      const ids = b.pulses.filter(p => p.neuron_type === 'lesson' || p.neuron_type === 'memory' || p.neuron_type === 'knowledge').map(p => p.neuron_id);
       for (let i = 0; i < ids.length; i++) {
         for (let j = i + 1; j < ids.length; j++) {
           const key = [ids[i], ids[j]].sort().join('|');
@@ -218,6 +218,7 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
                   const n = allNeurons.find(n => n.id === id);
                   if (n?.payload?.title) return (n.payload.title as string).slice(0, 25);
                   if (n?.payload?.symptom) return (n.payload.symptom as string).slice(0, 25);
+                  if (n?.payload?.topic) return (n.payload.topic as string).slice(0, 25);
                   return id.split(':')[1]?.slice(0, 8) ?? id;
                 };
                 return (

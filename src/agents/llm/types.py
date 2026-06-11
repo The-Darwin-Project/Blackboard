@@ -142,11 +142,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "consult_deep_memory",
         "description": (
-            "Search operational history for past events. Returns incident details, operational "
-            "timings, defer patterns, and procedural workflows. Use for: recurring issues, "
-            "timing questions, past event queries, or pattern analysis. MUST be called before "
-            "select_agent for recurring issues, past event queries, or unfamiliar symptoms. "
-            "Can directly answer user questions about history without needing an agent."
+            "Search deep memory for infrastructure facts, reference knowledge, past events, and "
+            "operational history. Returns reference facts (namespace mappings, team ownership, "
+            "conventions), lessons learned, incident details, timings, and procedural workflows. "
+            "Use for: factual questions, recurring issues, timing questions, past event queries, "
+            "or pattern analysis. MUST be called before select_agent for recurring issues, "
+            "past event queries, or unfamiliar symptoms. Can directly answer user questions "
+            "about history or infrastructure facts without needing an agent."
         ),
         "input_schema": {
             "type": "object",

@@ -61,11 +61,12 @@ export const PHASE_COLORS: Record<string, { bg: string; text: string; border: st
 
 /** Cortex neuron type colors (used by Sigma.js graph renderer) */
 export const NEURON_COLORS: Record<string, string> = {
-  lesson: '#22c55e',   // green -- stable knowledge
-  memory: '#6b7280',   // slate -- past event memories
-  tool:   '#64748b',   // slate -- executive tools
-  phase:  '#6366f1',   // indigo -- lifecycle phases
-  agent:  '#8b5cf6',   // violet -- default; overridden per agent below
+  lesson:    '#22c55e',   // green -- stable knowledge
+  memory:    '#6b7280',   // slate -- past event memories
+  knowledge: '#06b6d4',   // cyan -- infrastructure reference facts
+  tool:      '#64748b',   // slate -- executive tools
+  phase:     '#6366f1',   // indigo -- lifecycle phases
+  agent:     '#8b5cf6',   // violet -- default; overridden per agent below
 };
 
 export const AGENT_NEURON_COLORS: Record<string, string> = {

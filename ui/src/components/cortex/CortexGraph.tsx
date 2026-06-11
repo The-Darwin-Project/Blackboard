@@ -81,7 +81,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
     for (const n of allNeurons) {
       if (graph.hasNode(n.id)) continue;
-      const isKnowledge = n.type === 'lesson' || n.type === 'memory';
+      const isKnowledge = n.type === 'lesson' || n.type === 'memory' || n.type === 'knowledge';
       let x: number, y: number;
 
       if (isKnowledge) {
@@ -103,6 +103,10 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const symptom = n.payload?.symptom as string;
         const service = n.payload?.service as string;
         label = symptom ? symptom.slice(0, 30) : service ? service : n.id.slice(0, 12);
+      } else if (n.type === 'knowledge') {
+        const topic = n.payload?.topic as string;
+        const scope = n.payload?.scope as string;
+        label = topic ? `${topic.slice(0, 25)} [${scope}]` : n.id.slice(0, 12);
       } else {
         label = (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id.slice(0, 15);
       }
@@ -194,7 +198,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
         if (pulse.neuron_type === 'phase') {
           size = 6;
-        } else if (pulse.neuron_type === 'lesson' || pulse.neuron_type === 'memory') {
+        } else if (pulse.neuron_type === 'lesson' || pulse.neuron_type === 'memory' || pulse.neuron_type === 'knowledge') {
           size = 2;
           const lastTool = batch.pulses.findLast(p => p.neuron_type === 'tool');
           if (lastTool && graph.hasNode(lastTool.neuron_id)) source = lastTool.neuron_id;

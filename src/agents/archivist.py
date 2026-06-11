@@ -8,7 +8,11 @@
 # 6. [Pattern]: _get_adapter() follows Aligner/Headhunter lazy-load pattern. _ensure_initialized() is for embeddings + Qdrant only.
 # 7. [Pattern]: correct_memory() overwrites a contaminated event memory with corrected root_cause/fix_action. Uses same deterministic uuid5 point ID.
 # 8. [Pattern]: store_lesson()/search_lessons() operate on darwin_lessons collection. Lessons use uuid4 IDs (no natural unique key). Payload includes channel (external|experience), verification_count, related_lesson_ids for recall graph. Score weighting: experience lessons get 0.6x multiplier. Promotion: experience → external when verification_count >= 3.
-# 9. [Pattern]: Three Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns).
+# 9. [Pattern]: Four Qdrant collections: darwin_events (archived summaries), darwin_feedback (quality tracking), darwin_lessons (human-authored patterns), darwin_knowledge (static infrastructure facts).
+# 13. [Pattern]: _knowledge_ready flag is independent of _initialized. Knowledge init failure degrades gracefully; core collections remain operational.
+# 14. [Pattern]: Knowledge uses deterministic uuid5(NAMESPACE_URL, "knowledge:{topic}:{scope}") -- upsert semantics, one fact per (topic, scope). VALID_SCOPES: convention, ownership, historical, relationship.
+# 15. [Pattern]: embed_query() is the public embedding interface. Brain embeds once, passes vector to search_knowledge/search_lessons/search to avoid triple embedding.
+# 16. [Pattern]: update_knowledge(knowledge_id, **updates) encapsulates read-modify-reembed-upsert. Routes MUST use this, not _embed/_vector_store directly.
 # 10. [Pattern]: extract_lessons() uses Claude adapter (not Gemini) for document analysis. Only Claude-compatible kwargs (no thinking_level, no top_p).
 # 11. [Pattern]: pulse_port (PulsePort | None) emits Pulse events on search/search_lessons. Null-guarded. context param (PulseContext | None) is backward-compatible 3rd arg.
 # 12. [Pattern]: backfill_archives() is a startup hook that scans Redis closed events missing from Qdrant and re-archives them. Non-fatal, batch get_points check, runs once on startup via fire-and-forget task.
@@ -37,6 +41,8 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = "darwin_events"
 FEEDBACK_COLLECTION = "darwin_feedback"
 LESSONS_COLLECTION = "darwin_lessons"
+KNOWLEDGE_COLLECTION = "darwin_knowledge"
+VALID_SCOPES = {"convention", "ownership", "historical", "relationship"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.5-flash")
@@ -90,6 +96,7 @@ class Archivist:
         self._adapter = None
         self._vector_store = None
         self._initialized = False
+        self._knowledge_ready = False
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
@@ -113,6 +120,17 @@ class Archivist:
             await self._vector_store.ensure_collection(LESSONS_COLLECTION, vector_size=768)
             self._initialized = True
             logger.info("Archivist initialized (embedding + Qdrant, darwin_events + darwin_feedback + darwin_lessons)")
+
+            try:
+                await self._vector_store.ensure_collection(KNOWLEDGE_COLLECTION, vector_size=768)
+                await self._vector_store.create_payload_index(KNOWLEDGE_COLLECTION, "scope", "keyword")
+                await self._vector_store.create_payload_index(KNOWLEDGE_COLLECTION, "topic", "keyword")
+                self._knowledge_ready = True
+                logger.info("Knowledge collection ready (darwin_knowledge)")
+            except Exception as e:
+                logger.warning(f"Knowledge collection init failed (degraded): {e}")
+                self._knowledge_ready = False
+
             return True
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
@@ -140,6 +158,16 @@ class Archivist:
             config=types.EmbedContentConfig(output_dimensionality=EMBEDDING_DIMS),
         )
         return r.embeddings[0].values
+
+    async def embed_query(self, text: str) -> list[float]:
+        """Generate a 768-dim embedding for a query string.
+
+        Public interface so callers (Brain) can embed once and pass the vector
+        to multiple search methods, keeping embedding config inside Archivist.
+        """
+        if not await self._ensure_initialized():
+            raise RuntimeError("Archivist not initialized")
+        return await self._embed(text)
 
     async def archive_event(self, event: EventDocument) -> None:
         """
@@ -289,18 +317,20 @@ class Archivist:
             logger.warning(f"Backfill failed (non-fatal): {e}")
             return 0
 
-    async def search(self, query: str, limit: int = 5, context=None) -> list[dict]:
+    async def search(self, query: str, *, limit: int = 5, context=None, vector=None) -> list[dict]:
         """
         Search deep memory for similar past events.
         
         Returns list of {score, payload} dicts.
         context: PulseContext | None -- caller-provided pulse context for neuron firing.
+        vector: Pre-computed embedding. When provided, skip internal embed call.
         """
         try:
             if not await self._ensure_initialized():
                 return []
 
-            vector = await self._embed(query)
+            if vector is None:
+                vector = await self._embed(query)
 
             results = await self._vector_store.search(
                 collection=COLLECTION_NAME,
@@ -471,19 +501,21 @@ class Archivist:
             logger.warning(f"store_lesson failed: {e}")
             return None
 
-    async def search_lessons(self, query: str, limit: int = 3, context=None) -> list[dict]:
+    async def search_lessons(self, query: str, *, limit: int = 3, context=None, vector=None) -> list[dict]:
         """Search darwin_lessons for relevant patterns. Returns list of {score, payload}.
 
         Score weighting: "experience" channel lessons get 0.6x score multiplier so they
         rank lower than "external" (human-taught) lessons. Results re-sorted after weighting.
 
         context: PulseContext | None -- caller-provided pulse context for neuron firing.
+        vector: Pre-computed embedding. When provided, skip internal embed call.
         """
         try:
             if not await self._ensure_initialized():
                 return []
 
-            vector = await self._embed(query)
+            if vector is None:
+                vector = await self._embed(query)
             results = await self._vector_store.search(
                 collection=LESSONS_COLLECTION,
                 vector=vector,
@@ -622,6 +654,224 @@ class Archivist:
             return True
         except Exception as e:
             logger.warning(f"delete_lesson failed for {lesson_id}: {e}")
+            return False
+
+    # =========================================================================
+    # Knowledge Base (darwin_knowledge)
+    # =========================================================================
+
+    async def store_knowledge(
+        self,
+        topic: str,
+        fact: str,
+        scope: str,
+        source: str,
+        confidence: float = 1.0,
+        valid_until: float | None = None,
+    ) -> str | None:
+        """Store a knowledge fact. Upsert semantics: one fact per (topic, scope).
+
+        Returns knowledge_id (uuid5) or None on failure.
+        """
+        try:
+            if not self._knowledge_ready:
+                return None
+            if scope not in VALID_SCOPES:
+                logger.warning(f"store_knowledge: invalid scope '{scope}' (allowed: {VALID_SCOPES})")
+                return None
+
+            knowledge_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"knowledge:{topic}:{scope}"))
+            now = time.time()
+            payload = {
+                "knowledge_id": knowledge_id,
+                "topic": topic,
+                "fact": fact,
+                "scope": scope,
+                "source": source,
+                "confidence": confidence,
+                "valid_until": valid_until,
+                "created_at": now,
+                "updated_at": now,
+            }
+            vector = await self._embed(f"{topic} {fact} {scope}")
+            await self._vector_store.upsert(
+                collection=KNOWLEDGE_COLLECTION,
+                point_id=knowledge_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Knowledge stored: {knowledge_id} ({topic}/{scope})")
+            return knowledge_id
+
+        except Exception as e:
+            logger.warning(f"store_knowledge failed: {e}")
+            return None
+
+    async def search_knowledge(
+        self,
+        query: str,
+        *,
+        scope_filter: str | None = None,
+        limit: int = 3,
+        context=None,
+        vector=None,
+    ) -> list[dict]:
+        """Search darwin_knowledge. Returns list of {id, score, payload, stale?}.
+
+        scope_filter: restrict to a single scope (convention/ownership/historical/relationship).
+        vector: Pre-computed embedding. When provided, skip internal embed call.
+        """
+        try:
+            if not self._knowledge_ready:
+                return []
+
+            if vector is None:
+                vector = await self._embed(query)
+
+            qdrant_filter = None
+            if scope_filter:
+                qdrant_filter = {"must": [{"key": "scope", "match": {"value": scope_filter}}]}
+
+            results = await self._vector_store.search(
+                collection=KNOWLEDGE_COLLECTION,
+                vector=vector,
+                limit=limit,
+                filter=qdrant_filter,
+            )
+
+            now = time.time()
+            for r in results:
+                vu = r.get("payload", {}).get("valid_until")
+                if vu is not None and vu < now:
+                    r["stale"] = True
+
+            if self.pulse_port and results:
+                await self._emit_knowledge_pulses(results, context)
+
+            return results
+
+        except Exception as e:
+            logger.warning(f"Knowledge search failed (non-fatal): {e}")
+            return []
+
+    async def _emit_knowledge_pulses(self, results: list[dict], context) -> None:
+        """Emit pulse batch for knowledge search results."""
+        try:
+            from ..memory.pulse import Pulse, PulseBatch, PulseContext
+
+            ctx = context if isinstance(context, PulseContext) else None
+            if not ctx or not ctx.event_id:
+                return
+
+            pulses = [
+                Pulse(
+                    neuron_id=f"knowledge:{r.get('id', '')}",
+                    neuron_type="knowledge",
+                    score=float(r.get("score", 0)),
+                    injected=False,
+                )
+                for r in results
+            ]
+            batch = PulseBatch(
+                event_id=ctx.event_id or "",
+                pulses=pulses,
+                turn=ctx.turn or 0,
+                event_elapsed_s=ctx.event_elapsed_s,
+                event_source=ctx.event_source,
+            )
+            await self.pulse_port.on_pulse_batch(batch)
+        except Exception as e:
+            logger.debug(f"Knowledge pulse emission failed (non-fatal): {e}")
+
+    async def list_knowledge(self, limit: int = 0) -> list[dict]:
+        """List all knowledge facts from Qdrant (paginated scroll).
+
+        Args:
+            limit: 0 = fetch all (default), N = cap at N results.
+        """
+        try:
+            if not self._knowledge_ready:
+                return []
+            all_points: list[dict] = []
+            offset = None
+            page_size = 256
+            while True:
+                points, next_offset = await self._vector_store.scroll(
+                    KNOWLEDGE_COLLECTION, limit=page_size, offset=offset,
+                )
+                all_points.extend(points)
+                if not next_offset or not points:
+                    break
+                if limit and len(all_points) >= limit:
+                    return all_points[:limit]
+                offset = next_offset
+            return all_points
+        except Exception as e:
+            logger.warning(f"list_knowledge failed: {e}")
+            return []
+
+    async def get_knowledge(self, knowledge_id: str) -> dict | None:
+        """Get a single knowledge fact by ID."""
+        try:
+            if not self._knowledge_ready:
+                return None
+            results = await self._vector_store.get_points(KNOWLEDGE_COLLECTION, [knowledge_id])
+            return results[0] if results else None
+        except Exception as e:
+            logger.warning(f"get_knowledge failed for {knowledge_id}: {e}")
+            return None
+
+    async def delete_knowledge(self, knowledge_id: str) -> bool:
+        """Remove a knowledge fact by ID. Returns True on success."""
+        try:
+            if not self._knowledge_ready:
+                return False
+            await self._vector_store.delete(KNOWLEDGE_COLLECTION, [knowledge_id])
+            logger.info(f"Knowledge deleted: {knowledge_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"delete_knowledge failed for {knowledge_id}: {e}")
+            return False
+
+    async def update_knowledge(
+        self,
+        knowledge_id: str,
+        **updates: Any,
+    ) -> bool:
+        """Update mutable fields of a knowledge fact (read-modify-reembed-upsert).
+
+        Only mutable fields (fact, source, confidence, valid_until) should be
+        passed. Returns True on success, False on failure or not found.
+        """
+        try:
+            if not self._knowledge_ready:
+                return False
+
+            existing = await self._vector_store.get_points(KNOWLEDGE_COLLECTION, [knowledge_id])
+            if not existing:
+                return False
+
+            payload = existing[0].get("payload", {})
+            payload.update(updates)
+            payload["updated_at"] = time.time()
+
+            embed_text = (
+                f"{payload.get('topic', '')} "
+                f"{payload.get('fact', '')} "
+                f"{payload.get('scope', '')}"
+            )
+            vector = await self._embed(embed_text)
+            await self._vector_store.upsert(
+                collection=KNOWLEDGE_COLLECTION,
+                point_id=knowledge_id,
+                vector=vector,
+                payload=payload,
+            )
+            logger.info(f"Knowledge updated: {knowledge_id}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"update_knowledge failed for {knowledge_id}: {e}")
             return False
 
     async def promote_lesson(self, lesson_id: str) -> bool:

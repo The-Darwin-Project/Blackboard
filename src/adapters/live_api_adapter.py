@@ -277,6 +277,15 @@ class LiveAPIAdapter:
                 service = payload.get("service", "")
                 if symptom:
                     self._neuron_labels[nid] = f"{service}: {symptom}" if service else symptom
+            if hasattr(self._archivist, "list_knowledge"):
+                knowledge = await self._archivist.list_knowledge(limit=500)
+                for p in knowledge:
+                    nid = f"knowledge:{p.get('id', '')}"
+                    payload = p.get("payload", {})
+                    topic = payload.get("topic", "")
+                    scope = payload.get("scope", "")
+                    if topic:
+                        self._neuron_labels[nid] = f"{topic} [{scope}]" if scope else topic
         except Exception as e:
             logger.debug("Neuron label preload failed (non-fatal): %s", e)
 
@@ -721,15 +730,43 @@ class LiveAPIAdapter:
                 f"Outcome: {payload.get('outcome', '?')}\n"
                 f"Global heat: {global_heat}"
             )
+        elif ntype == "knowledge":
+            if not hasattr(self._archivist, "get_knowledge"):
+                return f"Knowledge neuron support not available"
+            fact = await self._archivist.get_knowledge(nid)
+            if not fact:
+                return f"Knowledge {nid} not found"
+            payload = fact.get("payload", {})
+            stale = " [STALE]" if payload.get("valid_until") and payload["valid_until"] < time.time() else ""
+            return (
+                f"Neuron: {neuron_id}\n"
+                f"Collection: darwin_knowledge\n"
+                f"Topic: {payload.get('topic', '?')}\n"
+                f"Fact: {payload.get('fact', '?')}\n"
+                f"Scope: {payload.get('scope', '?')}\n"
+                f"Source: {payload.get('source', '?')}\n"
+                f"Confidence: {payload.get('confidence', '?')}{stale}\n"
+                f"Global heat: {global_heat}"
+            )
         else:
             return f"Neuron: {neuron_id}\nType: {ntype}\nGlobal heat: {global_heat}"
 
     async def _tool_search_deep_memory(self, query: str) -> str:
         if not query:
             return "Error: query required"
+        knowledge = await self._archivist.search_knowledge(query, limit=3) if hasattr(self._archivist, "search_knowledge") else []
         memories = await self._archivist.search(query, limit=3)
         lessons = await self._archivist.search_lessons(query, limit=3)
         lines = [f"## Deep Memory Search: '{query}'"]
+        if knowledge:
+            lines.append("\n### Reference Facts")
+            for k in knowledge:
+                p = k.get("payload", {})
+                stale = " [STALE]" if k.get("stale") else ""
+                lines.append(
+                    f"- [{k.get('score', 0):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
+                    f"{p.get('fact', '?')[:150]}{stale}"
+                )
         if memories:
             lines.append("\n### Past Events")
             for m in memories:
@@ -747,7 +784,7 @@ class LiveAPIAdapter:
                     f"- [{ls.get('score', 0):.2f}] {p.get('title', '?')}: "
                     f"{p.get('pattern', '?')}"
                 )
-        if not memories and not lessons:
+        if not knowledge and not memories and not lessons:
             lines.append("\nNo results found.")
         return "\n".join(lines)
 

@@ -8,6 +8,8 @@
 # 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
 # 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to external/0.
 # 8. [Pattern]: /active response includes unread_notes for sidebar badge display.
+# 9. [Pattern]: Knowledge CRUD routes mirror lesson pattern. KnowledgeUpdateRequest uses extra="forbid" to enforce immutability of identity fields (topic, scope) -- Pydantic returns 422 on unknown fields.
+# 10. [Pattern]: PATCH /admin/knowledge/{id} does read-modify-reembed-upsert. Only mutable fields (fact, source, confidence, valid_until) can be updated.
 """
 Conversation Queue API - Event document management.
 
@@ -27,7 +29,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus
@@ -734,6 +736,99 @@ async def apply_lessons(req: LessonApplyRequest):
         "stored_lessons": stored_lessons,
         "applied_corrections": applied_corrections,
     }
+
+
+# =============================================================================
+# Admin: Knowledge Base
+# =============================================================================
+
+
+class KnowledgeRequest(BaseModel):
+    topic: str = Field(..., min_length=1, max_length=200)
+    fact: str = Field(..., min_length=1, max_length=2000)
+    scope: str = Field(..., pattern=r"^(convention|ownership|historical|relationship)$")
+    source: str = Field(..., min_length=1, max_length=200)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    valid_until: float | None = None
+
+
+class KnowledgeUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fact: str | None = Field(default=None, max_length=2000)
+    source: str | None = Field(default=None, max_length=200)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    valid_until: float | None = None
+
+
+@router.post("/admin/knowledge")
+async def create_knowledge(req: KnowledgeRequest):
+    """Store a knowledge fact (upsert: one fact per topic+scope)."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    knowledge_id = await archivist.store_knowledge(**req.model_dump())
+    if not knowledge_id:
+        raise HTTPException(503, "Failed to store knowledge fact")
+    return {"status": "stored", "knowledge_id": knowledge_id}
+
+
+@router.get("/admin/knowledge")
+async def list_knowledge(limit: int = Query(default=100, le=1000, ge=1)):
+    """List knowledge facts from Qdrant (paginated, default 100, max 1000)."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    return await archivist.list_knowledge(limit=limit)
+
+
+@router.get("/admin/knowledge/{knowledge_id}")
+async def get_knowledge(knowledge_id: str):
+    """Get a single knowledge fact by ID."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    result = await archivist.get_knowledge(knowledge_id)
+    if not result:
+        raise HTTPException(404, f"Knowledge {knowledge_id} not found")
+    return result
+
+
+@router.delete("/admin/knowledge/{knowledge_id}")
+async def delete_knowledge(knowledge_id: str):
+    """Delete a knowledge fact by ID."""
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+    success = await archivist.delete_knowledge(knowledge_id)
+    if not success:
+        raise HTTPException(404, f"Knowledge {knowledge_id} not found")
+    return {"status": "deleted", "knowledge_id": knowledge_id}
+
+
+@router.patch("/admin/knowledge/{knowledge_id}")
+async def update_knowledge(knowledge_id: str, req: KnowledgeUpdateRequest):
+    """Update mutable fields of a knowledge fact (re-embeds + upserts).
+
+    Identity fields (topic, scope) are immutable. KnowledgeUpdateRequest with
+    extra='forbid' returns 422 if the client sends them.
+    """
+    try:
+        archivist = await get_archivist()
+    except RuntimeError:
+        raise HTTPException(503, "Archivist not available")
+
+    updates = req.model_dump(exclude_unset=True)
+    if not updates:
+        return {"status": "no_changes", "knowledge_id": knowledge_id}
+
+    success = await archivist.update_knowledge(knowledge_id, **updates)
+    if not success:
+        raise HTTPException(404, f"Knowledge {knowledge_id} not found")
+    return {"status": "updated", "knowledge_id": knowledge_id}
 
 
 @router.get("/headhunter/pending")
