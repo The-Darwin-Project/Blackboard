@@ -67,6 +67,12 @@ export default function ReportHeader({ report }: { report: ReportFull }) {
         {report.turns} turns
       </span>
 
+      {report.triggered_by && (
+        <span style={{ fontSize: 12, color: '#94a3b8' }}>
+          {report.triggered_by}
+        </span>
+      )}
+
       <span style={{ fontSize: 12, color: '#64748b' }}>
         {new Date(report.closed_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
       </span>

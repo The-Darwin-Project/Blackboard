@@ -45,7 +45,8 @@ def _sanitize_stdout(raw: str) -> str:
     return cleaned
 
 KNOWN_AGENT_MODES = frozenset({
-    "message", "implement", "execute", "investigate", "test", "plan", "review", "rollback",
+    "message", "implement", "execute", "investigate", "test",
+    "plan", "review", "rollback", "analyze",
 })
 
 # Modes the sidecar may send on wake_register (subset of task modes; extend if tryWake diversifies).

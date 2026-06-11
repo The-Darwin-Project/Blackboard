@@ -75,11 +75,15 @@ Re-defer after fresh measurement is the correct Ts output when the process
 is still progressing.
 </bridge>
 
-## Ts Calibration
+## Ts Calibration Railway
 
-1. **Baseline**: consult deep memory for typical duration of this process type
-2. **Severity multiplier**: apply from severity_modulation table above
-3. **Progress signal**: if each check shows advancement, maintain Ts. If stalled, halve Ts for closer observation.
+0. **Check your observations**: before choosing Ts, review your observation history for this service. Look for duration measurement series. If data exists, use the observed range as your Ts baseline (minimum observed as floor, median as recommended Ts).
+1. **No observations? Query the source**: if no duration observations exist and the event involves a pipeline or build, dispatch an agent to investigate historical pipeline timing from the build system. CI/CD systems store duration on every pipeline run. The agent reports the range; you record it as observations for future events.
+2. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
+3. **Severity multiplier**: apply from the severity_modulation table above.
+4. **Progress signal**: if each check shows advancement, maintain Ts. If stalled, halve Ts for closer observation.
+
+Step 1 fires once per service -- after the first duration is observed, future events skip the agent dispatch and use measured data directly.
 
 ## Close Criteria
 

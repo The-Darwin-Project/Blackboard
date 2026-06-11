@@ -278,7 +278,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "enum": ["investigate", "execute", "rollback", "plan", "review", "analyze", "implement", "test"],
                     "description": (
                         "Mode controls which skills and tools load on the agent. "
-                        "investigate=read-only cluster and service inspection. "
+                        "investigate=reactive diagnosis (something is wrong, read-only inspection). "
+                        "analyze=proactive study (understand patterns, audit baselines, query history). "
                         "execute=git actions, MR comments, merge, retest (no cluster investigation). "
                         "implement=code changes, feature development. "
                         "test=QE verification, browser testing. "

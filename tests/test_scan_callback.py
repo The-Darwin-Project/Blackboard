@@ -54,24 +54,38 @@ class TestScanDecisionBranches:
     """
 
     @pytest.mark.asyncio
-    async def test_branch1_active_agent_task_skipped(self):
-        """Events with running agent tasks are NOT enqueued (handled via _process_intermediate)."""
-        # Branch: eid in _active_tasks and not done -> skip (don't enqueue)
+    async def test_branch1_active_agent_task_enqueued_with_input(self):
+        """Events with running agent tasks and unseen non-brain turns ARE enqueued."""
         active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
-        waiting_for_user = set()
-        waiting_for_jarvis = {}
-        event_locks = {}
-        last_processed = {}
-
-        events = {"evt-1": _make_event("evt-1", conversation=[_make_turn()])}
+        turns = [_make_turn(actor="developer", action="huddle", status="sent")]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
         result = _scan_logic(
             active_ids=["evt-1"],
             events=events,
             active_tasks=active_tasks,
-            waiting_for_user=waiting_for_user,
-            waiting_for_jarvis=waiting_for_jarvis,
-            event_locks=event_locks,
-            last_processed=last_processed,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result
+
+    @pytest.mark.asyncio
+    async def test_branch1_active_agent_task_skipped_no_input(self):
+        """Events with running agent tasks and NO unseen non-brain turns are NOT enqueued."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [_make_turn(actor="brain", action="route", status="evaluated")]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -87,6 +101,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -102,6 +117,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" in result
 
@@ -119,6 +135,7 @@ class TestScanDecisionBranches:
             event_locks={},
             last_processed={},
             defer_until=defer_until,
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -136,6 +153,7 @@ class TestScanDecisionBranches:
             event_locks={},
             last_processed={},
             defer_until=defer_until,
+            waiting_for_agent={},
         )
         assert "evt-1" in result
 
@@ -152,6 +170,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={"evt-1": time.time() - 30},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -172,6 +191,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={"evt-1": wait_start},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" in result
 
@@ -188,6 +208,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" in result
 
@@ -204,6 +225,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -220,6 +242,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={"evt-1": time.time() - 120},  # Idle 2 minutes
+            waiting_for_agent={},
         )
         assert "evt-1" in result
 
@@ -236,6 +259,7 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={"evt-1": time.time() - 10},  # Processed 10s ago
+            waiting_for_agent={},
         )
         assert "evt-1" not in result
 
@@ -254,9 +278,116 @@ class TestScanDecisionBranches:
             waiting_for_jarvis={},
             event_locks={"evt-1": lock},
             last_processed={},
+            waiting_for_agent={},
         )
         lock.release()
         assert "evt-1" not in result
+
+
+class TestIntermediateProcessing:
+    """Tests for the unified intermediate processing path (post _process_intermediate removal)."""
+
+    @pytest.mark.asyncio
+    async def test_huddle_during_active_task_enqueued(self):
+        """Huddle message from agent during active task IS enqueued for processing."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="route", status="evaluated"),
+            _make_turn(actor="developer", action="huddle", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result
+
+    @pytest.mark.asyncio
+    async def test_user_message_during_active_task_enqueued(self):
+        """User message during active agent task IS enqueued for processing."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="route", status="evaluated"),
+            _make_turn(actor="user", action="message", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_agent_clears_on_delivered_turn(self):
+        """Waiting-for-agent bypasses when a non-brain DELIVERED turn exists."""
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+            _make_turn(actor="developer", action="result", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": "developer"},
+        )
+        assert "evt-1" in result
+
+    @pytest.mark.asyncio
+    async def test_intermediate_tool_gate_invariant(self):
+        """Intermediate tool gate strips non-communication tools (fail-closed, not crash)."""
+        from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
+
+        intermediate_allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+        active_tools = list(BRAIN_TOOL_SCHEMAS)
+        active_tools = [t for t in active_tools if t["name"] in intermediate_allowed]
+
+        final_names = {t["name"] for t in active_tools}
+        assert final_names <= intermediate_allowed
+        assert len(active_tools) > 0, "At least one communication tool must survive the gate"
+
+        all_names = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+        leaked = all_names - intermediate_allowed
+        assert len(leaked) > 0, "There must be tools that get stripped"
+        for leaked_name in leaked:
+            assert leaked_name not in final_names
+
+    @pytest.mark.asyncio
+    async def test_jarvis_message_during_active_task_enqueued(self):
+        """JARVIS message during active agent task IS enqueued."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="route", status="evaluated"),
+            _make_turn(actor="jarvis", action="message", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result
 
 
 def _scan_logic(
@@ -268,6 +399,7 @@ def _scan_logic(
     event_locks: dict,
     last_processed: dict,
     defer_until: dict | None = None,
+    waiting_for_agent: dict | None = None,
 ) -> list[str]:
     """Pure decision logic extracted from start_event_loop scan.
 
@@ -276,33 +408,43 @@ def _scan_logic(
     """
     if defer_until is None:
         defer_until = {}
+    if waiting_for_agent is None:
+        waiting_for_agent = {}
 
     to_enqueue: list[str] = []
 
     for eid in active_ids:
-        # Branch 1: Agent task running -- handled by intermediate processing, not reconcile
+        # Guard 1: Active task -- enqueue when unseen non-brain turns exist
         if eid in active_tasks and not active_tasks[eid].done():
+            event = events.get(eid)
+            if event:
+                unseen = [t for t in event.conversation if t.status.value == "sent"]
+                has_new_input = any(t.actor != "brain" for t in unseen) or any(
+                    t.status.value == "delivered" and t.actor != "brain"
+                    for t in event.conversation
+                )
+                if has_new_input:
+                    to_enqueue.append(eid)
             continue
 
         event = events.get(eid)
         if not event:
             continue
 
-        # Branch 2: Zombie (closed but still in active set)
+        # Guard 2: Zombie (closed but still in active set)
         if event.status == EventStatus.CLOSED:
             continue
 
-        # Branch 3: New event with no conversation
+        # Guard 3: New event with no conversation
         if not event.conversation:
             if event.status == EventStatus.NEW:
                 to_enqueue.append(eid)
             continue
 
-        # Branch 4-5: Deferred events
+        # Guard 4-5: Deferred events
         if event.status == EventStatus.DEFERRED:
             dt = defer_until.get(eid)
             if dt and time.time() < dt:
-                # Check for user interrupt
                 last_defer_idx = next(
                     (i for i, t in enumerate(reversed(event.conversation))
                      if t.actor == "brain" and t.action == "defer"), None
@@ -317,7 +459,19 @@ def _scan_logic(
             to_enqueue.append(eid)
             continue
 
-        # Branch 6-7: JARVIS wait
+        # Guard 6: Mark SENT turns as DELIVERED (status transition only in real scan)
+        unseen = [t for t in event.conversation if t.status.value == "sent"]
+
+        # Guard 7: Waiting-for-agent -- bypass on participant input (level-triggered)
+        if eid in waiting_for_agent:
+            has_participant_input = any(t.actor != "brain" for t in unseen) or any(
+                t.status.value == "delivered" and t.actor != "brain"
+                for t in event.conversation
+            )
+            if not has_participant_input:
+                continue
+
+        # Guard 8-9: JARVIS wait
         if eid in waiting_for_jarvis:
             wait_start = waiting_for_jarvis[eid]
             jarvis_reply = any(
@@ -329,7 +483,7 @@ def _scan_logic(
                 to_enqueue.append(eid)
             continue  # Whether reply arrived or not, don't fall through
 
-        # Branch 8-12: Active event processing decision
+        # Guard 10-12: Active event processing decision
         has_unread = any(t.status.value == "delivered" for t in event.conversation)
         is_waiting = eid in waiting_for_user
         is_locked = eid in event_locks and event_locks[eid].locked()

@@ -86,7 +86,7 @@ function GridTile({ report, isSelected, onClick }: {
       </div>
 
       <div className="flex justify-between items-center text-[11px] text-text-muted">
-        <span>{report.turns} turns</span>
+        <span>{report.turns} turns{report.triggered_by ? ` · ${report.triggered_by}` : ''}</span>
         <span className="font-mono">{report.event_id}</span>
       </div>
     </div>

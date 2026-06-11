@@ -401,6 +401,7 @@ export interface ReportMeta {
   reason: string;
   closed_at: string;
   indexed_at?: number;
+  triggered_by?: string | null;
 }
 
 export interface ReportSearchResponse {

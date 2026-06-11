@@ -626,6 +626,7 @@ class ReportMeta(BaseModel):
     turns: int
     closed_at: str
     indexed_at: float = 0.0
+    triggered_by: str | None = None
 
 
 class ReportSearchResponse(BaseModel):

@@ -50,6 +50,7 @@ Every event, journal entry, and investigation result carries a timestamp. Before
 5. `notify_user_slack` (each maintainer)
 6. `report_incident`
 7. `notify_gitlab_result` (if GitLab-sourced)
+7.5. For events involving pipelines or builds: record the final observed duration as an observation before closing. You have the timing data from your last state refresh -- capture it so future events can calibrate their sampling interval from measured history instead of guessing.
 8. `set_phase("close")`
 9. `close_event`
 

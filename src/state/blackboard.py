@@ -2198,6 +2198,10 @@ class BlackboardState:
                 domain = evidence.brain_domain or evidence.domain
                 severity = evidence.brain_severity or evidence.severity
 
+            triggered_by = None
+            if isinstance(evidence, EventEvidence) and evidence.triggered_by:
+                triggered_by = evidence.triggered_by
+
             indexed_at = time.time()
             report_data = {
                 "event_id": event_id,
@@ -2211,6 +2215,7 @@ class BlackboardState:
                 "reason": event.event.reason,
                 "closed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "indexed_at": indexed_at,
+                "triggered_by": triggered_by,
             }
 
             obs_summary = await self.get_observation_summary(event_id)

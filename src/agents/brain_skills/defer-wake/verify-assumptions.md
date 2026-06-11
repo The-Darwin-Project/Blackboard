@@ -14,7 +14,7 @@ verify phase is the correct checkpoint for evaluating evidence.
 
 ## Before deferring again, you MUST
 
-1. **Consult deep memory** -- check if past events reveal how long this type of task typically takes or what the resolution looked like. Use the timing from memory to set `delay_seconds` -- if memory says a process takes 30 minutes, use history known time frames when defering.
+1. **Check observations and deep memory** -- first review your observation history for this service. Recent duration measurements from your own events are more precise than archived deep memory baselines. If you recorded timing data for this service in a previous event, that is your best Ts calibration source. Then consult deep memory for additional context -- it provides patterns across longer time spans. Use the timing from both sources to choose your deferral interval.
 2. **Verify, don't assume** -- if the deferral reason involves waiting for an external process (CI pipeline, deployment sync, merge), route an agent to check the current state rather than re-deferring with the same stale reason.
 3. **Check for progress, not just count** -- repeated defers are healthy when each check shows progress (new percentage, different status, advancing stage). Escalate only when:
    - Two consecutive checks show the SAME state with no change (stalled process)

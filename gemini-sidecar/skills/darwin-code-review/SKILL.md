@@ -2,7 +2,7 @@
 name: darwin-code-review
 description: Code and MR/PR review workflow for plan mode. Use when reviewing merge requests, pull requests, or code changes.
 roles: [architect]
-modes: [plan]
+modes: [plan, review]
 ---
 
 # Darwin Code Review Workflow

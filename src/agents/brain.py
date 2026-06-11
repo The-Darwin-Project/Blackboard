@@ -27,7 +27,7 @@
 # 30. [Gotcha]: consult_deep_memory cached guard uses string matching ("No historical patterns", "No results") coupled to Archivist response text. If Archivist wording changes, the guard silently breaks.
 # 31. [Pattern]: _reasoning_by_event (dict[str, str | None]) keyed by event_id. Set in _process_with_llm
 #     before _execute_function_call, consumed via .pop() in _emit_executive_pulse, cleared on error/text-only
-#     paths, _process_intermediate, and _close_and_broadcast. JARVIS sees reasoning via PulseBatch.reasoning.
+#     paths and _close_and_broadcast. JARVIS sees reasoning via PulseBatch.reasoning.
 # 32. [Pattern]: _hold_watch_events + _hold_watch_park_time: zero-cost FRIDAY parking for jarvis meta-events.
 #     Scan wakes on new deferred ID (set-diff), unread system turns, or 600s TTL. Cleared in
 #     clear_hold_watch(), _close_and_broadcast(). Orphan recovery in _recover_hold_watch_orphans().
@@ -52,11 +52,10 @@
 #     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
 #     intentionally broken on RECALL re-invoke.
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
-# 24. [Pattern]: Intermediate phase: _process_intermediate runs during active agent execution on ALL
-#     non-brain turns (including user messages). Tools: reply_to_agent/message_agent/wait_for_agent.
-#     Token limit: 256 (agent-only), 1024 (user or huddle present). NEVER add wait_for_user to
-#     intermediate -- it sets _waiting_for_user which blocks reconcile for that event. Appends brain.intermediate,
-#     marks turns EVALUATED.
+# 24. [Pattern]: Intermediate processing: scan enqueues active-task events with unseen non-brain turns.
+#     _process_with_llm uses is_intermediate flag to gate tools: {reply_to_agent, message_agent,
+#     wait_for_agent, respond_to_jarvis}. Fail-closed invariant strips leaked tools after all gates.
+#     NEVER add wait_for_user to intermediate -- it sets _waiting_for_user which blocks reconcile.
 # 32. [Pattern]: brain.thoughts (internal reasoning, is_thought=True tokens) -- NOT fed to LLM prompt
 #     (_turn_to_parts returns []), no pulse, no _waiting_for_user. Dashboard/JARVIS can see it.
 # 33. [Pattern]: brain.response (visible reply, is_thought=False text) -- IN LLM prompt as role=model,
@@ -767,7 +766,8 @@ class Brain:
             # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
             # returns True, meaning the LLM needs to make a follow-up decision.
             # Bounded to prevent runaway loops.
-            max_llm_iterations = 5
+            is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+            max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
             for iteration in range(max_llm_iterations):
                 # Re-fetch event to pick up turns appended by the previous iteration
                 if iteration > 0:
@@ -776,7 +776,7 @@ class Brain:
                         return
                 should_continue = await self._process_with_llm(
                     event_id, event, is_defer_wake=is_defer_wake,
-                    iteration=iteration,
+                    iteration=iteration, is_intermediate=is_intermediate,
                 )
                 if not should_continue:
                     break
@@ -828,6 +828,7 @@ class Brain:
         *,
         is_defer_wake: bool = False,
         iteration: int = 0,
+        is_intermediate: bool = False,
     ) -> bool:
         """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
@@ -862,7 +863,7 @@ class Brain:
 
         # Progressive skill loading: build phase-specific system prompt + LLM params
         if self._progressive_skills and self._skill_loader:
-            context_flags = await self._extract_context_flags(event)
+            context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
@@ -882,6 +883,11 @@ class Brain:
         if is_defer_wake and iteration == 0:
             active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
             logger.info(f"Defer-wake iter 0: stripped defer_event from tools for {event_id}")
+
+        # === Intermediate tool gate (FIRST -- before phase/domain gates) ===
+        if context_flags.get("is_intermediate"):
+            intermediate_allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+            active_tools = [t for t in active_tools if t["name"] in intermediate_allowed]
 
         # === Phase-driven tool gating ===
         # Code reads the Brain's declared phase and provides matching tools.
@@ -1042,6 +1048,15 @@ class Brain:
         else:
             active_tools = tier_always + tier_phase + tier_rest
 
+        # Fail-closed invariant: intermediate events MUST only have communication tools
+        if context_flags.get("is_intermediate"):
+            allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+            final_names = {t["name"] for t in active_tools}
+            if not final_names <= allowed:
+                leaked = final_names - allowed
+                active_tools = [t for t in active_tools if t["name"] in allowed]
+                logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
+
         prompt = await self._build_contents(event, context_cache=context_flags)
 
         prompt = [
@@ -1138,7 +1153,16 @@ class Brain:
                         logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
                         await asyncio.sleep(delay)
                         continue
-                    logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+                    err_str = str(e)
+                    if "400" in err_str or "INVALID_ARGUMENT" in err_str:
+                        token_est = self._estimate_tokens(prompt)
+                        logger.error(
+                            f"Brain LLM 400 for {event_id} "
+                            f"(turns={len(event.conversation)}, est_tokens={token_est}): {e}",
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
                     break
         finally:
             if want_search and hasattr(self._adapter, 'set_search_enabled'):
@@ -1271,130 +1295,6 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
-    async def _process_intermediate(
-        self, event_id: str, event: EventDocument, turns: list[ConversationTurn]
-    ) -> None:
-        """Evaluate intermediate turns during active agent dispatch via LLM.
-
-        Processes ALL non-brain unseen turns: agent progress, user messages, aligner signals.
-        Tools: reply_to_agent, message_agent, wait_for_agent (always available).
-        Token limit: 256 (agent-only), 1024 (user or huddle present).
-        Appends brain.thoughts turn for temporal context; marks processed turns EVALUATED.
-        """
-        self._reasoning_by_event.pop(event_id, None)
-        if not self._adapter:
-            logger.warning("_process_intermediate skipped: no LLM adapter")
-            return
-
-        from .llm import BRAIN_TOOL_SCHEMAS
-        intermediate_tools = [
-            t for t in BRAIN_TOOL_SCHEMAS
-            if t["name"] in ("reply_to_agent", "message_agent", "wait_for_agent")
-        ]
-        huddle_turns = [t for t in turns if t.action == "huddle"]
-        user_turns = [t for t in turns if t.actor == "user"]
-        max_tokens = 1024 if (huddle_turns or user_turns) else 256
-
-        ctx: ContextFlags = {
-            "is_intermediate": True,
-            "has_pending_huddle": bool(huddle_turns),
-            "last_is_user": bool(user_turns),
-            "turn_count": len(event.conversation),
-            "has_agent_result": False,
-            "is_waiting": False,
-            "is_defer_wakeup": False,
-            "has_related": False,
-            "has_graph_edges": False,
-            "has_recent_closed": False,
-            "has_slack_participant": bool(
-                getattr(event, "slack_thread_ts", None)
-                and any(t.actor == "user" and t.source == "slack" for t in event.conversation)
-            ),
-            "source": event.source,
-            "service": event.service or "",
-        }
-        active_phases = self._match_phases(event, ctx)
-        system_prompt = await self._build_system_prompt(event, active_phases, ctx)
-        thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
-        contents = await self._build_contents(event, context_cache=ctx)
-        await self._broadcast({
-            "type": "brain_thinking", "event_id": event_id,
-            "text": "", "accumulated": "", "is_thought": True,
-        })
-        if huddle_turns:
-            from ..dependencies import get_registry_and_bridge
-            registry, _ = get_registry_and_bridge()
-            if registry:
-                agent_conn = await registry.get_by_event(event_id)
-                if agent_conn and agent_conn.ws:
-                    try:
-                        await agent_conn.ws.send_json({
-                            "type": "proactive_message",
-                            "from": "brain",
-                            "content": "Brain received your huddle and is evaluating. Stand by.",
-                        })
-                    except Exception as e:
-                        logger.debug("Huddle ack send failed for %s: %s", event_id, e)
-        accumulated_text = ""
-        function_call = None
-        try:
-            async for chunk in self._adapter.generate_stream(
-                system_prompt=system_prompt,
-                contents=contents,
-                tools=intermediate_tools,
-                temperature=call_temp,
-                max_output_tokens=min(max_tokens, phase_max_tokens),
-                thinking_level=thinking_level,
-            ):
-                if chunk.text:
-                    if not chunk.is_thought:
-                        accumulated_text += chunk.text
-                if chunk.function_call:
-                    function_call = chunk.function_call
-        except Exception as e:
-            logger.warning(f"Intermediate LLM call failed for {event_id}: {e}")
-        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
-
-        # State guard: event may have been deferred/closed during the LLM call
-        fresh = await self.blackboard.get_event(event_id)
-        if not fresh or fresh.status.value != "active":
-            logger.info(
-                f"Intermediate result discarded for {event_id}: "
-                f"status changed to {fresh.status.value if fresh else 'deleted'}"
-            )
-            up_to = max(t.turn for t in turns) + 1
-            await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
-            evaluated_turns = [t.turn for t in turns if t.turn < up_to]
-            if evaluated_turns:
-                await self._broadcast_status_update(event_id, "evaluated", turns=evaluated_turns)
-            return
-
-        if accumulated_text:
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="intermediate",
-                thoughts=accumulated_text,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Appended turn {turn.turn} (brain.intermediate) to event {event_id}")
-
-        if function_call and function_call.name in ("reply_to_agent", "message_agent", "wait_for_agent"):
-            await self._execute_function_call(
-                event_id, function_call.name, function_call.args or {},
-            )
-
-        tool_names = [t["name"] for t in intermediate_tools] or ["none"]
-        up_to = max(t.turn for t in turns) + 1
-        await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=up_to)
-        evaluated_turns = [t.turn for t in turns if t.turn < up_to]
-        if evaluated_turns:
-            await self._broadcast_status_update(event_id, "evaluated", turns=evaluated_turns)
-        logger.info(
-            f"Intermediate: processed {len(turns)} turns for {event_id} "
-            f"(phases: {active_phases}, tools: {tool_names})"
-        )
-
     @staticmethod
     def _is_transient(e: Exception) -> bool:
         """Check if exception is a transient rate-limit or availability error."""
@@ -1511,11 +1411,15 @@ class Brain:
     # Progressive Skill System -- Context Flags + Phase Matching
     # =========================================================================
 
-    async def _extract_context_flags(self, event: EventDocument) -> ContextFlags:
+    async def _extract_context_flags(
+        self, event: EventDocument, *, is_intermediate: bool = False,
+    ) -> ContextFlags:
         """Extract boolean context flags for phase matching. Lightweight Redis reads.
 
         Returns flags dict with cached raw data for _build_contents to reuse,
         avoiding double Redis calls for active_events, mermaid, and recent_closed.
+        is_intermediate is passed from the caller (single evaluation at L769)
+        to avoid TOCTOU with _active_tasks between await boundaries.
         """
         flags: ContextFlags = {
             "turn_count": len(event.conversation),
@@ -1524,38 +1428,48 @@ class Brain:
             "is_waiting": event.id in self._waiting_for_user,
         }
 
+        flags["is_intermediate"] = is_intermediate
+
         flags["has_agent_result"] = any(
             t.actor not in ("brain", "user", "aligner", "headhunter") for t in event.conversation
         )
         recent = event.conversation[-3:] if event.conversation else []
         flags["last_is_user"] = bool(recent and recent[-1].actor == "user")
 
-        active_ids = await self.blackboard.get_active_events()
-        flags["_cached_active_ids"] = active_ids
-        has_related = False
-        for eid in active_ids:
-            if eid == event.id:
-                continue
-            other = await self.blackboard.get_event(eid)
-            if other and other.service == event.service:
-                has_related = True
-                break
-        flags["has_related"] = has_related
+        if flags["is_intermediate"]:
+            flags["_cached_active_ids"] = []
+            flags["has_related"] = False
+            flags["_cached_recent_closed"] = []
+            flags["has_recent_closed"] = False
+            flags["_cached_mermaid"] = ""
+            flags["has_graph_edges"] = False
+        else:
+            active_ids = await self.blackboard.get_active_events()
+            flags["_cached_active_ids"] = active_ids
+            has_related = False
+            for eid in active_ids:
+                if eid == event.id:
+                    continue
+                other = await self.blackboard.get_event(eid)
+                if other and other.service == event.service:
+                    has_related = True
+                    break
+            flags["has_related"] = has_related
 
-        recent_closed = await self.blackboard.get_recent_closed_for_service(
-            event.service, minutes=15
-        )
-        flags["_cached_recent_closed"] = recent_closed
-        flags["has_recent_closed"] = bool(recent_closed)
+            recent_closed = await self.blackboard.get_recent_closed_for_service(
+                event.service, minutes=15
+            )
+            flags["_cached_recent_closed"] = recent_closed
+            flags["has_recent_closed"] = bool(recent_closed)
 
-        mermaid = ""
-        if getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
-            try:
-                mermaid = await self.blackboard.generate_mermaid()
-            except Exception:
-                pass
-        flags["_cached_mermaid"] = mermaid
-        flags["has_graph_edges"] = bool(mermaid and "-->" in mermaid)
+            mermaid = ""
+            if getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
+                try:
+                    mermaid = await self.blackboard.generate_mermaid()
+                except Exception:
+                    pass
+            flags["_cached_mermaid"] = mermaid
+            flags["has_graph_edges"] = bool(mermaid and "-->" in mermaid)
 
         flags["has_aligner_turns"] = any(
             t.actor == "aligner" for t in event.conversation
@@ -4524,7 +4438,7 @@ class Brain:
                 registry, bridge = get_registry_and_bridge()
                 if registry and bridge:
                     async def on_huddle(data: dict) -> None:
-                        """Append huddle as conversation turn -- Brain replies via _process_intermediate."""
+                        """Append huddle as conversation turn -- Brain replies via intermediate enqueue."""
                         role = data.get("agent_id", agent_name).split("-")[0]
                         turn = ConversationTurn(
                             turn=(await self._next_turn_number(event_id)),
@@ -5682,7 +5596,7 @@ class Brain:
         to_enqueue: list[str] = []
 
         for eid in active:
-            # Agent task running: handle delivery + intermediate, don't enqueue
+            # Guard 1: Active task -- enqueue when unseen non-brain turns exist
             if eid in self._active_tasks and not self._active_tasks[eid].done():
                 event = await self.blackboard.get_event(eid)
                 if event:
@@ -5690,9 +5604,27 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                    intermediate = [t for t in unseen if t.actor != "brain"]
-                    if intermediate:
-                        await self._process_intermediate(eid, event, intermediate)
+                    has_new_input = any(t.actor != "brain" for t in unseen) or any(
+                        t.status.value == "delivered" and t.actor != "brain"
+                        for t in event.conversation
+                    )
+                    if has_new_input:
+                        has_huddle = any(t.action == "huddle" for t in unseen)
+                        if has_huddle:
+                            from .dependencies import get_registry_and_bridge
+                            registry, _ = get_registry_and_bridge()
+                            if registry:
+                                agent_conn = await registry.get_by_event(eid)
+                                if agent_conn and agent_conn.ws:
+                                    try:
+                                        await agent_conn.ws.send_json({
+                                            "type": "proactive_message",
+                                            "from": "brain",
+                                            "content": "Brain received your huddle and is evaluating. Stand by.",
+                                        })
+                                    except Exception:
+                                        pass
+                        to_enqueue.append(eid)
                 continue
 
             event = await self.blackboard.get_event(eid)
@@ -5759,9 +5691,14 @@ class Brain:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
-            # waiting_for_agent: skip re-enqueue while agent is working
+            # Guard 7: waiting_for_agent -- bypass on participant input (level-triggered)
             if eid in self._waiting_for_agent:
-                continue
+                has_participant_input = any(t.actor != "brain" for t in unseen) or any(
+                    t.status.value == "delivered" and t.actor != "brain"
+                    for t in event.conversation
+                )
+                if not has_participant_input:
+                    continue
 
             # hold_watch: zero-cost parking for jarvis meta-events
             if eid in self._hold_watch_events:
