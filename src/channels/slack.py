@@ -180,12 +180,20 @@ class SlackChannel:
         async def on_thread_started(say: Any, set_suggested_prompts: Any) -> None:
             try:
                 event_ids = await self._blackboard.get_active_events()
-                prompts = [{"title": "Check system health", "message": "What is the current status of all monitored services?"}]
+                prompts: list[dict[str, str]] = []
                 if event_ids:
-                    prompts.insert(0, {
-                        "title": f"Resume active event ({event_ids[0]})",
-                        "message": f"What is the status of event {event_ids[0]}?",
+                    prompts.append({
+                        "title": f"What's happening with {event_ids[0]}?",
+                        "message": f"Give me a full status update on event {event_ids[0]} -- current phase, what agents have done, and what's pending.",
                     })
+                prompts.append({
+                    "title": "Run a pipeline retest",
+                    "message": "Retest the latest failed pipeline on this MR: <paste MR URL>",
+                })
+                prompts.append({
+                    "title": "Investigate a failure",
+                    "message": "Investigate why this service is failing: <paste service name or error>",
+                })
                 await set_suggested_prompts(prompts=prompts)
                 await say("How can I help you?")
             except Exception as e:
