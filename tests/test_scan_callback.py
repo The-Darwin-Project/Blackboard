@@ -330,8 +330,8 @@ class TestIntermediateProcessing:
         assert "evt-1" in result
 
     @pytest.mark.asyncio
-    async def test_waiting_for_agent_clears_on_delivered_turn(self):
-        """Waiting-for-agent bypasses when a non-brain DELIVERED turn exists."""
+    async def test_waiting_for_agent_clears_on_sent_turn(self):
+        """Waiting-for-agent bypasses when a non-brain SENT turn exists (edge-triggered)."""
         turns = [
             _make_turn(actor="brain", action="wait", status="evaluated"),
             _make_turn(actor="developer", action="result", status="sent"),
@@ -350,23 +350,89 @@ class TestIntermediateProcessing:
         assert "evt-1" in result
 
     @pytest.mark.asyncio
+    async def test_waiting_for_agent_clears_on_delivered_turn(self):
+        """Waiting-for-agent bypasses when a non-brain DELIVERED turn exists (level-triggered, prior scan cycle)."""
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+            _make_turn(actor="developer", action="result", status="delivered"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": "developer"},
+        )
+        assert "evt-1" in result
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_agent_stays_parked_on_brain_only_unseen(self):
+        """Waiting-for-agent does NOT bypass when only brain turns are unseen (negative test)."""
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+            _make_turn(actor="brain", action="thoughts", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": "developer"},
+        )
+        assert "evt-1" not in result
+
+    @pytest.mark.asyncio
+    async def test_active_task_no_input_stays_skipped(self):
+        """Active task with only brain-authored unseen turns does NOT enqueue (negative test)."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="route", status="evaluated"),
+            _make_turn(actor="brain", action="thoughts", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" not in result
+
+    @pytest.mark.asyncio
     async def test_intermediate_tool_gate_invariant(self):
-        """Intermediate tool gate strips non-communication tools (fail-closed, not crash)."""
+        """Intermediate tool gate: all 4 communication tools survive, all others stripped."""
         from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
 
         intermediate_allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
-        active_tools = list(BRAIN_TOOL_SCHEMAS)
-        active_tools = [t for t in active_tools if t["name"] in intermediate_allowed]
-
-        final_names = {t["name"] for t in active_tools}
-        assert final_names <= intermediate_allowed
-        assert len(active_tools) > 0, "At least one communication tool must survive the gate"
-
         all_names = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
-        leaked = all_names - intermediate_allowed
-        assert len(leaked) > 0, "There must be tools that get stripped"
-        for leaked_name in leaked:
-            assert leaked_name not in final_names
+
+        # All 4 intermediate tools must exist in the schema
+        assert intermediate_allowed <= all_names, (
+            f"Missing intermediate tools in schema: {intermediate_allowed - all_names}"
+        )
+
+        # After gate, only allowed tools survive
+        gated = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in intermediate_allowed]
+        final_names = {t["name"] for t in gated}
+        assert final_names == intermediate_allowed, f"Gate result mismatch: {final_names}"
+
+        # Stripped tools must not survive
+        stripped = all_names - intermediate_allowed
+        assert len(stripped) > 0, "There must be tools that get stripped"
+        for name in stripped:
+            assert name not in final_names
 
     @pytest.mark.asyncio
     async def test_jarvis_message_during_active_task_enqueued(self):
