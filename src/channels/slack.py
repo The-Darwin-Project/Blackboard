@@ -8,6 +8,9 @@
 # 5. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
 # 7. [Pattern]: _assistant_context stores {channel, thread_ts, user_id, team_id} per event for streaming. Populated in user_message, consumed by broadcast_handler.
 # 8. [Pattern]: _stream_sessions manages AsyncChatStream lifecycle. Created on first non-thought brain_thinking chunk, stopped on turn. Fallback to legacy on any error.
+# 9. [Pattern]: _INTERNAL_ACTIONS blacklist prevents internal turns (triage, phase, respond_jarvis,
+#    tool_result, etc.) from leaking into user Slack threads. Applied in both _handle_assistant_turn
+#    and _handle_legacy_turn. The is_quiet whitelist (line ~681) is the inverse for infra threads.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
@@ -32,6 +35,11 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger("darwin.slack")
+
+_INTERNAL_ACTIONS = frozenset({
+    "triage", "phase", "respond_jarvis", "tool_result",
+    "hold_watch", "intermediate", "hold_watch_wake", "think",
+})
 
 
 class SlackChannel:
@@ -766,6 +774,9 @@ class SlackChannel:
         if turn.actor == "user" and turn.source == "slack":
             return
 
+        if turn.actor == "brain" and turn.action in _INTERNAL_ACTIONS:
+            return
+
         stream = self._stream_sessions.pop(event_id, None)
         if stream:
             try:
@@ -815,6 +826,9 @@ class SlackChannel:
 
         # Internal reasoning -- don't post to Slack. Thinking animation persists until brain.response.
         if turn.actor == "brain" and turn.action == "thoughts":
+            return
+
+        if turn.actor == "brain" and turn.action in _INTERNAL_ACTIONS:
             return
 
         if (
