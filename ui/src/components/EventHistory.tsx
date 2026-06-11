@@ -76,6 +76,7 @@ export default function EventHistory() {
 
   const sourceOptions = useMemo(() => {
     const set = new Set(allReports.map((r) => r.source));
+    for (const s of ['aligner', 'chat', 'headhunter', 'jarvis', 'slack', 'timekeeper']) set.add(s);
     return [...set].sort();
   }, [allReports]);
 
