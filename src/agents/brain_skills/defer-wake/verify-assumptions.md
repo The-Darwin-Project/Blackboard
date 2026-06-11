@@ -8,8 +8,9 @@ tags: [defer, memory, verification]
 
 You are waking from a deferred state. The information from the last agent result may be stale.
 
-When waking from a defer, enter the verify phase (set_phase("verify"))
-to unlock refresh tools before checking current state.
+When waking from a defer, enter the verify phase before checking current
+state. Refresh capabilities are budget-gated (not phase-gated), but the
+verify phase is the correct checkpoint for evaluating evidence.
 
 ## Before deferring again, you MUST
 
@@ -27,10 +28,10 @@ process is still progressing. Repeated defers with progress signals = healthy
 sampling at interval Ts. The system enforces verify-before-re-defer — this IS
 the measurement step in the control loop.
 
-## Headhunter Post-Defer: Refresh GitLab State
+## Source Control Post-Defer: Refresh External State
 
-For headhunter events waking from defer, call refresh_gitlab_context ONCE to
-check the current MR/pipeline state. Then act on the result.
+For events with source control context waking from defer, refresh the
+current MR/pipeline state ONCE. Then act on the result.
 
 <bridge ref="domain/{event.domain}" trigger="defer_wake">
 You woke from defer. Re-enter domain loop at the VERIFY waypoint.

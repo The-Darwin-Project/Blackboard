@@ -6,9 +6,9 @@ tag_type: protocol
 # Phase Pipeline
 
 This phase pipeline is executed by the domain control loops in 03-control-theory.md.
-Phases unlock tools; domain strategy decides which path you walk through them.
-You call `set_phase` to unlock the toolset for your next action — the domain loop
-decides WHAT to do; the phase decides WHAT TOOLS you can use to do it.
+Phases unlock capabilities; domain strategy decides which path you walk through them.
+Transition phases to unlock the capabilities for your next action — the domain loop
+decides WHAT to do; the phase decides WHAT CAPABILITIES you can use to do it.
 
 ## Pipeline Flow
 
@@ -68,44 +68,54 @@ graph LR
 
 CLOSE is terminal. Reopen requires a new event.
 
-## Tool Gating Per Phase
+## Capabilities Per Phase
 
 ```mermaid
 graph TD
-    subgraph triage ["TRIAGE tools"]
-        T_refresh["refresh_gitlab/kargo_context -- 1x initial"]
-        T_classify["classify_event"]
-        T_lookups["lookups + deep memory"]
+    subgraph triage ["TRIAGE capabilities"]
+        T1["Classify the event domain"]
+        T2["Gather initial state (1x refresh)"]
+        T3["Consult deep memory + lookups"]
     end
 
-    subgraph dispatch ["DISPATCH tools"]
-        D_agent["select_agent, message_agent, reply_to_agent"]
-        D_plan["create_plan, get_plan_progress"]
-        D_defer["defer_event, wait_for_user"]
-        D_jira["comment_jira_issue, transition_jira_issue"]
+    subgraph dispatch ["DISPATCH capabilities"]
+        D1["Route agents to investigate or execute"]
+        D2["Create and track plans"]
+        D3["Schedule observation intervals + wait for user"]
+        D4["Interact with issue trackers"]
     end
 
-    subgraph verify ["VERIFY tools"]
-        V_refresh["refresh_gitlab/kargo_context -- budget"]
-        V_dispatch["select_agent, create_plan -- still available"]
-        V_eval["agent evaluation + observations"]
+    subgraph verify ["VERIFY capabilities"]
+        D1b["Route agents (still available)"]
+        V1["Refresh external state (budget-gated)"]
+        V2["Schedule calibrated observation intervals"]
+        V3["Evaluate agent results + record observations"]
     end
 
-    subgraph escalateTools ["ESCALATE tools"]
-        E_incident["report_incident"]
-        E_notify["notify_user_slack"]
-        E_close["close_event, notify_gitlab_result"]
+    subgraph escalateTools ["ESCALATE capabilities"]
+        E1["File incidents"]
+        E2["Notify maintainers"]
+        E3["Schedule observation intervals"]
+        E4["Close event + notify external systems"]
     end
 
-    subgraph closeTools ["CLOSE tools"]
-        C_close["close_event, notify_gitlab_result"]
-        C_notify["notify_user_slack"]
+    subgraph closeTools ["CLOSE capabilities"]
+        C1["Close event + notify external systems"]
+        C2["Notify maintainers"]
+        C3["Park for observation (meta-events)"]
     end
 ```
 
-Core tools (lookups, classify_event, set_phase, select_agent, message_agent,
-reply_to_agent, create_plan, get_plan_progress, wait_for_agent) are available
-in ALL phases. The diagram shows phase-specific unlocks only.
+Core capabilities (lookups, classification, phase transitions, agent routing,
+plan management, agent communication) are available in ALL phases. The diagram
+shows phase-specific unlocks only.
+
+**Defer discipline:** Scheduling observation intervals is available in DISPATCH,
+VERIFY, and ESCALATE. When deferring to wait on an async result (pipeline, agent
+task, build, sync), transition to **VERIFY first**. Deferring from DISPATCH is
+valid only for capacity gating (WIP cap reached, all agents busy). If you dispatched
+async work, the correct sequence is: DISPATCH → transition to VERIFY → evaluate
+evidence → schedule observation. Skipping VERIFY means you defer on stale state.
 
 ## Phase Handoffs
 
@@ -121,18 +131,18 @@ graph LR
 
 ## Refresh Budget
 
-Refresh tools (refresh_gitlab_context, refresh_kargo_context) use an
-event-scoped budget, not phase gating. You start with 3 tokens per event.
-Each use consumes one. Tokens refill when an agent returns results (new
-evidence justifies a fresh check). Budget is capped at 10 to prevent
-unbounded accumulation on long-running events.
+Refreshing external state uses an event-scoped budget, not phase gating.
+You start with 3 tokens per event. Each use consumes one. Tokens refill
+when an agent returns results (new evidence justifies a fresh check).
+Budget is capped at 10 to prevent unbounded accumulation on long-running
+events.
 
-You do not need to transition phases to access refresh tools. If tokens are
-exhausted without agent work in between, dispatch an agent rather than
-refreshing stale state repeatedly.
+You do not need to transition phases to refresh. If tokens are exhausted
+without agent work in between, dispatch an agent rather than refreshing
+stale state repeatedly.
 
-fetch_jira_issue is phase-gated (available in triage, dispatch, and verify)
-but does not consume refresh budget tokens.
+Fetching issue tracker data is phase-gated (available in triage, dispatch,
+and verify) but does not consume refresh budget tokens.
 
 ## Why Phases Matter
 
@@ -161,22 +171,22 @@ erode trust. Always VERIFY before ESCALATE for automated events.
 ```mermaid
 graph LR
     CT[TRIAGE] -->|"act first"| CE[ESCALATE]
-    CE -->|"report_incident + notify_slack"| STABLE{"stabilized?"}
+    CE -->|"file incident + notify maintainers"| STABLE{"stabilized?"}
     STABLE -->|"yes: reclassify"| CD[DISPATCH]
     CD --> CV[VERIFY] --> CC[CLOSE]
 ```
 
-close_event is NOT available in CHAOTIC domain. Reclassify to COMPLICATED
-first. The act-first principle overrides verify-before-escalate.
+Closing and deferring are not available in CHAOTIC domain. Reclassify to
+COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 ## After Escalation
 
 - **Automated events:** CLOSE. Incident is an offline artifact for business hours.
-- **FRIDAY needs input:** request_user_approval after escalating. Human responds
-  via dashboard or Slack DM. If event closes before reply, follow-up event created.
+- **FRIDAY needs input:** request user approval after escalating. Human responds
+  via dashboard or chat. If event closes before reply, follow-up event created.
 
 ## System States
 
 System states (agent working, waiting for user) are handled automatically.
-Your declared phase resumes when the system state clears. New tools are
-available on the next processing turn after set_phase.
+Your declared phase resumes when the system state clears. New capabilities
+are available on the next processing turn after a phase transition.

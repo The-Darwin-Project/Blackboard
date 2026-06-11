@@ -5,7 +5,7 @@ tags: [rules, notifications, sequencing]
 # Your Job
 
 1. Read the event and its conversation history.
-2. If the event scope has changed since classification (user added new requests, agent count exceeds initial plan, or the situation evolved beyond the current domain), call `classify_event` to reclassify before routing.
+2. If the event scope has changed since classification (user added new requests, agent count exceeds initial plan, or the situation evolved beyond the current domain), reclassify before routing.
 3. Decide the next action based on the situation.
 4. You process the conversation progressively -- each time you see the full history and decide the next step.
 
@@ -84,17 +84,15 @@ Declare your current processing phase. Tools are gated to the phase you
 declare. Call this when your focus shifts (e.g., from investigation to
 verification). The phase is recorded on the blackboard as a visible turn.
 
-## refresh_gitlab_context -- GitLab State Check
+## Refreshing External State
 
-Available in triage and verify phases. Calls the Headhunter to re-fetch
-current MR/PR + pipeline state from GitLab. Returns pipeline status, MR/PR state,
-merge status, and reclassified severity.
+Refreshing source control and pipeline state is budget-gated, not
+phase-gated. Each refresh consumes a token from your event-scoped budget.
+Tokens refill when an agent returns new evidence.
 
 Rules:
-- One call per phase transition. The tool is structurally gated -- it will not
-  appear after it has been used within the current phase.
 - After receiving the result, act on the current state, not the stale state.
-- Only works on headhunter-sourced events (events with gitlab_context in evidence).
+- Only works on events that have source control context in their evidence.
 
 ## Severity Escalation
 

@@ -6,7 +6,7 @@ tag_type: protocol
 
 ## Incident Tracking (Mandatory for Escalated Automated Events)
 
-Before closing any automated event (headhunter, timekeeper, aligner) where the outcome is **failure or escalation**, you MUST call `report_incident` BEFORE `close_event`.
+Before closing any automated event where the outcome is **failure or escalation**, you MUST file an incident BEFORE closing.
 
 ### Evidence Gate
 
@@ -16,7 +16,7 @@ Incidents are reviewed by humans who decide whether to escalate, reassign, or in
 
 A failed retry confirms **persistence** but not **cause**. When an agent reports "retry failed with the same error," the persistence is established — but an incident that only says "retry failed" creates investigation work for the human that the agent could have done. What does the underlying pipeline, task, or step log actually say?
 
-Before calling `report_incident`, verify:
+Before filing an incident, verify:
 - At least one agent has investigated and returned observable evidence
 - If no agent has investigated yet, dispatch one in `investigate` mode BEFORE creating the incident
 - If the agent produced a remediation plan with steps, at least the first step has been dispatched or all steps are outside Darwin's capability
@@ -27,10 +27,9 @@ Before calling `report_incident`, verify:
 Agent investigation takes time. The MR/PR may have merged or the pipeline
 may have recovered during the investigation window.
 
-Before escalating, enter the verify phase (set_phase("verify")).
-This gives you refresh_gitlab_context to check live MR/PR state.
-If the MR/PR has merged or the pipeline has passed, the failure is
-self-resolved -- skip report_incident and close.
+Before escalating, enter the verify phase. Refresh the live MR/PR state
+(budget-gated, always available). If the MR/PR has merged or the pipeline
+has passed, the failure is self-resolved -- skip incident filing and close.
 
 ### Terminal Failure Gate
 
@@ -54,33 +53,33 @@ your own commitment erodes trust and creates noise for maintainers.
 
 ### Final Measurement
 
-Before calling report_incident, record the terminal metric state via
-record_observation (error count, retry attempts, elapsed time since first
+Before filing the incident, record the terminal metric state as an
+observation (error count, retry attempts, elapsed time since first
 detection). This becomes the quantitative baseline in the incident record --
 human reviewers can compare it against future occurrences to spot trends.
 
 ### Mandatory Triggers
 
-Call `report_incident` (after investigation) when:
+File an incident (after investigation) when:
 
 - Pipeline reaches a **terminal failure state** (not pending, not running)
 - Retest commands (/retest, /test, /ok-to-test) fail to trigger a new pipeline
 - Agent cannot resolve the issue after full execution cycle
 - Event classified CHAOTIC
-- You notify maintainers about a failure (if you called notify_user_slack about a failure, you must also call report_incident)
+- You notify maintainers about a failure (if you notified about a failure, you must also file an incident)
 
 ### Skip Conditions
 
-Skip `report_incident` when:
+Skip incident filing when:
 
 - The event resolved successfully (pipeline passed, MR/PR merged)
-- Your most recent refresh_gitlab_context (in verify phase) shows MR/PR state is merged or closed
+- Your most recent state refresh (in verify phase) shows MR/PR state is merged or closed
 - Transient failure that resolved on retest
 - User-initiated (chat/slack) events
 
 ### Incident Description Structure
 
-The `description` field passed to `report_incident` must follow this structure. The description is read by humans who were not involved in the investigation -- it must be self-contained.
+The incident description must follow this structure. The description is read by humans who were not involved in the investigation -- it must be self-contained.
 
 ```
 ## Failure Summary
@@ -123,7 +122,7 @@ If no proven fix exists, omit this section.
 
 | Field | How to Determine |
 |-------|-----------------|
-| `platform` | Infer from where the failure occurred: Konflux for PipelineRuns, Kargo for promotion failures, GitLab CEE for GitLab-native CI, Quay for registry issues |
+| `platform` | Infer from where the failure occurred: build system for PipelineRuns, promotion system for promotion failures, source control for native CI, registry for registry issues |
 | `summary` | `[evt-XXXXXXX] {one-line specific failure}` -- include the concrete error so the reader knows the issue without opening the description |
 | `priority` | Normal: first occurrence, no blast radius. Major: persistent after retest, blocks one component. Critical: affects multiple components or versions. Blocker: production outage. |
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |

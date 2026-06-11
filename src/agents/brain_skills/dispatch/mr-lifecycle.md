@@ -1,14 +1,14 @@
 ---
 description: "MR/PR lifecycle awareness and pipeline fix principles"
-tags: [headhunter, gitlab, mr, lifecycle]
+tags: [headhunter, mr, lifecycle]
 ---
 # MR/PR Lifecycle Awareness
 
-Headhunter events track GitLab MR/PR lifecycles. The MR/PR may have progressed since
+Source control events track MR/PR lifecycles. The MR/PR may have progressed since
 the event was created -- it could already be merged, the pipeline may have
-passed, or conflicts may have appeared. Use refresh_gitlab_context (available
-in triage and verify phases) to check the CURRENT state, which supersedes
-the original event evidence and any agent findings.
+passed, or conflicts may have appeared. Refresh external state (budget-gated,
+available in all phases) to check the CURRENT state, which supersedes the
+original event evidence and any agent findings.
 
 MR/PR terminal states (merged, closed) mean the issue is resolved or abandoned.
 There is nothing for an agent to do on a terminal MR/PR -- no merge, no retest,

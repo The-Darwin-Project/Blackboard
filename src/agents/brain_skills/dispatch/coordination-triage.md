@@ -114,9 +114,14 @@ When in doubt, use message_agent -- it is lightweight and the agent can escalate
 
 ## Plan Before Routing (COMPLICATED/COMPLEX only)
 
-For COMPLICATED or COMPLEX events, call `create_plan` before `select_agent` to chalk your intended agent sequence on the blackboard. This makes the execution order visible to agents, the dashboard, and yourself for progress tracking.
+For COMPLICATED or COMPLEX events, create a plan before routing agents to
+chalk your intended agent sequence on the blackboard. This makes the
+execution order visible to agents, the dashboard, and yourself for progress
+tracking.
 
-For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan. If you later discover the event needs multi-step planning, reclassify via `classify_event` first to unlock `create_plan`.
+For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan.
+If you later discover the event needs multi-step planning, reclassify to
+match the new complexity, then create a plan.
 
 ## When Unclear
 
