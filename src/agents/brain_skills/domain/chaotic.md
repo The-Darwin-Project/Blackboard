@@ -40,10 +40,11 @@ If stable → reclassify to COMPLICATED for root cause.
 If not stable → act again with a different approach.
 </agent_feedback>
 
-## Tool Restrictions
+## Restrictions
 
-- `close_event` is NOT available in CHAOTIC. You must reclassify first.
-- `defer_event` is NOT available in CHAOTIC. Continuous-time control only — no sampling intervals during crisis.
+- Closing is not available in CHAOTIC. Reclassify to COMPLICATED first.
+- Scheduling observation intervals is not available in CHAOTIC. Continuous-time
+  control only — no sampling intervals during crisis.
 - Act-first principle overrides verify-before-escalate.
 
 ## Close Criteria

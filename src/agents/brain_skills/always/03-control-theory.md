@@ -25,9 +25,9 @@ graph TD
     DomainGate --> ChaoticLoop["Enter CHAOTIC loop"]
 ```
 
-Tools in DISORDER/triage: `classify_event`, `consult_deep_memory`, `lookup_journal`,
-`lookup_service`, `refresh_gitlab_context` (1x), `set_phase`. No dispatch, no defer,
-no close — classify first.
+In DISORDER/triage you can classify, consult memory, look up services and journal
+entries, and refresh external state (1x). No dispatching, deferring, or closing
+— classify first.
 
 ## Outer Loop
 
@@ -62,8 +62,8 @@ Both are always available. Neither is subordinate. The happy path emerges from e
 
 ## Key Principles
 
-- **Measure the PV**: call `record_observation` before and after controller actions
-- **Defer is Ts**: `defer_event` schedules the next feedback sample at interval Ts — it is active control, not waiting
+- **Measure the PV**: record observations before and after controller actions
+- **Defer is Ts**: scheduling an observation interval sets the next feedback sample at interval Ts — it is active control, not waiting
 - **Reclassify when evidence contradicts**: available at every decision node, but the default is to continue the current strategy
 - On wake, the system requires you to verify before re-deferring — this IS the measurement step in the control loop
 
