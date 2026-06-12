@@ -2,15 +2,14 @@
 # @ai-rules:
 # 1. [Constraint]: Single Socket Mode connection. If Brain scales, only one replica enables Slack.
 # 2. [Pattern]: Events from Slack via /darwin (channels), @mention (join existing threads), or Assistant split-pane (DMs). Non-threaded bare DMs still ignored.
-# 6. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
-# 3. [Pattern]: broadcast_handler routes by message["type"]. Assistant threads: brain_thinking -> streaming, turn -> stream.stop(). Legacy: brain_thinking -> emoji, turn -> Block Kit.
-# 4. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
-# 5. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
-# 7. [Pattern]: _assistant_context stores {channel, thread_ts, user_id, team_id} per event for streaming. Populated in user_message, consumed by broadcast_handler.
-# 8. [Pattern]: _stream_sessions manages AsyncChatStream lifecycle. Created on first non-thought brain_thinking chunk, stopped on turn. Fallback to legacy on any error.
-# 9. [Pattern]: _INTERNAL_ACTIONS blacklist prevents internal turns (triage, phase, respond_jarvis,
-#    tool_result, etc.) from leaking into user Slack threads. Applied in both _handle_assistant_turn
-#    and _handle_legacy_turn. The is_quiet whitelist (line ~681) is the inverse for infra threads.
+# 3. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
+# 4. [Pattern]: broadcast_handler routes by message["type"]. Assistant threads: brain_thinking -> setStatus, turn -> Block Kit (same as legacy). Legacy: brain_thinking -> emoji, turn -> Block Kit.
+# 5. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
+# 6. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
+# 7. [Pattern]: _assistant_context stores {channel, thread_ts, user_id, team_id} per event for setStatus calls and DM routing. Populated in user_message, consumed by broadcast_handler.
+# 8. [Pattern]: _INTERNAL_ACTIONS blacklist prevents internal turns (triage, phase, respond_jarvis,
+#    tool_result, etc.) from leaking into user Slack threads. Applied in _handle_legacy_turn.
+#    The is_quiet whitelist is the inverse for infra threads.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
@@ -25,8 +24,7 @@ from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .formatter import (
     format_turn, format_event_summary, get_turn_attachment_color,
-    get_agent_notification_text, create_feedback_block, format_task_card,
-    extract_tables,
+    get_agent_notification_text, extract_tables,
 )
 from ..models import EventEvidence
 
@@ -65,7 +63,6 @@ class SlackChannel:
         self._USER_CACHE_TTL = 3600
         self._thinking_msg: dict[str, tuple[str, str]] = {}  # event_id -> (channel, msg_ts)
         self._assistant_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id}
-        self._stream_sessions: dict[str, Any] = {}  # event_id -> AsyncChatStream
         self._quiet_events: set[str] = set()  # events from @mention -- suppress noise, show only results
 
         self._app = AsyncApp(token=bot_token)
@@ -672,11 +669,11 @@ class SlackChannel:
 
     # =========================================================================
     # Broadcast handler (registered on Brain via register_channel)
-    # Two-path router: Assistant threads use streaming, legacy uses emoji hack.
+    # Unified Block Kit router for all thread types.
     # =========================================================================
 
     async def broadcast_handler(self, message: dict) -> None:
-        """Route Brain broadcasts to Assistant streaming or legacy Block Kit path."""
+        """Route Brain broadcasts to Block Kit path for all thread types."""
         msg_type = message.get("type")
         event_id = message.get("event_id", "")
         is_assistant = event_id in self._assistant_context
@@ -703,10 +700,7 @@ class SlackChannel:
             if is_quiet:
                 if action not in ("execute", "request_approval", "error", "wait", "close", "response"):
                     return
-            if is_assistant and event_id in self._stream_sessions:
-                await self._handle_assistant_turn(event_id, message)
-            else:
-                await self._handle_legacy_turn(event_id, message)
+            await self._handle_legacy_turn(event_id, message)
 
         elif msg_type == "event_closed":
             event_doc = await self._blackboard.get_event(event_id)
@@ -726,24 +720,21 @@ class SlackChannel:
                 )
             self._assistant_context.pop(event_id, None)
             self._quiet_events.discard(event_id)
-            stream = self._stream_sessions.pop(event_id, None)
-            if stream:
-                try:
-                    await stream.stop()
-                except Exception:
-                    pass
 
     # =========================================================================
-    # Assistant streaming path (split-pane DM threads)
+    # Assistant status path (split-pane DM threads — status only, turns via legacy)
     # =========================================================================
 
     async def _handle_assistant_thinking(self, event_id: str, message: dict) -> None:
-        """Process brain_thinking broadcasts for Assistant threads via chat_stream."""
+        """Set status indicator for Assistant threads. Streaming removed — turns use Block Kit."""
         text = message.get("text", "")
         is_thought = message.get("is_thought", False)
 
         if not text:
-            ctx = self._assistant_context[event_id]
+            ctx = self._assistant_context.get(event_id)
+            if not ctx:
+                logger.debug(f"No assistant context for {event_id}, skipping setStatus")
+                return
             try:
                 await self._app.client.assistant_threads_setStatus(
                     channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
@@ -756,59 +747,8 @@ class SlackChannel:
         if is_thought:
             return
 
-        if event_id not in self._stream_sessions:
-            ctx = self._assistant_context[event_id]
-            try:
-                stream = await self._app.client.chat_stream(
-                    channel=ctx["channel"],
-                    thread_ts=ctx["thread_ts"],
-                    recipient_user_id=ctx["user_id"],
-                    recipient_team_id=ctx["team_id"] or None,
-                    buffer_size=256,
-                )
-                self._stream_sessions[event_id] = stream
-                logger.debug(f"Stream started for {event_id}")
-            except Exception as e:
-                logger.warning(f"chat_stream start failed for {event_id}, will fallback: {e}")
-                return
-
-        try:
-            await self._stream_sessions[event_id].append(markdown_text=text)
-        except Exception as e:
-            logger.warning(f"Stream append failed for {event_id}: {e}")
-            self._stream_sessions.pop(event_id, None)
-
-    async def _handle_assistant_turn(self, event_id: str, message: dict) -> None:
-        """Finalize the stream with feedback blocks (and table blocks if present)."""
-        from ..models import ConversationTurn
-        turn = ConversationTurn(**message["turn"])
-
-        if turn.actor == "user" and turn.source == "slack":
-            return
-
-        if turn.actor == "brain" and turn.action in _INTERNAL_ACTIONS:
-            return
-
-        stream = self._stream_sessions.pop(event_id, None)
-        if stream:
-            try:
-                if turn.actor == "brain" and turn.action == "route":
-                    card = format_task_card(turn, status="in_progress")
-                    await stream.append(markdown_text=f"\n\n{card}")
-
-                raw_text = turn.result or turn.thoughts or ""
-                _, table_blocks = extract_tables(raw_text)
-                stop_blocks = table_blocks[:1] + create_feedback_block()
-                await stream.stop(blocks=stop_blocks)
-                logger.debug(f"Stream stopped for {event_id}")
-                return
-            except Exception as e:
-                logger.warning(f"Stream stop failed for {event_id}, falling back: {e}")
-
-        await self._handle_legacy_turn(event_id, message)
-
     # =========================================================================
-    # Legacy path (channel threads, infra threads, fallback)
+    # Legacy path (channel threads, infra threads, all turn delivery)
     # =========================================================================
 
     async def _handle_legacy_thinking(self, event_id: str, message: dict) -> None:
@@ -829,7 +769,7 @@ class SlackChannel:
             logger.warning(f"Slack thinking indicator failed: {e}")
 
     async def _handle_legacy_turn(self, event_id: str, message: dict) -> None:
-        """Post turn via Block Kit for non-Assistant threads (or streaming fallback)."""
+        """Post turn via Block Kit for all thread types (Assistant + legacy)."""
         event_doc = await self._blackboard.get_event(event_id)
         if not event_doc:
             return
