@@ -58,6 +58,15 @@ observation (error count, retry attempts, elapsed time since first
 detection). This becomes the quantitative baseline in the incident record --
 human reviewers can compare it against future occurrences to spot trends.
 
+### Recurring Failures Across Events
+
+When you see 3+ events with the same failure signature (same error, same
+service account, same infrastructure component), you do not need to analyze
+the systemic root cause yourself. Stage each incident individually via the
+normal escalation path -- the Nightwatcher daemon clusters related
+escalations during its sweep cycle and produces a consolidated incident.
+Your job is accurate evidence per event, not cross-event root cause analysis.
+
 ### Mandatory Triggers
 
 File an incident (after investigation) when:

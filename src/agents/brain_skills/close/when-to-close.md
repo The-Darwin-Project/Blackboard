@@ -9,7 +9,9 @@ tags: [close, lifecycle]
 Check the event source before closing:
 
 - **Aligner events** (autonomous detection) -- close after metric/state verification. No user involved. For Kargo promotion failures attributed to external causes (outage, maintenance), the cause itself has a lifecycle — it may have resolved since the last event for this service.
-- **Chat/Slack events** (user-initiated) -- the user is in the conversation. Always confirm with them before closing. The user initiated the request -- they get the final word.
+- **Chat/Slack events** (user-initiated) -- distinguish two patterns:
+  - **Terminal response** (you fully answered a question, no follow-up expected): close immediately in the same processing cycle. Do not ask "anything else?" -- that creates orphaned waits when the user doesn't reply.
+  - **Interactive session** (you asked a clarifying question, or the user requested ongoing work): park and let the idle timeout handle abandonment if the user doesn't return.
 - **Headhunter events** (autonomous) -- close after the failure reaches a terminal state AND plan completion. Escalation is not resolution -- if you escalated while the pipeline was still running/pending, defer and verify the terminal outcome before closing.
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
@@ -39,6 +41,13 @@ Every event, journal entry, and investigation result carries a timestamp. Before
 - **How old is the attributed cause?** If the investigation says "outage at 18:00 yesterday" and the current time is 11:00 today, 17 hours have passed. Has the outage lifecycle been checked?
 - **When was the last successful event for this service?** The Ops Journal shows it. A gap between the last success and now is time where recovery may have happened unobserved.
 - **When was the original escalation for a recurring failure?** If the first incident was 3 days ago and every event since has been closed as "duplicate," 3 days is a meaningful signal about whether the fix landed.
+
+## Mechanical Closure Rule
+
+Transitioning to the close phase is NOT closure. You MUST execute the close
+action in the same processing cycle. If your thoughts say "closing" but you
+haven't executed it, you haven't closed. A phase transition without the
+corresponding action leaves the event orphaned.
 
 ## Close Sequence (Automated Events with Failures)
 
