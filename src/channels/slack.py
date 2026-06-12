@@ -218,6 +218,10 @@ class SlackChannel:
                 if not event_id:
                     display_name = await self._resolve_display_name(client, user_id)
                     user_email = self._get_cached_email(user_id)
+                    # Pre-register assistant context BEFORE create_event to avoid
+                    # race: Brain can process the event before context is set.
+                    # event_id is not known yet, so we register after creation
+                    # but Slack context is passed atomically via create_event.
                     event_id = await self._blackboard.create_event(
                         source="slack",
                         service="general",
@@ -230,9 +234,9 @@ class SlackChannel:
                             severity="info",
                         ),
                         created_by_email=user_email or None,
-                    )
-                    await self._blackboard.update_event_slack_context(
-                        event_id, channel_id, thread_ts, user_id,
+                        slack_channel_id=channel_id,
+                        slack_thread_ts=thread_ts,
+                        slack_user_id=user_id,
                     )
                     await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
                     await set_title(f"{event_id}: {text[:50]}")
@@ -694,9 +698,9 @@ class SlackChannel:
             return
 
         if msg_type == "turn":
+            turn_data = message.get("turn", {})
+            action = turn_data.get("action", "")
             if is_quiet:
-                turn_data = message.get("turn", {})
-                action = turn_data.get("action", "")
                 if action not in ("execute", "request_approval", "error", "wait", "close", "response"):
                     return
             if is_assistant and event_id in self._stream_sessions:
@@ -832,7 +836,6 @@ class SlackChannel:
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
 
-        # Internal reasoning -- don't post to Slack. Thinking animation persists until brain.response.
         if turn.actor == "brain" and turn.action == "thoughts":
             return
 

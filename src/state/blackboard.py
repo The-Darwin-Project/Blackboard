@@ -1296,6 +1296,9 @@ class BlackboardState:
         evidence: "str | EventEvidence",
         subject_type: str = "service",
         created_by_email: Optional[str] = None,
+        slack_channel_id: Optional[str] = None,
+        slack_thread_ts: Optional[str] = None,
+        slack_user_id: Optional[str] = None,
     ) -> str:
         """Create a new event and add to the queue for Brain triage.
 
@@ -1320,6 +1323,9 @@ class BlackboardState:
             ),
             queued_at=time.time(),
             created_by_email=created_by_email,
+            slack_channel_id=slack_channel_id,
+            slack_thread_ts=slack_thread_ts,
+            slack_user_id=slack_user_id,
         )
         # Store event document
         await self.redis.set(
