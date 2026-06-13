@@ -15,19 +15,27 @@ RUN dnf install -y git && dnf clean all && \
     kubectl version --client
 
 # Install developer productivity tools (code search, file ops, validation)
-RUN dnf install -y make gettext diffutils patch tree && dnf clean all && \
+RUN dnf install -y diffutils patch xz && dnf clean all && \
     # ripgrep -- fast recursive code search (10x grep)
-    curl -sL https://github.com/BurntSushi/ripgrep/releases/latest/download/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz \
+    RG_VERSION=$(curl -sL https://api.github.com/repos/BurntSushi/ripgrep/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/rg' && \
     # fd -- fast file finder (alternative to find)
-    curl -sL https://github.com/sharkdp/fd/releases/latest/download/fd-v10.2.0-x86_64-unknown-linux-musl.tar.gz \
+    FD_VERSION=$(curl -sL https://api.github.com/repos/sharkdp/fd/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/sharkdp/fd/releases/download/${FD_VERSION}/fd-${FD_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/fd' && \
     # bat -- syntax-highlighted cat (log review, code inspection)
-    curl -sL https://github.com/sharkdp/bat/releases/latest/download/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz \
+    BAT_VERSION=$(curl -sL https://api.github.com/repos/sharkdp/bat/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/sharkdp/bat/releases/download/${BAT_VERSION}/bat-${BAT_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/bat' && \
     # shellcheck -- shell script validator
-    curl -sL https://github.com/koalaman/shellcheck/releases/latest/download/shellcheck-latest.linux.x86_64.tar.xz \
-      | tar -xJ --strip-components=1 -C /usr/local/bin/ shellcheck-latest/shellcheck && \
+    SC_VERSION=$(curl -sL https://api.github.com/repos/koalaman/shellcheck/releases/latest \
+      | grep '"tag_name"' | cut -d'"' -f4) && \
+    curl -sL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" \
+      | tar -xJ --strip-components=1 -C /usr/local/bin/ && \
     rg --version && fd --version && bat --version && shellcheck --version && \
     make --version | head -1 && envsubst --version | head -1
 
