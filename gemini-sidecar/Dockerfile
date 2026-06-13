@@ -14,6 +14,23 @@ RUN dnf install -y git && dnf clean all && \
     rm kubectl && \
     kubectl version --client
 
+# Install developer productivity tools (code search, file ops, validation)
+RUN dnf install -y make gettext diffutils patch tree && dnf clean all && \
+    # ripgrep -- fast recursive code search (10x grep)
+    curl -sL https://github.com/BurntSushi/ripgrep/releases/latest/download/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/rg' && \
+    # fd -- fast file finder (alternative to find)
+    curl -sL https://github.com/sharkdp/fd/releases/latest/download/fd-v10.2.0-x86_64-unknown-linux-musl.tar.gz \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/fd' && \
+    # bat -- syntax-highlighted cat (log review, code inspection)
+    curl -sL https://github.com/sharkdp/bat/releases/latest/download/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz \
+      | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/bat' && \
+    # shellcheck -- shell script validator
+    curl -sL https://github.com/koalaman/shellcheck/releases/latest/download/shellcheck-latest.linux.x86_64.tar.xz \
+      | tar -xJ --strip-components=1 -C /usr/local/bin/ shellcheck-latest/shellcheck && \
+    rg --version && fd --version && bat --version && shellcheck --version && \
+    make --version | head -1 && envsubst --version | head -1
+
 # Install CLI tools: oc, argocd, kargo, tkn (all use latest/stable -- no pinned versions)
 RUN \
     # oc -- OpenShift CLI (superset of kubectl, adds routes, projects, builds)
@@ -118,7 +135,7 @@ RUN dnf install -y \
     && dnf clean all && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
-    python3 -m pip install pytest httpx pip-audit pyyaml && \
+    python3 -m pip install pytest httpx pip-audit pyyaml ruff jsonschema && \
     ln -sf "$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/pip" /usr/local/bin/pip && \
     ln -sf /usr/local/bin/pip /usr/local/bin/pip3 && \
     python3 --version && python3 -m pytest --version && \
