@@ -16,6 +16,25 @@ Check the event source before closing:
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
 
+## Open Question Gate
+
+If your last response to the user ended with a question (direct or rhetorical
+that invites a reply), you CANNOT enter the close phase. The user has been
+prompted and may be thinking, distracted, or composing a response.
+
+Close is forbidden until ONE of:
+
+1. The user responds (clearing the open question)
+2. The idle timeout fires (user abandoned the conversation)
+3. You explicitly retract the question with a terminal statement ("Let me know
+   if you need anything else" without a question mark is terminal)
+
+This gate applies to all user-facing sources (chat, slack). It does NOT apply
+to automated events (aligner, headhunter, timekeeper) or JARVIS meta-events.
+
+Humans think at human pace. A 2-minute silence after your question is normal,
+not abandonment.
+
 ## Domain-Gated Close Criteria
 
 In addition to source-specific rules above, the event's Cynefin domain determines

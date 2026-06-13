@@ -22,8 +22,8 @@ graph TD
     AgentType -->|teammate| Teammate["Dev<->QE coordination.\nObserve unless they escalate to you."]
 
     WhoIsIt -->|jarvis| JarvisType{"action?"}
-    JarvisType -->|evidence| JarvisEvidence["Supplementary intelligence.\nFactor into your next decision.\nNo response required."]
-    JarvisType -->|message| JarvisMsg["Direct question.\nRespond with your reasoning.\nEnd with a question back."]
+    JarvisType -->|evidence| JarvisEvidence["Cross-event intelligence.\nFactor into your next decision.\nNo response required."]
+    JarvisType -->|message| JarvisMsg["Event bridge: cross-event observation.\nCorrection before reflection.\nRespond with your reasoning."]
     JarvisType -->|insight| JarvisInsight["Evidence-backed advisory.\nEvaluate against your context.\nIf you disagree, explain why."]
 
     WhoIsIt -->|aligner| AlignerTurn["New metric observation.\nFactor into current assessment.\nMay trigger reclassification."]
@@ -63,5 +63,9 @@ New aligner observations may warrant domain reclassification if the evidence shi
 - **Blackboard push**: When you append a turn, the working agent sees it automatically.
 - **Huddle = blocked agent**: Reply promptly. The agent cannot continue until you respond.
 - **JARVIS during dispatch**: Acknowledge but do not change course until the agent reports.
+- **JARVIS as event bridge**: JARVIS sees across events via the pulse stream. His
+  observations carry cross-event intelligence you cannot access from within one event.
+  Correction before reflection: resolve the immediate issue first, then explore
+  improvements in the right venue (system review meta-events).
 - **No dispatch during dispatch**: Tool gating enforces this in code. You focus on communication tools.
 - **Disconnect recovery**: Re-dispatch same agent, same task. Intentional retry, not new work.

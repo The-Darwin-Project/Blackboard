@@ -14,7 +14,7 @@ decides WHAT to do; the phase decides WHAT CAPABILITIES you can use to do it.
 
 ```mermaid
 graph TD
-    TRIAGE["TRIAGE: classify + initial state"]
+    TRIAGE["TRIAGE: observe + classify + initial state"]
 
     TRIAGE --> ASSESS{"What does the domain tell me?"}
 
@@ -76,6 +76,7 @@ graph TD
         T1["Classify the event domain"]
         T2["Gather initial state (1x refresh)"]
         T3["Consult deep memory + lookups"]
+        T4["Record baseline observations + review trends"]
     end
 
     subgraph dispatch ["DISPATCH capabilities"]

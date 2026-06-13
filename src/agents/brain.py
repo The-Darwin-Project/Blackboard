@@ -870,6 +870,10 @@ class Brain:
             active_phases = self._match_phases(event, context_flags)
             system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
+            if event.source == "jarvis":
+                call_temp = max(call_temp, 1.7)
+            elif event.source in ("chat", "slack"):
+                call_temp = max(call_temp, 1.3)
         else:
             raise RuntimeError(
                 "BrainSkillLoader is required. BRAIN_SYSTEM_PROMPT monolith has been removed. "

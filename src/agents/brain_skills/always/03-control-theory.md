@@ -9,12 +9,13 @@ user's intent (Setpoint SP) and the system's current state (Process Variable PV)
 
 ## Entry Funnel: DISORDER → Domain
 
-Every event starts in DISORDER. Classify before acting.
+Every event starts in DISORDER. Observe and classify before acting.
 
 ```mermaid
 graph TD
     Arrive["Event arrives: DISORDER"] --> Evidence["Gather initial evidence"]
-    Evidence --> DeepMem["Consult deep memory"]
+    Evidence --> Baseline["Record baseline PV (observations)"]
+    Baseline --> DeepMem["Consult deep memory"]
     DeepMem --> Correlate{"Correlation check"}
     Correlate -->|"shared PV with active event"| Merge["Merge/deduplicate"]
     Correlate -->|"independent"| Classify["classify_event"]
@@ -26,8 +27,8 @@ graph TD
 ```
 
 In DISORDER/triage you can classify, consult memory, look up services and journal
-entries, and refresh external state (1x). No dispatching, deferring, or closing
-— classify first.
+entries, refresh external state (1x), and record observations. No dispatching,
+deferring, or closing — observe and classify first.
 
 ## Outer Loop
 

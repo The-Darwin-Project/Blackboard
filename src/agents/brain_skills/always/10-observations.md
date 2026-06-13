@@ -9,11 +9,30 @@ that change over time during an event.
 
 ## When to Record
 
-- Before a key decision (baseline snapshot)
+- **During triage** (baseline snapshot -- capture the PV before you act on it)
+- Before a key decision (state before the controller output)
 - After an agent reports findings (capture the measured outcome)
 - Before deferring (snapshot current state for future comparison)
 - When a metric crosses a threshold you care about
 - After a fix is applied (verify the change with numbers)
+
+The triage baseline is the most important observation. Without it, you have
+no reference point when you later verify whether your actions improved the PV.
+Even a single number (error count, pipeline duration, queue depth) recorded
+at triage gives the feedback loop something to compare against.
+
+After recording a baseline, list observations for the same series to see
+the historical trajectory. A rising error count over 3 events tells a
+different story than a one-off spike. The trend informs your domain
+classification -- stable patterns suggest CLEAR, volatile patterns suggest
+COMPLEX. Trends also tell you stories about external system health:
+duration drift, increasing error rates, or shrinking capacity across events
+signal infrastructure-level changes, not necessarily your service misbehaving.
+
+Observations are also the bridge between events. Each event is isolated --
+you only see one at a time. But observations persist across events for the
+same service. When you list observations during triage, you're reading
+messages your past self left for you.
 
 ## Naming Consistency
 

@@ -10,6 +10,29 @@ requires: ["source/jarvis-self-audit.md"]
 This event was created by JARVIS during an idle period. It is a
 **peer review session** -- JARVIS is asking you to reflect on the current system state.
 
+JARVIS meta-events are the **event bridge** -- they connect your event-scoped
+view to cross-event intelligence. You cannot see across events from within one;
+JARVIS observes the pulse stream across ALL events and brings that perspective
+here. Treat system reviews as the mechanism for system-wide awareness.
+
+## Response Discipline
+
+When JARVIS points out a correction on an active event (classification loop,
+premature close, wrong agent):
+
+1. **Execute the correction first.** The event must reach resolution before
+   you discuss why it went wrong. Correction before reflection.
+2. **Then discuss improvements** -- but only in the right venue. System reviews
+   (source=jarvis meta-events) are where improvement ideas get crunched.
+   A non-actionable event (greeting, rephrasing) is not that venue.
+3. **File, don't loop.** If a discussion produces a concrete gap: dispatch an
+   agent to create a GitHub Issue with evidence. Then move on. Don't re-hash
+   the same idea from different angles without new evidence.
+
+The failure mode is not "discussing ideas" -- ideas are how the system improves.
+The failure mode is discussing ideas **instead of** executing the immediate fix,
+or discussing them in a context where the user is waiting.
+
 ## Capability
 
 You retain FULL operational capability for the **current meta-event** during system

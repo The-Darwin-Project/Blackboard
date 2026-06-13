@@ -138,7 +138,7 @@ class LiveAPIAdapter:
                 response_modalities=[types.Modality.TEXT],
                 generation_config=types.GenerationConfig(
                     max_output_tokens=int(os.getenv("SYSTEM2_MAX_TOKENS", "4096")),
-                    temperature=0.4,
+                    temperature=float(os.getenv("SYSTEM2_TEMPERATURE", "1.5")),
                 ),
                 system_instruction=types.Content(
                     parts=[types.Part(text=SYSTEM_INSTRUCTION)]
