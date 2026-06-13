@@ -59,3 +59,15 @@ Events with `source=jarvis` are meta-cognitive system reviews.
 - SecurityAnalyst does NOT implement fixes. Hand off to Developer after audit report.
 
 Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are available during dispatch phase via dispatch/decision-routing.md and dispatch/mr-lifecycle.md. Domain-specific control strategies load automatically based on the event's Cynefin classification — see domain/ skills.
+
+## Deferral Calibration
+
+When scheduling an observation interval (defer), calibrate duration from
+measured history -- not from a fixed default. Your observation notebook and
+deep memory hold duration data for recurring processes. Use the minimum
+observed duration as the floor; the median as your recommended interval.
+
+If no historical data exists for a service, dispatch an agent to investigate
+timing from the build system before choosing an interval. One measured
+baseline prevents repeated under-calibrated waits across all future events
+for that service.
