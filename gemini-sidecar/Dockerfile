@@ -17,23 +17,19 @@ RUN dnf install -y git && dnf clean all && \
 # Install developer productivity tools (code search, file ops, validation)
 RUN dnf install -y diffutils patch xz && dnf clean all && \
     # ripgrep -- fast recursive code search (10x grep)
-    RG_VERSION=$(curl -sL https://api.github.com/repos/BurntSushi/ripgrep/releases/latest \
-      | grep '"tag_name"' | cut -d'"' -f4) && \
+    RG_VERSION=$(basename $(curl -sIL -o /dev/null -w '%{url_effective}' https://github.com/BurntSushi/ripgrep/releases/latest)) && \
     curl -sL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/rg' && \
     # fd -- fast file finder (alternative to find)
-    FD_VERSION=$(curl -sL https://api.github.com/repos/sharkdp/fd/releases/latest \
-      | grep '"tag_name"' | cut -d'"' -f4) && \
+    FD_VERSION=$(basename $(curl -sIL -o /dev/null -w '%{url_effective}' https://github.com/sharkdp/fd/releases/latest)) && \
     curl -sL "https://github.com/sharkdp/fd/releases/download/${FD_VERSION}/fd-${FD_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/fd' && \
     # bat -- syntax-highlighted cat (log review, code inspection)
-    BAT_VERSION=$(curl -sL https://api.github.com/repos/sharkdp/bat/releases/latest \
-      | grep '"tag_name"' | cut -d'"' -f4) && \
+    BAT_VERSION=$(basename $(curl -sIL -o /dev/null -w '%{url_effective}' https://github.com/sharkdp/bat/releases/latest)) && \
     curl -sL "https://github.com/sharkdp/bat/releases/download/${BAT_VERSION}/bat-${BAT_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
       | tar -xz --strip-components=1 -C /usr/local/bin/ --wildcards '*/bat' && \
     # shellcheck -- shell script validator
-    SC_VERSION=$(curl -sL https://api.github.com/repos/koalaman/shellcheck/releases/latest \
-      | grep '"tag_name"' | cut -d'"' -f4) && \
+    SC_VERSION=$(basename $(curl -sIL -o /dev/null -w '%{url_effective}' https://github.com/koalaman/shellcheck/releases/latest)) && \
     curl -sL "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz" \
       | tar -xJ --strip-components=1 -C /usr/local/bin/ && \
     rg --version && fd --version && bat --version && shellcheck --version && \
