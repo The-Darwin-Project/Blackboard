@@ -392,7 +392,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "Why this sampling interval was chosen (e.g., 'pipeline typically completes in 20min, sampling at Ts=15min')",
+                    "description": "Why this sampling interval was chosen — reference the historical baseline or severity multiplier that determined Ts.",
                 },
                 "delay_seconds": {
                     "type": "integer",
