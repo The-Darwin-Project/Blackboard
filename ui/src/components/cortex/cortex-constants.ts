@@ -60,6 +60,48 @@ export function getExecutiveNeurons(): Neuron[] {
   return neurons;
 }
 
+export const NEURON_DESCRIPTIONS: Record<string, string> = {
+  // Observation tools
+  'tool:lookup_service': 'Query K8s service metrics and annotations',
+  'tool:lookup_journal': 'Search system journal for recent log entries',
+  'tool:consult_deep_memory': 'Query vector memory for lessons and past events',
+  'tool:refresh_gitlab_context': 'Fetch latest GitLab MR and pipeline status',
+  'tool:refresh_kargo_context': 'Fetch latest Kargo promotion status',
+  // Classification tools
+  'tool:classify_event': 'Classify event domain and severity via LLM',
+  'tool:set_phase': 'Transition event to a new lifecycle phase',
+  // Routing tools
+  'tool:select_agent': 'Route event to the appropriate CLI agent',
+  'tool:create_plan': 'Generate an action plan for the selected agent',
+  'tool:message_agent': 'Send instructions to a dispatched agent',
+  'tool:reply_to_agent': 'Respond to an agent follow-up question',
+  // Lifecycle tools
+  'tool:defer_event': 'Park event and schedule a wake-up timer',
+  'tool:wait_for_user': 'Pause event pending user response',
+  'tool:close_event': 'Resolve and close the event lifecycle',
+  // Communication tools
+  'tool:notify_user_slack': 'Send a message to the user via Slack',
+  'tool:notify_gitlab_result': 'Post results as a GitLab MR comment',
+  'tool:report_incident': 'Escalate to Smartsheet incident report',
+  'tool:get_plan_progress': 'Check execution status of the current plan',
+  'tool:comment_jira_issue': 'Post a comment on a Jira issue',
+  'tool:transition_jira_issue': 'Move a Jira issue to a new status',
+  'tool:post_sticky_note': 'Leave a cross-event sticky note for future reference',
+  'tool:hold_watch': 'Park meta-event and watch queue membership changes',
+  // Phases
+  'phase:triage': 'Initial classification and context gathering',
+  'phase:dispatch': 'Agent selection and plan creation',
+  'phase:verify': 'Validate agent execution results',
+  'phase:escalate': 'Escalate unresolved issues to stakeholders',
+  'phase:close': 'Resolve and finalize the event',
+  // Agents
+  'agent:architect': 'Strategy and plan creation (Claude CLI, plan-only)',
+  'agent:sysadmin': 'GitOps and kubectl execution (Gemini CLI)',
+  'agent:developer': 'Pair programming: Dev implements, QE verifies',
+  'agent:qe': 'Quality verification of developer output',
+  'agent:security_analyst': 'Security analysis and vulnerability assessment',
+};
+
 /** X position bias: knowledge left, events center, executive right. Wide separation prevents mixing. */
 export const HEMISPHERE_X = {
   knowledge: -500,

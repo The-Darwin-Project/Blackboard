@@ -3,13 +3,15 @@
 // 1. [Pattern]: Split layout -- left panel (global topology), right panel (drill-down on event select).
 // 2. [Pattern]: Active events bar at bottom of left panel. Click event -> opens drill-down.
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
-import { useState, useMemo, useCallback, type FC } from 'react';
+import { useState, useMemo, useCallback, useEffect, type FC } from 'react';
 import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import CortexGraph from './CortexGraph';
 import CortexLiveFeed from './CortexLiveFeed';
 import EventDrillDown from './EventDrillDown';
+import NeuronInfoPanel from './NeuronInfoPanel';
+import { getExecutiveNeurons } from './cortex-constants';
 import type { Neuron } from './types';
 
 const CortexPage: FC = () => {
@@ -24,9 +26,19 @@ const CortexPage: FC = () => {
   const { data: activeEvents } = useActiveEvents();
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [selectedNeuron, setSelectedNeuron] = useState<{ id: string; pos: { x: number; y: number } } | null>(null);
   const [feedOpen, setFeedOpen] = useState(true);
 
   const neurons: Neuron[] = graphData?.neurons ?? [];
+
+  const mergedNeurons = useMemo(() => {
+    const executive = getExecutiveNeurons();
+    const heatMap = new Map(neurons.map(n => [n.id, n.heat]));
+    for (const n of executive) {
+      if (heatMap.has(n.id)) n.heat = heatMap.get(n.id)!;
+    }
+    return [...neurons, ...executive];
+  }, [neurons]);
 
   const glowingIds = useMemo(() => {
     const ids = new Set<string>();
@@ -39,6 +51,20 @@ const CortexPage: FC = () => {
   const handleSelectEvent = useCallback((id: string) => {
     setSelectedEventId(prev => prev === id ? null : id);
   }, []);
+
+  const handleClickNeuron = useCallback((id: string | null, pos?: { x: number; y: number }) => {
+    if (id === null) { setSelectedNeuron(null); return; }
+    if (!mergedNeurons.some(n => n.id === id)) return;
+    setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
+  }, [mergedNeurons]);
+
+  const handleCloseNeuron = useCallback(() => setSelectedNeuron(null), []);
+
+  useEffect(() => {
+    if (selectedNeuron && !mergedNeurons.some(n => n.id === selectedNeuron.id)) {
+      setSelectedNeuron(null);
+    }
+  }, [selectedNeuron, mergedNeurons]);
 
   if (isLoading) {
     return (
@@ -67,10 +93,12 @@ const CortexPage: FC = () => {
           activeEvents={activeEvents ?? []}
           liveBatches={liveBatches}
           className="flex-1 min-h-0"
-          onClickNeuron={(_id) => {
-            // Future: neuron detail tooltip
-          }}
+          onClickNeuron={handleClickNeuron}
         />
+        {selectedNeuron && (() => {
+          const neuron = mergedNeurons.find(n => n.id === selectedNeuron.id);
+          return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} /> : null;
+        })()}
 
         {/* Active events bar */}
         <div className="flex-shrink-0 border-t border-border px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto">

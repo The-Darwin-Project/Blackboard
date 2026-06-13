@@ -272,7 +272,7 @@ const FA2Controller: FC = () => {
   return null;
 };
 
-const DragHandler: FC<{ onClick?: (id: string) => void }> = ({ onClick }) => {
+const DragHandler: FC<{ onClick?: (id: string | null, pos?: { x: number; y: number }) => void }> = ({ onClick }) => {
   const registerEvents = useRegisterEvents();
   const sigma = useSigma();
   const dragStateRef = useRef<{ node: string; dragged: boolean; wasFixed: boolean } | null>(null);
@@ -294,17 +294,19 @@ const DragHandler: FC<{ onClick?: (id: string) => void }> = ({ onClick }) => {
         graph.setNodeAttribute(dragStateRef.current.node, 'x', pos.x);
         graph.setNodeAttribute(dragStateRef.current.node, 'y', pos.y);
       },
-      mouseup: () => {
+      mouseup: (e) => {
         if (!dragStateRef.current) return;
         const { node, dragged, wasFixed } = dragStateRef.current;
         const graph = sigma.getGraph();
-        // Restore original fixed state -- knowledge nodes go back to unfixed
-        // so FA2 worker pulls connected nodes toward new position
         graph.setNodeAttribute(node, 'fixed', wasFixed);
-        if (!dragged && onClick) onClick(node);
         dragStateRef.current = null;
         sigma.getCamera().enable();
+        if (!dragged && onClick && e.original instanceof MouseEvent) {
+          onClick(node, { x: e.original.clientX, y: e.original.clientY });
+        }
       },
+      clickStage: () => { onClick?.(null); },
+      downStage: () => { onClick?.(null); },
     });
   }, [registerEvents, sigma, onClick]);
 
@@ -317,7 +319,7 @@ interface CortexGraphProps {
   activeEvents?: ActiveEvent[];
   liveBatches?: PulseBatch[];
   dimmedIds?: Set<string>;
-  onClickNeuron?: (id: string) => void;
+  onClickNeuron?: (id: string | null, pos?: { x: number; y: number }) => void;
   className?: string;
 }
 
