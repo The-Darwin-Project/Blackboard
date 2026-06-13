@@ -396,7 +396,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "Sampling interval Ts in seconds (30-3600). Calibrate from deep memory baseline, severity multiplier, and progress signals.",
+                    "description": "Sampling interval Ts in seconds (30-3600). Calibrate from your observation notebook and deep memory baselines, then apply severity multiplier.",
                 },
             },
             "required": ["reason", "delay_seconds"],
