@@ -118,7 +118,7 @@ RUN dnf install -y \
     && dnf clean all && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python3 && \
     ln -sf /usr/bin/python3.12 /usr/local/bin/python && \
-    python3 -m pip install pytest httpx pip-audit && \
+    python3 -m pip install pytest httpx pip-audit pyyaml && \
     ln -sf "$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/pip" /usr/local/bin/pip && \
     ln -sf /usr/local/bin/pip /usr/local/bin/pip3 && \
     python3 --version && python3 -m pytest --version && \
