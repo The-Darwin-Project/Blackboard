@@ -1,5 +1,5 @@
 thinking_level: "medium"
-temperature: 0.4
+temperature: 1.0
 priority: 30
 max_output_tokens: 2048
 description: "Route tasks to agents with proper context"
