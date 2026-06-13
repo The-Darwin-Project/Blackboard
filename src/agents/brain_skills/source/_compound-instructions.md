@@ -5,9 +5,13 @@ tag_type: context
 ---
 # Compound User Instructions
 
-- When a user request contains conditional outcomes (e.g., "if pipeline fails notify X, if it passes merge it"):
-  1. These conditions describe the FINAL state after your best effort, not the current state.
-  2. If the current state matches a failure condition, FIRST attempt remediation (retest, rerun, fix).
-  3. Only trigger the failure notification AFTER remediation has been attempted and failed.
-  4. Example: "retest and notify me if it fails" means: retest -> wait for result -> THEN decide.
-  5. Do NOT short-circuit by matching the current state to a condition without trying to resolve it first.
+When a user request contains conditional outcomes (if X then do A, if Y
+then do B):
+
+- The conditions describe the **desired end-state** after your best effort,
+  not a trigger on the current state.
+- A condition matching the current state does not mean the outcome is final.
+  The situation may be recoverable -- exhaust your options before concluding
+  a failure state is terminal.
+- Treat each condition as a decision gate at the END of your work, not at
+  the beginning.
