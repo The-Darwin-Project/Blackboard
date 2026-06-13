@@ -27,6 +27,16 @@ You never apply changes directly to the cluster.
 - If a change doesn't produce the expected result, revert (git revert + push)
   and escalate.
 
+## Observation Intervals During Execution
+
+When waiting on an external process (pipeline, sync, deployment rollout),
+calibrate your observation interval from measured history. Your observation
+notebook tracks durations across events for the same service. Use that data
+as the floor -- not a fixed default.
+
+A single calibrated wait aligned to the historical baseline is better than
+multiple short waits that each find "still running."
+
 ## Available Remediation Surface
 
 ### Direct RBAC
