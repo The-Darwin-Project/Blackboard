@@ -67,6 +67,15 @@ export const NEURON_COLORS: Record<string, string> = {
   tool:      '#64748b',   // slate -- executive tools
   phase:     '#6366f1',   // indigo -- lifecycle phases
   agent:     '#8b5cf6',   // violet -- default; overridden per agent below
+  domain:    '#eab308',   // amber -- default; overridden per domain below
+};
+
+export const DOMAIN_NEURON_COLORS: Record<string, string> = {
+  clear:       '#22c55e', // green
+  complicated: '#eab308', // amber
+  complex:     '#a855f7', // purple
+  chaotic:     '#ef4444', // red
+  disorder:    '#6b7280', // slate
 };
 
 export const AGENT_NEURON_COLORS: Record<string, string> = {

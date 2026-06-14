@@ -16,6 +16,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
 
 export const PHASES = ['triage', 'dispatch', 'verify', 'escalate', 'close'];
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'];
+export const DOMAINS = ['clear', 'complicated', 'complex', 'chaotic', 'disorder'];
 
 const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
   triage: ['refresh_gitlab_context', 'refresh_kargo_context'],
@@ -54,6 +55,15 @@ export function getExecutiveNeurons(): Neuron[] {
       type: 'agent',
       heat: 0,
       payload: { label: agent },
+    });
+  }
+
+  for (const domain of DOMAINS) {
+    neurons.push({
+      id: `domain:${domain}`,
+      type: 'domain',
+      heat: 0,
+      payload: { label: domain },
     });
   }
 
@@ -100,6 +110,12 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'agent:developer': 'Pair programming: Dev implements, QE verifies',
   'agent:qe': 'Quality verification of developer output',
   'agent:security_analyst': 'Security analysis and vulnerability assessment',
+  // Cynefin domains
+  'domain:clear': 'Known knowns — best practice, single correct solution',
+  'domain:complicated': 'Known unknowns — expert analysis, multiple good practices',
+  'domain:complex': 'Unknown unknowns — emergent practice, safe-to-fail probes',
+  'domain:chaotic': 'System in crisis — act first, stabilize, then analyze',
+  'domain:disorder': 'Default state — not yet classified into a domain',
 };
 
 /** X position bias: knowledge left, events center, executive right. Wide separation prevents mixing. */
@@ -165,6 +181,11 @@ export function getStructuralEdges(): StructuralEdge[] {
     for (let i = 0; i < tools.length - 1; i++) {
       edges.push({ source: `tool:${tools[i]}`, target: `tool:${tools[i + 1]}` });
     }
+  }
+
+  // Domain -> classify_event
+  for (const d of DOMAINS) {
+    edges.push({ source: 'tool:classify_event', target: `domain:${d}` });
   }
 
   return edges;

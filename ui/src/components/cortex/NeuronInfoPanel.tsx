@@ -6,14 +6,14 @@
 // 4. [Pattern]: Type-specific rendering via chained if-else on neuron.type.
 import { memo, useEffect, useLayoutEffect, useRef, useState, type FC, type ReactNode } from 'react';
 import { X } from 'lucide-react';
-import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
+import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS } from '../../constants/colors';
 import { NEURON_DESCRIPTIONS } from './cortex-constants';
 import type { Neuron } from './types';
 
 const asString = (v: unknown): string => typeof v === 'string' ? v : '';
 const asNumber = (v: unknown): number => typeof v === 'number' ? v : 0;
 const asStringArray = (v: unknown): string[] => Array.isArray(v) ? v.filter(i => typeof i === 'string') : [];
-const describeNeuron = (id: string) => NEURON_DESCRIPTIONS[id] ?? id.replace(/^(tool|phase|agent):/, '').replace(/_/g, ' ');
+const describeNeuron = (id: string) => NEURON_DESCRIPTIONS[id] ?? id.replace(/^(tool|phase|agent|domain):/, '').replace(/_/g, ' ');
 
 const Hdr: FC<{ text: string }> = ({ text }) => (
   <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">{text}</div>
@@ -93,8 +93,10 @@ const NeuronInfoPanel: FC<NeuronInfoPanelProps> = ({ neuron, position, onClose }
       </div>
     </>);
   } else {
-    const agentName = neuron.type === 'agent' ? neuron.id.replace('agent:', '') : '';
-    const accent = neuron.type === 'agent' ? (AGENT_NEURON_COLORS[agentName] ?? typeColor) : typeColor;
+    const subName = neuron.id.replace(/^(tool|phase|agent|domain):/, '');
+    const accent = neuron.type === 'agent' ? (AGENT_NEURON_COLORS[subName] ?? typeColor)
+      : neuron.type === 'domain' ? (DOMAIN_NEURON_COLORS[subName] ?? typeColor)
+      : typeColor;
     body = (<>
       {asString(p.label) && <div className="text-[12px] text-text-primary font-medium mb-1" style={{ color: accent }}>{asString(p.label)}</div>}
       {asString(p.group) && <div className="mb-1"><Badge text={asString(p.group)} /></div>}

@@ -9,7 +9,7 @@ import type { EventSource } from '../../api/types';
 
 export interface Pulse {
   neuron_id: string;
-  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent';
+  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain';
   score: number;
   injected: boolean;
 }
@@ -29,7 +29,7 @@ export interface PulseBatch {
 
 export interface Neuron {
   id: string;
-  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent';
+  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain';
   heat: number;
   payload: Record<string, unknown>;
 }

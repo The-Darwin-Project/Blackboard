@@ -13,7 +13,7 @@ import { MultiGraph } from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
 import { NodeCircleProgram } from 'sigma/rendering';
 import '@react-sigma/core/lib/style.css';
-import { NEURON_COLORS, AGENT_NEURON_COLORS } from '../../constants/colors';
+import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS } from '../../constants/colors';
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor,
 } from './cortex-constants';
@@ -26,11 +26,15 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
     const name = neuron.id.replace('agent:', '');
     return AGENT_NEURON_COLORS[name] ?? NEURON_COLORS.agent;
   }
+  if (neuron.type === 'domain') {
+    const name = neuron.id.replace('domain:', '');
+    return DOMAIN_NEURON_COLORS[name] ?? NEURON_COLORS.domain;
+  }
   return NEURON_COLORS[neuron.type] ?? '#6b7280';
 }
 
 function getNeuronSize(heat: number, type: string): number {
-  const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'tool' ? 4 : type === 'event' ? 8 : 3;
+  const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5 : type === 'tool' ? 4 : type === 'event' ? 8 : 3;
   return base + Math.min(heat * 0.2, 6);
 }
 
@@ -111,7 +115,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         label = (n.payload?.label as string) ?? (n.payload?.title as string) ?? n.id.slice(0, 15);
       }
 
-      const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent';
+      const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain';
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
