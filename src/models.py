@@ -362,6 +362,21 @@ def _resolve_phase(phase: str | None) -> str:
     return resolved
 
 
+_CANONICAL_DOMAINS = {"clear", "complicated", "complex", "chaotic", "disorder"}
+
+
+def _resolve_domain(domain: str | None) -> str:
+    """Normalize domain classification to canonical values.
+
+    Unknown values default to 'disorder' (fail-secure: triggers no domain
+    gates, forces reclassification).
+    """
+    raw = (domain or "disorder").lower().strip()
+    if raw not in _CANONICAL_DOMAINS:
+        return "disorder"
+    return raw
+
+
 class EventDocument(BaseModel):
     """A complete event document with conversation history."""
     id: str = Field(default_factory=lambda: f"evt-{uuid.uuid4().hex[:8]}")

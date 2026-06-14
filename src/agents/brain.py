@@ -166,7 +166,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import httpx
 
-from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_phase
+from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
 from ..ports import BroadcastPort
 from .dispatch import dispatch_to_agent, send_cancel, RETRYABLE_SENTINEL
 
@@ -1100,12 +1100,13 @@ class Brain:
             if function_call.name not in valid_tool_names:
                 from .tool_gates import diagnose_rejection
                 all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+                safe_name = repr(function_call.name)
                 if function_call.name not in all_known:
                     rejection_reason = f"[UNKNOWN] {function_call.name} is not a recognized tool."
                 else:
                     rejection_reason = diagnose_rejection(function_call.name, gate_ctx)
                 logger.warning(
-                    f"Tool rejection [{function_call.name}] for {event_id}: {rejection_reason}"
+                    f"Tool rejection [{safe_name}] for {event_id}: {rejection_reason}"
                 )
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
@@ -3531,7 +3532,7 @@ class Brain:
             return True
 
         elif function_name == "classify_event":
-            domain = args.get("domain", "complicated")
+            domain = _resolve_domain(args.get("domain", "complicated"))
             reasoning = args.get("reasoning", "")
             severity = args.get("severity")
             await self.blackboard.update_event_domain(event_id, domain)

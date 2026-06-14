@@ -1,12 +1,13 @@
 # src/agents/tool_gates.py
 # @ai-rules:
-# 1. [Constraint]: Pure evaluation logic -- no I/O, no async, no Redis, no LLM calls.
+# 1. [Constraint]: Pure evaluation logic -- no I/O, no async, no Redis, no LLM calls, no sibling imports.
 # 2. [Pattern]: GATE_REGISTRY is the single source of truth for both stripping and diagnostics.
 # 3. [Pattern]: mode="strip" removes listed tools; mode="allow" keeps ONLY listed tools.
 # 4. [Gotcha]: Gate predicates are named functions (not lambdas) for per-gate unit testing.
 # 5. [Gotcha]: evaluate_gates() returns list[dict], not set -- preserves tool schema dicts.
 # 6. [Constraint]: context_flags is always a dict by the time it reaches GateContext
 #    (build_gate_context normalizes None -> {}).
+# 7. [Gotcha]: GateDefinition.hint is appended by diagnose_rejection(), not by _msg_* functions.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -15,14 +16,11 @@ and why a rejected tool was blocked. Extracted from brain.py inline gate logic.
 """
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Literal
 
 if TYPE_CHECKING:
     from ..models import EventDocument
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -36,7 +34,6 @@ class GateContext:
     iteration: int
     has_kargo_context: bool
     unread_notes: int
-    all_tool_names: frozenset[str]
     refresh_budget: int = 0
     refresh_count: int = 0
     agent_completions: int = 0
@@ -100,7 +97,7 @@ def _pred_budget_exhausted(ctx: GateContext) -> bool:
 
 
 def _pred_pre_classification(ctx: GateContext) -> bool:
-    return bool(ctx.context_flags and not ctx.context_flags.get("brain_has_classified", False))
+    return not ctx.context_flags.get("brain_has_classified", False)
 
 
 def _pred_domain_clear(ctx: GateContext) -> bool:
@@ -116,7 +113,7 @@ def _pred_domain_complex(ctx: GateContext) -> bool:
         return False
     agent_rounds = sum(
         1 for t in ctx.conversation
-        if t.actor not in ("brain", "user", "aligner", "headhunter")
+        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
     )
     return agent_rounds < 4
 
@@ -251,6 +248,7 @@ def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
         "select_agent", "classify_event", "lookup_service", "lookup_journal",
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
+        "respond_to_jarvis", "wait_for_jarvis",
     }
 
 
@@ -319,23 +317,21 @@ def _msg_no_kargo_context(tool: str, _ctx: GateContext) -> str:
 
 
 def _msg_phase_jira_fetch(tool: str, ctx: GateContext) -> str:
-    return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: triage, dispatch, or verify phase. Hint: available in triage, dispatch, and verify states."
+    return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: triage, dispatch, or verify phase."
 
 
 def _msg_budget_exhausted(tool: str, ctx: GateContext) -> str:
     return (
         f"[GATE] {tool} unavailable. State: refresh budget exhausted "
         f"({ctx.refresh_count} used, {ctx.agent_completions} refills). "
-        f"Constraint: budget replenishes after agent completion turns. "
-        f"Hint: budget replenishes when agent completion turns are present."
+        f"Constraint: budget replenishes after agent completion turns."
     )
 
 
 def _msg_pre_classification(tool: str, _ctx: GateContext) -> str:
     return (
         f"[GATE] {tool} unavailable. State: domain not yet classified. "
-        f"Prerequisite: classification. "
-        f"Hint: lookups and classification are available in current state."
+        f"Prerequisite: classification."
     )
 
 
@@ -346,12 +342,11 @@ def _msg_domain_clear(tool: str, _ctx: GateContext) -> str:
 def _msg_domain_complex(tool: str, ctx: GateContext) -> str:
     agent_rounds = sum(
         1 for t in ctx.conversation
-        if t.actor not in ("brain", "user", "aligner", "headhunter")
+        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
     )
     return (
         f"[GATE] {tool} unavailable. State: domain is COMPLEX, {agent_rounds} agent rounds completed. "
-        f"Prerequisite: 4+ agent rounds. "
-        f"Hint: additional agent rounds build the evidence base needed for closure."
+        f"Prerequisite: 4+ agent rounds."
     )
 
 
@@ -602,10 +597,16 @@ def diagnose_rejection(
 
         if gate.mode == "allow":
             if tool_name not in affected:
-                return gate.message(tool_name, ctx)
+                msg = gate.message(tool_name, ctx)
+                if gate.hint:
+                    msg += f" Hint: {gate.hint}"
+                return msg
         else:
             if tool_name in affected:
-                return gate.message(tool_name, ctx)
+                msg = gate.message(tool_name, ctx)
+                if gate.hint:
+                    msg += f" Hint: {gate.hint}"
+                return msg
 
     return f"[UNKNOWN GATE] {tool_name} stripped by undocumented runtime condition."
 
@@ -648,9 +649,6 @@ def build_gate_context(
     )
     budget = min(3 + agent_completions, 10) - refresh_count
 
-    from .llm import BRAIN_TOOL_SCHEMAS
-    all_names = frozenset(t["name"] for t in BRAIN_TOOL_SCHEMAS)
-
     return GateContext(
         brain_phase=brain_phase,
         event_source=event.source,
@@ -660,7 +658,6 @@ def build_gate_context(
         iteration=iteration,
         has_kargo_context=has_kargo,
         unread_notes=unread,
-        all_tool_names=all_names,
         refresh_budget=budget,
         refresh_count=refresh_count,
         agent_completions=agent_completions,

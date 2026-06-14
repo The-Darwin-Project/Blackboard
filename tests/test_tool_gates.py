@@ -31,19 +31,12 @@ def _fake_schemas(*names: str) -> list[dict]:
     return [{"name": n} for n in names]
 
 
-ALL_TOOL_NAMES = frozenset([
-    "lookup_service", "lookup_journal", "consult_deep_memory", "classify_event",
-    "set_phase", "select_agent", "close_event", "request_user_approval",
-    "re_trigger_aligner", "ask_agent_for_state", "wait_for_verification",
-    "defer_event", "wait_for_user", "wait_for_agent", "notify_user_slack",
-    "reply_to_agent", "message_agent", "notify_gitlab_result", "fetch_jira_issue",
-    "comment_jira_issue", "transition_jira_issue", "create_plan",
-    "get_plan_progress", "report_incident", "refresh_gitlab_context",
-    "refresh_kargo_context", "respond_to_jarvis", "wait_for_jarvis",
-    "inspect_event", "post_sticky_note", "read_sticky_notes", "hold_watch",
-    "record_observation", "list_observations", "create_event",
-    "update_active_event", "report_recovery",
-])
+def _load_real_tool_names() -> frozenset[str]:
+    from src.agents.llm import BRAIN_TOOL_SCHEMAS
+    return frozenset(t["name"] for t in BRAIN_TOOL_SCHEMAS)
+
+
+ALL_TOOL_NAMES = _load_real_tool_names()
 
 ALL_SCHEMAS = _fake_schemas(*ALL_TOOL_NAMES)
 
@@ -62,7 +55,6 @@ def _ctx(**overrides) -> GateContext:
         iteration=0,
         has_kargo_context=True,
         unread_notes=0,
-        all_tool_names=ALL_TOOL_NAMES,
         refresh_budget=3,
         refresh_count=0,
         agent_completions=0,
@@ -119,10 +111,14 @@ class TestDeferWakeIter0:
 
 class TestIntermediate:
     def test_strips_to_communication_only(self):
-        ctx = _ctx(context_flags={"is_intermediate": True, "brain_has_classified": True})
+        turns = [_turn("jarvis", "message")]
+        ctx = _ctx(
+            context_flags={"is_intermediate": True, "brain_has_classified": True},
+            conversation=turns,
+        )
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert names <= {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+        assert names == {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
 
     def test_diagnosis(self):
         ctx = _ctx(context_flags={"is_intermediate": True, "brain_has_classified": True})
@@ -242,10 +238,10 @@ class TestBudgetExhausted:
 
 class TestPreClassification:
     def test_restricts_to_lookup_classify(self):
-        ctx = _ctx(context_flags={"brain_has_classified": False})
+        ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="aligner")
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert names <= {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user"}
+        assert names == {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase"}
 
     def test_chat_source_allows_wait_for_user(self):
         ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="chat")
@@ -288,15 +284,26 @@ class TestDomainComplex:
 
 class TestDomainChaotic:
     def test_restricts_to_act_first_tools(self):
-        ctx = _ctx(context_flags={"brain_has_classified": True, "event_domain": "chaotic"})
+        turns = [
+            _turn("jarvis", "message"),
+            _turn("brain", "respond_jarvis"),
+            _turn("jarvis", "message"),
+        ]
+        ctx = _ctx(
+            brain_phase="escalate",
+            context_flags={"brain_has_classified": True, "event_domain": "chaotic"},
+            event_source="jarvis",
+            conversation=turns,
+        )
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
         expected = {
             "select_agent", "classify_event", "lookup_service", "lookup_journal",
             "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
             "wait_for_agent", "reply_to_agent", "message_agent",
+            "respond_to_jarvis", "wait_for_jarvis",
         }
-        assert names <= expected
+        assert names == expected
 
     def test_includes_agent_communication(self):
         """Pre-flight audit: CHAOTIC must allow agent interaction for intermediate."""
@@ -652,3 +659,192 @@ class TestBehaviorParity:
         assert "post_sticky_note" in names
         assert "read_sticky_notes" in names
         assert "record_observation" not in names
+
+
+# ---------------------------------------------------------------------------
+# F-01: pre_classification fires on empty context_flags
+# ---------------------------------------------------------------------------
+
+class TestPreClassificationEmptyFlags:
+    def test_fires_when_context_flags_empty(self):
+        """Gate must fire when context_flags={} (no brain_has_classified key)."""
+        ctx = _ctx(context_flags={})
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "select_agent" not in names
+        assert "classify_event" in names
+
+    def test_fires_when_brain_has_classified_false(self):
+        ctx = _ctx(context_flags={"brain_has_classified": False})
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "select_agent" not in names
+        assert "classify_event" in names
+
+
+# ---------------------------------------------------------------------------
+# F-03: INTERMEDIATE + PRE_CLASSIFICATION double-fire -> empty intersection
+# ---------------------------------------------------------------------------
+
+class TestAllowModeIntersection:
+    def test_intermediate_plus_unclassified_produces_empty(self):
+        """Both allow-mode gates fire, intersection is empty set."""
+        ctx = _ctx(context_flags={"is_intermediate": True, "brain_has_classified": False})
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert _names(result) == set()
+
+    def test_chaotic_plus_intermediate_keeps_overlap(self):
+        """INTERMEDIATE and DOMAIN_CHAOTIC both fire -- intersection includes agent comms."""
+        ctx = _ctx(context_flags={
+            "is_intermediate": True, "brain_has_classified": True, "event_domain": "chaotic",
+        })
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"} & names
+
+
+# ---------------------------------------------------------------------------
+# F-05: Budget construction tests for build_gate_context
+# ---------------------------------------------------------------------------
+
+class TestBudgetConstruction:
+    def test_base_budget_is_3(self):
+        from src.models import EventDocument, EventEvidence, EventInput
+        evidence = EventEvidence(display_text="test", source_type="aligner", severity="info")
+        event = EventDocument(
+            id="evt-budget", source="aligner", service="svc",
+            brain_phase="dispatch",
+            event=EventInput(reason="anomaly", evidence=evidence),
+        )
+        ctx = build_gate_context(event=event, brain_phase="dispatch", context_flags={})
+        assert ctx.refresh_budget == 3
+
+    def test_budget_capped_at_10(self):
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+        evidence = EventEvidence(display_text="test", source_type="aligner", severity="info")
+        turns = [ConversationTurn(turn=i, actor="sysadmin", action="execute") for i in range(20)]
+        event = EventDocument(
+            id="evt-cap", source="aligner", service="svc",
+            brain_phase="dispatch",
+            event=EventInput(reason="anomaly", evidence=evidence),
+            conversation=turns,
+        )
+        ctx = build_gate_context(event=event, brain_phase="dispatch", context_flags={})
+        assert ctx.refresh_budget == 10
+
+    def test_negative_budget_triggers_gate(self):
+        ctx = _ctx(refresh_budget=-2)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "refresh_gitlab_context" not in _names(result)
+
+    def test_only_brain_waitingfor_refresh_counts(self):
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+        evidence = EventEvidence(display_text="test", source_type="aligner", severity="info")
+        turns = [
+            ConversationTurn(turn=1, actor="brain", action="route", waitingFor="refresh_gitlab_context"),
+            ConversationTurn(turn=2, actor="brain", action="route", waitingFor="select_agent"),
+            ConversationTurn(turn=3, actor="brain", action="route", waitingFor="refresh_kargo_context"),
+        ]
+        event = EventDocument(
+            id="evt-wf", source="aligner", service="svc",
+            brain_phase="dispatch",
+            event=EventInput(reason="anomaly", evidence=evidence),
+            conversation=turns,
+        )
+        ctx = build_gate_context(event=event, brain_phase="dispatch", context_flags={})
+        assert ctx.refresh_count == 2
+
+    def test_jarvis_turns_dont_count_as_completions(self):
+        from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+        evidence = EventEvidence(display_text="test", source_type="aligner", severity="info")
+        turns = [
+            ConversationTurn(turn=1, actor="jarvis", action="execute"),
+            ConversationTurn(turn=2, actor="sysadmin", action="execute"),
+            ConversationTurn(turn=3, actor="brain", action="execute"),
+        ]
+        event = EventDocument(
+            id="evt-jc", source="aligner", service="svc",
+            brain_phase="dispatch",
+            event=EventInput(reason="anomaly", evidence=evidence),
+            conversation=turns,
+        )
+        ctx = build_gate_context(event=event, brain_phase="dispatch", context_flags={})
+        assert ctx.agent_completions == 1
+
+
+# ---------------------------------------------------------------------------
+# F-06: Ordering parity test (evaluate -> inject -> reorder)
+# ---------------------------------------------------------------------------
+
+class TestOrderingParity:
+    def test_notify_stripped_in_dispatch_despite_injection(self):
+        """Maintainer injection must not resurrect phase-gated tools."""
+        ctx = _ctx(brain_phase="dispatch")
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "notify_user_slack" not in _names(result)
+
+    def test_notify_available_in_escalate_for_injection(self):
+        """In escalate phase, notify_user_slack passes gate (injection can mutate schema)."""
+        ctx = _ctx(brain_phase="escalate")
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "notify_user_slack" in _names(result)
+
+
+# ---------------------------------------------------------------------------
+# F-08: jarvis turns don't count toward COMPLEX domain round threshold
+# ---------------------------------------------------------------------------
+
+class TestDomainComplexJarvisExclusion:
+    def test_jarvis_turns_excluded_from_agent_rounds(self):
+        turns = [
+            _turn("sysadmin", "execute"),
+            _turn("jarvis", "message"),
+            _turn("jarvis", "insight"),
+            _turn("architect", "plan"),
+        ]
+        ctx = _ctx(
+            context_flags={"brain_has_classified": True, "event_domain": "complex"},
+            conversation=turns,
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "close_event" not in _names(result)
+
+
+# ---------------------------------------------------------------------------
+# F-12: ALL_TOOL_NAMES derived from BRAIN_TOOL_SCHEMAS (sync by construction)
+# ---------------------------------------------------------------------------
+
+class TestSchemaSync:
+    def test_all_tool_names_is_nonempty(self):
+        """Verify the dynamic load produced a real tool set."""
+        assert len(ALL_TOOL_NAMES) > 20
+
+    def test_core_tools_present(self):
+        """Smoke-check that key tools are in the real schema."""
+        assert "classify_event" in ALL_TOOL_NAMES
+        assert "select_agent" in ALL_TOOL_NAMES
+        assert "close_event" in ALL_TOOL_NAMES
+        assert "set_phase" in ALL_TOOL_NAMES
+
+
+# ---------------------------------------------------------------------------
+# F-13: Hint field wired into diagnostic output
+# ---------------------------------------------------------------------------
+
+class TestHintInDiagnostic:
+    def test_budget_hint_in_message(self):
+        ctx = _ctx(refresh_budget=0)
+        msg = diagnose_rejection("refresh_gitlab_context", ctx)
+        assert "Hint:" in msg
+        assert "budget replenishes" in msg
+
+    def test_pre_classification_hint(self):
+        ctx = _ctx(context_flags={"brain_has_classified": False})
+        msg = diagnose_rejection("select_agent", ctx)
+        assert "Hint:" in msg
+        assert "lookups and classification" in msg
+
+    def test_no_hint_for_phase_escalate(self):
+        ctx = _ctx(brain_phase="dispatch")
+        msg = diagnose_rejection("report_incident", ctx)
+        assert "Hint:" not in msg
