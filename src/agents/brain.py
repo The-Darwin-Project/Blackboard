@@ -880,152 +880,44 @@ class Brain:
                 "Ensure brain_skills/ directory exists."
             )
 
-        # Strip defer_event on first iteration of defer-wake -- forces Brain to act
-        # before re-deferring. After iteration 0, defer is available so LLM can
-        # re-defer based on tool results + skill protocol.
-        active_tools = BRAIN_TOOL_SCHEMAS
-        if is_defer_wake and iteration == 0:
-            active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] != "defer_event"]
-            logger.info(f"Defer-wake iter 0: stripped defer_event from tools for {event_id}")
+        # === Tool gate evaluation (all gating logic lives in tool_gates.py) ===
+        from .tool_gates import evaluate_gates, build_gate_context
 
-        # === Intermediate tool gate (FIRST -- before phase/domain gates) ===
-        if context_flags.get("is_intermediate"):
-            intermediate_allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
-            active_tools = [t for t in active_tools if t["name"] in intermediate_allowed]
-
-        # === Phase-driven tool gating ===
-        # Code reads the Brain's declared phase and provides matching tools.
-        # Same pattern as domain gating (CLEAR strips create_plan, etc.).
         brain_phase = _resolve_phase(event.brain_phase)
+        gate_ctx = build_gate_context(
+            event=event,
+            brain_phase=brain_phase,
+            context_flags=context_flags,
+            is_defer_wake=is_defer_wake,
+            iteration=iteration,
+            jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+            jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+        )
+        active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
 
-        # Phase gates: tools gated to specific phases
-        escalate_tools = {"report_incident"}
-        if brain_phase != "escalate":
-            active_tools = [t for t in active_tools if t["name"] not in escalate_tools]
+        if not active_tools:
+            logger.error(
+                f"EMPTY TOOLSET after gate evaluation for {event_id} "
+                f"(phase={brain_phase}, source={event.source})"
+            )
+            if context_flags.get("is_intermediate"):
+                active_tools = [
+                    t for t in BRAIN_TOOL_SCHEMAS
+                    if t["name"] in {"wait_for_agent"}
+                ]
+            else:
+                active_tools = [
+                    t for t in BRAIN_TOOL_SCHEMAS
+                    if t["name"] in {"classify_event", "set_phase", "lookup_journal"}
+                ]
 
-        notify_tools = {"notify_user_slack"}
-        if brain_phase not in ("escalate", "close"):
-            active_tools = [t for t in active_tools if t["name"] not in notify_tools]
-        else:
+        # Maintainer enum injection (AFTER gate evaluation, escalate/close only)
+        if brain_phase in ("escalate", "close"):
             maintainer_emails = self._resolve_maintainer_enum(event)
             if maintainer_emails:
                 active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
 
-        close_tools = {"close_event", "notify_gitlab_result"}
-        if brain_phase not in ("escalate", "close"):
-            active_tools = [t for t in active_tools if t["name"] not in close_tools]
-
-        observation_tools = {"record_observation", "list_observations"}
-        if brain_phase == "close":
-            active_tools = [t for t in active_tools if t["name"] not in observation_tools]
-
-        jira_phases = ("dispatch", "verify", "escalate", "close")
-        if brain_phase not in jira_phases:
-            active_tools = [t for t in active_tools if t["name"] not in {"comment_jira_issue", "transition_jira_issue"}]
-
-        # Refresh tools: event-scoped budget (3 + agent_completions - usage)
-        has_kargo = (
-            event.event and event.event.evidence
-            and hasattr(event.event.evidence, "kargo_context")
-            and event.event.evidence.kargo_context
-        )
-        if not has_kargo:
-            active_tools = [t for t in active_tools if t["name"] != "refresh_kargo_context"]
-
-        # fetch_jira_issue: simple phase gate (triage + dispatch + verify), excluded from budget
-        if brain_phase not in ("triage", "dispatch", "verify"):
-            active_tools = [t for t in active_tools if t["name"] != "fetch_jira_issue"]
-
-        # Budget-gated refresh tools (GitLab + Kargo only)
-        refresh_tools_budgeted = {"refresh_gitlab_context", "refresh_kargo_context"}
-        refresh_count = sum(
-            1 for t in event.conversation
-            if t.actor == "brain" and t.waitingFor in refresh_tools_budgeted
-        )
-        agent_completions = sum(
-            1 for t in event.conversation
-            if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
-            and t.action in ("execute", "plan")
-        )
-        budget = min(3 + agent_completions, 10) - refresh_count
-        if budget <= 0:
-            active_tools = [t for t in active_tools if t["name"] not in refresh_tools_budgeted]
-            logger.info(f"Refresh budget exhausted ({refresh_count} used, {agent_completions} refills) for {event_id}")
-
-        # === Domain classification gate (mandatory before routing) ===
-        if context_flags and not context_flags.get("brain_has_classified", False):
-            pre_classify_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase"}
-            # Human-initiated events: allow wait_for_user before classification.
-            # A greeting or vibe check is Cynefin Confusion -- the domain isn't known yet.
-            # FRIDAY can pause and ask what's on their mind before forcing a classification.
-            if event.source in ("slack", "chat"):
-                pre_classify_tools.add("wait_for_user")
-            active_tools = [t for t in active_tools if t["name"] in pre_classify_tools]
-            logger.info(f"Pre-classification gate: only lookup+classify+set_phase tools for {event_id}")
-        elif context_flags:
-            domain = context_flags.get("event_domain", "complicated")
-            if domain == "clear":
-                active_tools = [t for t in active_tools if t["name"] != "create_plan"]
-                logger.info(f"CLEAR domain: create_plan gated (act directly) for {event_id}")
-            elif domain == "complex":
-                agent_rounds = sum(1 for t in event.conversation if t.actor not in ("brain", "user", "aligner", "headhunter"))
-                if agent_rounds < 4:
-                    active_tools = [t for t in active_tools if t["name"] != "close_event"]
-                    logger.info(f"COMPLEX domain: close_event gated until 4+ agent rounds ({agent_rounds} so far) for {event_id}")
-            elif domain == "chaotic":
-                chaotic_tools = {"select_agent", "classify_event", "lookup_service", "lookup_journal", "notify_user_slack", "get_plan_progress", "report_incident", "set_phase"}
-                active_tools = [t for t in active_tools if t["name"] in chaotic_tools]
-                logger.info(f"CHAOTIC domain: restricted to act-first tool set for {event_id}")
-
-        # === JARVIS response gate ===
-        # Strip respond_to_jarvis unless an unanswered jarvis.message or jarvis.insight exists.
-        # For jarvis-sourced events: the initial JARVIS prompt is the event evidence, not a
-        # conversation turn. Treat it as an implicit unanswered message until FRIDAY responds.
-        has_unanswered_jarvis = False
-        if event.source == "jarvis" and not any(
-            t.actor == "brain" and t.action == "respond_jarvis" for t in event.conversation
-        ):
-            has_unanswered_jarvis = True  # Implicit: JARVIS created the event, FRIDAY hasn't responded yet
-        else:
-            for t in reversed(event.conversation):
-                if t.actor == "jarvis" and t.action in ("message", "insight"):
-                    has_unanswered_jarvis = True
-                    break
-                if t.actor == "brain" and t.action == "respond_jarvis":
-                    break
-        if not has_unanswered_jarvis:
-            active_tools = [t for t in active_tools if t["name"] != "respond_to_jarvis"]
-
-        # === wait_for_jarvis gate ===
-        # Available only: jarvis-sourced events, after respond_jarvis sent, not already waiting, count < 3
-        if event.source == "jarvis":
-            has_respond = any(t.actor == "brain" and t.action == "respond_jarvis" for t in event.conversation)
-            already_waiting = event_id in self._waiting_for_jarvis
-            max_retries = self._jarvis_wait_count.get(event_id, 0) >= 3
-            if not (has_respond and not already_waiting and not max_retries):
-                active_tools = [t for t in active_tools if t["name"] != "wait_for_jarvis"]
-        else:
-            active_tools = [t for t in active_tools if t["name"] != "wait_for_jarvis"]
-
-        # === inspect_event gate ===
-        # Available only in jarvis-sourced meta-events
-        if event.source != "jarvis":
-            active_tools = [t for t in active_tools if t["name"] != "inspect_event"]
-
-        # === hold_watch gate ===
-        if not (event.source == "jarvis" and brain_phase == "close"):
-            active_tools = [t for t in active_tools if t["name"] != "hold_watch"]
-
-        # === Sticky notes gates ===
-        if not (event.source == "jarvis" and brain_phase == "close"):
-            active_tools = [t for t in active_tools if t["name"] != "post_sticky_note"]
-
-        unread = getattr(event, "unread_notes", 0) or 0
-        if unread <= 0:
-            active_tools = [t for t in active_tools if t["name"] != "read_sticky_notes"]
-
         # Reorder tools: always-available first, then phase-relevant, then rest.
-        # Gives the LLM a signal about what's most useful for the current phase.
         _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
         _phase_tool_priority: dict[str, set[str]] = {
             "triage":    {"refresh_gitlab_context", "refresh_kargo_context"},
@@ -1034,11 +926,6 @@ class Brain:
             "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
             "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
         }
-        # Hard strip: defer_event and wait_for_user not available in triage or jarvis-sourced events
-        if brain_phase == "triage" or event.source == "jarvis":
-            active_tools = [t for t in active_tools if t["name"] not in ("defer_event", "wait_for_user")]
-        elif event.source not in ("chat", "slack"):
-            active_tools = [t for t in active_tools if t["name"] != "wait_for_user"]
         priority_names = _phase_tool_priority.get(brain_phase, set())
         tier_always = [t for t in active_tools if t["name"] in _always_tools]
         tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
@@ -1211,16 +1098,20 @@ class Brain:
         if function_call:
             valid_tool_names = {t["name"] for t in active_tools}
             if function_call.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+                if function_call.name not in all_known:
+                    rejection_reason = f"[UNKNOWN] {function_call.name} is not a recognized tool."
+                else:
+                    rejection_reason = diagnose_rejection(function_call.name, gate_ctx)
                 logger.warning(
-                    f"Hallucinated tool '{function_call.name}' for {event_id} "
-                    f"(active: {valid_tool_names})"
+                    f"Tool rejection [{function_call.name}] for {event_id}: {rejection_reason}"
                 )
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="tool_result",
-                    thoughts="That action is not available right now. "
-                             "Review the current phase and what actions are appropriate for it.",
+                    thoughts=rejection_reason,
                     response_parts=captured_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
