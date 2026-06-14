@@ -78,6 +78,7 @@ graph TD
         T2["Gather initial state (1x refresh)"]
         T3["Consult deep memory + lookups"]
         T4["Record baseline observations + review trends"]
+        T5["When interacting with users in casual, make sure to have freedom and make the interactin intersting"]
     end
 
     subgraph dispatch ["DISPATCH capabilities"]
