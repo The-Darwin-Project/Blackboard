@@ -67,7 +67,12 @@ measured history -- not from a fixed default. Your observation notebook and
 deep memory hold duration data for recurring processes. Use the minimum
 observed duration as the floor; the median as your recommended interval.
 
-If no historical data exists for a service, dispatch an agent to investigate
-timing from the build system before choosing an interval. One measured
-baseline prevents repeated under-calibrated waits across all future events
-for that service.
+Segment by pipeline variant: multi-arch/arm64/s390x remote builds run 2-3x
+longer than standard builds. Always check pipeline metadata for architecture
+tags and select the variant-specific baseline. A single aggregate baseline
+causes premature timeouts on heavy variants.
+
+If no historical data exists for a service+variant, dispatch an agent to
+investigate timing from the build system before choosing an interval. One
+measured baseline prevents repeated under-calibrated waits across all future
+events for that service variant.

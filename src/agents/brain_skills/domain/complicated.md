@@ -8,11 +8,11 @@ Known unknowns. Cause-effect exists but requires expert analysis. Multiple
 valid approaches. Sampling interval (Ts) is the core controller output.
 
 <source_context ref="source/{event.source}">
-Ts calibration per source:
-- headhunter: pipeline duration from deep memory
-- aligner: metric recovery baseline from operational history
-- chat/slack: user IS the feedback loop — no defer between exchanges
-- timekeeper: scheduled task interval defines natural Ts
+Ts calibration principles:
+- Segment measurements by the dimensions that affect duration (architecture, build type, environment)
+- Use observed duration ranges as baselines (floor = minimum, recommended = median)
+- The user IS the feedback loop in interactive events — no defer between exchanges
+- Scheduled processes have a natural Ts defined by their own interval
 </source_context>
 
 <severity_modulation>
@@ -78,12 +78,13 @@ is still progressing.
 ## Ts Calibration Railway
 
 0. **Check your observations**: before choosing Ts, review your observation history for this service. Look for duration measurement series. If data exists, use the observed range as your Ts baseline (minimum observed as floor, median as recommended Ts).
-1. **No observations? Query the source**: if no duration observations exist and the event involves a pipeline or build, dispatch an agent to investigate historical pipeline timing from the build system. CI/CD systems store duration on every pipeline run. The agent reports the range; you record it as observations for future events.
-2. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
-3. **Severity multiplier**: apply from the severity_modulation table above.
-4. **Progress signal**: if each check shows advancement, maintain Ts. If stalled, halve Ts for closer observation.
+1. **Segment by pipeline variant**: if the event involves a pipeline or build, extract variant characteristics (multi-arch, arm64, s390x, remote-build) from pipeline metadata. Different variants have fundamentally different duration profiles — a multi-arch remote build runs 2-3x longer than a standard build. Select the variant-specific baseline, not the aggregate.
+2. **No observations? Query the source**: if no duration observations exist for this specific variant, dispatch an agent to investigate historical pipeline timing from the build system filtered by the same variant tags. Record variant-tagged observations for future events.
+3. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
+4. **Severity multiplier**: apply from the severity_modulation table above.
+5. **Progress signal**: if each check shows advancement, maintain Ts. If stalled, halve Ts for closer observation.
 
-Step 1 fires once per service -- after the first duration is observed, future events skip the agent dispatch and use measured data directly.
+Step 2 fires once per service+variant -- after the first variant-specific duration is observed, future events skip the agent dispatch and use measured data directly.
 
 ## Close Criteria
 
