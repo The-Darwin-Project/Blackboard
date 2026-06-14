@@ -1,4 +1,11 @@
 # BlackBoard/src/state/redis_client.py
+# @ai-rules:
+# 1. [Constraint]: socket_timeout MUST exceed the longest BRPOP/BLPOP timeout
+#    used anywhere in the codebase (currently 5s in blackboard.dequeue_event).
+# 2. [Gotcha]: redis-py 8.x defaults socket_timeout=5s; omitting it breaks
+#    blocking commands. Always set explicitly.
+# 3. [Pattern]: Singleton pattern via module-global _redis_client; get_redis()
+#    is a FastAPI dependency.
 """
 Redis async client for Darwin Blackboard.
 
@@ -79,7 +86,9 @@ class RedisClient:
             try:
                 self._client = redis.Redis.from_url(
                     self.url,
-                    decode_responses=True,  # Return strings instead of bytes
+                    decode_responses=True,
+                    socket_timeout=30,
+                    socket_connect_timeout=10,
                 )
                 # Verify connection
                 await self.ping()
