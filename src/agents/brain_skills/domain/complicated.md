@@ -82,7 +82,10 @@ is still progressing.
 2. **No observations? Query the source**: if no duration observations exist for this specific variant, dispatch an agent to investigate historical pipeline timing from the build system filtered by the same variant tags. Record variant-tagged observations for future events.
 3. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
 4. **Severity multiplier**: apply from the severity_modulation table above.
-5. **Progress signal**: if each check shows advancement, maintain Ts. If stalled, halve Ts for closer observation.
+5. **Progress signal (adaptive Ts)**:
+   - **Progressing**: process advancing normally → multiply Ts by 1.5× on each successive deferral (cap at 60 minutes). Confidence grows with each positive signal.
+   - **Stalled**: no state change since last check → halve Ts for closer observation.
+   - **State change**: process completed, errored, or shifted fundamentally → reset to baseline Ts and re-evaluate domain.
 
 Step 2 fires once per service+variant -- after the first variant-specific duration is observed, future events skip the agent dispatch and use measured data directly.
 
