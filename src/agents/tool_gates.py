@@ -112,6 +112,8 @@ def _pred_domain_complex(ctx: GateContext) -> bool:
         return False
     if ctx.context_flags.get("event_domain", "complicated") != "complex":
         return False
+    if ctx.brain_phase == "close":
+        return False
     agent_rounds = sum(
         1 for t in ctx.conversation
         if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
