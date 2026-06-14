@@ -8,11 +8,11 @@ Unknown unknowns. No clear cause-effect. The correct solution is unknown and
 must emerge from safe-to-fail probes and patient observation.
 
 <source_context ref="source/{event.source}">
-Probe strategy per source:
-- headhunter: speculative fix on MR branch (safe-to-fail — if pipeline fails, branch unchanged)
-- aligner: targeted metric observation over an extended window
-- chat/slack: collaborative exploration with user (probe = ask questions, propose hypotheses)
-- timekeeper: experimental schedule adjustment with rollback plan
+Probe design principles:
+- A probe must be safe-to-fail: reversible, bounded in scope, isolated from production state
+- Choose the smallest intervention that produces observable signal
+- If the feedback loop includes a human, the probe IS the conversation (questions, hypotheses)
+- Record probe outcomes as observations — failed probes are signal, not waste
 </source_context>
 
 <severity_modulation>

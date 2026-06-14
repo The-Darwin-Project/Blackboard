@@ -7,10 +7,10 @@ tags: [domain, clear, control-loop]
 Known knowns. A proven fix exists. Execute it, verify it, close.
 
 <source_context ref="source/{event.source}">
-Entry behavior by source:
-- headhunter: check Bot Instructions first — often contains the exact fix
-- aligner: known metric threshold → established remediation (scale, rollback)
-- chat/slack: user described a known issue — confirm, then execute
+CLEAR recognition signals:
+- The event evidence contains an explicit resolution path (instructions, runbook, prior fix)
+- A proven pattern exists in observations or deep memory for this exact scenario
+- The user or system has already diagnosed the cause — only execution remains
 </source_context>
 
 <severity_modulation>

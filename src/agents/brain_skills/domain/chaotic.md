@@ -8,11 +8,11 @@ Crisis. No time for analysis. Cause and effect are indecipherable.
 Stabilize the system first. Everything else follows.
 
 <source_context ref="source/{event.source}">
-Stabilization actions per source:
-- aligner: rollback last deployment, scale up replicas, disable feature flag
-- headhunter: close MR, revert merge, notify maintainers immediately
-- chat/slack: immediate human escalation — user is live witness
-- timekeeper: halt scheduled operations, escalate
+Stabilization principles:
+- Act on the most reversible high-impact lever first (scale, disable, rollback)
+- Contain blast radius before diagnosing root cause
+- If a human is present, they are a live witness — escalate to them immediately
+- Every stabilization action must be logged as an observation for the post-mortem
 </source_context>
 
 ## Control Loop
