@@ -1097,6 +1097,20 @@ class Brain:
 
         # Process the final result
         if function_call:
+            # Flush text response before executing tool (mixed text + function call)
+            if accumulated_text:
+                response_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="response",
+                    thoughts=accumulated_text,
+                    evidence=grounding_evidence if grounding_evidence else None,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, response_turn)
+                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                self._last_processed[event_id] = time.time()
+
             valid_tool_names = {t["name"] for t in active_tools}
             if function_call.name not in valid_tool_names:
                 from .tool_gates import diagnose_rejection
