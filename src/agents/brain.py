@@ -3581,6 +3581,14 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
+            if domain == "casual":
+                nudge = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="tool_result",
+                    evidence="Domain locked: CASUAL. Respond to the user conversationally now. Do not reclassify unless the user's next message shifts to a task.",
+                    timestamp=time.time(),
+                )
+                await self._append_and_broadcast(event_id, nudge)
             return True
 
         elif function_name == "set_phase":
