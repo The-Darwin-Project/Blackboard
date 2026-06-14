@@ -168,14 +168,16 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "Classify this event's Cynefin domain. Called once during initial triage -- "
             "select_agent requires a prior classification. Reclassify only when NEW evidence "
             "changes the domain (e.g., agent reports unexpected complexity). "
-            "Do NOT reclassify just because a new processing cycle started."
+            "Do NOT reclassify just because a new processing cycle started. "
+            "CASUAL: non-problem user interaction -- greetings, small talk, status checks, "
+            "informational updates with no anomaly or action request. Chat/slack sources only."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "domain": {
                     "type": "string",
-                    "enum": ["clear", "complicated", "complex", "chaotic"],
+                    "enum": ["clear", "complicated", "complex", "chaotic", "casual"],
                     "description": "Your assessed Cynefin domain",
                 },
                 "reasoning": {

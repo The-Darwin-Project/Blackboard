@@ -70,17 +70,17 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_22_gates(self):
-        assert len(GATE_REGISTRY) == 22
+    def test_registry_has_23_gates(self):
+        assert len(GATE_REGISTRY) == 23
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
         assert len(ids) == len(set(ids))
 
-    def test_three_allow_mode_gates(self):
+    def test_four_allow_mode_gates(self):
         allow_gates = [g for g in GATE_REGISTRY if g.mode == "allow"]
-        assert len(allow_gates) == 3
-        assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC"}
+        assert len(allow_gates) == 4
+        assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
     def test_nineteen_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
@@ -311,6 +311,86 @@ class TestDomainChaotic:
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
         assert {"wait_for_agent", "reply_to_agent", "message_agent"} <= names
+
+
+class TestDomainCasual:
+    def test_restricts_to_conversational_tools(self):
+        ctx = _ctx(
+            brain_phase="dispatch",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        expected = {
+            "classify_event", "set_phase", "wait_for_user",
+            "consult_deep_memory", "lookup_service", "lookup_journal",
+            "respond_to_jarvis", "read_sticky_notes",
+        }
+        assert names <= expected
+        assert {"classify_event", "set_phase", "wait_for_user",
+                "consult_deep_memory", "lookup_service", "lookup_journal"} <= names
+
+    def test_does_not_fire_for_aligner(self):
+        ctx = _ctx(
+            event_source="aligner",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "select_agent" in _names(result)
+
+    def test_blocks_close_event(self):
+        ctx = _ctx(
+            brain_phase="close",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "close_event" not in _names(result)
+
+    def test_diagnosis(self):
+        ctx = _ctx(
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        msg = diagnose_rejection("select_agent", ctx)
+        assert "[GATE]" in msg
+        assert "CASUAL" in msg
+
+    def test_triage_strips_wait_for_user(self):
+        """HARD_STRIP_WAIT_USER removes wait_for_user in triage even for casual."""
+        ctx = _ctx(
+            brain_phase="triage",
+            event_source="chat",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "wait_for_user" not in _names(result)
+
+    def test_fail_open_non_chat_source(self):
+        """Casual gate doesn't fire for non-chat/slack -- fail-open to full tools."""
+        ctx = _ctx(
+            event_source="aligner",
+            context_flags={"brain_has_classified": True, "event_domain": "casual"},
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "select_agent" in names
+
+    def test_intermediate_defers_casual(self):
+        """CASUAL predicate yields to INTERMEDIATE -- agent comms tools available."""
+        ctx = _ctx(
+            event_source="chat",
+            context_flags={
+                "is_intermediate": True,
+                "brain_has_classified": True,
+                "event_domain": "casual",
+            },
+        )
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        names = _names(result)
+        assert "reply_to_agent" in names
+        assert "message_agent" in names
 
 
 class TestJarvisResponse:

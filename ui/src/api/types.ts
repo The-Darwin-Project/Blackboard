@@ -151,7 +151,7 @@ export interface EventEvidence {
   display_text: string;
   source_type: string;
   triggered_by?: string | null;
-  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
+  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic' | 'casual';
   brain_domain?: string;
   brain_severity?: 'info' | 'warning' | 'critical';
   domain_confidence?: 'assessed' | 'default';
@@ -395,7 +395,7 @@ export interface ReportMeta {
   service: string;
   source: string;
   subject_type?: SubjectType;
-  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic';
+  domain: 'disorder' | 'clear' | 'complicated' | 'complex' | 'chaotic' | 'casual';
   severity: 'info' | 'warning' | 'critical';
   turns: number;
   reason: string;

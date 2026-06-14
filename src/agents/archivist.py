@@ -76,7 +76,7 @@ TEMPORAL FIELDS (component-specific -- PRESERVED for operational planning):
 - agent_execution_times: Array of agent tasks, each with agent name and duration_seconds
 - procedures: Short workflow description (e.g., "retest pipeline, wait for completion, merge MR")
 - outcome: Final state -- one of: resolved, escalated, user_closed, force_closed, stale
-- domain: Cynefin classification (clear|complicated|complex|chaotic)
+- domain: Cynefin classification (clear|complicated|complex|chaotic|casual)
 
 INSTANCE FIELDS (component-specific -- for search findability, not shown to Brain):
 - instance_keywords: 2-3 component-specific terms that help find this event via search.

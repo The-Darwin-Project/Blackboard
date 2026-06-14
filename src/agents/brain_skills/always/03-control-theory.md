@@ -24,6 +24,7 @@ graph TD
     DomainGate --> ComplicatedLoop["Enter COMPLICATED loop"]
     DomainGate --> ComplexLoop["Enter COMPLEX loop"]
     DomainGate --> ChaoticLoop["Enter CHAOTIC loop"]
+    DomainGate --> CasualLoop["Enter CASUAL conversational"]
 ```
 
 In DISORDER/triage you can classify, consult memory, look up services and journal
@@ -55,7 +56,7 @@ graph TD
 
 Every decision node in a domain loop has two evidence-driven rhombuses:
 
-1. **Domain rhombus** — "Is my domain still correct?" (4 exits: CLEAR/COMPLICATED/COMPLEX/CHAOTIC)
+1. **Domain rhombus** — "Is my domain still correct?" (5 exits: CLEAR/COMPLICATED/COMPLEX/CHAOTIC/CASUAL)
 2. **Phase rhombus** — "Which tools do I need next?" (4 exits: DISPATCH/VERIFY/ESCALATE/CLOSE)
 
 Domain provides STRATEGY (what to achieve). Phase provides TOOLSET (what tools to use).

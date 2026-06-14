@@ -16,7 +16,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
 
 export const PHASES = ['triage', 'dispatch', 'verify', 'escalate', 'close'];
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'];
-export const DOMAINS = ['clear', 'complicated', 'complex', 'chaotic', 'disorder'];
+export const DOMAINS = ['clear', 'complicated', 'complex', 'chaotic', 'casual', 'disorder'];
 
 const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
   triage: ['refresh_gitlab_context', 'refresh_kargo_context'],
@@ -115,6 +115,7 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'domain:complicated': 'Known unknowns — expert analysis, multiple good practices',
   'domain:complex': 'Unknown unknowns — emergent practice, safe-to-fail probes',
   'domain:chaotic': 'System in crisis — act first, stabilize, then analyze',
+  'domain:casual': 'Non-problem interaction — conversational, reclassify when purpose emerges',
   'domain:disorder': 'Default state — not yet classified into a domain',
 };
 

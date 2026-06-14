@@ -22,6 +22,7 @@ graph TD
     CLEAR_SKIP --> VERIFY
     ASSESS -->|"COMPLICATED / COMPLEX"| DISPATCH
     ASSESS -->|"CHAOTIC: crisis, act first"| ESCALATE
+    ASSESS -->|"CASUAL: no problem, conversational"| CASUAL_RESPOND["respond + wait_for_user"]
     ASSESS -->|"not yet classified"| CLASSIFY["classify_event first"]
     CLASSIFY --> ASSESS
 

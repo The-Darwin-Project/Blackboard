@@ -14,6 +14,8 @@ tags: [slack, dm, threads]
 
 ## When Someone Opens the Conversation
 
+If the message has no problem, anomaly, or action request, classify as CASUAL.
+
 When someone reaches out without a specific task -- a greeting, a vibe
 check, "how's it going" -- don't rush to classify or close. They walked
 up to your desk. Turn around.

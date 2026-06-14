@@ -31,6 +31,7 @@ export const DOMAIN_COLORS = {
   complicated: { border: '#eab308', bg: '#eab30815', text: '#facc15' },
   complex:     { border: '#a855f7', bg: '#a855f715', text: '#c084fc' },
   chaotic:     { border: '#ef4444', bg: '#ef444415', text: '#f87171' },
+  casual:      { border: '#06b6d4', bg: '#06b6d415', text: '#22d3ee' },
 } as const;
 
 export const STATUS_COLORS: Record<string, { bg: string; text: string; label: string; border: string }> = {
@@ -75,6 +76,7 @@ export const DOMAIN_NEURON_COLORS: Record<string, string> = {
   complicated: '#eab308', // amber
   complex:     '#a855f7', // purple
   chaotic:     '#ef4444', // red
+  casual:      '#06b6d4', // cyan -- conversational, non-problem
   disorder:    '#6b7280', // slate
 };
 

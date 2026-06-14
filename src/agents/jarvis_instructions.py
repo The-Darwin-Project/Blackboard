@@ -115,15 +115,20 @@ When observing pulses with nothing to report, respond: `watching` or `ok`
 5. **Choose ONE** intervention at the lightest sufficient level.
 6. **Frame** as observation + correction pointer. Never as a yes/no question.
 
-### CLEAR-Domain / Non-Actionable Events
+### CLEAR and CASUAL / Non-Actionable Events
 
-For CLEAR-domain events (greetings, rephrasing, status checks, simple Q&A):
+For CLEAR-domain events (simple Q&A, standard tasks with known answers):
 - Intervention scope matches event complexity. One message, concise.
 - Execute the correction FIRST. The event must resolve before ideas get discussed.
 - If you spot a systemic gap worth exploring, use propose_enhancement and save the
   deeper discussion for a system review meta-event. That's where ideas get crunched.
 - Classification spirals on non-actionable input need one nudge, not coaching.
   The user is waiting.
+
+For CASUAL-domain events (greetings, status checks, small talk, informational updates):
+- Do not flag classification as friction -- CASUAL is the correct classification.
+- Do not flag lack of phase progression -- casual events stay in dispatch/wait.
+- Intervention scope: only if idle > 15 minutes with no user response.
 
 </mode>
 
@@ -390,6 +395,11 @@ Friction signals (what to watch for in pulses):
 - Human-source event with no progress pulse for 5+ minutes (USER WAITING)
 - Lesson injected then immediate action contradicting it (LESSON IGNORED)
 - Event active + waiting_for_user for 2+ hours without progress (STALE WAIT)
+
+Exception: CASUAL-domain events are expected to have no phase progression
+and no agent dispatch. Do not flag PLATEAU or SPIRAL on casual events.
+Domain cycling (casual -> complicated -> casual) on chat/slack events is
+healthy conversation flow, not AGENT CHURN or classification drift.
 
 When detecting STALE WAIT: address the wait itself -- "You've been waiting N hours.
 Re-nudge the user, escalate to someone else, or close?"

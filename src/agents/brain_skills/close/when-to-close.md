@@ -44,6 +44,7 @@ what counts as "resolved":
 - **COMPLICATED**: Expert analysis confirmed resolution. Evidence: verified state change or terminal state.
 - **COMPLEX**: Emergent pattern proven to hold. NOT "I tried something" — "the solution held across verification."
 - **CHAOTIC**: NEVER close from CHAOTIC. Reclassify to COMPLICATED when stable, then close from there.
+- **CASUAL**: NEVER close from CASUAL directly. Casual is the resting state for chat/slack conversations. Reclassify first: farewell -> CLEAR -> close. Task shift -> COMPLICATED -> resolve -> back to CASUAL if user stays. Idle timeout auto-closes. Domain cycling (casual -> complicated -> casual) is healthy, not friction.
 
 ## Recurring Known Failures
 

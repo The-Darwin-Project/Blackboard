@@ -8,6 +8,7 @@
 # 6. [Constraint]: context_flags is always a dict by the time it reaches GateContext
 #    (build_gate_context normalizes None -> {}).
 # 7. [Gotcha]: GateDefinition.hint is appended by diagnose_rejection(), not by _msg_* functions.
+# 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -122,6 +123,16 @@ def _pred_domain_chaotic(ctx: GateContext) -> bool:
     if not ctx.context_flags or not ctx.context_flags.get("brain_has_classified", False):
         return False
     return ctx.context_flags.get("event_domain", "complicated") == "chaotic"
+
+
+def _pred_domain_casual(ctx: GateContext) -> bool:
+    if ctx.context_flags and ctx.context_flags.get("is_intermediate"):
+        return False
+    if not ctx.context_flags or not ctx.context_flags.get("brain_has_classified", False):
+        return False
+    if ctx.context_flags.get("event_domain", "complicated") != "casual":
+        return False
+    return ctx.event_source in ("chat", "slack")
 
 
 def _pred_jarvis_response(ctx: GateContext) -> bool:
@@ -252,6 +263,14 @@ def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
     }
 
 
+def _tools_domain_casual(_ctx: GateContext) -> set[str]:
+    return {
+        "classify_event", "set_phase", "wait_for_user",
+        "consult_deep_memory", "lookup_service", "lookup_journal",
+        "respond_to_jarvis", "read_sticky_notes",
+    }
+
+
 def _tools_jarvis_response(_ctx: GateContext) -> set[str]:
     return {"respond_to_jarvis"}
 
@@ -352,6 +371,10 @@ def _msg_domain_complex(tool: str, ctx: GateContext) -> str:
 
 def _msg_domain_chaotic(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: domain is CHAOTIC. Constraint: only act-first tools available."
+
+
+def _msg_domain_casual(tool: str, _ctx: GateContext) -> str:
+    return f"[GATE] {tool} unavailable. State: domain is CASUAL. Constraint: conversational tools only. Reclassify to access operational tools."
 
 
 def _msg_jarvis_response(tool: str, _ctx: GateContext) -> str:
@@ -493,6 +516,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         predicate=_pred_domain_chaotic,
         tools_affected=_tools_domain_chaotic,
         message=_msg_domain_chaotic,
+    ),
+    GateDefinition(
+        gate_id="DOMAIN_CASUAL",
+        mode="allow",
+        predicate=_pred_domain_casual,
+        tools_affected=_tools_domain_casual,
+        message=_msg_domain_casual,
+        hint="reclassify to complicated or clear to unlock full capabilities.",
     ),
     GateDefinition(
         gate_id="JARVIS_RESPONSE",

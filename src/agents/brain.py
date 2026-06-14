@@ -236,6 +236,7 @@ BRAIN_DOMAIN_SKILLS: dict[str, list[str]] = {
     "complicated": ["domain/complicated"],
     "complex":     ["domain/complex"],
     "chaotic":     ["domain/chaotic"],
+    "casual":      ["domain/casual"],
 }
 
 # Context priming: synthetic prefill so the LLM treats protocols as already-committed.
@@ -3535,6 +3536,36 @@ class Brain:
             domain = _resolve_domain(args.get("domain", "complicated"))
             reasoning = args.get("reasoning", "")
             severity = args.get("severity")
+            if domain == "casual":
+                event_doc = await self.blackboard.get_event(event_id)
+                if not event_doc:
+                    logger.warning(f"classify_event: cannot verify source for {event_id}, rejecting casual")
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain", action="tool_result",
+                        waitingFor="classify_event",
+                        evidence=(
+                            "[GATE] casual domain rejected. State: event not found. "
+                            "Constraint: cannot verify source. Reclassify with an operational domain."
+                        ),
+                        response_parts=[],
+                    )
+                    await self._append_and_broadcast(event_id, turn)
+                    return True
+                if event_doc.source not in ("chat", "slack"):
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain", action="tool_result",
+                        waitingFor="classify_event",
+                        evidence=(
+                            "[GATE] casual domain rejected. State: source is "
+                            f"{event_doc.source}. Constraint: casual is only valid for "
+                            "chat/slack events. Reclassify with an operational domain."
+                        ),
+                        response_parts=[],
+                    )
+                    await self._append_and_broadcast(event_id, turn)
+                    return True
             await self.blackboard.update_event_domain(event_id, domain)
             thoughts = f"Cynefin: {domain.upper()}."
             if severity:

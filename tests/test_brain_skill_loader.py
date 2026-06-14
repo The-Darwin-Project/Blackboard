@@ -412,18 +412,19 @@ class TestDomainSkillLoading:
         assert "CLEAR: Categorize then Act" in joined
         assert "</navigation>" in joined
 
-    def test_all_four_domains_resolvable(self, tmp_path: Path):
-        """All four domain files resolve via the H1 fix path."""
+    def test_all_five_domains_resolvable(self, tmp_path: Path):
+        """All five domain files resolve via the H1 fix path."""
         _make_skills(tmp_path, {
             "domain": {
                 "clear.md": "# CLEAR",
                 "complicated.md": "# COMPLICATED",
                 "complex.md": "# COMPLEX",
                 "chaotic.md": "# CHAOTIC",
+                "casual.md": "# CASUAL",
             },
         })
         loader = BrainSkillLoader(str(tmp_path))
-        for domain in ("clear", "complicated", "complex", "chaotic"):
+        for domain in ("clear", "complicated", "complex", "chaotic", "casual"):
             result = loader.get_with_meta(f"domain/{domain}.md")
             assert result is not None, f"domain/{domain}.md not found in path_index"
 

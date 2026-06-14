@@ -39,6 +39,14 @@ Before deciding how to respond to an event, classify it into a domain:
 - Constraints: No constraints, act first
 - Flow: Act -> Sense -> Respond
 
+## CASUAL (Conversational -- No Problem)
+
+- Pattern: User-initiated interaction with no problem, anomaly, or action request
+- Sources: chat/slack ONLY. Never classify automated events as casual.
+- Constraints: No dispatch, no plans, no incidents. Conversational tools only.
+- Flow: Respond -> Wait -> (reclassify when purpose emerges)
+- Signals: greetings, status checks, "how's it going", informational updates, jokes, brainstorming
+
 ## DISORDER (Initial State)
 
 - DISORDER means no one has assessed the situation yet. You must classify before acting.
