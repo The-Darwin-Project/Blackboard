@@ -407,17 +407,19 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "wait_for_user",
         "description": (
-            "Pause processing until the user responds. "
+            "Park the conversation until the user sends their next message. "
             "ONLY available for chat and slack events. "
-            "Use ONLY when waiting for the user's decision or confirmation. "
-            "NOT for automated events -- use request_user_approval instead."
+            "IMPORTANT: your text response to the user must be generated as normal text output "
+            "BEFORE calling this tool. The summary parameter is an internal note only -- "
+            "the user will NOT see it. If you have not yet responded to the user in this turn, "
+            "generate your response text first, then call wait_for_user to park."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "Summary of findings and available actions",
+                    "description": "Internal note: why you are parking (not shown to user)",
                 },
             },
             "required": ["summary"],
