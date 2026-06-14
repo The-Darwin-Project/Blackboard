@@ -173,8 +173,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const evtId = batch.event_id;
       if (!evtId) continue;
 
-      // Dynamically add event node if needed
       if (!graph.hasNode(evtId)) {
+        if (!activeEvents.some(e => e.id === evtId)) continue;
         const evtCount = graph.nodes().filter((n: string) => {
           try { return graph.getNodeAttribute(n, 'type') === 'square'; } catch { return false; }
         }).length;
@@ -234,7 +234,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         activityTimersRef.current.set(edgeId, timer);
       }
     }
-  }, [liveBatches, sigma]);
+  }, [liveBatches, sigma, activeEvents]);
 
   useEffect(() => {
     const timers = activityTimersRef.current;
