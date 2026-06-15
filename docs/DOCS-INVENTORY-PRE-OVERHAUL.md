@@ -162,6 +162,7 @@ REDIS_HOST, REDIS_PASSWORD, GCP_PROJECT, GCP_LOCATION, LLM_MODEL_BRAIN, LLM_MODE
 | §5 API endpoints NOT documented | Done | See `docs/api-reference.md` — Jira, Cortex, waiting_approval, topology/services, journal/{service}, lessons PATCH |
 | §6 Env vars NOT documented | Done | See `docs/deployment.md` — Jira, idleTimeout, cortex, lessonEnrichment |
 | `.cursor/rules/02-architecture.mdc` | Reconciled | Behavioral air gap aligned with `docs/architecture.md` |
-| `ui/README.md` | Updated | Cortex + JARVIS Memory pages added |
+| `helm/README.md` | Updated | Integrations + behavioral tuning sections |
+| `CONTRIBUTING.md` | Updated | Sidecar local run, doc maintenance guide |
 
 **Remaining optional work:** Archive this inventory file after maintainer sign-off. Consider automated OpenAPI export for api-reference drift prevention.
