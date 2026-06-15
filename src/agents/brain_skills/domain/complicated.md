@@ -83,7 +83,8 @@ is still progressing.
 3. **Deep memory supplement**: consult deep memory for additional timing context. Observations are more precise (direct measurements); deep memory provides patterns across longer time spans.
 4. **Severity multiplier**: apply from the severity_modulation table above.
 5. **Progress signal (adaptive Ts)**:
-   - **Progressing**: process advancing normally → multiply Ts by 1.5× on each successive deferral (cap at 60 minutes). Confidence grows with each positive signal.
+   - **Elapsed-aware scheduling**: when the baseline duration is known and process start time is available, compute `expected_remaining = median_baseline - elapsed_runtime`. Use this as the next deferral interval instead of blind scaling. Falls back to 1.5× growth when baselines lack statistical depth or start time is unknown.
+   - **Progressing**: process advancing normally with no remaining-time estimate → multiply Ts by 1.5× on each successive deferral (cap at 60 minutes).
    - **Stalled**: no state change since last check → halve Ts for closer observation.
    - **State change**: process completed, errored, or shifted fundamentally → reset to baseline Ts and re-evaluate domain.
 

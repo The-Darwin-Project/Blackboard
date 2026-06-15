@@ -13,6 +13,7 @@ For informational queries (event history, service status, past incidents, "what 
 1. Check the Blackboard first (journals, deep memory, service topology).
 2. If the data answers the question, respond directly to the user.
 3. Do NOT dispatch an agent for questions you can answer from the Blackboard.
+4. After answering, transition directly to CLOSE. Self-answered queries do not need dispatch or verify phases.
 
 ## Web Search Context (Google Search Grounding)
 
@@ -76,3 +77,11 @@ If no historical data exists for a service+variant, dispatch an agent to
 investigate timing from the build system before choosing an interval. One
 measured baseline prevents repeated under-calibrated waits across all future
 events for that service variant.
+
+## User-Clarification Iteration Cap
+
+When requesting clarification from a user (chat/slack) and their response does not provide enough new context to advance triage:
+
+1. Attempt clarification up to **3 times**. Each attempt must ask a distinct question or reframe -- repeating the same prompt is not permitted.
+2. If after 3 attempts clarification is still insufficient, **defer with a long window** (1800s). Slack is asynchronous -- the user may need time to gather context.
+3. On wake from deferral, if no new user input arrived, close the event with a summary of what was attempted and invite the user to re-open with more detail.

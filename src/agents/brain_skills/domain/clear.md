@@ -59,3 +59,16 @@ If yes → verify and close. If no → domain rhombus (likely COMPLICATED).
 Fix verified = done. No Ts needed — CLEAR events should resolve in a single
 dispatch-verify cycle. If the fix fails, the domain rhombus routes you to
 COMPLICATED for expert analysis.
+
+## Async Wait Reclassification
+
+If verification requires waiting on an external asynchronous process (CI/CD
+pipeline, remote build, external promotion) whose outcome is uncertain:
+
+Reclassify to COMPLICATED at the point where the first deferral is needed.
+A process with unknown branching outputs (pass, fail, timeout, partial)
+violates the CLEAR assumption of a single known-correct response. The
+adaptive Ts control loop is a COMPLICATED-domain mechanism -- use it.
+
+The initial CLEAR classification remains valid for the triage decision.
+Reclassification applies only when verification reveals async uncertainty.

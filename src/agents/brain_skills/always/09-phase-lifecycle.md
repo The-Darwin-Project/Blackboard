@@ -126,6 +126,7 @@ evidence → schedule observation. Skipping VERIFY means you defer on stale stat
 graph LR
     T[TRIAGE] -->|"produces: domain, state, memory"| G1{"gate eval"}
     G1 -->|"expects: which phase?"| D[DISPATCH]
+    G1 -->|"self-answered (no agent needed)"| CL[CLOSE]
     D -->|"produces: agent report, observations"| G2{{"async boundary"}}
     G2 -->|"expects: defer or immediate"| V[VERIFY]
     V -->|"produces: fresh state, assessment"| G3{"resolved?"}
