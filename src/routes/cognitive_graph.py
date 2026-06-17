@@ -1,6 +1,6 @@
 # BlackBoard/src/routes/cognitive_graph.py
 # @ai-rules:
-# 1. [Constraint]: Read-only endpoints. No mutations to Qdrant or Redis heat counters.
+# 1. [Constraint]: Read-only endpoints EXCEPT proposal dismiss (operator lifecycle action).
 # 2. [Pattern]: Returns 503 when PulseTracker or Archivist unavailable (feature flag off).
 # 3. [Pattern]: /api/cognitive-graph merges Qdrant neurons with Redis heat counters.
 # 4. [Pattern]: /api/pulses filters by event_id or since timestamp.
@@ -232,8 +232,12 @@ async def get_handoff_reports(limit: int = 100):
     return {"reports": reports, "count": len(reports)}
 
 
+PROPOSALS_KEY = "darwin:cortex:proposals"
+PROPOSALS_DISMISSED_KEY = "darwin:cortex:proposals:dismissed"
+
+
 @router.get("/cortex/proposals")
-async def get_proposals(limit: int = 100):
+async def get_proposals(limit: int = 100, include_dismissed: bool = False):
     """Return JARVIS enhancement proposals from Redis.
 
     Proposals have no TTL (intentional) -- they persist until explicitly
@@ -245,12 +249,42 @@ async def get_proposals(limit: int = 100):
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
     redis = blackboard.redis
-    raw = await redis.lrange("darwin:cortex:proposals", -limit, -1)
+    raw = await redis.lrange(PROPOSALS_KEY, -limit, -1)
+    dismissed: set[str] = set()
+    if not include_dismissed:
+        dismissed = {m.decode() if isinstance(m, bytes) else m
+                     for m in await redis.smembers(PROPOSALS_DISMISSED_KEY)}
     proposals = []
     for entry in raw:
         try:
-            proposals.append(json.loads(entry))
+            p = json.loads(entry)
+            ts_key = str(p.get("timestamp", ""))
+            if ts_key in dismissed:
+                p["status"] = "dismissed"
+                if not include_dismissed:
+                    continue
+            proposals.append(p)
         except (json.JSONDecodeError, TypeError):
             continue
     proposals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
     return {"proposals": proposals, "count": len(proposals)}
+
+
+@router.post("/cortex/proposals/dismiss")
+async def dismiss_proposals(body: dict):
+    """Mark proposals as dismissed by timestamp. Accepts {timestamps: [float, ...], reason: str}.
+
+    Dismissed proposals are filtered from GET by default (use ?include_dismissed=true to see them).
+    """
+    from ..dependencies import get_blackboard
+    try:
+        blackboard = await get_blackboard()
+    except RuntimeError:
+        raise HTTPException(503, "Blackboard not available")
+    timestamps = body.get("timestamps", [])
+    if not timestamps:
+        raise HTTPException(400, "timestamps array required")
+    redis = blackboard.redis
+    str_timestamps = [str(t) for t in timestamps]
+    await redis.sadd(PROPOSALS_DISMISSED_KEY, *str_timestamps)
+    return {"dismissed": len(str_timestamps)}
