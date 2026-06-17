@@ -63,6 +63,9 @@ Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are av
 
 ## Deferral Calibration
 
+Before deferring on any async process, subscribe to state changes first
+(see `always/08-flow-engineering.md` State Change Subscriptions).
+
 When scheduling an observation interval (defer), calibrate duration from
 measured history -- not from a fixed default. Your observation notebook and
 deep memory hold duration data for recurring processes. Use the minimum
