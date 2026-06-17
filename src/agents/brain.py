@@ -37,6 +37,11 @@
 #     WATCH/MULTI/EXEC. Protected by per-event asyncio.Lock, but external concurrent writes (REST endpoints)
 #     could theoretically lose turns. Pre-existing pattern -- refactor to use transition_event_status() or
 #     a dedicated blackboard.defer_event() atomic operation when this path is next modified.
+# 35. [Pattern]: StateWatcher subscription lifecycle: cycle_id (uuid4 per _process_event_inner) tracks
+#     subscribe+defer in same cycle. defer_event cancels stale (different-cycle) subscriptions only.
+#     _close_and_broadcast, force-close, and reconcile timer-wake cancel unconditionally.
+#     on_change callback: transition deferred->active, inject system.notification turn (thoughts field),
+#     enqueue for immediate processing. Lifecycle tied to start_event_loop/stop_event_loop.
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
@@ -329,6 +334,8 @@ class Brain:
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._scheduler = None  # ReconcileScheduler | None -- set by start_event_loop()
+        self._state_watcher = None  # StateWatcher | None -- set by start_event_loop()
+        self._cycle_id_for_event: dict[str, str] = {}  # event_id -> uuid4 per _process_event_inner
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
         self._ephemeral_provisioner = None
@@ -532,6 +539,10 @@ class Brain:
         service, close this one as a duplicate.
         """
         self._last_processed[event_id] = time.time()
+
+        # Generate cycle_id for subscription lifecycle tracking (subscribe + defer in same cycle)
+        from uuid import uuid4
+        self._cycle_id_for_event[event_id] = str(uuid4())
 
         # Use prefetched event if available (from loop scan), otherwise fetch fresh
         event = prefetched_event or await self.blackboard.get_event(event_id)
@@ -2605,6 +2616,10 @@ class Brain:
             # Defer supersedes any active wait -- FRIDAY chose to wait on a timer,
             # not on a participant. Clear wait states to prevent post-reactivation deadlock.
             self._waiting_for_agent.pop(event_id, None)
+            # Cancel stale subscriptions from previous cycles (preserve same-cycle: subscribe -> defer)
+            if self._state_watcher:
+                current_cycle = self._cycle_id_for_event.get(event_id, "")
+                self._state_watcher.cancel_if_different_cycle(event_id, current_cycle)
             reason = args.get("reason", "Deferred by Brain")
             delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))  # Clamp 30s-60min
             defer_started_at = time.time()
@@ -3704,7 +3719,31 @@ class Brain:
                     f"{merge_line}\n"
                     f"Severity: {state['severity']}"
                 )
+            subscription_active = False
+            if args.get("subscribe") and self._state_watcher and "error" not in state:
+                event = await self.blackboard.get_event(event_id)
+                gl_ctx = getattr(event.event.evidence, "gitlab_context", None) if event and event.event and event.event.evidence else None
+                if gl_ctx:
+                    from ..scheduling import SubscriptionSpec, GitLabMrRef
+                    interval = max(15, min(int(args.get("poll_interval", 30)), 300))
+                    spec = SubscriptionSpec(
+                        event_id=event_id,
+                        resource_type="gitlab_mr",
+                        resource_ref=GitLabMrRef(
+                            project_id=gl_ctx.get("project_id", 0),
+                            mr_iid=gl_ctx.get("mr_iid", 0),
+                        ),
+                        poll_fn=headhunter.poll_gitlab_mr_status,
+                        interval=interval,
+                        state_key=headhunter.extract_gitlab_state_key(state),
+                        registered_at=time.time(),
+                        cycle_id=self._cycle_id_for_event.get(event_id, ""),
+                    )
+                    subscription_active = self._state_watcher.register(spec)
+
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
+            if args.get("subscribe"):
+                evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -3774,7 +3813,30 @@ class Brain:
                     f"Message: {state.get('message', '')}\n"
                     f"MR URL: {new_mr_url or 'N/A'}"
                 )
+            subscription_active = False
+            if args.get("subscribe") and self._state_watcher and "error" not in state:
+                from ..scheduling import SubscriptionSpec, KargoStageRef
+                from ..observers.kargo import KargoObserver as _KO
+                interval = max(15, min(int(args.get("poll_interval", 30)), 300))
+                promo_status = state.get("_promo_status", {})
+                spec = SubscriptionSpec(
+                    event_id=event_id,
+                    resource_type="kargo_stage",
+                    resource_ref=KargoStageRef(project=project, stage=stage),
+                    poll_fn=kargo_observer.poll_kargo_stage_status,
+                    interval=interval,
+                    state_key=_KO.extract_kargo_state_key(promo_status) if promo_status else {
+                        "phase": state.get("phase", "unknown"),
+                        "failed_step": state.get("failed_step"),
+                    },
+                    registered_at=time.time(),
+                    cycle_id=self._cycle_id_for_event.get(event_id, ""),
+                )
+                subscription_active = self._state_watcher.register(spec)
+
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
+            if args.get("subscribe"):
+                evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -4974,7 +5036,11 @@ class Brain:
                     await archivist.archive_event(event)
                 except Exception as e:
                     logger.warning(f"Deep memory archive failed (non-fatal): {e}")
+        # Cancel any active state watcher subscription
+        if self._state_watcher:
+            self._state_watcher.cancel(event_id)
         # Clean up all per-event state to prevent memory leaks
+        self._cycle_id_for_event.pop(event_id, None)
         self.clear_hold_watch(event_id)
         if event and event.source == "jarvis":
             self._active_meta_event_id = None
@@ -5491,6 +5557,13 @@ class Brain:
             name="chat",
         ))
 
+        from ..scheduling import StateWatcher
+        self._state_watcher = StateWatcher(
+            on_change=self._on_subscription_state_change,
+            is_deferred=self._is_event_deferred,
+        )
+        await self._state_watcher.start()
+
         logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
         await self._scheduler.start()
 
@@ -5514,9 +5587,71 @@ class Brain:
         """Error handler for ReconcileScheduler worker failures."""
         logger.error(f"Reconcile failed for {event_id}: {exc}", exc_info=True)
 
+    # =========================================================================
+    # StateWatcher: subscription lifecycle callbacks + shared wake helper
+    # =========================================================================
+
+    async def _is_event_deferred(self, event_id: str) -> bool:
+        """Deferred gate check for StateWatcher poll loop."""
+        event = await self.blackboard.get_event(event_id)
+        return event is not None and event.status == EventStatus.DEFERRED
+
+    async def _wake_deferred_event(self, event_id: str, *, notification_turn: ConversationTurn | None = None) -> bool:
+        """Shared helper: transition deferred->active, broadcast, enqueue.
+
+        Used by both subscription-wake (_on_subscription_state_change) and
+        timer-wake (_scan_active_for_reconcile) to avoid duplicate logic."""
+        defer_key = f"{self.blackboard.EVENT_PREFIX}{event_id}:defer_until"
+        transitioned = await self.blackboard.transition_event_status(
+            event_id, "deferred", EventStatus.ACTIVE,
+        )
+        await self.blackboard.redis.delete(defer_key)
+        if not transitioned:
+            return False
+        if notification_turn:
+            await self._append_and_broadcast(event_id, notification_turn)
+        await self._broadcast({
+            "type": "event_status_changed",
+            "event_id": event_id,
+            "status": EventStatus.ACTIVE.value,
+        })
+        self._defer_wake_events.add(event_id)
+        if self._scheduler:
+            self._scheduler.enqueue(event_id)
+        return True
+
+    async def _on_subscription_state_change(self, event_id: str, old_state, new_state, spec) -> None:
+        """Hook for StateWatcher: wake deferred event with structured notification."""
+        elapsed = int(time.time() - spec.registered_at)
+        resource_label = (
+            f"GitLab MR !{spec.resource_ref.mr_iid}"
+            if spec.resource_type == "gitlab_mr"
+            else f"Kargo {spec.resource_ref.project}/{spec.resource_ref.stage}"
+        )
+        notification = (
+            f"## State Change Notification\n"
+            f"Resource: {resource_label}\n"
+            f"Previous: {', '.join(f'{k}: {v}' for k, v in old_state.items())}\n"
+            f"Current: {', '.join(f'{k}: {v}' for k, v in new_state.items())}\n"
+            f"Elapsed: {elapsed // 60}m since subscription registered\n"
+            f"Change detected by background subscription ({spec.interval}s poll interval)"
+        )
+        turn = ConversationTurn(
+            turn=(await self._next_turn_number(event_id)),
+            actor="system", action="notification",
+            thoughts=notification,
+        )
+        woke = await self._wake_deferred_event(event_id, notification_turn=turn)
+        if not woke:
+            logger.warning("StateWatcher: %s transition failed (already active/closed), skipping", event_id)
+            return
+        logger.info("StateWatcher woke %s: %s -> %s (%dm)", event_id, old_state, new_state, elapsed // 60)
+
     async def stop_event_loop(self) -> None:
         """Stop the event loop."""
         self._running = False
+        if self._state_watcher:
+            await self._state_watcher.stop()
         if self._scheduler:
             await self._scheduler.stop()
         logger.info("Brain event loop stopped")
@@ -5610,23 +5745,15 @@ class Brain:
                     if not user_after_defer:
                         continue
                     logger.info(f"User message interrupted defer for {eid} -- waking early")
-                # Re-activate deferred event
+                if self._state_watcher:
+                    self._state_watcher.cancel(eid)
                 logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
-                transitioned = await self.blackboard.transition_event_status(
-                    eid, "deferred", EventStatus.ACTIVE,
-                )
-                await self.blackboard.redis.delete(defer_key)
-                if transitioned:
-                    await self._broadcast({
-                        "type": "event_status_changed",
-                        "event_id": eid,
-                        "status": EventStatus.ACTIVE.value,
-                    })
+                woke = await self._wake_deferred_event(eid)
+                if woke:
                     if eid in self._waiting_for_user:
                         logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
                     else:
                         logger.info(f"Deferred event {eid} re-activated")
-                        self._defer_wake_events.add(eid)
                         to_enqueue.append(eid)
                 else:
                     refetched = await self.blackboard.get_event(eid)

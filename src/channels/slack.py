@@ -7,9 +7,9 @@
 # 5. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
 # 6. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
 # 7. [Pattern]: _assistant_context stores {channel, thread_ts, user_id, team_id} per event for setStatus calls and DM routing. Populated in user_message, consumed by broadcast_handler.
-# 8. [Pattern]: _INTERNAL_ACTIONS blacklist prevents internal turns (triage, phase, respond_jarvis,
-#    tool_result, etc.) from leaking into user Slack threads. Applied in _handle_legacy_turn.
-#    The is_quiet whitelist is the inverse for infra threads.
+# 8. [Pattern]: _INTERNAL_TURNS (actor, action) frozenset prevents internal turns from leaking into
+#    user Slack threads. Applied in _handle_legacy_turn via tuple matching. Extensible for non-brain
+#    actors (e.g., system.notification). The is_quiet whitelist is the inverse for infra threads.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
@@ -34,9 +34,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("darwin.slack")
 
-_INTERNAL_ACTIONS = frozenset({
-    "triage", "phase", "respond_jarvis", "tool_result",
-    "hold_watch", "intermediate", "hold_watch_wake", "think",
+_INTERNAL_TURNS = frozenset({
+    ("brain", "triage"), ("brain", "phase"), ("brain", "respond_jarvis"),
+    ("brain", "tool_result"), ("brain", "hold_watch"), ("brain", "intermediate"),
+    ("brain", "hold_watch_wake"), ("brain", "think"),
+    ("system", "notification"),
 })
 
 
@@ -779,7 +781,7 @@ class SlackChannel:
         if turn.actor == "brain" and turn.action == "thoughts":
             return
 
-        if turn.actor == "brain" and turn.action in _INTERNAL_ACTIONS:
+        if (turn.actor, turn.action) in _INTERNAL_TURNS:
             return
 
         if (

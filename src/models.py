@@ -625,6 +625,7 @@ class FlowMetricsResponse(BaseModel):
     active_events: int = 0
     busy_agents: int = 0
     idle_agents: int = 0
+    active_subscriptions: int = 0
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
 

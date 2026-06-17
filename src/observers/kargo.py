@@ -6,6 +6,7 @@
 #    _initial_sync() clears-then-repopulates ONLY on success. Failed K8s API call preserves previous state.
 # 4. [Constraint]: Callbacks are async -- never raise into the watch loop. Wrap in try/except.
 # 5. [Pattern]: get_stage_status() is the on-demand read path for Brain's refresh_kargo_context tool.
+# 6. [Pattern]: poll_kargo_stage_status() is a side-effect-free read-only poll for StateWatcher. Returns state_key fields only.
 """
 Kargo Stage Observer -- watches promotion state via K8s Watch API.
 
@@ -346,6 +347,33 @@ class KargoObserver:
         except Exception as e:
             logger.error(f"KargoObserver get_stage_status failed for {project}/{stage}: {e}")
             return {"error": str(e), "project": project, "stage": stage}
+
+    async def poll_kargo_stage_status(self, project: str, stage: str) -> dict:
+        """Lightweight read-only poll. Returns only state_key fields.
+        Does NOT fire callbacks. Used by StateWatcher.
+        Raises on K8s errors so StateWatcher backoff engages."""
+        if not self._k8s_available:
+            raise RuntimeError("K8s client not available")
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: self._custom_api.get_namespaced_custom_object(
+                group=KARGO_GROUP, version=KARGO_VERSION,
+                namespace=project, plural=KARGO_PLURAL, name=stage,
+            ),
+        )
+        status = result.get("status", {})
+        last_promo = status.get("lastPromotion", {})
+        promo_status = last_promo.get("status", {})
+        return self.extract_kargo_state_key(promo_status)
+
+    @staticmethod
+    def extract_kargo_state_key(promo_status: dict) -> dict:
+        """Canonical state_key builder for Kargo subscriptions.
+        Single source of truth -- used by both Brain (register) and poll adapter."""
+        return {
+            "phase": promo_status.get("phase", "unknown"),
+            "failed_step": KargoObserver._extract_failed_step(promo_status),
+        }
 
     @staticmethod
     def _extract_failed_step(promo_status: dict) -> str:

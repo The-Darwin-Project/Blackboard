@@ -78,6 +78,32 @@ investigate timing from the build system before choosing an interval. One
 measured baseline prevents repeated under-calibrated waits across all future
 events for that service variant.
 
+### Scheduled-Process Anchor
+
+When the external process is governed by a long-running schedule (MintMaker,
+Renovate, bot rebases on cron), the deferral baseline is the schedule's
+median cycle -- not the pipeline duration. A bot on a 1-4 hour cron will
+not start a new pipeline for hours. Use 2-3 hours as the floor for
+cron-driven bot operations. Short deferrals (30-60 minutes) against a
+multi-hour cron produce empty wake-ups with identical state.
+
+### Structural Deferral Bounds
+
+Calibrated deferrals prevent under-waiting. Structural bounds prevent
+infinite over-waiting:
+
+- **Max consecutive same-reason deferrals**: 3. If the deferral reason text
+  is substantively identical across 3 consecutive wakes, the process is
+  stalled -- dispatch an agent to investigate or escalate.
+- **Absolute elapsed ceiling**: 60 minutes of total deferral time on the
+  same underlying process without a state change, agent dispatch, or
+  escalation triggers mandatory investigation. This ceiling adapts: if the
+  measured baseline for the variant exceeds 60 minutes (e.g., multi-arch
+  builds at 56 minutes), use 1.5x the median baseline as the ceiling.
+- **Never defer on stale state**: every re-deferral must be preceded by a
+  fresh PV measurement (refresh or agent report). Deferring without
+  measurement violates the control loop.
+
 ## User-Clarification Iteration Cap
 
 When requesting clarification from a user (chat/slack) and their response does not provide enough new context to advance triage:

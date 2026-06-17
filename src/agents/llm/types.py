@@ -720,13 +720,12 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "refresh_gitlab_context",
         "description": (
-            "Quick-check: ask the Headhunter to re-fetch current MR and pipeline "
-            "state from GitLab WITHOUT dispatching an agent. Returns a snapshot of "
-            "the current state. Use in two patterns: "
-            "(1) Pre-dispatch triage: refresh before selecting an agent so you can "
-            "give precise instructions (e.g., 'pipeline failed' vs 'pipeline passed, merge'). "
-            "(2) Post-defer check: after deferring for a running pipeline, refresh to "
-            "see the outcome before deciding next action."
+            "Quick-check: re-fetch current MR and pipeline state from GitLab "
+            "WITHOUT dispatching an agent. Returns a snapshot of the current state. "
+            "Can optionally subscribe to background state monitoring -- the system "
+            "watches for MR/pipeline state changes (merged, pipeline completed, "
+            "failed) and injects a notification turn when something changes, "
+            "waking the event early. The defer timer remains the safety net."
         ),
         "input_schema": {
             "type": "object",
@@ -734,6 +733,22 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "check_condition": {
                     "type": "string",
                     "description": "What to verify (e.g., 'pipeline passed after retest', 'MR merged', 'pipeline completed after defer')",
+                },
+                "subscribe": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable background state monitoring. The system watches for "
+                        "changes and injects a notification turn when the state "
+                        "changes, waking the event early. Best-effort -- check "
+                        "subscription_active in the response to confirm acceptance."
+                    ),
+                },
+                "poll_interval": {
+                    "type": "integer",
+                    "description": (
+                        "Seconds between background state checks when subscribe is "
+                        "enabled. The system enforces minimum and maximum bounds."
+                    ),
                 },
             },
             "required": ["check_condition"],
@@ -743,9 +758,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "refresh_kargo_context",
         "description": (
             "Re-read current Kargo Stage promotion state without dispatching an agent. "
-            "Returns promotion phase, failed step, and error message. Use after dispatching "
-            "sysadmin to retry a promotion, or after deferring to check if a new promotion "
-            "succeeded. Only available for events with kargo_context in evidence."
+            "Returns promotion phase, failed step, and error message. Can optionally "
+            "subscribe to background state monitoring -- the system watches for "
+            "promotion state changes (succeeded, failed, progressing) and injects a "
+            "notification turn when something changes."
         ),
         "input_schema": {
             "type": "object",
@@ -753,6 +769,22 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "check_condition": {
                     "type": "string",
                     "description": "What to verify (e.g., 'promotion succeeded after retry', 'new promotion running')",
+                },
+                "subscribe": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable background state monitoring. The system watches for "
+                        "changes and injects a notification turn when the state "
+                        "changes, waking the event early. Best-effort -- check "
+                        "subscription_active in the response to confirm acceptance."
+                    ),
+                },
+                "poll_interval": {
+                    "type": "integer",
+                    "description": (
+                        "Seconds between background state checks when subscribe is "
+                        "enabled. The system enforces minimum and maximum bounds."
+                    ),
                 },
             },
             "required": ["check_condition"],

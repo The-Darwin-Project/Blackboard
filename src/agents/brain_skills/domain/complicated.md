@@ -88,6 +88,10 @@ is still progressing.
    - **Stalled**: no state change since last check → halve Ts for closer observation.
    - **State change**: process completed, errored, or shifted fundamentally → reset to baseline Ts and re-evaluate domain.
 
+6. **Subscribe before deferring**: when deferring on a running pipeline or promotion, subscribe to state changes on the inspection tool. This lets you defer for the full expected duration while waking early on completion or failure. The subscription is an optimization -- the defer timer is always the safety net.
+7. **Scheduled-process baseline**: when the process is driven by an external cron schedule (MintMaker, Renovate, bot rebases), the natural Ts is the schedule's median cycle -- not the pipeline duration. A bot on a 1-4 hour cron will not start a new pipeline for hours; deferring in 30-minute increments produces empty wake-ups. Use 2-3 hours as the baseline for cron-driven bots, then apply severity modulation.
+8. **Absolute deferral ceiling**: regardless of Ts scaling, no single chain of deferrals for the same underlying process may exceed **60 minutes of total elapsed wall time** without either (a) a state change in the PV, (b) an agent dispatch to investigate, or (c) escalation. If 60 minutes pass with "still running" and no new evidence, dispatch an agent to investigate or escalate. This ceiling prevents indefinite stall loops.
+
 Step 2 fires once per service+variant -- after the first variant-specific duration is observed, future events skip the agent dispatch and use measured data directly.
 
 ## Close Criteria

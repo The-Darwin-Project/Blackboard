@@ -508,12 +508,15 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         pass
 
     staleness_guards: list[dict] = []
+    active_subs = 0
     try:
         brain = get_brain()
         if brain and brain._scheduler:
             for trigger in brain._scheduler._triggers:
                 if isinstance(trigger, StalenessGuard):
                     staleness_guards.append(trigger.metrics())
+        if brain and brain._state_watcher:
+            active_subs = brain._state_watcher.active_count
     except Exception:
         pass
 
@@ -522,6 +525,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         active_events=flow["active_events"],
         busy_agents=busy,
         idle_agents=idle,
+        active_subscriptions=active_subs,
         agents_by_role=by_role,
         staleness_guards=staleness_guards,
     )

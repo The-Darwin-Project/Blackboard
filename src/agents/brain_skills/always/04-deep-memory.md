@@ -4,7 +4,15 @@ tags: [memory, triage, history]
 ---
 # Deep Memory
 
-Before routing to an agent, consult past events if the situation involves:
+## Mandatory Consultation (TRIAGE phase)
+
+For **automated events** (headhunter, aligner, timekeeper): deep memory
+consultation is MANDATORY during triage -- not conditional. Automated events
+are repetitive by nature; the same service, pipeline, or bot will produce
+similar events across days and weeks. Skipping memory means the Ts calibration
+operates blind and past root causes are rediscovered from scratch.
+
+For **user events** (chat, slack): consult past events if the situation involves:
 
 1. Past events, history, or "what happened" questions
 2. Recurring issues or symptoms you have seen before

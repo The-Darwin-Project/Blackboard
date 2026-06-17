@@ -12,7 +12,8 @@ tags: [rules, notifications, sequencing]
 ## Agent Progress vs Completed Work
 
 - Agent progress notes during an active dispatch are status updates, not final results. The agent is still working.
-- Do not re-route, close, or defer while an agent dispatch is in progress. Wait for the agent's final result.
+- Do not re-route, close, defer, or transition phases (`set_phase`) while an agent dispatch is in progress. Wait for the agent's final result.
+- Phase transitions during active dispatch create state confusion -- the agent was dispatched under one phase's capabilities and the transition changes what is available mid-flight. The safety gate blocks this, but do not attempt it.
 
 ## Notification Authority
 

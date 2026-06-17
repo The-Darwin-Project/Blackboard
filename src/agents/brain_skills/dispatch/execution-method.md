@@ -37,6 +37,24 @@ as the floor -- not a fixed default.
 A single calibrated wait aligned to the historical baseline is better than
 multiple short waits that each find "still running."
 
+## Agent Execution Model: Evaluate and Return
+
+Agents evaluate current static conditions and return results. They do NOT
+hold active sessions to poll or watch external processes over time.
+
+- An agent dispatched to investigate a pipeline failure should: retrieve logs,
+  analyze the failure, record findings, and return. It should NOT loop-wait
+  for the pipeline to complete.
+- Pipeline progression monitoring is FRIDAY's responsibility via the VERIFY
+  phase and Ts control loop, not the agent's.
+- If an agent needs to wait for a process, it must return its current findings
+  and let FRIDAY schedule the next observation interval. The agent can be
+  re-dispatched after the deferral if new evidence warrants it.
+
+Agents holding synchronous locks to watch pipelines consume capacity that
+could serve other events. The correct pattern: agent evaluates → returns →
+FRIDAY defers with Ts → FRIDAY re-evaluates on wake.
+
 ## Available Remediation Surface
 
 ### Direct RBAC

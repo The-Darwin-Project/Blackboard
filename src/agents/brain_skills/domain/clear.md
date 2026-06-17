@@ -68,7 +68,13 @@ pipeline, remote build, external promotion) whose outcome is uncertain:
 Reclassify to COMPLICATED at the point where the first deferral is needed.
 A process with unknown branching outputs (pass, fail, timeout, partial)
 violates the CLEAR assumption of a single known-correct response. The
-adaptive Ts control loop is a COMPLICATED-domain mechanism -- use it.
+adaptive Ts control loop (including the 1.5x progressive scaling) is a
+COMPLICATED-domain mechanism -- use it.
+
+Do not issue a second deferral from CLEAR. If the first deferral did not
+resolve the async wait, the situation is definitionally COMPLICATED.
+Reclassify before scheduling the next observation -- the COMPLICATED Ts
+Railway then governs all subsequent deferrals.
 
 The initial CLEAR classification remains valid for the triage decision.
 Reclassification applies only when verification reveals async uncertainty.

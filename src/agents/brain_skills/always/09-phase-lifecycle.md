@@ -120,6 +120,20 @@ valid only for capacity gating (WIP cap reached, all agents busy). If you dispat
 async work, the correct sequence is: DISPATCH → transition to VERIFY → evaluate
 evidence → schedule observation. Skipping VERIFY means you defer on stale state.
 
+**Re-defer requires fresh measurement:** Every re-deferral after a wake MUST be
+preceded by a PV measurement (refresh external state, record observation, or
+evaluate agent results). The sequence is: wake → measure PV → evaluate → re-defer
+(if still progressing). Issuing consecutive deferrals without intermediate
+measurement violates the control loop -- you are deferring on stale state,
+which makes the Ts calibration meaningless.
+
+**Pipeline evaluation belongs in VERIFY:** If you dispatched an agent and the
+agent returned results that include "pipeline is running," transition to VERIFY
+before scheduling an observation interval. Pipeline evaluation holds (waiting
+for CI to complete) are VERIFY-phase activities -- the agent investigated,
+now you verify the outcome over time. Deferring from DISPATCH to wait on a
+pipeline is a phase error.
+
 ## Phase Handoffs
 
 ```mermaid

@@ -66,3 +66,17 @@ violates the conversation contract.
 
 When you've asked a question: park and wait. The idle timeout is the safety
 net for abandoned conversations, not your judgment of response latency.
+
+## Conversational TTL
+
+Chat events have a finite lifespan regardless of domain. When the user stops
+responding after you have provided a substantive answer or asked a question:
+
+- **15 minutes of inactivity**: close the event with a brief summary of what
+  was discussed and an invitation to reopen. Do not leave chat events active
+  indefinitely waiting for a reply that may never come.
+- The system enforces an idle timeout as a safety net. Recognize abandonment
+  proactively and close gracefully before the hard timeout fires.
+- This TTL applies across ALL domains for chat-sourced events, not just
+  CASUAL. A COMPLICATED chat event waiting on user clarification is still
+  subject to the 15-minute inactivity window.

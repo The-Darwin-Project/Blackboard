@@ -14,7 +14,8 @@
 # 11. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
 # 12. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
 # 13. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
-# 14. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note).
+# 14. [Pattern]: poll_gitlab_mr_status(project_id, mr_iid) is a side-effect-free read-only poll for StateWatcher. Returns state_key fields only.
+# 15. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note).
 #     Normal closes: mark_feedback_sent always runs after MR comment post, regardless of dismiss outcome.
 """
 Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
@@ -630,6 +631,40 @@ class Headhunter:
         await self.blackboard.update_event_gitlab_context(event_id, result)
         logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}, severity={severity}")
         return result
+
+    async def poll_gitlab_mr_status(self, project_id: int, mr_iid: int) -> dict:
+        """Lightweight read-only poll. Returns only state_key fields.
+        Does NOT update event evidence. Used by StateWatcher.
+        Raises on HTTP errors so StateWatcher backoff engages."""
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            mr_resp = await client.get(
+                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
+                headers=self._headers(),
+            )
+            mr_resp.raise_for_status()
+            pipe_resp = await client.get(
+                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/pipelines"),
+                headers=self._headers(),
+            )
+            pipe_resp.raise_for_status()
+        mr = mr_resp.json()
+        pipelines = pipe_resp.json()
+        latest_pipeline = pipelines[0] if isinstance(pipelines, list) and pipelines else {}
+        return {
+            "mr_state": mr.get("state", "unknown"),
+            "pipeline_status": latest_pipeline.get("status", "unknown"),
+            "merge_status": mr.get("merge_status", "unknown"),
+        }
+
+    @staticmethod
+    def extract_gitlab_state_key(state: dict) -> dict:
+        """Canonical state_key builder for GitLab MR subscriptions.
+        Single source of truth -- used by both Brain (register) and poll adapter."""
+        return {
+            "mr_state": state.get("mr_state", "unknown"),
+            "pipeline_status": state.get("pipeline_status", "unknown"),
+            "merge_status": state.get("merge_status", "unknown"),
+        }
 
     async def _resolve_service(self, project_path: str) -> str:
         """Map GitLab project path to a Darwin service name via service registry.

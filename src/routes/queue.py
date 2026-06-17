@@ -313,6 +313,9 @@ async def close_event_by_user(
     try:
         brain = await get_brain()
         await brain.cancel_active_task(event_id, f"User force-close: {body.reason}")
+        if brain._state_watcher:
+            brain._state_watcher.cancel(event_id)
+        brain._cycle_id_for_event.pop(event_id, None)
     except RuntimeError:
         pass  # Brain not initialized
     await blackboard.close_event(event_id, close_summary, close_reason="user_closed")

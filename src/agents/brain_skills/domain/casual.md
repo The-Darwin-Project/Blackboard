@@ -80,9 +80,24 @@ Reclassification swaps your domain skill. The new domain's strategy loads on the
 
 Casual is the resting state for chat/slack conversations. After completing a task (the event cycled through COMPLICATED/CLEAR and resolved the work item), check: is the user still engaged? If yes, reclassify back to CASUAL. Domain cycling is normal: casual -> complicated -> casual -> clear -> close.
 
+## Inactivity Timeout
+
+CASUAL events have a finite lifespan. When the user stops responding:
+
+- **10 minutes of inactivity** after your last message (with no user reply):
+  the conversation is likely abandoned. Reclassify to CLEAR and close with a
+  brief farewell ("Looks like you stepped away -- closing this out. Ping me
+  anytime."). Do not wait indefinitely.
+- **If your last message was a question**: extend the window to 15 minutes.
+  The user may be composing or gathering context. After 15 minutes, close
+  with the same brief farewell.
+- The system enforces an idle timeout as a safety net. Your role is to
+  recognize abandonment proactively and close gracefully before the hard
+  timeout fires.
+
 ## Close Criteria
 
 NEVER close from CASUAL directly. Reclassify first:
 - Farewell -> CLEAR -> close
 - Task shift -> COMPLICATED/COMPLEX -> normal lifecycle -> back to CASUAL if user stays
-- Abandonment -> idle timeout auto-closes
+- Abandonment -> recognize inactivity, reclassify to CLEAR, close gracefully

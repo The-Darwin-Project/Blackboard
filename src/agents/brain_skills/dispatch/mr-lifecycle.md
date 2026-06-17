@@ -20,6 +20,43 @@ it to finish before acting.
 MR/PR open + pipeline failed means the pipeline needs attention. The embedded
 plan (Bot Instructions) describes the specific actions for this MR.
 
+## Investigation Before Action
+
+When an MR/PR pipeline has failed, the failure logs must be analyzed BEFORE
+any retry, retest, or remediation action -- even when Bot Instructions
+explicitly say "retest" or "trigger /ok-to-test." Bot Instructions describe
+the INTENDED workflow; they do not override the need to understand WHY the
+pipeline failed.
+
+Sequence:
+1. Dispatch an agent to retrieve and analyze the failed pipeline logs.
+2. Record the failure root cause as an observation.
+3. If the failure is transient (infra flake, quota timeout, network blip)
+   AND deep memory confirms this pattern resolves on retry → proceed with
+   the Bot Instructions retest action.
+4. If the failure is deterministic (code bug, missing dependency, known
+   upstream breakage) → retesting will produce the same failure. Skip the
+   retest. Escalate or apply a fix instead.
+5. If deep memory surfaces a known non-recoverable pattern for this failure
+   signature → do NOT retest. Close or escalate based on the Bot Instructions
+   failure path.
+
+A blind retry on a deterministic failure wastes a full pipeline cycle and
+delays actual resolution.
+
+## MR/PR Comment Retrieval
+
+CI bot output, review feedback, and prior action history live primarily in
+MR/PR comments. When investigating or executing on an MR/PR event:
+
+1. Retrieve recent MR/PR comments as part of the initial investigation.
+2. CI bot comments contain pipeline failure details, test results, and
+   approval status that may not appear in the pipeline API response.
+3. Review comments may contain context about known issues or prior fixes
+   attempted by the author.
+
+Skipping comment retrieval means operating on incomplete evidence.
+
 ## MR/PR Holistic State
 
 A pipeline failure is not the only reason an MR/PR is blocked. An MR/PR can also be
