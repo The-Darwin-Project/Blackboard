@@ -68,6 +68,28 @@ When investigating MR/PR failures, the full picture includes: pipeline status,
 merge conflicts, rebase state, and recent merges to the target branch that
 may resolve the issue without a code change.
 
+## Bot MR Merge Conflict Handling
+
+When `refresh_gitlab_context` reveals merge conflicts on a bot-authored MR,
+do not dispatch an agent to resolve the conflict manually. Bot MRs with
+conflicts resolve by bot regeneration or rebase, not human intervention.
+
+**Precedence:** If the MR has both merge conflicts AND a failed pipeline,
+the conflict path takes precedence -- a conflicted MR cannot be retested.
+
+**Decision:**
+
+1. Check the MR's recent activity (commits, pushes). If the bot has been
+   active within its observed update cadence (check deep memory for the
+   bot's prior MR frequency on this repo), defer once -- the bot may
+   rebase on its next cycle.
+2. If the MR is stale (no bot activity for significantly longer than the
+   bot's observed cadence), close the event and notify the maintainer.
+   The bot will create a fresh MR on its next trigger.
+3. If deep memory has no prior data for this bot's cadence, defer once
+   (conservative). If still conflicted after the deferral, close and
+   notify.
+
 ## MR/PR Pipeline Fix Principle
 
 When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):

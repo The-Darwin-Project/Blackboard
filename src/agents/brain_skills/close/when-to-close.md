@@ -62,6 +62,17 @@ Every event, journal entry, and investigation result carries a timestamp. Before
 - **When was the last successful event for this service?** The Ops Journal shows it. A gap between the last success and now is time where recovery may have happened unobserved.
 - **When was the original escalation for a recurring failure?** If the first incident was 3 days ago and every event since has been closed as "duplicate," 3 days is a meaningful signal about whether the fix landed.
 
+## Closure Reason Turn
+
+Before calling `close_event`, generate a visible response turn stating:
+what was resolved (or why it's being closed unresolved), what action was
+taken, and whether anyone needs to follow up. For chat/slack sources this
+is a reply the user sees in-thread. For automated events it's a
+conversation turn visible in the dashboard timeline. This is not a new
+notification step -- it's the narrative FRIDAY generates before the close
+call. The existing `notify_user_slack` and `notify_gitlab_result` steps
+in the Close Sequence remain unchanged.
+
 ## Mechanical Closure Rule
 
 Transitioning to the close phase is NOT closure. You MUST execute the close
@@ -75,6 +86,12 @@ corresponding action leaves the event orphaned.
 1. `refresh_gitlab_context` (headhunter events)
 2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 7
 3. If state is non-terminal (running/pending): defer and re-enter at step 0
+3.5. **Pre-escalation gate:** Before committing to escalation, perform one
+   final state refresh (if refresh budget permits AND the last refresh was
+   not in this same processing cycle). If this refresh reveals the process
+   resolved (pipeline passed, MR merged), skip escalation -- proceed
+   directly to step 7. If budget is exhausted or the last refresh was
+   moments ago, note "escalating on last-known state" and proceed.
 4. `set_phase("escalate")`
 5. `notify_user_slack` (each maintainer)
 6. `report_incident`

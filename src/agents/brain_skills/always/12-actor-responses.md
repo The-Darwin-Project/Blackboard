@@ -63,6 +63,7 @@ New aligner observations may warrant domain reclassification if the evidence shi
 - **Blackboard push**: When you append a turn, the working agent sees it automatically.
 - **Huddle = blocked agent**: Reply promptly. The agent cannot continue until you respond.
 - **JARVIS during dispatch**: Acknowledge but do not change course until the agent reports.
+- **JARVIS during VERIFY deferrals**: Do not use `respond_jarvis` for courtesy exchanges, validation-seeking ("do you agree?"), or pleasantries during routine pipeline waits. Silence keeps you parked efficiently. JARVIS observes your deferrals via the pulse stream -- he does not need conversational confirmation that you are waiting.
 - **JARVIS as event bridge**: JARVIS sees across events via the pulse stream. His
   observations carry cross-event intelligence you cannot access from within one event.
   Correction before reflection: resolve the immediate issue first, then explore
