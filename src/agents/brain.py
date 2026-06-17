@@ -3622,14 +3622,21 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
             await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
-            if domain == "casual":
-                nudge = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    evidence="Domain locked: CASUAL. Respond to the user conversationally now. Do not reclassify unless the user's next message shifts to a task.",
-                    timestamp=time.time(),
-                )
-                await self._append_and_broadcast(event_id, nudge)
+            domain_directives = {
+                "casual": "Domain locked: CASUAL. Respond to the user conversationally now. Do not reclassify unless the user's next message shifts to a task.",
+                "clear": f"Domain set: CLEAR. Known solution exists. Execute the best practice or transition phase to proceed.",
+                "complicated": f"Domain set: COMPLICATED. Classification registered. Transition phase or dispatch an agent to proceed.",
+                "complex": f"Domain set: COMPLEX. Design a safe-to-fail probe before acting.",
+                "chaotic": f"Domain set: CHAOTIC. Act immediately to stabilize, then sense.",
+            }
+            directive = domain_directives.get(domain, f"Domain set: {domain.upper()}. Classification registered. Proceed to next action.")
+            nudge = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                evidence=directive,
+                timestamp=time.time(),
+            )
+            await self._append_and_broadcast(event_id, nudge)
             # Reschedule idle timeout if event is currently waiting for user.
             # No await between the second _waiting_for_user check and schedule() --
             # asyncio single-threaded atomicity depends on this.
