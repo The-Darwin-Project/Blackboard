@@ -35,7 +35,7 @@ spec:
         app: darwin-brain
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
-      {{- if .Values.observer.enabled }}
+      {{- if or .Values.observer.enabled .Values.slackAccess.enabled .Values.ephemeralAgents.enabled }}
       serviceAccountName: {{ .Release.Name }}-brain
       {{- end }}
       securityContext:
@@ -419,6 +419,24 @@ spec:
             {{- if .Values.slack.workspaceDomain }}
             - name: SLACK_WORKSPACE_DOMAIN
               value: {{ .Values.slack.workspaceDomain | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.slackAccess.enabled }}
+            # Slack Access Gate (OCP Group-based)
+            - name: SLACK_ACCESS_ENABLED
+              value: "true"
+            - name: SLACK_ACCESS_GROUPS
+              value: {{ .Values.slackAccess.groups | quote }}
+            - name: SLACK_ACCESS_EMAIL_DOMAIN
+              value: {{ .Values.slackAccess.emailDomain | quote }}
+            - name: SLACK_ACCESS_SYNC_INTERVAL
+              value: {{ .Values.slackAccess.syncIntervalSeconds | default 300 | quote }}
+            {{- if .Values.slackAccess.existingSecret }}
+            - name: SLACK_ACCESS_MAINTAINER_EMAILS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slackAccess.existingSecret }}
+                  key: maintainer-emails
             {{- end }}
             {{- end }}
             {{- if and .Values.smartsheet.incident.enabled .Values.smartsheet.incident.existingSecret }}

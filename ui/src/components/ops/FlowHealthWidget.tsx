@@ -1,5 +1,9 @@
 // BlackBoard/ui/src/components/ops/FlowHealthWidget.tsx
-import { Layers, Users, Inbox } from 'lucide-react';
+// @ai-rules:
+// 1. [Pattern]: Pure presentational widget. Data from useFlowMetrics() hook (10s poll).
+// 2. [Pattern]: Conditionally shows subscription count only when > 0 (zero-state hidden).
+// 3. [Constraint]: No direct API calls -- delegates to useFlowMetrics() hook.
+import { Layers, Users, Inbox, Radar } from 'lucide-react';
 import { useFlowMetrics } from '../../hooks/useFlowMetrics';
 
 function queueColor(depth: number): string {
@@ -47,6 +51,13 @@ export default function FlowHealthWidget() {
           <span className="font-semibold text-text-primary">{data.busy_agents}/{totalAgents}</span>
           <span className="text-text-muted">busy</span>
         </div>
+        {(data.active_subscriptions ?? 0) > 0 && (
+          <div className="flex items-center gap-1" title="Active state subscriptions">
+            <Radar className="w-3 h-3 text-cyan-400" />
+            <span className="font-semibold text-cyan-400">{data.active_subscriptions}</span>
+            <span className="text-text-muted">watching</span>
+          </div>
+        )}
       </div>
 
       {/* Per-role breakdown */}

@@ -92,6 +92,39 @@ roleRef:
   name: {{ .Release.Name }}-cluster-reader
   apiGroup: rbac.authorization.k8s.io
 {{- end }}
+{{- if .Values.slackAccess.enabled }}
+---
+# Minimal ClusterRole for Slack access gate -- OCP Group membership lookup only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-slack-gate-reader
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: slack-access-gate
+rules:
+  - apiGroups: ["user.openshift.io"]
+    resources: ["groups"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-slack-gate-reader
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: slack-access-gate
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-brain
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-slack-gate-reader
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
 {{- if .Values.ephemeralAgents.enabled }}
 ---
 # Role for ephemeral agent lifecycle -- EventListener needs full Tekton Triggers access

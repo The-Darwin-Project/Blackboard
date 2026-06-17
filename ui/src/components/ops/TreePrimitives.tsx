@@ -4,7 +4,7 @@
 // 2. [Constraint]: Pure presentational. No data fetching, no context access.
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
 import { useState, type ReactNode } from 'react';
-import { ChevronRight, Bot, Radio, Bell, StickyNote } from 'lucide-react';
+import { ChevronRight, Bot, Radio, Radar, Bell, StickyNote } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 import DeferCountdownBar from '../DeferCountdownBar';
@@ -56,6 +56,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
     id: string; status: string; source: string; service: string; subject_type?: string;
     current_agent?: string | null; unread_notes?: number;
     defer_until?: number; defer_started_at?: number;
+    subscription_active?: boolean;
   };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -90,6 +91,11 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
         )}
         {!isWaiting && (evt.unread_notes ?? 0) > 0 && (
           <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
+        )}
+        {evt.subscription_active && (
+          <span className="flex-shrink-0" title="Background state subscription active">
+            <Radar size={14} className="text-cyan-400 animate-pulse" />
+          </span>
         )}
         {evt.current_agent && (
           <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"

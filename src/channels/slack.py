@@ -10,6 +10,9 @@
 # 8. [Pattern]: _INTERNAL_TURNS (actor, action) frozenset prevents internal turns from leaking into
 #    user Slack threads. Applied in _handle_legacy_turn via tuple matching. Extensible for non-brain
 #    actors (e.g., system.notification). The is_quiet whitelist is the inverse for infra threads.
+# 9. [Pattern]: SlackAccessGate (OCP Group-based) gates 8 entry points via _gate_check helper.
+#    Intentionally ungated: handle_feedback (feedback on rejection messages), on_thread_started (info only).
+#    Home tab forks to access-denied view for unauthorized users.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ from ..models import EventEvidence
 
 if TYPE_CHECKING:
     from ..agents.brain import Brain
+    from ..slack_gate import SlackAccessGate
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger("darwin.slack")
@@ -53,8 +57,10 @@ class SlackChannel:
         mr_fallback_channel: str,
         blackboard: "BlackboardState",
         brain: "Brain",
+        access_gate: "SlackAccessGate | None" = None,
     ) -> None:
         self._app_token = app_token
+        self._access_gate = access_gate
         self._infra_channel = infra_channel
         self._mr_fallback_channel = mr_fallback_channel
         self._blackboard = blackboard
@@ -91,9 +97,26 @@ class SlackChannel:
             logger.warning(f"Failed to resolve display name for {user_id}: {e}")
             return user_id
 
-    def _get_cached_email(self, user_id: str) -> str:
-        """Return cached email for a Slack user_id, or empty string."""
-        return self._user_email_cache.get(user_id, "")
+    def _get_cached_email(self, user_id: str) -> str | None:
+        """Return cached email for a Slack user_id, or None on cache miss.
+
+        Returns empty string if profile was resolved but had no email.
+        Distinguishes 'not checked yet' (None) from 'checked, no email' ("")."""
+        return self._user_email_cache.get(user_id)
+
+    async def _gate_check(self, client: Any, user_id: str) -> bool:
+        """Check if a Slack user is authorized via the OCP Group gate.
+
+        Resolves email on cache miss (first interaction from new user).
+        Returns True if no gate is configured (gate disabled).
+        """
+        if not self._access_gate:
+            return True
+        email = self._get_cached_email(user_id)
+        if email is None:
+            await self._resolve_display_name(client, user_id)
+            email = self._get_cached_email(user_id) or ""
+        return self._access_gate.check(email)
 
     @staticmethod
     def _build_prior_context(event_doc: Any) -> str:
@@ -176,15 +199,18 @@ class SlackChannel:
         """Register Assistant middleware handlers for split-pane AI experience."""
 
         @self._assistant.thread_started
-        async def on_thread_started(say: Any, set_suggested_prompts: Any) -> None:
+        async def on_thread_started(say: Any, set_suggested_prompts: Any, context: dict, client: Any) -> None:
             try:
-                event_ids = await self._blackboard.get_active_events()
                 prompts: list[dict[str, str]] = []
-                if event_ids:
-                    prompts.append({
-                        "title": f"What's happening with {event_ids[0]}?",
-                        "message": f"Give me a full status update on event {event_ids[0]} -- current phase, what agents have done, and what's pending.",
-                    })
+                user_id = context.get("user_id", "")
+                authorized = await self._gate_check(client, user_id) if user_id else not self._access_gate
+                if authorized:
+                    event_ids = await self._blackboard.get_active_events()
+                    if event_ids:
+                        prompts.append({
+                            "title": f"What's happening with {event_ids[0]}?",
+                            "message": f"Give me a full status update on event {event_ids[0]} -- current phase, what agents have done, and what's pending.",
+                        })
                 prompts.append({
                     "title": "Run a pipeline retest",
                     "message": "Retest the latest failed pipeline on this MR: <paste MR URL>",
@@ -209,6 +235,10 @@ class SlackChannel:
                 thread_ts = payload["thread_ts"]
                 user_id = payload["user"]
                 text = payload.get("text", "")
+
+                if not await self._gate_check(client, user_id):
+                    await say(":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
+                    return
 
                 await set_status("Darwin is thinking...")
 
@@ -302,6 +332,10 @@ class SlackChannel:
                 await respond(text="Usage: `/darwin <describe the issue or task>`")
                 return
 
+            if not await self._gate_check(client, user_id):
+                await respond(text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
+                return
+
             display_name = await self._resolve_display_name(client, user_id)
             event_id = await self._blackboard.create_event(
                 source="slack",
@@ -342,6 +376,17 @@ class SlackChannel:
 
             channel = event.get("channel", "")
             user_id = event["user"]
+
+            if not await self._gate_check(client, user_id):
+                try:
+                    await client.chat_postEphemeral(
+                        channel=channel, user=user_id,
+                        text=":lock: You don't have access to Darwin. Contact the app maintainer to be added.",
+                    )
+                except Exception:
+                    pass
+                return
+
             raw_text = event.get("text", "")
             text = re.sub(r"<@[A-Z0-9]+>\s*", "", raw_text, count=1).strip()
 
@@ -420,6 +465,9 @@ class SlackChannel:
 
             user = event["user"]
 
+            if not await self._gate_check(client, user):
+                return
+
             event_id = await self._blackboard.get_event_by_slack_thread(channel, thread_ts)
             if not event_id:
                 return
@@ -474,6 +522,8 @@ class SlackChannel:
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
             await ack()
+            if not await self._gate_check(client, body["user"]["id"]):
+                return
             event_id = body["actions"][0]["value"]
             user = body["user"]["id"]
             channel = body["channel"]["id"]
@@ -499,6 +549,8 @@ class SlackChannel:
         @self._app.action("darwin_reject")
         async def handle_reject(ack: Any, body: dict, client: Any) -> None:
             await ack()
+            if not await self._gate_check(client, body["user"]["id"]):
+                return
             event_id = body["actions"][0]["value"]
             user = body["user"]["id"]
             channel = body["channel"]["id"]
@@ -551,6 +603,8 @@ class SlackChannel:
         @self._app.action("darwin_home_create_event")
         async def handle_home_create_event(ack: Any, body: dict, client: Any) -> None:
             await ack()
+            if not await self._gate_check(client, body["user"]["id"]):
+                return
             await client.views_open(
                 trigger_id=body["trigger_id"],
                 view={
@@ -578,6 +632,8 @@ class SlackChannel:
         @self._app.view("darwin_create_event_modal")
         async def handle_create_event_modal(ack: Any, body: dict, client: Any, view: dict) -> None:
             await ack()
+            if not await self._gate_check(client, body["user"]["id"]):
+                return
             text = view["state"]["values"]["event_description"]["description_input"]["value"]
             user_id = body["user"]["id"]
             if not text or not text.strip():
@@ -617,6 +673,12 @@ class SlackChannel:
 
     async def _publish_home_tab(self, client: Any, user_id: str) -> None:
         """Gather data and publish the Home tab view for a user."""
+        if not await self._gate_check(client, user_id):
+            from .formatter import build_access_denied_home_view
+            view = build_access_denied_home_view()
+            await client.views_publish(user_id=user_id, view=view)
+            return
+
         from .formatter import build_home_tab_view
 
         event_ids = await self._blackboard.get_active_events()

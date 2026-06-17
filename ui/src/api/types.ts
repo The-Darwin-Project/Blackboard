@@ -178,6 +178,8 @@ export interface ActiveEvent {
   defer_until?: number;
   /** Unix seconds of the last brain.defer turn (conversation). */
   defer_started_at?: number;
+  /** True when a StateWatcher subscription is actively polling for this event. */
+  subscription_active?: boolean;
 }
 
 // =============================================================================
@@ -293,6 +295,7 @@ export interface FlowMetrics {
   active_events: number;
   busy_agents: number;
   idle_agents: number;
+  active_subscriptions?: number;
   agents_by_role: Record<string, { busy: number; idle: number }>;
 }
 

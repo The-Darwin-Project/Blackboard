@@ -58,6 +58,14 @@ def _serialize_evidence(event: EventDocument) -> dict:
     }
 
 
+def _has_active_subscription(event_id: str) -> bool:
+    """Check if StateWatcher has an active subscription for this event."""
+    from ..dependencies import _brain
+    if _brain and _brain._state_watcher:
+        return _brain._state_watcher.has_subscription(event_id)
+    return False
+
+
 async def _defer_timeline_fields(
     blackboard: BlackboardState,
     event_id: str,
@@ -97,6 +105,7 @@ async def list_active_events(
                 "created": event.event.timeDate,
                 "created_by_email": event.created_by_email,
                 "unread_notes": getattr(event, "unread_notes", 0) or 0,
+                "subscription_active": _has_active_subscription(eid),
             }
             if event.status == EventStatus.DEFERRED:
                 row.update(await _defer_timeline_fields(blackboard, eid, event))

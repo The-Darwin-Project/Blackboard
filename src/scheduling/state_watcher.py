@@ -153,6 +153,9 @@ class StateWatcher:
     def active_count(self) -> int:
         return len(self._subs)
 
+    def has_subscription(self, event_id: str) -> bool:
+        return event_id in self._subs
+
     async def start(self) -> None:
         if self._running:
             return

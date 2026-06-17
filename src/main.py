@@ -227,6 +227,28 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(brain.start_event_loop())
         logger.info("Brain event loop started - WebSocket conversation queue active")
         
+        # === SLACK ACCESS GATE (OCP Group-based authorization) ===
+        access_gate = None
+        if os.getenv("SLACK_ACCESS_ENABLED", "false").lower() == "true":
+            from .slack_gate import SlackAccessGate
+            groups = [g.strip() for g in os.getenv("SLACK_ACCESS_GROUPS", "").split(",") if g.strip()]
+            maintainers = {m.strip() for m in os.getenv("SLACK_ACCESS_MAINTAINER_EMAILS", "").split(",") if m.strip()}
+            email_domain = os.getenv("SLACK_ACCESS_EMAIL_DOMAIN", "")
+            if not maintainers:
+                logger.warning(
+                    "SLACK_ACCESS_ENABLED=true but SLACK_ACCESS_MAINTAINER_EMAILS is empty. "
+                    "If K8s API is unavailable, ALL Slack users will be denied (no maintainer bypass)."
+                )
+            access_gate = SlackAccessGate(
+                groups, maintainers, email_domain,
+                int(os.getenv("SLACK_ACCESS_SYNC_INTERVAL", "300")),
+            )
+            await access_gate.start()
+            logger.info(
+                "Slack access gate enabled (%d groups, %d maintainers, domain=%s, healthy=%s)",
+                len(groups), len(maintainers), email_domain or "direct", access_gate._healthy,
+            )
+
         # === SLACK CHANNEL ===
         # Bidirectional Slack integration via Socket Mode (conditional on env vars)
         slack_bot_token = os.getenv("SLACK_BOT_TOKEN", "")
@@ -240,6 +262,7 @@ async def lifespan(app: FastAPI):
                 mr_fallback_channel=os.getenv("SLACK_MR_CHANNEL", ""),
                 blackboard=blackboard,
                 brain=brain,
+                access_gate=access_gate,
             )
             brain.register_channel(slack.broadcast_handler)
             await slack.start()
@@ -395,6 +418,11 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "oidc_adapter"):
         await app.state.oidc_adapter.stop()
 
+    # Stop Slack access gate
+    if access_gate:
+        await access_gate.stop()
+        logger.info("Slack access gate stopped")
+
     # Stop Slack channel
     if hasattr(app.state, "slack"):
         await app.state.slack.stop()
@@ -510,7 +538,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     staleness_guards: list[dict] = []
     active_subs = 0
     try:
-        brain = get_brain()
+        brain = await get_brain()
         if brain and brain._scheduler:
             for trigger in brain._scheduler._triggers:
                 if isinstance(trigger, StalenessGuard):

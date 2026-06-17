@@ -369,6 +369,15 @@ slack:
   userMapping:
     method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================
+# Slack Access Gate (OCP Group-based user authorization)
+# =============================================================================
+slackAccess:
+  enabled: false
+  groups: ""              # CSV of OCP group names -- set in GitOps overlay
+  emailDomain: ""         # Domain suffix for username->email mapping -- set in GitOps overlay
+  syncIntervalSeconds: 300
+  existingSecret: ""      # K8s Secret with key "maintainer-emails" -- set in GitOps overlay
+# =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
 ephemeralAgents:

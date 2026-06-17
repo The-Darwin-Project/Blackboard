@@ -470,6 +470,30 @@ SUBJECT_LABEL: dict[str, str] = {
 }
 
 
+def build_access_denied_home_view() -> dict:
+    """Build a limited Home tab view for users not authorized by the access gate.
+
+    Pure function -- no I/O, no Slack API calls.
+    Returns a complete views.publish payload with the same shape as build_home_tab_view.
+    """
+    return {
+        "type": "home",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "Darwin - AI Operations Agent"},
+            },
+            {"type": "divider"},
+            _section(
+                ":lock: *Access Required*\n\n"
+                "You don't have access to Darwin yet. "
+                "Contact the app maintainer to be added to the Darwin users group."
+            ),
+            {"type": "divider"},
+        ],
+    }
+
+
 def build_home_tab_view(
     active_events: list[dict],
     recent_closed: list[dict],
