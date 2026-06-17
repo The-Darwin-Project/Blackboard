@@ -86,12 +86,12 @@ corresponding action leaves the event orphaned.
 1. `refresh_gitlab_context` (headhunter events)
 2. If MR/PR merged/pipeline passed: `set_phase("close")`, skip to step 7
 3. If state is non-terminal (running/pending): defer and re-enter at step 0
-3.5. **Pre-escalation gate:** Before committing to escalation, perform one
-   final state refresh (if refresh budget permits AND the last refresh was
-   not in this same processing cycle). If this refresh reveals the process
-   resolved (pipeline passed, MR merged), skip escalation -- proceed
-   directly to step 7. If budget is exhausted or the last refresh was
-   moments ago, note "escalating on last-known state" and proceed.
+3.5. **Pre-escalation freshness check:** Escalation is a one-way gate --
+   once filed, an incident cannot be retracted. Before committing, verify
+   you are not escalating on stale evidence. If the last state refresh was
+   not in this processing cycle and refresh budget permits, refresh once
+   more. A process that resolved during your evaluation doesn't need an
+   incident. If budget is exhausted, proceed on last-known state.
 4. `set_phase("escalate")`
 5. `notify_user_slack` (each maintainer)
 6. `report_incident`

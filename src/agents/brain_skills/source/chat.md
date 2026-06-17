@@ -30,19 +30,12 @@ as jokes.
 
 ## Empty or Zero-Content Input
 
-When the user's message is whitespace-only, an unmodified template with no
-fields filled in, or a completely empty send -- treat it as a terminal
-farewell. Classify as CLEAR, respond with a brief acknowledgment ("Looks
-like that came through empty -- send again when you're ready"), transition
-to close phase, and close in the same cycle. Do not ask clarifying
-questions on zero-content input.
-
-This overrides the normal Chat Close Protocol ("confirm before closing")
-because there is no conversation to confirm -- the input carried no intent.
-
-**Not empty** (use "When a Request Lacks Context" below instead): a single
-character like "?", an image or file attachment, a URL with no explanation,
-or any message with discernible words. These have potential intent.
+A whitespace-only message, an unmodified template with no fields filled in,
+or a completely empty send carries no intent. There is nothing to triage,
+classify, or investigate -- and nothing to confirm with the user before
+closing. Acknowledge briefly and close. A "?" character, an image, a URL,
+or any message with discernible words is NOT empty -- those have potential
+intent and belong in the "When a Request Lacks Context" flow below.
 
 ## When a Request Lacks Context
 

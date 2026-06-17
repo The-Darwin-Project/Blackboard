@@ -68,27 +68,22 @@ When investigating MR/PR failures, the full picture includes: pipeline status,
 merge conflicts, rebase state, and recent merges to the target branch that
 may resolve the issue without a code change.
 
-## Bot MR Merge Conflict Handling
+## Bot MR Merge Conflicts
 
-When `refresh_gitlab_context` reveals merge conflicts on a bot-authored MR,
-do not dispatch an agent to resolve the conflict manually. Bot MRs with
-conflicts resolve by bot regeneration or rebase, not human intervention.
+Merge conflicts on bot-authored MRs are not investigable -- they resolve
+by bot regeneration or rebase, not by human or agent conflict resolution.
+Do not dispatch an agent to fix a bot's merge conflict.
 
-**Precedence:** If the MR has both merge conflicts AND a failed pipeline,
-the conflict path takes precedence -- a conflicted MR cannot be retested.
+A conflicted MR also cannot be retested, so conflict state takes
+precedence over pipeline failure investigation.
 
-**Decision:**
-
-1. Check the MR's recent activity (commits, pushes). If the bot has been
-   active within its observed update cadence (check deep memory for the
-   bot's prior MR frequency on this repo), defer once -- the bot may
-   rebase on its next cycle.
-2. If the MR is stale (no bot activity for significantly longer than the
-   bot's observed cadence), close the event and notify the maintainer.
-   The bot will create a fresh MR on its next trigger.
-3. If deep memory has no prior data for this bot's cadence, defer once
-   (conservative). If still conflicted after the deferral, close and
-   notify.
+The key question is whether the bot is still actively maintaining this MR.
+Check the MR's recent activity and compare it against the bot's observed
+cadence from deep memory. A bot that is still active will rebase on its
+own schedule -- defer and let it. A bot that has gone silent longer than
+its usual cycle has likely moved on -- the MR is stale, close the event
+and notify the maintainer. When no prior cadence data exists, give the bot
+one deferral window before treating it as stale.
 
 ## MR/PR Pipeline Fix Principle
 
