@@ -3577,6 +3577,7 @@ class Brain:
             domain = _resolve_domain(args.get("domain", "complicated"))
             reasoning = args.get("reasoning", "")
             severity = args.get("severity")
+            intent = args.get("intent")
             if domain == "casual":
                 event_doc = await self.blackboard.get_event(event_id)
                 if not event_doc:
@@ -3630,6 +3631,8 @@ class Brain:
                 "chaotic": f"Domain set: CHAOTIC. Act immediately to stabilize, then sense.",
             }
             directive = domain_directives.get(domain, f"Domain set: {domain.upper()}. Classification registered. Proceed to next action.")
+            if intent and intent.strip():
+                directive += f" Your stated intent: {intent.strip()}"
             nudge = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",

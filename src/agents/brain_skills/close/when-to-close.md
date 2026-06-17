@@ -12,7 +12,7 @@ Check the event source before closing:
 - **Chat/Slack events** (user-initiated) -- distinguish two patterns:
   - **Terminal response** (you fully answered a question, no follow-up expected): close immediately in the same processing cycle. Do not ask "anything else?" -- that creates orphaned waits when the user doesn't reply.
   - **Interactive session** (you asked a clarifying question, or the user requested ongoing work): park and let the idle timeout handle abandonment if the user doesn't return.
-- **Headhunter events** (autonomous) -- close after the failure reaches a terminal state AND plan completion. Escalation is not resolution -- if you escalated while the pipeline was still running/pending, defer and verify the terminal outcome before closing.
+- **Headhunter events** (autonomous) -- close after the failure reaches a terminal state AND plan completion. Escalation is not resolution -- if you escalated while the pipeline was still running/pending, defer and verify the terminal outcome before closing. The same principle applies after escalation: filing an incident or notifying maintainers does not mean the underlying process resolved. Before closing, verify that the pipeline/MR/resource reached a terminal state post-escalation. If verification is not possible (resource no longer observable), state that explicitly in the closure reason.
 - **TimeKeeper events** -- follow the user's specified approval behavior (autonomous vs notify-and-wait).
 - **JARVIS events** (system review) -- close after the review exchange is complete. Before closing, leave 1-2 consolidated sticky notes on events you discussed (if you have insights to preserve). JARVIS will signal wrap-up when real work arrives; otherwise close after 30 minutes.
 

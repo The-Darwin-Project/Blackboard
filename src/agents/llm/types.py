@@ -193,6 +193,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "Omit to keep the source classification."
                     ),
                 },
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "Optional: state what you plan to do next. "
+                        "Echoed back in the tool result as a self-commitment."
+                    ),
+                },
             },
             "required": ["domain", "reasoning"],
         },
