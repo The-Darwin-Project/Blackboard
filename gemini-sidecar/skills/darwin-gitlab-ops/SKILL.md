@@ -1,7 +1,7 @@
 ---
 name: darwin-gitlab-ops
 description: "GitLab environment context: project resolution, authentication, and API conventions for GitLab instances."
-roles: [architect, sysadmin, developer]
+roles: [architect, sysadmin, developer, qe, security_analyst]
 ---
 
 # GitLab Operations
@@ -33,6 +33,18 @@ Git operations to `$GITLAB_HOST` use the pre-configured TLS settings.
 ## Tool Preference
 
 GitLab MCP tools are available in your tool list. Prefer them for structured API interactions -- they handle authentication and pagination automatically. CLI and direct API access are available as fallback.
+
+## Arrival Comment
+
+When dispatched to work on an MR/PR, your first action after reading the
+event context is to post a brief comment on the MR/PR announcing what you
+are investigating or doing. This gives visibility to anyone watching the
+MR in GitLab.
+
+Format: `Darwin ({role}): {one sentence describing your actual task}`
+
+Post once on arrival. Do not post updates to the MR -- use `team_send_message`
+for progress updates to FRIDAY instead.
 
 ## URL-Encoding for Nested Project Paths
 
