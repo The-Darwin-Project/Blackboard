@@ -335,13 +335,14 @@ class TestCanonicalStateKeyBuilders:
         from src.agents.headhunter import Headhunter
         state = {"mr_state": "opened", "pipeline_status": "running", "merge_status": "unchecked", "extra": "ignored"}
         key = Headhunter.extract_gitlab_state_key(state)
-        assert key == {"mr_state": "opened", "pipeline_status": "running", "merge_status": "unchecked"}
+        assert key == {"mr_state": "opened", "pipeline_status": "running"}
         assert "extra" not in key
+        assert "merge_status" not in key
 
     def test_gitlab_state_key_defaults(self):
         from src.agents.headhunter import Headhunter
         key = Headhunter.extract_gitlab_state_key({})
-        assert key == {"mr_state": "unknown", "pipeline_status": "unknown", "merge_status": "unknown"}
+        assert key == {"mr_state": "unknown", "pipeline_status": "unknown"}
 
     def test_kargo_state_key_builder(self):
         from src.observers.kargo import KargoObserver
