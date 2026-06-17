@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "20cf942" # Updated by CI to commit SHA
+  tag: "6536e0b" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -373,10 +373,10 @@ slack:
 # =============================================================================
 slackAccess:
   enabled: false
-  groups: ""              # CSV of OCP group names -- set in GitOps overlay
-  emailDomain: ""         # Domain suffix for username->email mapping -- set in GitOps overlay
+  groups: "" # CSV of OCP group names -- set in GitOps overlay
+  emailDomain: "" # Domain suffix for username->email mapping -- set in GitOps overlay
   syncIntervalSeconds: 300
-  existingSecret: ""      # K8s Secret with key "maintainer-emails" -- set in GitOps overlay
+  existingSecret: "" # K8s Secret with key "maintainer-emails" -- set in GitOps overlay
 # =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
