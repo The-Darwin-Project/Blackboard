@@ -653,17 +653,17 @@ class Headhunter:
         return {
             "mr_state": mr.get("state", "unknown"),
             "pipeline_status": latest_pipeline.get("status", "unknown"),
-            "merge_status": mr.get("merge_status", "unknown"),
         }
 
     @staticmethod
     def extract_gitlab_state_key(state: dict) -> dict:
         """Canonical state_key builder for GitLab MR subscriptions.
-        Single source of truth -- used by both Brain (register) and poll adapter."""
+        Single source of truth -- used by both Brain (register) and poll adapter.
+        merge_status excluded: it flaps between ci_still_running/can_be_merged
+        during active pipelines, producing spurious wakes without new signal."""
         return {
             "mr_state": state.get("mr_state", "unknown"),
             "pipeline_status": state.get("pipeline_status", "unknown"),
-            "merge_status": state.get("merge_status", "unknown"),
         }
 
     async def _resolve_service(self, project_path: str) -> str:
