@@ -48,7 +48,7 @@ function SparkCard({ title, data, dataKey, color, unit = '' }: SparkCardProps) {
             <XAxis hide dataKey="timestamp" />
             <Tooltip
               labelFormatter={(v) => formatTime(v as number)}
-              formatter={(v: number) => [`${v.toFixed(1)}${unit}`, title]}
+              formatter={(v: number | undefined) => [`${(v ?? 0).toFixed(1)}${unit}`, title]}
               contentStyle={{ background: '#1e293b', border: 'none', borderRadius: 8, fontSize: 12 }}
             />
             <Line
