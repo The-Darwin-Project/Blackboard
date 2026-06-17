@@ -626,8 +626,27 @@ class FlowMetricsResponse(BaseModel):
     busy_agents: int = 0
     idle_agents: int = 0
     active_subscriptions: int = 0
+    avg_event_age_sec: float = 0.0
+    deferred_events: int = 0
+    avg_reconcile_ms: float = 0.0
+    snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
+
+
+class FlowSnapshot(BaseModel):
+    """Point-in-time flow health snapshot. Persisted to Redis sorted set every 60s."""
+    timestamp: float
+    queue_depth: int = 0
+    active_events: int = 0
+    deferred_events: int = 0
+    busy_agents: int = 0
+    idle_agents: int = 0
+    active_subscriptions: int = 0
+    avg_event_age_sec: float = 0.0
+    avg_reconcile_ms: float = 0.0
+    reconcile_count_delta: int = 0
+    error_count_delta: int = 0
 
 
 class ReportMeta(BaseModel):

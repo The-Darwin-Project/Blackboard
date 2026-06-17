@@ -87,6 +87,21 @@ not start a new pipeline for hours. Use 2-3 hours as the floor for
 cron-driven bot operations. Short deferrals (30-60 minutes) against a
 multi-hour cron produce empty wake-ups with identical state.
 
+### Seconds Conversion Rule
+
+The `defer_event` seconds parameter must exactly match the intended
+duration. Apply these conversion constants:
+
+- **1 minute = 60 seconds**
+- **1 hour = 3600 seconds**
+
+To convert: multiply hours by 3600, minutes by 60, then sum.
+Example: "2 hours" = 2 × 3600 = 7200 seconds.
+
+The reason text and the seconds parameter must agree. If the reason
+says "2 hours" but seconds is 3600, the call is wrong -- 3600 is
+1 hour, not 2.
+
 ### Structural Deferral Bounds
 
 Calibrated deferrals prevent under-waiting. Structural bounds prevent

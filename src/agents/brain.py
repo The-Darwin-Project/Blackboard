@@ -216,6 +216,18 @@ MAX_TURNS_PER_EVENT = 100
 NUDGE_INTERVAL_SECONDS = 1800  # 30 min idle before automated nudge
 MAX_NUDGES_BEFORE_ESCALATION = 3  # consecutive nudges before human escalation
 
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Parse integer env var with safe fallback for empty/invalid values."""
+    val = os.getenv(name, "")
+    if not val or not val.strip():
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        logger.warning("Invalid %s (non-integer value, len=%d), using default %d", name, len(val), default)
+        return default
+
 # Volume mount paths (must match Helm deployment.yaml)
 VOLUME_PATHS = {
     "architect": "/data/gitops-architect",
@@ -335,6 +347,7 @@ class Brain:
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._scheduler = None  # ReconcileScheduler | None -- set by start_event_loop()
         self._state_watcher = None  # StateWatcher | None -- set by start_event_loop()
+        self._flow_collector = None  # FlowCollector | None -- set by start_event_loop()
         self._cycle_id_for_event: dict[str, str] = {}  # event_id -> uuid4 per _process_event_inner
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
         self._ws_mode = os.getenv("AGENT_WS_MODE", "legacy")
@@ -1207,8 +1220,7 @@ class Brain:
             self._last_processed[event_id] = time.time()
             if event.source in ("slack", "chat"):
                 self._waiting_for_user[event_id] = time.time()
-                conversation_timeout = int(os.getenv("IDLE_TIMEOUT_CONVERSATION_SEC", "3600"))
-                self._idle_timeout.schedule(event_id, warning_sec=conversation_timeout)
+                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
 
         self._reasoning_by_event.pop(event_id, None)
         if accumulated_text or accumulated_thoughts:
@@ -2503,7 +2515,7 @@ class Brain:
             await self.blackboard.park_for_approval(event_id)
             event = await self.blackboard.get_event(event_id)
             if event and event.source in ("slack", "chat"):
-                self._idle_timeout.schedule(event_id)
+                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
             return False
 
         elif function_name == "re_trigger_aligner":
@@ -2701,7 +2713,7 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             event = await self.blackboard.get_event(event_id)
             if event and event.source in ("slack", "chat"):
-                self._idle_timeout.schedule(event_id)
+                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
             return False
 
         elif function_name == "wait_for_agent":
@@ -3618,6 +3630,15 @@ class Brain:
                     timestamp=time.time(),
                 )
                 await self._append_and_broadcast(event_id, nudge)
+            # Reschedule idle timeout if event is currently waiting for user.
+            # No await between the second _waiting_for_user check and schedule() --
+            # asyncio single-threaded atomicity depends on this.
+            if event_id in self._waiting_for_user:
+                event_doc = await self.blackboard.get_event(event_id)
+                if event_doc and event_id in self._waiting_for_user:
+                    self._idle_timeout.schedule(
+                        event_id, warning_sec=self._get_conversation_timeout(event_doc)
+                    )
             return True
 
         elif function_name == "set_phase":
@@ -5564,6 +5585,21 @@ class Brain:
         )
         await self._state_watcher.start()
 
+        from ..observers.flow_collector import FlowCollector
+        from ..dependencies import get_registry_and_bridge
+        registry = None
+        try:
+            registry, _ = get_registry_and_bridge()
+        except Exception:
+            pass
+        self._flow_collector = FlowCollector(
+            scheduler=self._scheduler,
+            blackboard=self.blackboard,
+            registry=registry,
+            interval=60.0,
+        )
+        await self._flow_collector.start()
+
         logger.info("Brain event loop started (ReconcileScheduler, workers=%d)", self._scheduler._worker_count)
         await self._scheduler.start()
 
@@ -5650,6 +5686,8 @@ class Brain:
     async def stop_event_loop(self) -> None:
         """Stop the event loop."""
         self._running = False
+        if self._flow_collector:
+            await self._flow_collector.stop()
         if self._state_watcher:
             await self._state_watcher.stop()
         if self._scheduler:
@@ -5924,10 +5962,25 @@ class Brain:
             close_reason="timeout",
         )
 
+    def _get_conversation_timeout(self, event: "EventDocument") -> int:
+        """Domain-aware idle timeout: CASUAL=600s, default=900s. Safe for None domain."""
+        from ..models import EventEvidence
+        evidence = event.event.evidence if event.event else None
+        domain = None
+        if isinstance(evidence, EventEvidence):
+            domain = evidence.brain_domain or evidence.domain
+        if domain and str(domain).lower() == "casual":
+            return _safe_int_env("IDLE_TIMEOUT_CASUAL_SEC", 600)
+        return _safe_int_env("IDLE_TIMEOUT_CONVERSATION_SEC", 900)
+
     async def _idle_timeout_warn(self, event_id: str) -> None:
         """Send idle timeout warning to user (Slack thread or dashboard turn)."""
+        if event_id not in self._waiting_for_user:
+            logger.debug("Idle timeout warn aborted for %s: no longer waiting", event_id)
+            return
         event = await self.blackboard.get_event(event_id)
-        if not event:
+        if not event or event.status == "closed":
+            self._waiting_for_user.pop(event_id, None)
             return
         warning_text = "If nothing else is needed, I'll close this in 5 minutes."
         if event.source == "slack" and event.slack_channel_id and event.slack_thread_ts:

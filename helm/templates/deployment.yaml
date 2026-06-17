@@ -333,6 +333,10 @@ spec:
               value: "{{ .Values.idleTimeout.warningSec }}"
             - name: IDLE_TIMEOUT_CLOSE_SEC
               value: "{{ .Values.idleTimeout.closeSec }}"
+            - name: IDLE_TIMEOUT_CONVERSATION_SEC
+              value: "{{ .Values.idleTimeout.conversationSec }}"
+            - name: IDLE_TIMEOUT_CASUAL_SEC
+              value: "{{ .Values.idleTimeout.casualSec }}"
             {{- end }}
             {{- if .Values.googleSearch }}
             # Google Search Grounding

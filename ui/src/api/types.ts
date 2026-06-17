@@ -295,8 +295,27 @@ export interface FlowMetrics {
   active_events: number;
   busy_agents: number;
   idle_agents: number;
-  active_subscriptions?: number;
+  active_subscriptions: number;
+  avg_event_age_sec: number;
+  deferred_events: number;
+  avg_reconcile_ms: number;
+  snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
+  staleness_guards: Array<Record<string, unknown>>;
+}
+
+export interface FlowSnapshot {
+  timestamp: number;
+  queue_depth: number;
+  active_events: number;
+  deferred_events: number;
+  busy_agents: number;
+  idle_agents: number;
+  active_subscriptions: number;
+  avg_event_age_sec: number;
+  avg_reconcile_ms: number;
+  reconcile_count_delta: number;
+  error_count_delta: number;
 }
 
 // =============================================================================

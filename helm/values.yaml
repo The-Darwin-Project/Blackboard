@@ -458,6 +458,8 @@ timekeeper:
 idleTimeout:
   warningSec: "600" # 10 min -- warning message sent to user
   closeSec: "300" # 5 min after warning -- auto-close if no response
+  conversationSec: "900" # chat/slack post-response idle timeout (was 3600 before v0.9)
+  casualSec: "600" # CASUAL domain idle timeout (shorter for social conversations)
 # =============================================================================
 # Google Search Grounding (Brain web search during triage/investigate)
 # =============================================================================

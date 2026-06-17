@@ -25,11 +25,11 @@ from contextlib import asynccontextmanager
 
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_kargo_observer, set_pulse_tracker, set_registry_and_bridge
-from .models import FlowMetricsResponse, HealthResponse
+from .models import FlowMetricsResponse, FlowSnapshot, HealthResponse
 from .routes import (
     chat_router,
     cognitive_graph_router,
@@ -548,15 +548,38 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     except Exception:
         pass
 
+    # Read latest persisted snapshot for enriched fields (O(1) Redis op)
+    latest = None
+    try:
+        if _blackboard is not None:
+            latest = await _blackboard.get_latest_flow_snapshot()
+    except Exception as exc:
+        logger.warning("Flow enrichment from snapshot failed: %s", exc)
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
         busy_agents=busy,
         idle_agents=idle,
         active_subscriptions=active_subs,
+        avg_event_age_sec=latest.avg_event_age_sec if latest else 0.0,
+        deferred_events=latest.deferred_events if latest else 0,
+        avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
+        snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,
         staleness_guards=staleness_guards,
     )
+
+
+@app.get("/flow/history", response_model=list[FlowSnapshot], tags=["flow"])
+async def get_flow_history(
+    range_seconds: int = Query(3600, ge=60, le=604800),
+) -> list[FlowSnapshot]:
+    """Time-series flow snapshots with server-side downsampling for large ranges."""
+    from .dependencies import _blackboard
+    if _blackboard is None:
+        return []
+    return await _blackboard.get_flow_history(range_seconds=range_seconds)
 
 
 @app.get("/flow/{event_id}", tags=["flow"])

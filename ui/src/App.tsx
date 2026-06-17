@@ -26,8 +26,20 @@ import MemoryPage from './components/memory/MemoryPage';
 import ShiftsPage from './components/ShiftsPage';
 import JarvisMemoryPage from './components/JarvisMemoryPage';
 import CortexPage from './components/cortex/CortexPage';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, Component, type ReactNode } from 'react';
 const CortexDevPage = lazy(() => import('./components/cortex/CortexDevPage'));
+import FlowHistoryPage from './components/FlowHistoryPage';
+
+class WipErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean}> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) {
+      return <div className="p-4 text-text-muted">WIP tab encountered an error. Try refreshing.</div>;
+    }
+    return this.props.children;
+  }
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -69,6 +81,11 @@ function AuthGate() {
           } />
           <Route path="incidents" element={<IncidentsPage />} />
           <Route path="insights" element={<InsightsPage />} />
+          <Route path="wip" element={
+            <WipErrorBoundary>
+              <FlowHistoryPage />
+            </WipErrorBoundary>
+          } />
           <Route path="guide" element={<GuidePage />} />
           <Route path="timekeeper" element={<TimeKeeperPage />} />
           <Route path="shifts" element={<ShiftsPage />} />

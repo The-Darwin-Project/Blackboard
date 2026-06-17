@@ -21,6 +21,7 @@ import type {
   ChartData,
   EventDocument,
   FlowMetrics,
+  FlowSnapshot,
   GraphResponse,
   KargoStageStatus,
   ObservationsResponse,
@@ -336,6 +337,10 @@ export async function getAgents(): Promise<AgentRegistryEntry[]> {
 
 export async function getFlowMetrics(): Promise<FlowMetrics> {
   return fetchApi<FlowMetrics>('/flow');
+}
+
+export async function getFlowHistory(rangeSeconds = 3600): Promise<FlowSnapshot[]> {
+  return fetchApi<FlowSnapshot[]>(`/flow/history?range_seconds=${rangeSeconds}`);
 }
 
 // =============================================================================

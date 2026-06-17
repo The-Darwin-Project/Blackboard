@@ -1611,6 +1611,88 @@ class BlackboardState:
         active_count = await self.redis.scard(self.EVENT_ACTIVE)
         return {"queue_depth": queue_depth, "active_events": active_count}
 
+    # =========================================================================
+    # Flow History (time-series snapshots for /flow/history)
+    # =========================================================================
+    FLOW_HISTORY_KEY = "darwin:flow:history"
+    FLOW_RETENTION_SECONDS = 604800  # 7 days
+    FLOW_DOWNSAMPLE_THRESHOLD = 86400  # 24h — aggregate beyond this
+
+    async def persist_flow_snapshot(self, snapshot: "FlowSnapshot") -> None:
+        """Persist a flow snapshot to the time-series sorted set (pipelined)."""
+        from ..models import FlowSnapshot  # noqa: F811
+        member = json.dumps(snapshot.model_dump(), sort_keys=True, separators=(",", ":"))
+        cutoff = snapshot.timestamp - self.FLOW_RETENTION_SECONDS
+        async with self.redis.pipeline(transaction=False) as pipe:
+            pipe.zadd(self.FLOW_HISTORY_KEY, {member: snapshot.timestamp})
+            pipe.zremrangebyscore(self.FLOW_HISTORY_KEY, "-inf", cutoff)
+            await pipe.execute()
+
+    _FLOW_MAX_RAW_ENTRIES = 1500
+
+    async def get_flow_history(
+        self, range_seconds: int = 3600, downsample: bool = True
+    ) -> "list[FlowSnapshot]":
+        """Retrieve flow history with optional downsampling for large ranges."""
+        from ..models import FlowSnapshot
+        now = time.time()
+        start = now - min(max(0, range_seconds), self.FLOW_RETENTION_SECONDS)
+        results = await self.redis.zrangebyscore(
+            self.FLOW_HISTORY_KEY, start, now,
+            start=0, num=self._FLOW_MAX_RAW_ENTRIES,
+        )
+        snapshots: list[FlowSnapshot] = []
+        for r in results:
+            try:
+                snapshots.append(FlowSnapshot(**json.loads(r)))
+            except Exception as exc:
+                logger.warning("FlowHistory: skipping corrupt entry: %s", exc)
+        if downsample and range_seconds > self.FLOW_DOWNSAMPLE_THRESHOLD and len(snapshots) > 300:
+            return self._downsample_snapshots(snapshots, bucket_seconds=300)
+        return snapshots
+
+    async def get_latest_flow_snapshot(self) -> "FlowSnapshot | None":
+        """Read the most recent snapshot (O(1) for /flow enrichment)."""
+        from ..models import FlowSnapshot
+        results = await self.redis.zrevrangebyscore(
+            self.FLOW_HISTORY_KEY, "+inf", "-inf", start=0, num=1
+        )
+        if results:
+            try:
+                return FlowSnapshot(**json.loads(results[0]))
+            except Exception:
+                return None
+        return None
+
+    def _downsample_snapshots(
+        self, snapshots: "list[FlowSnapshot]", bucket_seconds: int = 300
+    ) -> "list[FlowSnapshot]":
+        """Aggregate snapshots into time buckets (5-min averages)."""
+        if not snapshots:
+            return []
+        from ..models import FlowSnapshot
+        buckets: dict[int, list] = {}
+        for s in snapshots:
+            bucket_key = int(s.timestamp // bucket_seconds) * bucket_seconds
+            buckets.setdefault(bucket_key, []).append(s)
+        result: list[FlowSnapshot] = []
+        for ts, group in sorted(buckets.items()):
+            n = len(group)
+            result.append(FlowSnapshot(
+                timestamp=float(ts),
+                queue_depth=round(sum(s.queue_depth for s in group) / n),
+                active_events=round(sum(s.active_events for s in group) / n),
+                deferred_events=round(sum(s.deferred_events for s in group) / n),
+                busy_agents=round(sum(s.busy_agents for s in group) / n),
+                idle_agents=round(sum(s.idle_agents for s in group) / n),
+                active_subscriptions=round(sum(s.active_subscriptions for s in group) / n),
+                avg_event_age_sec=sum(s.avg_event_age_sec for s in group) / n,
+                avg_reconcile_ms=sum(s.avg_reconcile_ms for s in group) / n,
+                reconcile_count_delta=sum(s.reconcile_count_delta for s in group),
+                error_count_delta=sum(s.error_count_delta for s in group),
+            ))
+        return result
+
     _event_fields: set[str] = set(EventDocument.model_fields.keys())
 
     async def stamp_event(self, event_id: str, **fields) -> None:

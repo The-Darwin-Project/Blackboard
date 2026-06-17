@@ -24,6 +24,7 @@ const BASE_TABS = [
   { id: '/reports', label: 'Event History' },
   { id: '/incidents', label: 'Incidents' },
   { id: '/insights', label: 'Insights' },
+  { id: '/wip', label: 'WIP' },
   { id: '/timekeeper', label: 'TimeKeeper' },
   { id: '/memory', label: 'Memory' },
   { id: '/jarvis-memory', label: 'JARVIS Memory' },
