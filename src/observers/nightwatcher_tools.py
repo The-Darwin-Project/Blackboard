@@ -6,6 +6,8 @@
 # 4. [Pattern]: build_report_tool() and build_summary_tool() generate dynamic tool dicts per iteration.
 # 5. [Pattern]: get_phase_tools() filters static schemas. Dynamic tools are built separately by the cart loop.
 # 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
+# 7. [Pattern]: escalations_by_id: dict[str, StagedEscalation] typed lookup for cart link hydration.
+# 8. [Constraint]: build_report_tool() includes link guidance in BOTH normal and overflow description branches.
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
 
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.task_bridge import TaskBridge
     from ..state.blackboard import BlackboardState
+    from ..models import StagedEscalation
 
 from ..models import ShiftIncident, ShiftInvestigation
 
@@ -62,6 +65,7 @@ class NightwatcherContext:
     dispatch_cap: int = 3
     created_incidents: list[ShiftIncident] = field(default_factory=list)
     investigations: list[ShiftInvestigation] = field(default_factory=list)
+    escalations_by_id: dict[str, "StagedEscalation"] = field(default_factory=dict)
     declared_clusters: list[dict] = field(default_factory=list)
     failed_cluster_events: list[str] = field(default_factory=list)
     _summary_text: str = ""
@@ -115,6 +119,8 @@ def build_report_tool(cluster: dict, index: int, total: int, completed_reports: 
     desc = (
         f"Cluster {index} of {total}: {cluster.get('root_cause', '?')}\n"
         f"Platform and affected_events are pre-filled from your cluster plan.\n"
+        f"Include relevant links (MR URLs, pipeline IDs, Slack threads) from the "
+        f"Related Links section in your description.\n"
     )
     if completed_reports:
         desc += f"\nCompleted reports:\n{receipt}\n"
@@ -132,6 +138,7 @@ def build_report_tool(cluster: dict, index: int, total: int, completed_reports: 
         desc = (
             f"Cluster {index} of {total}: {cluster.get('root_cause', '?')}\n"
             f"Platform and affected_events are pre-filled.\n"
+            f"Include links from the Related Links section.\n"
             f"\nCompleted reports:\n{short_receipt}\n"
             f"\n{'This is the final report.' if remaining == 0 else f'{remaining} cluster(s) remain.'}"
         )

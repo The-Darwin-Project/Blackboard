@@ -4,6 +4,7 @@
 # 2. [Pattern]: LLMPort protocol defines generate() (blocking) and generate_stream() (async iterator).
 # 3. [Gotcha]: Anthropic uses "input_schema" key; Gemini uses "parameters_json_schema". Adapters convert.
 # 4. [Constraint]: BRAIN_TOOL_SCHEMAS must stay in sync with _execute_function_call() in brain.py.
+# 5. [Pattern]: NIGHTWATCHER write_incident.description includes link guidance (MR URLs, pipeline IDs, Slack threads).
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -1204,7 +1205,8 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Full consolidated description including: root cause, "
-                        "affected services list, timeline, investigation findings if any"
+                        "affected services list, timeline, investigation findings if any, "
+                        "and relevant links (MR URLs, pipeline IDs, Slack threads) from the Related Links data"
                     ),
                 },
                 "priority": {

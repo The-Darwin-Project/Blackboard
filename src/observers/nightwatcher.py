@@ -6,6 +6,7 @@
 # 4. [Constraint]: requeue_inflight() called on start() to recover from prior crash.
 # 5. [Constraint]: MAX_ANALYSIS_ROUNDS caps the analysis loop. Report loop bounded by N declared clusters.
 # 6. [Pattern]: Partial commit: successful events committed, failed cluster events restaged.
+# 7. [Pattern]: Cart loop hydrates cluster links via extract_full_links from escalations_by_id before each iteration.
 """
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
@@ -38,7 +39,7 @@ MAX_CART_RETRIES = 2
 NIGHTWATCHER_SWEEP_CRON = os.getenv("NIGHTWATCHER_SWEEP_CRON", "0 6,18 * * *")
 
 from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_summary_tool, _handle_write_incident
-from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt
+from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
 
 
 class NightwatcherObserver:
@@ -201,6 +202,7 @@ class NightwatcherObserver:
             slack_notify=self._slack_notify,
             manifest_services={e.service for e in escalations},
             manifest_ids={e.event_id for e in escalations},
+            escalations_by_id={e.event_id: e for e in escalations},
             dispatch_count=0, dispatch_cap=dispatch_cap,
             created_incidents=[], investigations=[],
         )
@@ -294,7 +296,17 @@ class NightwatcherObserver:
         # Step 2: Code-driven report loop
         completed_reports: list[dict] = []
         for i, cluster in enumerate(ctx.declared_clusters, 1):
-            report_prompt = build_report_iteration_prompt(cluster, i, len(ctx.declared_clusters), completed_reports)
+            cluster_links: list[str] = []
+            for eid in cluster.get("events", []):
+                esc = ctx.escalations_by_id.get(eid)
+                if esc:
+                    links_text = extract_full_links(esc)
+                    if links_text:
+                        cluster_links.append(f"**{eid}**:\n{links_text}")
+            report_prompt = build_report_iteration_prompt(
+                cluster, i, len(ctx.declared_clusters), completed_reports,
+                cluster_links=cluster_links or None,
+            )
             report_tools = build_report_tool(cluster, i, len(ctx.declared_clusters), completed_reports)
 
             for retry in range(MAX_CART_RETRIES + 1):
