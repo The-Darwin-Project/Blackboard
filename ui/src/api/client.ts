@@ -694,7 +694,7 @@ export interface EnhancementProposal {
   title: string;
   description: string;
   severity: 'nice_to_have' | 'would_improve' | 'blocking';
-  status: string;
+  status: 'pending' | 'dismissed';
 }
 
 export async function getHandoffReports(): Promise<HandoffReport[]> {
@@ -705,4 +705,12 @@ export async function getHandoffReports(): Promise<HandoffReport[]> {
 export async function getProposals(): Promise<EnhancementProposal[]> {
   const resp = await fetchApi<{ proposals: EnhancementProposal[]; count: number }>('/api/cortex/proposals');
   return resp.proposals;
+}
+
+export async function dismissProposals(timestamps: number[]): Promise<void> {
+  await fetchApi<{ dismissed: number }>('/api/cortex/proposals/dismiss', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timestamps }),
+  });
 }

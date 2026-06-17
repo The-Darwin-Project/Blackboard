@@ -8,10 +8,10 @@
  * JARVIS Memory page -- timeline of session handoff reports and enhancement proposals.
  */
 import { useState, useCallback } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Brain, ChevronDown, ChevronRight, Lightbulb } from 'lucide-react';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
+import { Brain, ChevronDown, ChevronRight, Lightbulb, X } from 'lucide-react';
 import { useWSMessage, useWSReconnect } from '../contexts/WebSocketContext';
-import { getHandoffReports, getProposals } from '../api/client';
+import { getHandoffReports, getProposals, dismissProposals } from '../api/client';
 import type { HandoffReport, EnhancementProposal } from '../api/client';
 
 type FilterMode = 'all' | 'handoff' | 'proposals';
@@ -58,13 +58,13 @@ function HandoffCard({ report }: { report: HandoffReport }) {
   );
 }
 
-function ProposalCard({ proposal }: { proposal: EnhancementProposal }) {
+function ProposalCard({ proposal, onDismiss }: { proposal: EnhancementProposal; onDismiss?: (ts: number) => void }) {
   const [expanded, setExpanded] = useState(false);
   const preview = proposal.description.length > 200 && !expanded
     ? proposal.description.slice(0, 200) + '…' : proposal.description;
 
   return (
-    <div className="border-l-[3px] border-amber-500 pl-3 py-2">
+    <div className="border-l-[3px] border-amber-500 pl-3 py-2 group">
       <div className="flex items-center gap-2 mb-1 flex-wrap">
         <span className="text-[11px] text-text-muted">{formatDate(proposal.timestamp)} {formatTime(proposal.timestamp)}</span>
         <span className="text-xs font-semibold text-amber-400">Enhancement Proposal</span>
@@ -75,6 +75,15 @@ function ProposalCard({ proposal }: { proposal: EnhancementProposal }) {
           <span className="text-[11px] text-text-muted bg-bg-tertiary px-1.5 py-0.5 rounded">
             {proposal.event_id}
           </span>
+        )}
+        {onDismiss && (
+          <button
+            onClick={() => onDismiss(proposal.timestamp)}
+            className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-[11px] text-text-muted hover:text-red-400 flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-red-900/20"
+            title="Dismiss proposal"
+          >
+            <X className="w-3 h-3" /> Dismiss
+          </button>
         )}
       </div>
       <div className="text-sm font-semibold text-text-primary mb-0.5">{proposal.title}</div>
@@ -105,6 +114,15 @@ export default function JarvisMemoryPage() {
     queryFn: getProposals,
     staleTime: 30_000,
   });
+
+  const dismissMutation = useMutation({
+    mutationFn: (timestamps: number[]) => dismissProposals(timestamps),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jarvis-proposals'] }),
+  });
+
+  const handleDismiss = useCallback((ts: number) => {
+    dismissMutation.mutate([ts]);
+  }, [dismissMutation]);
 
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['jarvis-handoff-reports'] });
@@ -188,7 +206,7 @@ export default function JarvisMemoryPage() {
             <div key={`${entry.type}-${entry.ts}-${i}`}>
               {entry.type === 'handoff'
                 ? <HandoffCard report={entry.data as HandoffReport} />
-                : <ProposalCard proposal={entry.data as EnhancementProposal} />}
+                : <ProposalCard proposal={entry.data as EnhancementProposal} onDismiss={handleDismiss} />}
             </div>
           ))
         )}
