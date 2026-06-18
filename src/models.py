@@ -628,6 +628,8 @@ class FlowMetricsResponse(BaseModel):
     active_subscriptions: int = 0
     avg_event_age_sec: float = 0.0
     deferred_events: int = 0
+    waiting_approval_events: int = 0
+    headhunter_pending: int = 0
     avg_reconcile_ms: float = 0.0
     snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -640,6 +642,8 @@ class FlowSnapshot(BaseModel):
     queue_depth: int = 0
     active_events: int = 0
     deferred_events: int = 0
+    waiting_approval_events: int = 0
+    headhunter_pending: int = 0
     busy_agents: int = 0
     idle_agents: int = 0
     active_subscriptions: int = 0

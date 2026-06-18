@@ -127,9 +127,15 @@ export default function FlowHistoryPage() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <SparkCard title="Waiting Approval" data={snapshots} dataKey="waiting_approval_events" color="#f97316" />
+        <SparkCard title="HH Pending" data={snapshots} dataKey="headhunter_pending" color="#ef4444" />
         <SparkCard title="Avg Event Age" data={snapshots} dataKey="avg_event_age_sec" color="#8b5cf6" unit="s" />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <SparkCard title="Agent Utilization" data={snapshots} dataKey="busy_agents" color="#06b6d4" />
         <SparkCard title="Reconcile Latency" data={snapshots} dataKey="avg_reconcile_ms" color="#ec4899" unit="ms" />
+        <SparkCard title="Subscriptions" data={snapshots} dataKey="active_subscriptions" color="#64748b" />
       </div>
     </div>
   );

@@ -1606,10 +1606,17 @@ class BlackboardState:
         return None
 
     async def get_flow_metrics(self) -> dict:
-        """Flow observability: queue depth + active event count. Both O(1) Redis ops."""
-        queue_depth = await self.redis.llen(self.EVENT_QUEUE)
-        active_count = await self.redis.scard(self.EVENT_ACTIVE)
-        return {"queue_depth": queue_depth, "active_events": active_count}
+        """Flow observability: queue depth + active + waiting_approval. All O(1) Redis ops."""
+        async with self.redis.pipeline(transaction=False) as pipe:
+            pipe.llen(self.EVENT_QUEUE)
+            pipe.scard(self.EVENT_ACTIVE)
+            pipe.scard(self.EVENT_WAITING_APPROVAL)
+            queue_depth, active_count, waiting_approval = await pipe.execute()
+        return {
+            "queue_depth": queue_depth,
+            "active_events": active_count,
+            "waiting_approval_events": waiting_approval,
+        }
 
     # =========================================================================
     # Flow History (time-series snapshots for /flow/history)

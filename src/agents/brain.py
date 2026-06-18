@@ -5602,10 +5602,12 @@ class Brain:
             registry, _ = get_registry_and_bridge()
         except Exception:
             pass
+        hh = self.agents.get("_headhunter")
         self._flow_collector = FlowCollector(
             scheduler=self._scheduler,
             blackboard=self.blackboard,
             registry=registry,
+            headhunter=hh,
             interval=60.0,
         )
         await self._flow_collector.start()

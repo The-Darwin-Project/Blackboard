@@ -151,6 +151,7 @@ class Headhunter:
         self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
         self._smartsheet_cache = None  # lazy-loaded only when source=smartsheet
         self._jira = HeadhunterJira(blackboard)
+        self._last_poll_pending: int = 0
 
     # =========================================================================
     # LLM Adapter (lazy-loaded, same pattern as Aligner._get_adapter)
@@ -237,6 +238,7 @@ class Headhunter:
             best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
             result.append(best)
         result.sort(key=lambda t: t.get("created_at", ""))
+        self._last_poll_pending = len(result)
         logger.info(f"Headhunter poll: {len(all_todos)} total todos, {len(actionable)} actionable, {len(active_mr_keys)} already active, {len(result)} new")
         return result
 
@@ -745,6 +747,11 @@ class Headhunter:
     # =========================================================================
     # Flow Gate
     # =========================================================================
+
+    @property
+    def pending_count(self) -> int:
+        """Pending todos from last poll cycle (not yet converted to events)."""
+        return self._last_poll_pending
 
     async def check_flow_gate(self) -> bool:
         """Return True if a slot is available (active+queued headhunter events < max_active)."""

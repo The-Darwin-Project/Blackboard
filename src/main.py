@@ -556,6 +556,15 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     except Exception as exc:
         logger.warning("Flow enrichment from snapshot failed: %s", exc)
 
+    hh_pending = 0
+    try:
+        brain = await get_brain()
+        hh = brain.agents.get("_headhunter") if brain else None
+        if hh:
+            hh_pending = hh.pending_count
+    except Exception:
+        pass
+
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
         active_events=flow["active_events"],
@@ -564,6 +573,8 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         active_subscriptions=active_subs,
         avg_event_age_sec=latest.avg_event_age_sec if latest else 0.0,
         deferred_events=latest.deferred_events if latest else 0,
+        waiting_approval_events=flow.get("waiting_approval_events", 0),
+        headhunter_pending=hh_pending,
         avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
         snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,

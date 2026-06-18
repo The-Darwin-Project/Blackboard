@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..agents.agent_registry import AgentRegistry
+    from ..agents.headhunter import Headhunter
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
 
@@ -31,11 +32,13 @@ class FlowCollector:
         scheduler: "ReconcileScheduler",
         blackboard: "BlackboardState",
         registry: "AgentRegistry | None" = None,
+        headhunter: "Headhunter | None" = None,
         interval: float = 60.0,
     ):
         self._scheduler = scheduler
         self._blackboard = blackboard
         self._registry = registry
+        self._headhunter = headhunter
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._running = False
@@ -124,11 +127,20 @@ class FlowCollector:
         except Exception:
             pass
 
+        hh_pending = 0
+        try:
+            if self._headhunter:
+                hh_pending = self._headhunter.pending_count
+        except Exception:
+            pass
+
         return FlowSnapshot(
             timestamp=now,
             queue_depth=flow["queue_depth"],
             active_events=len(status_map),
             deferred_events=deferred_count,
+            waiting_approval_events=flow.get("waiting_approval_events", 0),
+            headhunter_pending=hh_pending,
             busy_agents=busy,
             idle_agents=idle,
             active_subscriptions=active_subs,

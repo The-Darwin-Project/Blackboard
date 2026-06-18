@@ -298,6 +298,8 @@ export interface FlowMetrics {
   active_subscriptions: number;
   avg_event_age_sec: number;
   deferred_events: number;
+  waiting_approval_events: number;
+  headhunter_pending: number;
   avg_reconcile_ms: number;
   snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
@@ -309,6 +311,8 @@ export interface FlowSnapshot {
   queue_depth: number;
   active_events: number;
   deferred_events: number;
+  waiting_approval_events: number;
+  headhunter_pending: number;
   busy_agents: number;
   idle_agents: number;
   active_subscriptions: number;
