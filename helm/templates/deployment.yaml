@@ -622,7 +622,7 @@ spec:
         - name: skill-reconciler
           image: "{{ .Values.skillReconciler.image | default (printf "%s:%s" .Values.image.repository .Values.image.tag) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-m", "src.skill_reconciler.reconcile"]
+          command: ["python", "src/skill_reconciler/reconcile.py"]
           env:
             - name: SKILL_RECONCILER_POLL_INTERVAL
               value: "{{ .Values.skillReconciler.pollInterval }}"

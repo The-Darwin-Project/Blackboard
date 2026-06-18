@@ -12,7 +12,7 @@ Git-to-Redis skill reconciler sidecar.
 Polls a Git repo's tree via API, writes skill files to Redis HASHes,
 and bumps a version key. Brain reads from Redis with filesystem fallback.
 
-Run as: python -m src.skill_reconciler.reconcile
+Run as: python src/skill_reconciler/reconcile.py
 """
 from __future__ import annotations
 
@@ -23,6 +23,12 @@ import random
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Ensure the app root (/app) is on sys.path for src.* imports
+_app_root = str(Path(__file__).resolve().parent.parent.parent)
+if _app_root not in sys.path:
+    sys.path.insert(0, _app_root)
 
 import httpx
 import redis
