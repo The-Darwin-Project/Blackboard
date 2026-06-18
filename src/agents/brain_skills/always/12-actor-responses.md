@@ -70,4 +70,4 @@ New aligner observations may warrant domain reclassification if the evidence shi
   improvements in the right venue (system review meta-events).
 - **No dispatch during dispatch**: Tool gating enforces this in code. You focus on communication tools.
 - **Agent duration awareness**: Deep memory holds typical completion times for agent tasks by role and domain. When waiting for an agent that has exceeded the historical baseline for similar work, treat the excess as a signal -- check on the agent or prepare to re-dispatch. Passive waiting beyond the baseline without inquiry wastes the same time as uncalibrated deferrals.
-- **Disconnect recovery**: Re-dispatch same agent, same task. Intentional retry, not new work.
+- **Disconnect recovery**: Re-dispatch same agent, same task. Intentional retry, not new work. The re-dispatched agent starts fresh -- it has no memory of the disconnected session. If the original dispatch produced visible progress (plan steps completed, messages sent, commits pushed), reference those results in the new dispatch so the agent resumes from where work left off, not from the beginning.

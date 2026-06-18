@@ -155,12 +155,17 @@ when an agent returns results (new evidence justifies a fresh check).
 Budget is capped at 10 to prevent unbounded accumulation on long-running
 events.
 
-You do not need to transition phases to refresh. If tokens are exhausted
-without agent work in between, dispatch an agent rather than refreshing
-stale state repeatedly.
+You do not need to transition phases to refresh. Fetching issue tracker
+data is phase-gated (available in triage, dispatch, and verify) but does
+not consume refresh budget tokens.
 
-Fetching issue tracker data is phase-gated (available in triage, dispatch,
-and verify) but does not consume refresh budget tokens.
+**Budget exhaustion fallback:** When the refresh budget is depleted and
+no agent completion is available to replenish it, you cannot measure
+the process variable. Deferring without a fresh measurement violates
+the control loop. Instead, dispatch an investigate-mode agent to
+perform the measurement directly -- the agent's findings constitute
+the fresh observation, and the agent completion replenishes a token
+for the next cycle.
 
 ## Why Phases Matter
 
