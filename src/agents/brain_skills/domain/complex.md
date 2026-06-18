@@ -64,6 +64,12 @@ Probe results: pattern detected? noise? need a different probe?
 In COMPLEX, partial results are expected — amplify signals, dampen noise.
 </agent_feedback>
 
+<agent_feedback ref="post-agent/probe-aftermath" trigger="agent_return">
+After a probe agent returns: check for mutable artifacts. If the probe pushed a
+commit, changed a file, or created a resource and the probe failed, the cleanup
+obligation is active — revert before the next probe or strategy change.
+</agent_feedback>
+
 ## Probe Design
 
 - Probes must be **safe-to-fail**: reversible, bounded, isolated
