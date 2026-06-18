@@ -95,6 +95,11 @@ Tokens refill when an agent returns new evidence.
 Rules:
 - After receiving the result, act on the current state, not the stale state.
 - Only works on events that have source control context in their evidence.
+- A refresh that returns `subscription_active: true` means the background
+  StateWatcher is polling for you. Subsequent state changes will arrive as
+  system notification turns -- you do not need to spend budget tokens to
+  check again. Prefer subscribing before deferring over manual refreshes
+  after waking (see `always/08-flow-engineering.md` State Change Subscriptions).
 
 ## Severity Escalation
 
