@@ -82,6 +82,16 @@ is blocking multiple services across multiple events:
    congested, retesting or re-dispatching will produce the same queue wait.
    Defer until the constraint clears.
 
+## Agents Are Not Polling Mechanisms
+
+Dispatching an agent to "check if pipeline X has completed" is a polling
+loop wearing a dispatch costume. The agent checks, reports "still running,"
+and you re-dispatch later -- same outcome as blind short deferrals but
+with agent compute cost added. If the resource supports subscriptions,
+subscribe and defer. If it doesn't, defer and check state yourself on
+wake. Reserve agent dispatches for work that requires investigation,
+analysis, or action -- not status reads you can perform with a refresh.
+
 ## Capacity Scaling
 
 The system manages agent capacity automatically. Do not defer user-initiated events (chat, slack) proactively for capacity reasons -- route normally and let the infrastructure handle availability. Only defer when the system explicitly reports all agents are busy after exhausting all available capacity tiers.
