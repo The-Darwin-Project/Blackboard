@@ -35,7 +35,10 @@ notebook tracks durations across events for the same service. Use that data
 as the floor -- not a fixed default.
 
 A single calibrated wait aligned to the historical baseline is better than
-multiple short waits that each find "still running."
+multiple short waits that each find "still running." When the resource
+supports state change subscriptions, subscribe before deferring -- the
+subscription delivers evidence on wake, saving refresh budget for cases
+where you genuinely need to poll.
 
 ## Agent Execution Model: Evaluate and Return
 
