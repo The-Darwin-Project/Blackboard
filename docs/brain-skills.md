@@ -10,11 +10,57 @@ The Brain loads phase-specific skills (Markdown files) based on event state, rep
 
 ## How It Works
 
-1. **Filesystem discovery:** `BrainSkillLoader` scans `src/agents/brain_skills/` for `.md` files organized by phase directory.
-2. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), and `tags`.
-3. **Dependency resolution:** BFS with cycle detection ensures skills load in dependency order.
-4. **Template substitution:** Skills can reference variables like `{event_id}`, `{service}`, etc.
-5. **Phase exclusions:** Conflicting phases are never loaded simultaneously (e.g., `post-agent` excludes `triage` and `dispatch`).
+### Dual-Source Discovery
+
+`BrainSkillLoader` supports two skill sources with automatic failover:
+
+1. **Redis (primary):** When the skill reconciler sidecar is enabled (`skillReconciler.enabled: true`), a Git-to-Redis poller syncs skill files from the Git repo to Redis HASHes every 60 seconds. The Brain checks the version key (`darwin:skills:version`) before each event processing cycle and hot-reloads on change. This enables skill updates without image rebuilds.
+
+2. **Filesystem (fallback):** When Redis has no data (reconciler not enabled, Redis flushed, or first boot), the loader falls back to scanning `src/agents/brain_skills/` from the container image. This is the original behavior and remains the cold-start path.
+
+### Discovery Pipeline
+
+1. **Startup:** `BrainSkillLoader` scans `src/agents/brain_skills/` for `.md` files organized by phase directory (filesystem cold start).
+2. **Per-event version check:** Brain reads `darwin:skills:version` from Redis. On change, acquires `_skills_reload_lock` and calls `reload_from_redis()`.
+3. **Atomic corpus swap:** All caches live in a frozen `_SkillCorpus` dataclass. Reload builds a new corpus, then swaps `self._corpus = new_corpus` in a single reference assignment (GIL-safe). No window of partial state.
+4. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), and `tags`.
+5. **Dependency resolution:** BFS with cycle detection ensures skills load in dependency order.
+6. **Template substitution:** Skills can reference variables like `{event_id}`, `{service}`, etc.
+7. **Phase exclusions:** Conflicting phases are never loaded simultaneously (e.g., `post-agent` excludes `triage` and `dispatch`).
+
+### Redis Schema
+
+| Key | Type | Contents |
+| --- | --- | --- |
+| `darwin:skills:version` | STRING | Git commit SHA of last reconciled tree |
+| `darwin:skills:corpus` | HASH | field = relative path (e.g. `always/08-flow-engineering.md`), value = JSON `{"body": "...", "frontmatter": {...}, "blob_sha": "..."}` |
+| `darwin:skills:phase_config` | HASH | field = phase folder name (e.g. `always`), value = JSON phase metadata |
+| `darwin:skills:sync_state` | HASH | `last_success_at`, `last_error`, `file_count`, `source_sha` |
+
+### Failure Semantics
+
+- **Redis empty/down:** Loader keeps current corpus (filesystem on first boot, last-known-good otherwise). No reload triggered.
+- **Corrupt JSON in Redis:** Non-critical fields skipped with warning. Critical `always/*` corruption aborts the swap entirely -- previous corpus retained.
+- **Reconciler crash:** Brain continues with last-synced skills. On pod restart, filesystem fallback provides the baked-in version.
+- **Concurrent events during reload:** `_skills_reload_lock` (asyncio.Lock) serializes reloads. Double-check pattern inside the lock prevents TOCTOU.
+
+### Enabling Hot-Reload
+
+Set in Helm values (or GitOps overlay):
+
+```yaml
+skillReconciler:
+  enabled: true
+  repo: "org/repo-name"
+  branch: "main"
+  skillsPath: "src/agents/brain_skills"
+```
+
+Diagnostic endpoint: `GET /skills/version` returns version SHA + sync metadata.
+
+### CI Integration
+
+PRs that only touch `src/agents/brain_skills/**` skip the container image build (via `paths-ignore` in `build-push.yaml`). Main-branch merges always build, keeping the filesystem fallback image fresh.
 
 Each phase has a `_phase.yaml` with LLM parameters:
 
@@ -135,6 +181,18 @@ The `set_phase` tool controls which Brain tools are available at each lifecycle 
 | `close` | `close_event` |
 
 This prevents the Brain from, for example, calling `close_event` during triage or `classify_event` after dispatch -- structural enforcement of the event lifecycle.
+
+## Security Prerequisites
+
+When `skillReconciler.enabled: true`, skill content flows from Git to the LLM system prompt within ~60 seconds. This bypasses the image build pipeline.
+
+**Mandatory controls before enabling the reconciler in production:**
+
+- **Branch protection** on the configured branch (`skillReconciler.branch`, default `main`). Require at least one review before merge.
+- **CODEOWNERS** file covering `src/agents/brain_skills/` with designated reviewers. Prevents unreviewed changes to skills that control FRIDAY's behavior.
+- **Repository access control**: limit write access to the repository. Any commit that reaches the configured branch will be reconciled to the LLM within one poll interval.
+
+These are operational prerequisites, not enforced by code. The reconciler trusts the content of the configured branch.
 
 ## FRIDAY-Inspired Personality
 

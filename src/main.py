@@ -796,6 +796,27 @@ async def api_info() -> dict:
 
 
 # =============================================================================
+# Skills Version (diagnostics)
+# =============================================================================
+
+@app.get("/skills/version", tags=["diagnostics"])
+async def skills_version():
+    """Return current brain skills version and reconciler sync state."""
+    from .state.redis_client import get_redis
+    redis = await get_redis()
+    version = await redis.get("darwin:skills:version")
+    sync_state = await redis.hgetall("darwin:skills:sync_state") if version else {}
+    last_error = sync_state.get("last_error", "")
+    return {
+        "version": version,
+        "source": "redis" if version else "filesystem",
+        "last_success_at": sync_state.get("last_success_at"),
+        "file_count": sync_state.get("file_count"),
+        "last_error": last_error.split(":", 1)[0] if last_error else None,
+    }
+
+
+# =============================================================================
 # Static Files (React SPA) - MUST be mounted LAST
 # =============================================================================
 # Mount static assets (JS, CSS, images) at root, then add SPA fallback

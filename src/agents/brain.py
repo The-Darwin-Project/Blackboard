@@ -271,9 +271,15 @@ BRAIN_PREFILL_MODEL = (
 )
 
 
+import re as _re
+
+_SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
+
+
 def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
-    return f'<{tag_type} id="{path}">\n{body}\n</{tag_type}>'
+    safe_path = _SAFE_PATH_RE.sub('_', path)
+    return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
 
 
 class Brain:
@@ -360,10 +366,12 @@ class Brain:
         # Brain skill loading (required -- monolith fallback removed)
         self._progressive_skills = True
         self._skill_loader = None
+        self._skills_version: str | None = None
+        self._skills_reload_lock: asyncio.Lock = asyncio.Lock()
         try:
             from .brain_skill_loader import BrainSkillLoader
             skills_path = Path(__file__).parent / "brain_skills"
-            self._skill_loader = BrainSkillLoader(str(skills_path))
+            self._skill_loader = BrainSkillLoader(str(skills_path), redis=self.blackboard.redis)
         except Exception as e:
             logger.error(f"Failed to load brain skills: {e}. Brain will raise on first event.")
             self._skill_loader = None
@@ -886,8 +894,26 @@ class Brain:
                     await self._append_and_broadcast(event_id, notif_turn)
                     event = await self.blackboard.get_event(event_id)
 
-        # Progressive skill loading: build phase-specific system prompt + LLM params
+        # Progressive skill loading: check for hot-reload from Redis reconciler
         if self._progressive_skills and self._skill_loader:
+            try:
+                redis_version = await self.blackboard.redis.get("darwin:skills:version")
+            except Exception:
+                redis_version = None
+            if redis_version and redis_version != self._skills_version:
+                async with self._skills_reload_lock:
+                    try:
+                        inner_version = await self.blackboard.redis.get("darwin:skills:version")
+                    except Exception:
+                        inner_version = None
+                    if inner_version and inner_version != self._skills_version:
+                        loaded_from_redis = await self._skill_loader.reload_from_redis()
+                        if loaded_from_redis:
+                            self._skills_version = inner_version
+                            logger.info(f"Brain skills reloaded from Redis (version={inner_version[:8]})")
+                        else:
+                            logger.info("Skill reload fell back to filesystem -- version not updated")
+
             context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True

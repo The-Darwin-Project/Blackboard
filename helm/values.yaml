@@ -215,6 +215,23 @@ app:
   agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
   maxConcurrentDispatches: 0 # Global WIP cap for local sidecar dispatches: 0=disabled, N=max concurrent. Does NOT affect ephemeral agents (separate {SOURCE}_MAX_ACTIVE caps).
 # =============================================================================
+# Skill Reconciler Sidecar (Git-to-Redis hot-reload for brain skills)
+# =============================================================================
+skillReconciler:
+  enabled: false
+  image: "" # empty = use brain image
+  pollInterval: "60"
+  gitProvider: "github"
+  repo: ""
+  branch: "main"
+  skillsPath: "src/agents/brain_skills"
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+# =============================================================================
 # Brain Scheduling (ReconcileScheduler)
 # =============================================================================
 brain:

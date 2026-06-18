@@ -23,6 +23,8 @@ on:
     branches:
       - main
       - master
+    paths-ignore:
+      - 'src/agents/brain_skills/**'
   workflow_dispatch:
 
 env:

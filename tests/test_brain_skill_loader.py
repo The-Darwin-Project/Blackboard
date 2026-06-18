@@ -2,10 +2,15 @@
 # @ai-rules:
 # 1. [Constraint]: Tests use temp directories only -- no dependency on actual brain_skills/ content.
 # 2. [Pattern]: Each test creates its own fixture via _make_skills helper.
-"""Unit tests for BrainSkillLoader: discovery, frontmatter, dependencies, tags, reload."""
+# 3. [Pattern]: Redis tests use AsyncMock from conftest.py mock_redis fixture.
+# 4. [Pattern]: TestRedisDiscovery/TestCorpusSwap/TestFilesystemFallback/TestCorruptJson/TestRedisFlush
+#    cover the dual-source (Redis + filesystem) discovery path.
+"""Unit tests for BrainSkillLoader: discovery, frontmatter, dependencies, tags, reload, Redis."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -501,3 +506,227 @@ class TestUserMessageBypass:
             for t in conversation[-10:]
         )
         assert has_user_unread is False
+
+
+# =========================================================================
+# Redis Discovery Tests
+# =========================================================================
+
+
+def _build_redis_corpus(skills: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Build a Redis corpus HASH from a skill structure dict."""
+    corpus: dict[str, str] = {}
+    for phase, files in skills.items():
+        for filename, content in files.items():
+            if filename == "_phase.yaml":
+                continue
+            rel_path = f"{phase}/{filename}"
+            body, meta = BrainSkillLoader._parse_frontmatter(content)
+            corpus[rel_path] = json.dumps({"body": body, "frontmatter": meta, "blob_sha": "abc123"})
+    return corpus
+
+
+def _build_redis_phase_config(skills: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Build a Redis phase config HASH from a skill structure dict."""
+    import yaml
+    phase_config: dict[str, str] = {}
+    for phase, files in skills.items():
+        if "_phase.yaml" in files:
+            phase_config[phase] = json.dumps(yaml.safe_load(files["_phase.yaml"]) or {})
+    return phase_config
+
+
+def _mock_pipeline(mock_redis, results: list):
+    """Configure mock_redis.pipeline() to return an async pipeline mock that yields results."""
+    pipe = AsyncMock()
+    pipe.hgetall = AsyncMock()
+    pipe.execute = AsyncMock(return_value=results)
+    pipe.__aenter__ = AsyncMock(return_value=pipe)
+    pipe.__aexit__ = AsyncMock(return_value=False)
+    mock_redis.pipeline = lambda transaction=True: pipe
+    return pipe
+
+
+class TestRedisDiscovery:
+    @pytest.mark.asyncio
+    async def test_discovers_skills_from_redis(self, tmp_path: Path, mock_redis):
+        skills = {
+            "always": {"00-identity.md": "# Identity", "01-rules.md": "# Rules"},
+            "triage": {"cynefin.md": "# Cynefin"},
+        }
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# Placeholder"}})
+        _mock_pipeline(mock_redis, [
+            _build_redis_corpus(skills),
+            _build_redis_phase_config(skills),
+        ])
+
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        result = await loader.discover_from_redis()
+
+        assert result is True
+        assert sorted(loader.available_phases()) == ["always", "triage"]
+        assert len(loader.get_phase("always")) == 2
+        assert len(loader.get_phase("triage")) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_sorted_key_ordering(self, tmp_path: Path, mock_redis):
+        corpus = {
+            "always/02-b.md": json.dumps({"body": "# B", "frontmatter": {}, "blob_sha": "b"}),
+            "always/01-a.md": json.dumps({"body": "# A", "frontmatter": {}, "blob_sha": "a"}),
+        }
+        _mock_pipeline(mock_redis, [corpus, {}])
+
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# P"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        await loader.discover_from_redis()
+
+        paths = loader.get_all_paths_for_phase("always")
+        assert paths == ["always/01-a.md", "always/02-b.md"]
+
+    @pytest.mark.asyncio
+    async def test_phase_config_loaded(self, tmp_path: Path, mock_redis):
+        skills = {
+            "triage": {
+                "_phase.yaml": "thinking_level: low\ntemperature: 0.3\npriority: 20\n",
+                "assess.md": "# Assess",
+            },
+            "always": {"00-id.md": "# Id"},
+        }
+        _mock_pipeline(mock_redis, [
+            _build_redis_corpus(skills),
+            _build_redis_phase_config(skills),
+        ])
+
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# P"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        await loader.discover_from_redis()
+
+        meta = loader.get_phase_meta("triage")
+        assert meta["thinking_level"] == "low"
+        assert meta["temperature"] == 0.3
+
+
+class TestCorpusSwap:
+    @pytest.mark.asyncio
+    async def test_corpus_swap_is_atomic(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {
+            "always": {"00-identity.md": "# Original Identity"},
+        })
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        original_phases = loader.available_phases()
+        assert "always" in original_phases
+
+        new_corpus = {
+            "always/00-identity.md": json.dumps({"body": "# Updated Identity", "frontmatter": {}, "blob_sha": "new"}),
+            "always/01-new.md": json.dumps({"body": "# New Skill", "frontmatter": {}, "blob_sha": "new2"}),
+        }
+        _mock_pipeline(mock_redis, [new_corpus, {}])
+        await loader.discover_from_redis()
+
+        assert len(loader.get_phase("always")) == 2
+        assert "# Updated Identity" in loader.get_phase("always")[0]
+        assert "# New Skill" in loader.get_phase("always")[1]
+
+
+class TestFilesystemFallback:
+    @pytest.mark.asyncio
+    async def test_empty_redis_falls_back_to_filesystem(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {
+            "always": {"00-identity.md": "# FS Identity"},
+            "dispatch": {"exec.md": "# FS Exec"},
+        })
+        _mock_pipeline(mock_redis, [{}, {}])
+
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        result = await loader.discover_from_redis()
+
+        assert result is False
+        assert "always" in loader.available_phases()
+        assert "dispatch" in loader.available_phases()
+        assert "# FS Identity" in loader.get_phase("always")[0]
+
+    @pytest.mark.asyncio
+    async def test_reload_from_redis_falls_back(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {
+            "always": {"00-identity.md": "# FS Identity V1"},
+        })
+        _mock_pipeline(mock_redis, [{}, {}])
+
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+
+        (tmp_path / "always" / "00-identity.md").write_text("# FS Identity V2")
+        await loader.reload_from_redis()
+
+        assert "# FS Identity V2" in loader.get_phase("always")[0]
+
+    @pytest.mark.asyncio
+    async def test_no_redis_returns_false(self, tmp_path: Path):
+        _make_skills(tmp_path, {"always": {"00-id.md": "# Id"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=None)
+        result = await loader.discover_from_redis()
+        assert result is False
+
+
+class TestCorruptJson:
+    @pytest.mark.asyncio
+    async def test_non_critical_corrupt_field_skipped(self, tmp_path: Path, mock_redis):
+        corpus = {
+            "always/00-identity.md": json.dumps({"body": "# Identity", "frontmatter": {}, "blob_sha": "a"}),
+            "dispatch/exec.md": "NOT_VALID_JSON{{{",
+        }
+        _mock_pipeline(mock_redis, [corpus, {}])
+
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# P"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        result = await loader.discover_from_redis()
+
+        assert result is True
+        assert "always" in loader.available_phases()
+        assert "dispatch" not in loader.available_phases()
+
+    @pytest.mark.asyncio
+    async def test_critical_always_corrupt_aborts_swap(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {"always": {"00-identity.md": "# Original"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        assert "# Original" in loader.get_phase("always")[0]
+
+        corpus = {
+            "always/00-identity.md": "CORRUPT_JSON!!!",
+            "dispatch/exec.md": json.dumps({"body": "# Exec", "frontmatter": {}, "blob_sha": "b"}),
+        }
+        _mock_pipeline(mock_redis, [corpus, {}])
+        result = await loader.discover_from_redis()
+
+        assert result is False
+        assert "# Original" in loader.get_phase("always")[0]
+
+    @pytest.mark.asyncio
+    async def test_missing_always_phase_aborts(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {"always": {"00-identity.md": "# Original"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+
+        corpus = {
+            "dispatch/exec.md": json.dumps({"body": "# Exec", "frontmatter": {}, "blob_sha": "b"}),
+        }
+        _mock_pipeline(mock_redis, [corpus, {}])
+        result = await loader.discover_from_redis()
+
+        assert result is False
+        assert "# Original" in loader.get_phase("always")[0]
+
+
+class TestRedisFlush:
+    @pytest.mark.asyncio
+    async def test_redis_error_keeps_current_corpus(self, tmp_path: Path, mock_redis):
+        _make_skills(tmp_path, {"always": {"00-identity.md": "# Current"}})
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+
+        pipe = AsyncMock()
+        pipe.hgetall = AsyncMock()
+        pipe.execute = AsyncMock(side_effect=ConnectionError("Redis gone"))
+        mock_redis.pipeline = lambda transaction=True: pipe
+        result = await loader.discover_from_redis()
+
+        assert result is False
+        assert "# Current" in loader.get_phase("always")[0]

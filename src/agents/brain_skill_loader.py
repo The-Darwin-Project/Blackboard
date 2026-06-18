@@ -10,21 +10,34 @@
 #    and resolve_dependencies_with_paths (list[tuple[str, str]]) delegate to it. Zero duplication.
 # 8. [Pattern]: Semantic tag types resolved by get_tag_type(rel_path): frontmatter tag_type override
 #    (validated against _VALID_TAG_TYPES allowlist) > _FOLDER_TAG_TYPE folder default > "skill".
+# 9. [Pattern]: _SkillCorpus frozen dataclass holds all caches. Single-reference swap is GIL-safe.
+#    Reload replaces self._corpus atomically -- no window of partial state.
+# 10. [Pattern]: async discover_from_redis() reads HGETALL with sorted keys + corrupt JSON resilience.
+#     Critical always/* corruption aborts swap (fail-closed). Non-critical phases skip with warning.
 """
 Filesystem-driven brain skill discovery, loading, and dependency resolution.
 
 Skills are .md files organized in phase folders (e.g., always/, triage/, post-agent/).
 Each file can declare YAML frontmatter with description, requires (dependencies), and tags.
 Each folder can have a _phase.yaml declaring LLM parameters (thinking_level, temperature, priority).
+
+Supports dual-source discovery: Redis (primary when available) with filesystem fallback.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from redis.asyncio import Redis
+
+from src.skill_reconciler.constants import REDIS_KEY_CORPUS, REDIS_KEY_PHASE_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +53,22 @@ _FOLDER_TAG_TYPE: dict[str, str] = {
 }
 
 
-class BrainSkillLoader:
-    """Filesystem-driven brain skill discovery and loading."""
+@dataclass(frozen=True)
+class _SkillCorpus:
+    """Immutable snapshot of all loaded skills. Single-reference swap is GIL-safe."""
+    cache: dict[str, list[tuple[str, str, dict]]] = field(default_factory=dict)
+    phase_meta: dict[str, dict] = field(default_factory=dict)
+    tag_index: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    path_index: dict[str, tuple[str, dict]] = field(default_factory=dict)
 
-    def __init__(self, skills_dir: str):
+
+class BrainSkillLoader:
+    """Dual-source brain skill discovery and loading (Redis primary, filesystem fallback)."""
+
+    def __init__(self, skills_dir: str, redis: "Redis | None" = None):
         self._skills_dir = Path(skills_dir)
-        # phase -> [(rel_path, body_content, frontmatter_dict)]
-        self._cache: dict[str, list[tuple[str, str, dict]]] = {}
-        self._phase_meta: dict[str, dict] = {}
-        self._tag_index: dict[str, list[str]] = defaultdict(list)
-        # rel_path -> (body, frontmatter) for O(1) lookup in dependency resolution
-        self._path_index: dict[str, tuple[str, dict]] = {}
+        self._redis = redis
+        self._corpus = _SkillCorpus()
         self._discover()
 
     def _discover(self) -> None:
@@ -59,33 +77,42 @@ class BrainSkillLoader:
             logger.warning(f"Brain skills directory not found: {self._skills_dir}")
             return
 
+        cache: dict[str, list[tuple[str, str, dict]]] = {}
+        phase_meta: dict[str, dict] = {}
+        tag_index: dict[str, list[str]] = defaultdict(list)
+        path_index: dict[str, tuple[str, dict]] = {}
+
         for phase_dir in sorted(self._skills_dir.iterdir()):
             if not phase_dir.is_dir():
                 continue
             phase = phase_dir.name
-            self._cache[phase] = []
+            cache[phase] = []
 
             phase_yaml = phase_dir / "_phase.yaml"
             if phase_yaml.is_file():
                 try:
-                    self._phase_meta[phase] = yaml.safe_load(phase_yaml.read_text()) or {}
+                    phase_meta[phase] = yaml.safe_load(phase_yaml.read_text()) or {}
                 except Exception as e:
                     logger.warning(f"Failed to parse {phase_yaml}: {e}")
-                    self._phase_meta[phase] = {}
+                    phase_meta[phase] = {}
 
             for md_file in sorted(phase_dir.glob("*.md")):
                 raw = md_file.read_text()
                 body, meta = self._parse_frontmatter(raw)
                 rel_path = f"{phase}/{md_file.name}"
-                self._cache[phase].append((rel_path, body, meta))
-                self._path_index[rel_path] = (body, meta)
+                cache[phase].append((rel_path, body, meta))
+                path_index[rel_path] = (body, meta)
                 for tag in meta.get("tags", []):
-                    self._tag_index[tag].append(rel_path)
+                    tag_index[tag].append(rel_path)
 
-        total_files = sum(len(v) for v in self._cache.values())
-        total_tags = len(self._tag_index)
+        self._corpus = _SkillCorpus(
+            cache=cache, phase_meta=phase_meta, tag_index=tag_index, path_index=path_index,
+        )
+
+        total_files = sum(len(v) for v in cache.values())
+        total_tags = len(tag_index)
         logger.info(
-            f"Brain skills loaded: {len(self._cache)} phases, "
+            f"Brain skills loaded: {len(cache)} phases, "
             f"{total_files} files, {total_tags} tags"
         )
 
@@ -104,24 +131,127 @@ class BrainSkillLoader:
         body = text[end + 3:].strip()
         return body, meta
 
+    # ------------------------------------------------------------------
+    # Async Redis discovery
+    # ------------------------------------------------------------------
+
+    async def discover_from_redis(self) -> bool:
+        """Load skills from Redis HASHes. Returns True if valid data found.
+
+        Sorted key ordering matches filesystem sorted() behavior.
+        Corrupt JSON fields are skipped with warning. If any always/* skill
+        fails parsing, the swap is aborted entirely (fail-closed).
+        Both HGETALL calls use a pipeline (MULTI/EXEC) for atomic read.
+        """
+        if not self._redis:
+            return False
+
+        try:
+            pipe = self._redis.pipeline(transaction=True)
+            pipe.hgetall(REDIS_KEY_CORPUS)
+            pipe.hgetall(REDIS_KEY_PHASE_CONFIG)
+            raw_corpus, raw_phase = await pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis pipeline HGETALL failed during skill discovery: {e}")
+            return False
+
+        if not raw_corpus:
+            return False
+
+        cache: dict[str, list[tuple[str, str, dict]]] = {}
+        phase_meta: dict[str, dict] = {}
+        tag_index: dict[str, list[str]] = defaultdict(list)
+        path_index: dict[str, tuple[str, dict]] = {}
+        always_corrupt = False
+
+        for key in sorted(raw_corpus.keys()):
+            try:
+                entry = json.loads(raw_corpus[key])
+            except (json.JSONDecodeError, TypeError) as e:
+                if key.startswith("always/"):
+                    logger.error(f"Critical skill corrupt in Redis (aborting swap): {key}: {e}")
+                    always_corrupt = True
+                    break
+                logger.warning(f"Skipping corrupt Redis skill field: {key}: {e}")
+                continue
+
+            body = entry.get("body", "")
+            meta = entry.get("frontmatter", {})
+            phase = key.split("/")[0]
+
+            if phase not in cache:
+                cache[phase] = []
+            cache[phase].append((key, body, meta))
+            path_index[key] = (body, meta)
+            for tag in meta.get("tags", []):
+                tag_index[tag].append(key)
+
+        if always_corrupt:
+            logger.error("Keeping previous corpus due to critical skill corruption")
+            return False
+
+        for phase_name in sorted(raw_phase.keys()):
+            try:
+                phase_meta[phase_name] = json.loads(raw_phase[phase_name])
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Skipping corrupt phase config: {phase_name}: {e}")
+
+        if "always" not in cache or not cache["always"]:
+            logger.error("Redis corpus missing always/ phase -- aborting swap")
+            return False
+
+        self._corpus = _SkillCorpus(
+            cache=cache, phase_meta=phase_meta, tag_index=tag_index, path_index=path_index,
+        )
+        total_files = sum(len(v) for v in cache.values())
+        logger.info(f"Brain skills loaded from Redis: {len(cache)} phases, {total_files} files")
+        return True
+
+    async def reload_from_redis(self) -> bool:
+        """Async reload from Redis. Falls back to filesystem if Redis has no data.
+
+        Returns True if Redis data was loaded, False if fell back to filesystem.
+        Brain uses this to decide whether to update _skills_version.
+        """
+        if await self.discover_from_redis():
+            return True
+        logger.info("Redis empty or invalid -- falling back to filesystem reload")
+        self.reload()
+        return False
+
+    # ------------------------------------------------------------------
+    # Getters (all read from self._corpus)
+    # ------------------------------------------------------------------
+
     def get_phase(self, name: str) -> list[str]:
         """Return cached skill body contents for a phase."""
-        return [body for _, body, _ in self._cache.get(name, [])]
+        return [body for _, body, _ in self._corpus.cache.get(name, [])]
 
     def get_with_meta(self, rel_path: str) -> tuple[str, dict] | None:
-        """Return (content, frontmatter) for a specific skill by relative path."""
-        return self._path_index.get(rel_path)
+        """Return (content, frontmatter) for a specific skill by relative path.
+
+        Returns a copy of the frontmatter dict to prevent callers from
+        mutating the shared corpus cache.
+        """
+        entry = self._corpus.path_index.get(rel_path)
+        if entry is None:
+            return None
+        body, meta = entry
+        return (body, dict(meta))
 
     def get_phase_meta(self, name: str) -> dict:
-        """Return _phase.yaml metadata for a phase (thinking_level, temperature, priority)."""
-        return self._phase_meta.get(name, {})
+        """Return _phase.yaml metadata for a phase (thinking_level, temperature, priority).
+
+        Returns a copy to prevent callers from mutating the shared corpus cache.
+        """
+        return dict(self._corpus.phase_meta.get(name, {}))
 
     def get_tag_type(self, rel_path: str) -> str:
         """Return the semantic tag type for a skill path.
 
         Resolution order: frontmatter override (validated against allowlist) > folder default.
         """
-        entry = self._path_index.get(rel_path)
+        entry = self._corpus.path_index.get(rel_path)
         if entry:
             _, meta = entry
             if isinstance(meta, dict):
@@ -133,31 +263,27 @@ class BrainSkillLoader:
 
     def get_all_paths_for_phase(self, name: str) -> list[str]:
         """Return list of relative paths in a phase."""
-        return [rel for rel, _, _ in self._cache.get(name, [])]
+        return [rel for rel, _, _ in self._corpus.cache.get(name, [])]
 
     def find_by_tag(self, tag: str) -> list[str]:
         """Return skill body contents matching a tag."""
         results = []
-        for rel_path in self._tag_index.get(tag, []):
-            entry = self._path_index.get(rel_path)
+        for rel_path in self._corpus.tag_index.get(tag, []):
+            entry = self._corpus.path_index.get(rel_path)
             if entry:
                 results.append(entry[0])
         return results
 
     def find_paths_by_tag(self, tag: str) -> list[str]:
         """Return relative paths matching a tag."""
-        return list(self._tag_index.get(tag, []))
+        return list(self._corpus.tag_index.get(tag, []))
 
     def available_phases(self) -> list[str]:
         """Return list of discovered phase names."""
-        return list(self._cache.keys())
+        return list(self._corpus.cache.keys())
 
     def reload(self) -> None:
-        """Clear caches and re-discover (e.g., on SIGHUP or ConfigMap update)."""
-        self._cache.clear()
-        self._phase_meta.clear()
-        self._tag_index.clear()
-        self._path_index.clear()
+        """Re-discover from filesystem via atomic corpus swap."""
         self._discover()
 
     def _resolve_bfs(
@@ -177,7 +303,7 @@ class BrainSkillLoader:
             if skill_path in seen:
                 continue
             seen.add(skill_path)
-            entry = self._path_index.get(skill_path)
+            entry = self._corpus.path_index.get(skill_path)
             if not entry:
                 logger.debug(f"Skill not found during dependency resolution: {skill_path}")
                 continue
@@ -208,3 +334,5 @@ class BrainSkillLoader:
     ) -> list[tuple[str, str]]:
         """Like resolve_dependencies, but returns (rel_path, body) tuples."""
         return self._resolve_bfs(initial_paths, template_vars)
+
+

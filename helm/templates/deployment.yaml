@@ -616,6 +616,78 @@ spec:
         # Qdrant moved to standalone Deployment (qdrant-deployment.yaml)
         
         # =================================================================
+        # Skill Reconciler Sidecar (Git-to-Redis hot-reload)
+        # =================================================================
+        {{- if .Values.skillReconciler.enabled }}
+        - name: skill-reconciler
+          image: "{{ .Values.skillReconciler.image | default (printf "%s:%s" .Values.image.repository .Values.image.tag) }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "src.skill_reconciler.reconcile"]
+          env:
+            - name: SKILL_RECONCILER_POLL_INTERVAL
+              value: "{{ .Values.skillReconciler.pollInterval }}"
+            - name: SKILL_RECONCILER_GIT_PROVIDER
+              value: "{{ .Values.skillReconciler.gitProvider }}"
+            - name: SKILL_RECONCILER_REPO
+              value: "{{ .Values.skillReconciler.repo }}"
+            - name: SKILL_RECONCILER_BRANCH
+              value: "{{ .Values.skillReconciler.branch }}"
+            - name: SKILL_RECONCILER_SKILLS_PATH
+              value: "{{ .Values.skillReconciler.skillsPath }}"
+            - name: REDIS_HOST
+              value: "localhost"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-redis
+                  key: password
+            {{- if .Values.github.existingSecret }}
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.existingSecret }}
+                  key: app-id
+            - name: GITHUB_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.github.existingSecret }}
+                  key: installation-id
+            - name: GITHUB_PRIVATE_KEY_PATH
+              value: "/secrets/github"
+            {{- end }}
+            {{- if .Values.gitlab.enabled }}
+            - name: GITLAB_TOKEN_PATH
+              value: "/secrets/gitlab/token"
+            - name: GITLAB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gitlab.existingSecret }}
+                  key: host
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.github.existingSecret }}
+            - name: github-app-secret
+              mountPath: /secrets/github
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gitlab.enabled }}
+            - name: gitlab-token-secret
+              mountPath: /secrets/gitlab
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.skillReconciler.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        
+        # =================================================================
         # Architect Agent Sidecar
         # =================================================================
         {{- if .Values.sidecars.architect.enabled }}
