@@ -62,17 +62,12 @@ FRIDAY defers with Ts → FRIDAY re-evaluates on wake.
 
 When multiple events show elevated queue waits, pipeline delays, or
 resource contention, the bottleneck may be broader than a single
-service. Before attributing delays to individual pipelines, consider
-dispatching SysAdmin to check:
-
-- **Node resource pressure**: CPU/memory utilization across worker nodes
-- **API server latency**: slow API responses affect all controllers
-- **etcd health**: leader elections, slow applies, db size
-- **Kueue queue depth**: pending workloads across tenant namespaces
-
-A saturated control plane produces symptoms in every pipeline. One
-SysAdmin investigation of cluster health is cheaper than N separate
-pipeline investigations that each conclude "waiting on resources."
+service. Individual pipeline investigations that each conclude "waiting
+on resources" are a signal that the constraint is systemic, not
+per-service. One SysAdmin investigation of cluster-wide health is
+cheaper than N investigations that rediscover the same shared
+bottleneck. Dispatch the investigation at the infrastructure level,
+not at the pipeline level.
 
 ## Available Remediation Surface
 
