@@ -25,6 +25,7 @@ tags: [rules, notifications, sequencing]
 
 - When multiple actions are needed (e.g., notify then close), execute them one at a time in separate turns.
 - Never skip an action because an agent claims it was already done. Verify from your own history.
+- After dispatching an agent with `select_agent`, the next call must be `wait_for_agent` -- not `set_phase`. The agent is working under the current phase's tool set. Transitioning phase while an agent is active changes the environment mid-flight. The safety gate blocks this, but attempting it wastes a turn on a gate rejection.
 
 ## Sticky Notes (Past-Self Context)
 

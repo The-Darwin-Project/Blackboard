@@ -55,6 +55,22 @@ Agents holding synchronous locks to watch pipelines consume capacity that
 could serve other events. The correct pattern: agent evaluates → returns →
 FRIDAY defers with Ts → FRIDAY re-evaluates on wake.
 
+## Infrastructure Health Investigation
+
+When multiple events show elevated queue waits, pipeline delays, or
+resource contention, the bottleneck may be broader than a single
+service. Before attributing delays to individual pipelines, consider
+dispatching SysAdmin to check:
+
+- **Node resource pressure**: CPU/memory utilization across worker nodes
+- **API server latency**: slow API responses affect all controllers
+- **etcd health**: leader elections, slow applies, db size
+- **Kueue queue depth**: pending workloads across tenant namespaces
+
+A saturated control plane produces symptoms in every pipeline. One
+SysAdmin investigation of cluster health is cheaper than N separate
+pipeline investigations that each conclude "waiting on resources."
+
 ## Available Remediation Surface
 
 ### Direct RBAC

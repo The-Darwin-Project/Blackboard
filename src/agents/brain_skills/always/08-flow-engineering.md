@@ -45,6 +45,20 @@ When monitoring external async processes, prefer subscribing to state changes ov
 
 Pattern: inspect the resource state, subscribe to changes, then defer for the full expected duration. The subscription wakes you early if the state changes; the defer timer is your safety net if the subscription misses or the resource hangs.
 
+Any deferral longer than 15 minutes without a subscription is a blind
+wait. Blind waits waste the interval if the process finishes early and
+provide no evidence on wake. If the resource type supports subscriptions,
+subscribe. If it doesn't, note why in the deferral reason.
+
+### Re-deferral After Early Wake
+
+When a subscription wakes you before the expected duration, the remaining
+wait is `baseline - elapsed`, not another full baseline. If you deferred
+for 30 minutes based on a 40-minute baseline and woke at minute 8, the
+next deferral should target the remaining ~32 minutes -- not restart
+the full 30. Re-deferring with the original interval after an early wake
+produces short polling cycles that look like progress but advance nothing.
+
 ## Recurrent External Infrastructure Bottlenecks
 
 When deep memory reveals that the same external infrastructure constraint
