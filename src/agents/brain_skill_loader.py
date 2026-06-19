@@ -336,3 +336,66 @@ class BrainSkillLoader:
         return self._resolve_bfs(initial_paths, template_vars)
 
 
+TOOL_SKILL_MAP: dict[str, list[str]] = {
+    "consult_deep_memory": ["always/04-deep-memory.md"],
+    "classify_event": ["always/05-cynefin.md"],
+    "set_phase": ["always/09-phase-lifecycle.md"],
+    "defer_event": ["always/08-flow-engineering.md"],
+    "select_agent": ["dispatch/decision-routing.md"],
+    "wait_for_agent": ["always/12-actor-responses.md"],
+    "close_event": ["close/when-to-close.md"],
+    "report_incident": ["escalate/incident-tracking.md"],
+    "refresh_gitlab_context": ["always/08-flow-engineering.md"],
+    "refresh_kargo_context": ["always/08-flow-engineering.md"],
+    "notify_user_slack": ["always/01-function-rules.md"],
+    "reply_to_agent": ["always/12-actor-responses.md"],
+    "message_agent": ["always/12-actor-responses.md"],
+    "respond_to_jarvis": ["always/12-actor-responses.md"],
+}
+
+PHASE_SKILL_MAP: dict[str, str] = {
+    "triage": "always/06-decision-guidelines.md",
+    "dispatch": "dispatch/decision-routing.md",
+    "verify": "always/03-control-theory.md",
+    "escalate": "escalate/incident-tracking.md",
+}
+
+
+def build_skill_refs(
+    tool_name: str,
+    brain_phase: str | None = None,
+    event_source: str | None = None,
+) -> str:
+    """Build skill pointer XML block for a tool_result turn.
+
+    Returns newline-joined <skill id="..." /> tags for:
+    - Tool-specific skills (what this tool relates to)
+    - Phase-specific skill (what to do next in current phase)
+    - Source-specific skill (event source behavioral context)
+    Deduplicates when multiple layers map to the same skill.
+    """
+    from ..models import _resolve_phase  # noqa: deferred to avoid circular import
+
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    for skill in TOOL_SKILL_MAP.get(tool_name, []):
+        if skill not in seen:
+            refs.append(f'<skill id="{skill}" />')
+            seen.add(skill)
+
+    phase = _resolve_phase(brain_phase)
+    phase_skill = PHASE_SKILL_MAP.get(phase, "always/06-decision-guidelines.md")
+    if phase_skill not in seen:
+        refs.append(f'<skill id="{phase_skill}" />')
+        seen.add(phase_skill)
+
+    if event_source:
+        source_skill = f"source/{event_source}.md"
+        if source_skill not in seen:
+            refs.append(f'<skill id="{source_skill}" />')
+            seen.add(source_skill)
+
+    return "\n".join(refs)
+
+
