@@ -30,6 +30,10 @@
 # 16. [Pattern]: Prompt constants live in agents/jarvis_instructions.py (extracted for
 #     maintainability). Tags use semantic differentiation: jarvis_rule, jarvis_mode,
 #     jarvis_protocol, jarvis_context per prompt-semantic-tags.mdc.
+# 17. [Pattern]: SI attention pointers via _TOOL_SKILL_MAP + _build_skill_refs(). Every input
+#     channel (tool responses, FRIDAY direct, pulses, meta-events, session resume/report)
+#     prepends <skill id="..."> tags referencing the relevant SYSTEM_INSTRUCTION section.
+#     Anchors model attention to the right behavioral rules at the right time.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -72,6 +76,33 @@ SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
 _OPERATOR_PHASES = frozenset({"always", "dispatch", "post-agent", "source", "escalate", "close"})
+
+# SI attention pointers: map JARVIS tool/input channels to the relevant
+# semantic tag IDs in SYSTEM_INSTRUCTION. Injected into tool responses and
+# input turns so the model's attention is anchored to the right SI section.
+_TOOL_SKILL_MAP: dict[str, list[str]] = {
+    "get_pulse_history":     ["observer-mode", "observer-constraints"],
+    "view_event_blackboard": ["observer-mode"],
+    "get_neuron_details":    ["proactive-review"],
+    "search_deep_memory":    ["proactive-review"],
+    "send_event_message":    ["intervention-boundary"],
+    "list_active_events":    ["shared-context"],
+    "propose_enhancement":   ["proactive-review"],
+}
+
+
+def _build_skill_refs(tag_ids: list[str]) -> str:
+    """Build SI attention pointer prefix from tag IDs."""
+    if not tag_ids:
+        return ""
+    return "\n".join(f'<skill id="{tid}" />' for tid in tag_ids) + "\n"
+
+
+_PULSE_REFS = _build_skill_refs(["observer-mode", "observer-constraints"])
+_PEER_REFS = _build_skill_refs(["peer-mode", "peer-circuit-breaker"])
+_REVIEW_REFS = _build_skill_refs(["proactive-review", "proactive-review-constraints"])
+_REPORT_REFS = _build_skill_refs(["shift-report"])
+_RESUME_REFS = _build_skill_refs(["shared-context"])
 
 
 class LiveAPIAdapter:
@@ -221,7 +252,7 @@ class LiveAPIAdapter:
             self._awaiting_jarvis_event_id = None
             return
         try:
-            msg = f"[FRIDAY DIRECT for {event_id}]: {response}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
+            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {response}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
             await self._session.send(input=msg, end_of_turn=True)
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
@@ -255,7 +286,7 @@ class LiveAPIAdapter:
             return
 
         try:
-            text = self._format_pulse(batch)
+            text = f"{_PULSE_REFS}{self._format_pulse(batch)}"
             logger.debug(
                 "Cortex send_pulse: event=%s turn=%d len=%d end_of_turn=True",
                 batch.event_id, batch.turn, len(text),
@@ -525,11 +556,13 @@ class LiveAPIAdapter:
 
                 if self._session:
                     try:
+                        refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc.name, []))
+                        result_with_refs = f"{refs}{result}" if refs else result
                         tool_response = types.LiveClientToolResponse(
                             function_responses=[
                                 types.FunctionResponse(
                                     name=fc.name,
-                                    response={"result": result},
+                                    response={"result": result_with_refs},
                                 )
                             ]
                         )
@@ -1080,7 +1113,7 @@ class LiveAPIAdapter:
         # Inform JARVIS Live session: provide the same evidence so he knows
         # what FRIDAY is being asked. Different derivative: JARVIS is the reviewer.
         jarvis_context = (
-            f"[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
+            f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
             f"Here is what I observed and asked her to assess:\n\n"
             f"{display_text}\n\n"
             f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
@@ -1207,11 +1240,11 @@ class LiveAPIAdapter:
     async def _generate_session_report_on(self, session: object, handoff_history: str = "") -> None:
         """Generate report on a specific session (may differ from self._session during handoff)."""
         report = ""
-        prompt = SESSION_REPORT_PROMPT
+        prompt = f"{_REPORT_REFS}{SESSION_REPORT_PROMPT}"
         if handoff_history:
             segments = handoff_history.count("---") + 1
             prompt = (
-                f"Before writing your report, here are your session notes from this shift "
+                f"{_REPORT_REFS}Before writing your report, here are your session notes from this shift "
                 f"({segments} segments):\n\n"
                 f"{handoff_history}\n\n"
                 f"---\n\n{SESSION_REPORT_PROMPT}"
@@ -1439,7 +1472,7 @@ class LiveAPIAdapter:
             active_ids = await self._blackboard.get_active_events()
             if not active_ids:
                 return
-            lines = ["[SESSION RESUMED] Previous session lost. Active event summaries:"]
+            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost. Active event summaries:"]
             for eid in active_ids[:5]:
                 event = await self._blackboard.get_event(eid)
                 if not event:
