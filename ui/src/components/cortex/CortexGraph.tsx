@@ -85,8 +85,9 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     const toolNodes = allNeurons.filter(n => n.type === 'tool');
     const phaseNodes = allNeurons.filter(n => n.type === 'phase');
     const agentNodes = allNeurons.filter(n => n.type === 'agent');
+    const domainNodes = allNeurons.filter(n => n.type === 'domain');
     const skillNodes = allNeurons.filter(n => n.type === 'skill');
-    const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length;
+    const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length + domainNodes.length;
     let execIdx = 0;
     let skillIdx = 0;
 
@@ -200,6 +201,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     const graph = sigma.getGraph();
     if (!graph || graph.order === 0) return;
 
+    const now = Date.now() / 1000;
     for (const batch of liveBatches) {
       const batchId = batch._stream_id || `${batch.event_id}:${batch.timestamp}`;
       if (processedBatchesRef.current.has(batchId)) continue;
@@ -208,6 +210,9 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         const entries = [...processedBatchesRef.current];
         processedBatchesRef.current = new Set(entries.slice(-200));
       }
+
+      // Skip stale batches on graph rebuild — only replay edges still within fade window (10s)
+      if (now - batch.timestamp > 10) continue;
 
       const evtId = batch.event_id;
       if (!evtId) continue;
