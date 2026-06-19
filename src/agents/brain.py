@@ -282,6 +282,60 @@ def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
 
 
+_TOOL_SKILL_MAP: dict[str, list[str]] = {
+    "consult_deep_memory": ["always/04-deep-memory.md"],
+    "classify_event": ["always/05-cynefin.md"],
+    "set_phase": ["always/09-phase-lifecycle.md"],
+    "defer_event": ["always/08-flow-engineering.md"],
+    "select_agent": ["dispatch/decision-routing.md"],
+    "wait_for_agent": ["always/12-actor-responses.md"],
+    "close_event": ["close/when-to-close.md"],
+    "report_incident": ["escalate/incident-tracking.md"],
+    "refresh_gitlab_context": ["always/08-flow-engineering.md"],
+    "refresh_kargo_context": ["always/08-flow-engineering.md"],
+    "notify_user_slack": ["always/01-function-rules.md"],
+    "reply_to_agent": ["always/12-actor-responses.md"],
+    "message_agent": ["always/12-actor-responses.md"],
+    "respond_to_jarvis": ["always/12-actor-responses.md"],
+}
+
+_PHASE_SKILL_MAP: dict[str, str] = {
+    "triage": "always/06-decision-guidelines.md",
+    "dispatch": "dispatch/decision-routing.md",
+    "verify": "always/03-control-theory.md",
+    "escalate": "escalate/incident-tracking.md",
+}
+
+
+def _build_skill_refs(
+    tool_name: str,
+    brain_phase: str | None = None,
+    event_source: str | None = None,
+) -> str:
+    """Build skill pointer XML block for a tool_result turn."""
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    for skill in _TOOL_SKILL_MAP.get(tool_name, []):
+        if skill not in seen:
+            refs.append(f'<skill id="{skill}" />')
+            seen.add(skill)
+
+    phase = _resolve_phase(brain_phase)
+    phase_skill = _PHASE_SKILL_MAP.get(phase, "always/06-decision-guidelines.md")
+    if phase_skill not in seen:
+        refs.append(f'<skill id="{phase_skill}" />')
+        seen.add(phase_skill)
+
+    if event_source:
+        source_skill = f"source/{event_source}.md"
+        if source_skill not in seen:
+            refs.append(f'<skill id="{source_skill}" />')
+            seen.add(source_skill)
+
+    return "\n".join(refs)
+
+
 class Brain:
     """
     Brain orchestrator - thin shell around LLM function calling.
@@ -2960,18 +3014,14 @@ class Brain:
                 event_source=ev_for_ctx.source if ev_for_ctx else None,
             )
 
-            brain_phase = _resolve_phase(getattr(ev_for_ctx, "brain_phase", None))
-            phase_skill_map = {
-                "triage": "always/06-decision-guidelines.md",
-                "dispatch": "dispatch/decision-routing.md",
-                "verify": "always/03-control-theory.md",
-                "escalate": "escalate/incident-tracking.md",
-            }
-            phase_skill = phase_skill_map.get(brain_phase, "always/06-decision-guidelines.md")
+            skill_refs = _build_skill_refs(
+                "consult_deep_memory",
+                getattr(ev_for_ctx, "brain_phase", None),
+                ev_for_ctx.source if ev_for_ctx else None,
+            )
             memory_text = (
                 f"# Deep Memory: \"{safe_query}\"\n"
-                f"<skill id=\"always/04-deep-memory.md\" />\n"
-                f"<skill id=\"{phase_skill}\" />\n\n"
+                f"{skill_refs}\n\n"
             )
 
             # Embed once, pass vector to all 3 search methods
@@ -3814,6 +3864,9 @@ class Brain:
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             if args.get("subscribe"):
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
+            ev_doc = await self.blackboard.get_event(event_id)
+            refs = _build_skill_refs("refresh_gitlab_context", getattr(ev_doc, "brain_phase", None), getattr(ev_doc, "source", None))
+            evidence = f"{refs}\n{evidence}" if refs else evidence
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -3907,6 +3960,8 @@ class Brain:
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             if args.get("subscribe"):
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
+            refs = _build_skill_refs("refresh_kargo_context", getattr(event, "brain_phase", None), getattr(event, "source", None))
+            evidence = f"{refs}\n{evidence}" if refs else evidence
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
