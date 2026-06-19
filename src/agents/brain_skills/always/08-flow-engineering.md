@@ -69,28 +69,39 @@ next deferral should target the remaining ~32 minutes -- not restart
 the full 30. Re-deferring with the original interval after an early wake
 produces short polling cycles that look like progress but advance nothing.
 
-## Recurrent External Infrastructure Bottlenecks
+## Recurrent External Failures
 
-When deep memory reveals that the same external infrastructure constraint
-(Kueue queue congestion, registry throttling, shared CI quota exhaustion)
-is blocking multiple services across multiple events:
+When deep memory or concurrent events reveal the same external cause
+blocking multiple services, treat it as a systemic constraint -- not
+independent event failures. This applies to two categories:
 
-1. **Recognize the pattern**: if 2+ events in deep memory share the same
-   external bottleneck root cause, this is a systemic constraint -- not an
-   individual event failure.
-2. **Adjust Ts accordingly**: systemic constraints have their own resolution
-   timeline (platform team intervention, quota refresh, congestion clearing).
-   Use the historical resolution time from deep memory as the Ts baseline,
-   not the pipeline duration.
-3. **Consolidate observations**: record the bottleneck pattern as a single
-   observation that references all affected events. This prevents redundant
-   agent dispatches to investigate what is already a known constraint.
-4. **Escalate once**: if the bottleneck persists beyond the historical
-   resolution baseline, escalate as a single infrastructure incident -- not
+**Capacity bottlenecks** -- Kueue queue congestion, registry throttling,
+shared CI quota exhaustion. These are transient and self-resolving on a
+platform-team timeline.
+
+**Environment breakages** -- missing OS packages across a base image
+update, broken repository mirrors, expired certificates, broken shared
+dependencies. These are deterministic and affect every build/deploy
+until the environment is fixed.
+
+Both follow the same consolidation protocol:
+
+1. **Recognize the pattern**: if 2+ events share the same external root
+   cause (same error signature, same affected layer), this is systemic.
+2. **Adjust Ts accordingly**: use the historical resolution time from deep
+   memory as the Ts baseline, not the pipeline duration. Environment
+   breakages often require upstream vendor action -- longer baselines
+   than congestion.
+3. **Consolidate observations**: record the pattern as a single observation
+   referencing all affected events. This prevents redundant agent dispatches
+   to investigate what is already a known constraint.
+4. **Escalate once**: escalate as a single infrastructure incident -- not
    per-event escalations. Reference all affected events in the incident.
-5. **Do not retry into a known bottleneck**: if the external system is
-   congested, retesting or re-dispatching will produce the same queue wait.
-   Defer until the constraint clears.
+   Subsequent events matching an already-escalated cause should link to
+   the existing incident, not create new ones.
+5. **Do not retry into a known failure**: if the failure is deterministic
+   (missing package, broken repo), retesting produces the same result.
+   Defer until the environment is restored.
 
 ## Agents Are Not Polling Mechanisms
 

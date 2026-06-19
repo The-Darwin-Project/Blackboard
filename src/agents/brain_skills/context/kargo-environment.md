@@ -34,6 +34,22 @@ For **Errored** status: use shorter intervals since errors need faster feedback 
 - If the failure is a config/expression error in the stage spec, route to **developer** for a code fix.
 - If the failure is an MR/PR merge timeout, sysadmin can check the MR/PR state and either merge or close it.
 
+## MR-Blocked Promotions
+
+When a Kargo promotion failure is caused by an MR (merge timeout,
+pipeline failure, auto-merge timeout), the MR is the observable
+resource -- not the Kargo stage. The Kargo observer can only tell you
+the stage is still failing; the GitLab MR carries the actual signal
+(pipeline passed, MR merged, conflicts appeared).
+
+Use the MR URL from kargo_context to track the MR directly. The
+system hydrates GitLab context on first successful fetch, so
+subscriptions and subsequent refreshes work. The Kargo defer timer
+remains the safety net if the subscription misses.
+
+Blind Kargo-level deferrals on an MR-blocked promotion waste the
+interval when the MR merges early and provide no evidence on wake.
+
 ## Error Categories (from cluster probe)
 
 - **MR/PR merge timeout**: `step "wait-for-merge" timed out after 3h0m0s` -- MR/PR pipeline may have failed or is stuck.
