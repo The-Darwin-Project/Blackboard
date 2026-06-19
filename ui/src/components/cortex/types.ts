@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/components/cortex/types.ts
 // @ai-rules:
 // 1. [Constraint]: All interfaces use snake_case to match Python API (PulseBatch, Pulse, CognitiveGraphResponse).
-// 2. [Pattern]: neuron_type union matches backend PulsePort neuron categories exactly.
+// 2. [Pattern]: neuron_type union matches backend PulsePort neuron categories exactly. Includes 'skill' for brain skill ring.
 // 3. [Gotcha]: Executive hemisphere neurons (tool/phase/agent) have score=1.0 always; knowledge neurons have variable scores.
 // 4. [Pattern]: event_source typed via shared EventSource from api/types.ts. Optional -- None when source unavailable.
 
@@ -9,7 +9,7 @@ import type { EventSource } from '../../api/types';
 
 export interface Pulse {
   neuron_id: string;
-  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain';
+  neuron_type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill';
   score: number;
   injected: boolean;
 }
@@ -29,7 +29,7 @@ export interface PulseBatch {
 
 export interface Neuron {
   id: string;
-  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain';
+  type: 'lesson' | 'memory' | 'knowledge' | 'tool' | 'phase' | 'agent' | 'domain' | 'skill';
   heat: number;
   payload: Record<string, unknown>;
 }

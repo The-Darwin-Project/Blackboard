@@ -286,6 +286,18 @@ class BrainSkillLoader:
         """Return list of discovered phase names."""
         return list(self._corpus.cache.keys())
 
+    def list_skills_for_graph(self) -> list[dict[str, str]]:
+        """Return graph-friendly skill metadata for the cognitive graph API."""
+        return [
+            {
+                "id": f"skill:{rel_path}",
+                "label": meta.get("description", rel_path.rsplit("/", 1)[-1].replace(".md", "").replace("-", " ")),
+                "phase_folder": rel_path.split("/", 1)[0] if "/" in rel_path else "",
+                "tag_type": self.get_tag_type(rel_path),
+            }
+            for rel_path, (_body, meta) in self._corpus.path_index.items()
+        ]
+
     def reload(self) -> None:
         """Re-discover from filesystem via atomic corpus swap."""
         self._discover()

@@ -2,10 +2,13 @@
 // @ai-rules:
 // 1. [Pattern]: SigmaContainer + useLoadGraph + useRegisterEvents from @react-sigma/core.
 // 2. [Pattern]: useWorkerLayoutForceAtlas2 for CONTINUOUS force simulation on knowledge nodes.
-// 3. [Constraint]: Executive + event nodes have fixed:true -- FA2 worker ignores them.
+// 3. [Constraint]: Executive + skill + event nodes have fixed:true -- FA2 worker ignores them.
 // 4. [Gotcha]: FA2 worker runs in background WebWorker. Start on mount, stop on unmount.
 // 5. [Pattern]: Structural edges (white, thin) permanent. Activity edges (event-colored) fade over 10s.
 // 6. [Pattern]: Force model inspired by update-graph D3 simulation (repulsion + collision + gravity).
+// 7. [Pattern]: Ring layout: executive (r=250, fixed), skills (r=320, fixed), knowledge (r=400-650, FA2-free), events (r=800, fixed).
+// 8. [Gotcha]: Skill node color resolved INLINE during creation (SKILL_TAG_COLORS[tag_type]). getNeuronColor() has no payload access.
+// 9. [Pattern]: Ripple overlay via DOM: sigma.getContainer().appendChild(div.skill-ripple). activeRipplesRef cap=10. idempotent cleanup via `cleaned` flag.
 import { useEffect, useRef, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
@@ -13,9 +16,9 @@ import { MultiGraph } from 'graphology';
 import { NodeSquareProgram } from '@sigma/node-square';
 import { NodeCircleProgram } from 'sigma/rendering';
 import '@react-sigma/core/lib/style.css';
-import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS } from '../../constants/colors';
+import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS, SKILL_TAG_COLORS } from '../../constants/colors';
 import {
-  getExecutiveNeurons, getStructuralEdges, eventColor,
+  getExecutiveNeurons, getStructuralEdges, eventColor, PHASE_SKILL_FOLDERS,
 } from './cortex-constants';
 import type { ActiveEvent } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
@@ -34,7 +37,8 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 }
 
 function getNeuronSize(heat: number, type: string): number {
-  const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5 : type === 'tool' ? 4 : type === 'event' ? 8 : 3;
+  const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
+    : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : 3;
   return base + Math.min(heat * 0.2, 6);
 }
 
@@ -61,6 +65,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   const sigma = useSigma();
   const activityTimersRef = useRef<Map<string, number>>(new Map());
   const processedBatchesRef = useRef<Set<string>>(new Set());
+  const activeRipplesRef = useRef(0);
 
   useEffect(() => {
     processedBatchesRef.current.clear();
@@ -73,23 +78,31 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       if (heatMap.has(execN.id)) execN.heat = heatMap.get(execN.id)!;
     }
 
-    // Concentric ring layout: brain core -> executive (ring 1) -> knowledge (ring 2) -> events (ring 3)
-    const RING = { executive: 250, knowledge: { min: 400, max: 650 }, events: 800 };
+    // Concentric ring layout: brain core -> executive (ring 1) -> skills (ring 2) -> knowledge (ring 3) -> events (ring 4)
+    const RING = { executive: 250, skills: 320, knowledge: { min: 400, max: 650 }, events: 800 };
 
-    // Count executive nodes for even distribution
+    // Count executive and skill nodes for even distribution
     const toolNodes = allNeurons.filter(n => n.type === 'tool');
     const phaseNodes = allNeurons.filter(n => n.type === 'phase');
     const agentNodes = allNeurons.filter(n => n.type === 'agent');
+    const skillNodes = allNeurons.filter(n => n.type === 'skill');
     const execTotal = toolNodes.length + phaseNodes.length + agentNodes.length;
     let execIdx = 0;
+    let skillIdx = 0;
 
     for (const n of allNeurons) {
       if (graph.hasNode(n.id)) continue;
       const isKnowledge = n.type === 'lesson' || n.type === 'memory' || n.type === 'knowledge';
       let x: number, y: number;
 
-      if (isKnowledge) {
-        // Ring 2: knowledge nodes in a ring around executive core
+      if (n.type === 'skill') {
+        // Ring 2: skill nodes on fixed ring between executive and knowledge
+        const angle = (skillIdx / Math.max(skillNodes.length, 1)) * 2 * Math.PI - Math.PI / 2;
+        x = RING.skills * Math.cos(angle);
+        y = RING.skills * Math.sin(angle);
+        skillIdx++;
+      } else if (isKnowledge) {
+        // Ring 3: knowledge nodes in randomized band around skill ring
         const angle = Math.random() * Math.PI * 2;
         const radius = RING.knowledge.min + Math.random() * (RING.knowledge.max - RING.knowledge.min);
         x = radius * Math.cos(angle);
@@ -116,13 +129,18 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
 
       const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain';
+      const isFixed = isExecutive || n.type === 'skill';
+      // Skill color resolved inline (tag_type in payload, not available in getNeuronColor signature)
+      const nodeColor = n.type === 'skill'
+        ? (SKILL_TAG_COLORS[(n.payload as { tag_type?: string })?.tag_type ?? ''] ?? NEURON_COLORS.skill)
+        : getNeuronColor(n);
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
-        color: getNeuronColor(n),
+        color: nodeColor,
         label,
         type: 'circle',
-        fixed: isExecutive,
+        fixed: isFixed,
       });
     }
 
@@ -143,7 +161,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
     }
 
-    // Structural edges
+    // Structural edges (executive hemisphere chains)
     for (const edge of getStructuralEdges()) {
       if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
         const edgeId = `struct:${edge.source}:${edge.target}`;
@@ -153,6 +171,23 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
             size: 1,
             structural: true,
           });
+        }
+      }
+    }
+
+    // Dynamic phase→skill structural edges (always/ skills are omnipresent — left unconnected)
+    for (const [phase, folders] of Object.entries(PHASE_SKILL_FOLDERS)) {
+      const phaseId = `phase:${phase}`;
+      if (!graph.hasNode(phaseId)) continue;
+      for (const node of skillNodes) {
+        const folder = (node.payload as { phase_folder?: string })?.phase_folder;
+        if (folder && folders.includes(folder)) {
+          const edgeId = `struct:${phaseId}:${node.id}`;
+          if (!graph.hasEdge(edgeId)) {
+            graph.addEdgeWithKey(edgeId, phaseId, node.id, {
+              color: '#334155', size: 0.5, structural: true,
+            });
+          }
         }
       }
     }
@@ -210,6 +245,10 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           source = 'tool:select_agent';
           color = getNeuronColor({ type: 'agent', id: pulse.neuron_id });
           if (!graph.hasNode(source)) continue;
+        } else if (pulse.neuron_type === 'skill') {
+          size = 2;
+          // Skill pulses arrive in a separate batch (no tool in same batch) — route from event node
+          source = evtId;
         }
 
         graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, {
@@ -236,6 +275,31 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           }
         }, 500);
         activityTimersRef.current.set(edgeId, timer);
+
+        // Ripple overlay for skill pulses (capped at 10 concurrent)
+        if (pulse.neuron_type === 'skill' && graph.hasNode(pulse.neuron_id)) {
+          const container = sigma.getContainer();
+          if (container && activeRipplesRef.current < 10) {
+            activeRipplesRef.current++;
+            const nodeAttrs = graph.getNodeAttributes(pulse.neuron_id);
+            const viewPos = sigma.graphToViewport({ x: nodeAttrs.x as number, y: nodeAttrs.y as number });
+            const ripple = document.createElement('div');
+            ripple.className = 'skill-ripple';
+            ripple.style.left = `${viewPos.x - 6}px`;
+            ripple.style.top = `${viewPos.y - 6}px`;
+            ripple.style.color = graph.getNodeAttribute(pulse.neuron_id, 'color') as string;
+            container.appendChild(ripple);
+            let cleaned = false;
+            const cleanup = () => {
+              if (cleaned) return;
+              cleaned = true;
+              ripple.remove();
+              activeRipplesRef.current--;
+            };
+            ripple.addEventListener('animationend', cleanup);
+            setTimeout(cleanup, 700); // fallback if animationend doesn't fire
+          }
+        }
       }
     }
   }, [liveBatches, sigma, activeEvents]);
@@ -335,7 +399,7 @@ export default function CortexGraph({
     <div className={`relative ${className ?? ''}`} style={{ background: '#030712', width: '100%', height: '100%' }}>
       <SigmaContainer
         graph={MultiGraph}
-        style={{ width: '100%', height: '100%', background: 'transparent' }}
+        style={{ width: '100%', height: '100%', background: 'transparent', position: 'relative' }}
         settings={{
           allowInvalidContainer: true,
           defaultNodeColor: '#475569',

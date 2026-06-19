@@ -119,6 +119,18 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'domain:disorder': 'Default state — not yet classified into a domain',
 };
 
+/**
+ * Phase-to-skill-folder mapping for structural edges in the cognitive graph.
+ * Mirrors BRAIN_PHASE_SKILLS in brain.py. always/ skills are omnipresent and
+ * intentionally left unconnected (connecting to all phases is visual noise).
+ */
+export const PHASE_SKILL_FOLDERS: Record<string, string[]> = {
+  dispatch: ['dispatch', 'coordination'],
+  verify: ['post-agent', 'defer-wake'],
+  escalate: ['post-agent', 'escalate'],
+  close: ['close'],
+};
+
 /** X position bias: knowledge left, events center, executive right. Wide separation prevents mixing. */
 export const HEMISPHERE_X = {
   knowledge: -500,

@@ -6,7 +6,7 @@
 // 4. [Pattern]: Type-specific rendering via chained if-else on neuron.type.
 import { memo, useEffect, useLayoutEffect, useRef, useState, type FC, type ReactNode } from 'react';
 import { X } from 'lucide-react';
-import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS } from '../../constants/colors';
+import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS, SKILL_TAG_COLORS } from '../../constants/colors';
 import { NEURON_DESCRIPTIONS } from './cortex-constants';
 import type { Neuron } from './types';
 
@@ -91,6 +91,18 @@ const NeuronInfoPanel: FC<NeuronInfoPanelProps> = ({ neuron, position, onClose }
         {asString(p.scope) && <Badge text={asString(p.scope)} />}
         {asString(p.source) && <span>Source: {asString(p.source)}</span>}
       </div>
+    </>);
+  } else if (neuron.type === 'skill') {
+    const tagType = asString(p.tag_type);
+    const tagColor = SKILL_TAG_COLORS[tagType] ?? typeColor;
+    const phaseFolder = asString(p.phase_folder);
+    body = (<>
+      {asString(p.label) && <div className="text-[12px] text-text-primary font-medium mb-1">{asString(p.label)}</div>}
+      <div className="flex flex-wrap gap-1 mb-2">
+        {tagType && <Badge text={tagType} color={tagColor} />}
+        {phaseFolder && <Badge text={phaseFolder} />}
+      </div>
+      {neuron.heat > 0 && <div className="text-[10px] text-text-muted">Heat: {neuron.heat}</div>}
     </>);
   } else {
     const subName = neuron.id.replace(/^(tool|phase|agent|domain):/, '');

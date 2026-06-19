@@ -202,6 +202,7 @@ class ContextFlags(TypedDict, total=False):
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
+    from .brain_skill_loader import BrainSkillLoader
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,7 @@ def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
 
 
-from .brain_skill_loader import build_skill_refs as _build_skill_refs
+from .brain_skill_loader import build_skill_refs as _build_skill_refs, TOOL_SKILL_MAP as _TOOL_SKILL_MAP
 
 
 class Brain:
@@ -392,6 +393,11 @@ class Brain:
         logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, agents={list(self.agents.keys())})")
 
     JOURNAL_CACHE_TTL = 60  # seconds
+
+    @property
+    def skill_loader(self) -> BrainSkillLoader | None:
+        """Public accessor for the cognitive graph API."""
+        return self._skill_loader
 
     async def _get_journal_cached(self, service: str) -> list[str]:
         """Get journal with 60s in-memory cache. Invalidated on close_event."""
@@ -2970,6 +2976,12 @@ class Brain:
                 getattr(ev_for_ctx, "brain_phase", None),
                 ev_for_ctx.source if ev_for_ctx else None,
             )
+            skill_paths = _TOOL_SKILL_MAP.get("consult_deep_memory", [])
+            if skill_paths:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
+                )
             memory_text = (
                 f"# Deep Memory: \"{safe_query}\"\n"
                 f"{skill_refs}\n\n"
@@ -3818,6 +3830,12 @@ class Brain:
             ev_doc = await self.blackboard.get_event(event_id)
             refs = _build_skill_refs("refresh_gitlab_context", getattr(ev_doc, "brain_phase", None), getattr(ev_doc, "source", None))
             evidence = f"{refs}\n{evidence}" if refs else evidence
+            skill_paths = _TOOL_SKILL_MAP.get("refresh_gitlab_context", [])
+            if skill_paths:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
+                )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -3913,6 +3931,12 @@ class Brain:
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
             refs = _build_skill_refs("refresh_kargo_context", getattr(event, "brain_phase", None), getattr(event, "source", None))
             evidence = f"{refs}\n{evidence}" if refs else evidence
+            skill_paths = _TOOL_SKILL_MAP.get("refresh_kargo_context", [])
+            if skill_paths:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
+                )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",

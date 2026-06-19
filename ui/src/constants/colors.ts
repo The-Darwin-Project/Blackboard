@@ -69,6 +69,7 @@ export const NEURON_COLORS: Record<string, string> = {
   phase:     '#6366f1',   // indigo -- lifecycle phases
   agent:     '#8b5cf6',   // violet -- default; overridden per agent below
   domain:    '#eab308',   // amber -- default; overridden per domain below
+  skill:     '#f472b6',   // rose  -- brain skills ring (overridden per tag_type inline)
 };
 
 export const DOMAIN_NEURON_COLORS: Record<string, string> = {
@@ -86,6 +87,15 @@ export const AGENT_NEURON_COLORS: Record<string, string> = {
   developer: '#f59e0b', // amber
   qe:        '#a855f7', // purple
   security_analyst: '#ef4444', // red
+};
+
+/** Brain skill tag_type colors for the Cortex skill ring (ring 2, r=320) */
+export const SKILL_TAG_COLORS: Record<string, string> = {
+  rule:       '#22c55e', // green  -- always/, source/ (persistent rules)
+  skill:      '#f472b6', // rose   -- dispatch/, close/, post-agent/, etc.
+  protocol:   '#6366f1', // indigo -- coordination/
+  navigation: '#eab308', // amber  -- domain/ (steering logic)
+  context:    '#06b6d4', // cyan   -- context/
 };
 
 export const SHIFT_STATUS_COLORS: Record<string, { bg: string; text: string; border: string; label: string }> = {

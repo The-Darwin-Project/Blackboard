@@ -23,7 +23,7 @@ import time
 from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional
 
-from ..dependencies import get_archivist, get_pulse_tracker
+from ..dependencies import get_archivist, get_brain, get_pulse_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,25 @@ async def get_cognitive_graph():
             "payload": payload,
             "heat": heat.get(nid, 0),
         })
+
+    try:
+        brain = await get_brain()
+        if brain and brain.skill_loader:
+            skill_nodes = brain.skill_loader.list_skills_for_graph()
+            for s in skill_nodes:
+                nid = s["id"]
+                neurons.append({
+                    "id": nid,
+                    "type": "skill",
+                    "payload": {
+                        "label": s["label"],
+                        "phase_folder": s["phase_folder"],
+                        "tag_type": s["tag_type"],
+                    },
+                    "heat": heat.get(nid, 0),
+                })
+    except Exception:
+        logger.warning("Failed to load skill neurons for graph", exc_info=True)
 
     return {"neurons": neurons, "total": len(neurons)}
 

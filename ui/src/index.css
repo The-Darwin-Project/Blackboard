@@ -84,6 +84,21 @@ html, body {
   vertical-align: text-bottom;
 }
 
+/* Cortex skill ring: ripple animation on skill pulse */
+@keyframes skill-ripple {
+  0%   { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(3); opacity: 0; }
+}
+.skill-ripple {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  pointer-events: none;
+  animation: skill-ripple 600ms ease-out forwards;
+}
+
 /* Print styles -- hide chrome, show only report content */
 @media print {
   header, footer, [data-no-print] { display: none !important; }
