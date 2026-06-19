@@ -158,6 +158,18 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "type": "string",
                     "description": "What to search for (e.g., 'average pipeline time', 'high CPU on darwin-store')",
                 },
+                "time_range_hours": {
+                    "type": "integer",
+                    "description": "Narrow event results to the last N hours based on when events closed",
+                },
+                "min_duration_minutes": {
+                    "type": "integer",
+                    "description": "Only return events that lasted at least N minutes",
+                },
+                "service": {
+                    "type": "string",
+                    "description": "Exact service name to restrict event results",
+                },
             },
             "required": ["query"],
         },

@@ -279,6 +279,17 @@ import re as _re
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
 
 
+def _safe_int(val, *, default: int | None = None) -> int | None:
+    """Safely parse an integer from LLM tool args. Returns default on invalid input."""
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        result = int(val)
+        return result if result > 0 else default
+    except (ValueError, TypeError, OverflowError):
+        return default
+
+
 def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
     safe_path = _SAFE_PATH_RE.sub('_', path)
@@ -2932,9 +2943,32 @@ class Brain:
 
         elif function_name == "consult_deep_memory":
             query = args.get("query", "")
+            time_range = _safe_int(args.get("time_range_hours"))
+            min_dur = _safe_int(args.get("min_duration_minutes"))
+            svc = str(args.get("service") or "").strip() or None
+            conditions: list[dict] = []
+            if time_range:
+                cutoff = time.time() - (time_range * 3600)
+                conditions.append({"key": "closed_at", "range": {"gte": cutoff}})
+            if min_dur:
+                conditions.append({"key": "duration_seconds", "range": {"gte": min_dur * 60}})
+            if svc:
+                conditions.append({"key": "service", "match": {"value": svc}})
+            qdrant_filter = {"must": conditions} if conditions else None
+            if qdrant_filter:
+                logger.debug(f"Deep memory filters applied: {[f for f in ['time_range' if time_range else '', 'min_dur' if min_dur else '', 'svc' if svc else ''] if f]} for event {event_id}")
+
             ev = await self.blackboard.get_event(event_id)
             safe_query = query.replace('"', '\\"')
-            query_marker = f'Deep Memory: "{safe_query}"'
+            filter_parts: list[str] = []
+            if time_range:
+                filter_parts.append(f"time={time_range}h")
+            if min_dur:
+                filter_parts.append(f"dur>={min_dur}m")
+            if svc:
+                filter_parts.append(f"svc={svc}")
+            filter_tag = f" [{','.join(filter_parts)}]" if filter_parts else " [unfiltered]"
+            query_marker = f'Deep Memory: "{safe_query}"{filter_tag}'
             already_consulted = any(
                 t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and query_marker in (t.evidence or "")
                 for t in (ev.conversation if ev else [])
@@ -2955,7 +2989,7 @@ class Brain:
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
-                if "No historical patterns" in cached_evidence or "No results" in cached_evidence:
+                if "No historical patterns" in cached_evidence or "No results" in cached_evidence or "No events match" in cached_evidence:
                     return False
                 return True
 
@@ -2983,7 +3017,7 @@ class Brain:
                     [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
                 )
             memory_text = (
-                f"# Deep Memory: \"{safe_query}\"\n"
+                f"# Deep Memory: \"{safe_query}\"{filter_tag}\n"
                 f"{skill_refs}\n\n"
             )
 
@@ -3039,7 +3073,7 @@ class Brain:
             # Search past events (pattern first, temporal data preserved)
             if archivist and hasattr(archivist, "search"):
                 try:
-                    results = await archivist.search(query, limit=5, context=pulse_ctx, vector=query_vector)
+                    results = await archivist.search(query, limit=5, context=pulse_ctx, vector=query_vector, filter=qdrant_filter)
                 except Exception as e:
                     logger.warning(f"Deep memory event search failed: {e}")
                     results = None
@@ -3069,12 +3103,20 @@ class Brain:
                         )
 
             if not has_results:
-                memory_text += (
-                    "No historical patterns match this query. "
-                    "Consider whether the event classification is accurate, "
-                    "or try searching with different keywords that describe the symptom or root cause. "
-                    "The ops journal for this service may also have relevant entries."
-                )
+                if qdrant_filter:
+                    filter_desc = ", ".join(filter_parts) if filter_parts else "active filters"
+                    memory_text += (
+                        f"No events match the applied filters ({filter_desc}). "
+                        "Consider widening the time range, removing duration or service constraints, "
+                        "or searching with different keywords."
+                    )
+                else:
+                    memory_text += (
+                        "No historical patterns match this query. "
+                        "Consider whether the event classification is accurate, "
+                        "or try searching with different keywords that describe the symptom or root cause. "
+                        "The ops journal for this service may also have relevant entries."
+                    )
 
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),

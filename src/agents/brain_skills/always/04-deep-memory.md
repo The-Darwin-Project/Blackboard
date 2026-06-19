@@ -46,3 +46,19 @@ cluster endpoints, team ownership conventions, and historical deployment decisio
   current metrics and pod status.
 
 Fix proposal authorization (Propose and Prompt) is available during dispatch phase via dispatch/deep-memory-fixes.md.
+
+## Temporal and Structured Filters
+
+Deep memory supports optional structured filters alongside semantic search.
+These narrow results by recency, event duration, or service scope.
+
+Use filters when the question has a clear temporal or service dimension.
+Semantic search alone handles most queries — filters add precision when
+the user asks about specific time periods, long-running events, or
+particular services. When uncertain, prefer fewer filters. If filtered
+results return empty, the response will indicate which filters were applied
+so you can adjust.
+
+Filters narrow the **Past Events** section only. Lessons Learned and
+Reference Facts are never filtered by time or service — they represent
+timeless patterns and static infrastructure knowledge.

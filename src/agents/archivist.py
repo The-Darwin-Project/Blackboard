@@ -122,6 +122,14 @@ class Archivist:
             logger.info("Archivist initialized (embedding + Qdrant, darwin_events + darwin_feedback + darwin_lessons)")
 
             try:
+                await self._vector_store.create_payload_index(COLLECTION_NAME, "closed_at", "float")
+                await self._vector_store.create_payload_index(COLLECTION_NAME, "duration_seconds", "float")
+                await self._vector_store.create_payload_index(COLLECTION_NAME, "service", "keyword")
+                logger.info("Event payload indexes ready (closed_at, duration_seconds, service)")
+            except Exception as e:
+                logger.warning(f"Event payload index creation failed (degraded, search still works): {e}")
+
+            try:
                 await self._vector_store.ensure_collection(KNOWLEDGE_COLLECTION, vector_size=768)
                 await self._vector_store.create_payload_index(KNOWLEDGE_COLLECTION, "scope", "keyword")
                 await self._vector_store.create_payload_index(KNOWLEDGE_COLLECTION, "topic", "keyword")
@@ -317,7 +325,7 @@ class Archivist:
             logger.warning(f"Backfill failed (non-fatal): {e}")
             return 0
 
-    async def search(self, query: str, *, limit: int = 5, context=None, vector=None) -> list[dict]:
+    async def search(self, query: str, *, limit: int = 5, context=None, vector=None, filter: dict | None = None) -> list[dict]:
         """
         Search deep memory for similar past events.
         
@@ -336,6 +344,7 @@ class Archivist:
                 collection=COLLECTION_NAME,
                 vector=vector,
                 limit=limit,
+                filter=filter,
             )
 
             if self.pulse_port and results:
