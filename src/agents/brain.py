@@ -2920,17 +2920,19 @@ class Brain:
             return True
 
         elif function_name == "consult_deep_memory":
-            # Guard: max 1 deep memory call per event (prevent LLM re-query loop)
+            query = args.get("query", "")
             ev = await self.blackboard.get_event(event_id)
+            safe_query = query.replace('"', '\\"')
+            query_marker = f'Deep Memory: "{safe_query}"'
             already_consulted = any(
-                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep Memory" in (t.evidence or "")
+                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and query_marker in (t.evidence or "")
                 for t in (ev.conversation if ev else [])
             )
             if already_consulted:
-                logger.info(f"Deep memory already consulted for {event_id} -- returning cached results")
+                logger.info(f"Deep memory already consulted for {event_id} query={query!r} -- returning cached results")
                 cached_evidence = next(
                     (t.evidence for t in (ev.conversation if ev else [])
-                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and "Deep Memory" in t.evidence),
+                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and query_marker in t.evidence),
                     "Deep memory was already consulted (no cached results).",
                 )
                 turn = ConversationTurn(
@@ -2946,9 +2948,7 @@ class Brain:
                     return False
                 return True
 
-            query = args.get("query", "")
             archivist = self.agents.get("_archivist_memory")
-            memory_text = f"## Deep Memory: \"{query}\"\n\n"
             has_results = False
 
             from ..memory.pulse import PulseContext
@@ -2958,6 +2958,20 @@ class Brain:
                 turn=len(ev_for_ctx.conversation) if ev_for_ctx else 0,
                 event_elapsed_s=int(time.time() - ev_for_ctx.conversation[0].timestamp) if ev_for_ctx and ev_for_ctx.conversation else 0,
                 event_source=ev_for_ctx.source if ev_for_ctx else None,
+            )
+
+            brain_phase = _resolve_phase(getattr(ev_for_ctx, "brain_phase", None))
+            phase_skill_map = {
+                "triage": "always/06-decision-guidelines.md",
+                "dispatch": "dispatch/decision-routing.md",
+                "verify": "always/03-control-theory.md",
+                "escalate": "escalate/incident-tracking.md",
+            }
+            phase_skill = phase_skill_map.get(brain_phase, "always/06-decision-guidelines.md")
+            memory_text = (
+                f"# Deep Memory: \"{safe_query}\"\n"
+                f"<skill id=\"always/04-deep-memory.md\" />\n"
+                f"<skill id=\"{phase_skill}\" />\n\n"
             )
 
             # Embed once, pass vector to all 3 search methods
@@ -3042,12 +3056,11 @@ class Brain:
                         )
 
             if not has_results:
-                memory_text = (
-                    f"## Deep Memory: \"{query}\"\n\n"
-                    f"No historical patterns match this query. "
-                    f"Consider whether the event classification is accurate, "
-                    f"or try searching with different keywords that describe the symptom or root cause. "
-                    f"The ops journal for this service may also have relevant entries."
+                memory_text += (
+                    "No historical patterns match this query. "
+                    "Consider whether the event classification is accurate, "
+                    "or try searching with different keywords that describe the symptom or root cause. "
+                    "The ops journal for this service may also have relevant entries."
                 )
 
             turn = ConversationTurn(
