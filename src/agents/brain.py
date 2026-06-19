@@ -50,6 +50,8 @@
 #     _build_system_prompt wraps each resolved skill body with semantic XML tags (rule, skill,
 #     protocol, context) via _wrap_section(path, body, tag_type). Tag type resolved by
 #     BrainSkillLoader.get_tag_type(): frontmatter override > folder default > "skill".
+#     build_skill_refs (imported from brain_skill_loader) generates <skill id="..."> XML pointers
+#     for tool_result evidence on observation tools (deep_memory, refresh_gitlab, refresh_kargo).
 # 22b. [Constraint]: section id values must be ASCII path chars (a-z, 0-9, -, _, /). No quotes,
 #     angle brackets, or ampersands in skill filenames -- would break the XML id attribute.
 # 29. [Pattern]: _format_recall_block reads _recall_lessons dict (populated by reflex gate).

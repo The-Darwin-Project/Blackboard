@@ -1,6 +1,7 @@
 # BlackBoard/src/agents/brain_skill_loader.py
 # @ai-rules:
 # 1. [Constraint]: This module has ZERO dependency on Brain or any agent class. Testable in isolation.
+#    Only coupling: models._resolve_phase (deferred import in build_skill_refs to avoid circular).
 # 2. [Pattern]: Glob discovery at startup. All files cached in memory. Zero I/O per LLM call.
 # 3. [Pattern]: YAML frontmatter parsed via yaml.safe_load between --- delimiters.
 # 4. [Pattern]: Cross-skill dependencies resolved via BFS with cycle-safe seen set.
@@ -14,6 +15,9 @@
 #    Reload replaces self._corpus atomically -- no window of partial state.
 # 10. [Pattern]: async discover_from_redis() reads HGETALL with sorted keys + corrupt JSON resilience.
 #     Critical always/* corruption aborts swap (fail-closed). Non-critical phases skip with warning.
+# 11. [Pattern]: TOOL_SKILL_MAP, PHASE_SKILL_MAP, build_skill_refs() own the tool→skill and
+#     phase→skill mappings. Brain imports build_skill_refs and calls it for tool_result evidence.
+#     Dedup via seen set prevents duplicate <skill id> tags when tool and phase map to the same skill.
 """
 Filesystem-driven brain skill discovery, loading, and dependency resolution.
 
