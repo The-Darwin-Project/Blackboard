@@ -232,14 +232,20 @@ class Headhunter:
 
         grouped = self._group_by_mr(actionable)
         result = []
+        skipped_terminal = 0
         for key, group in grouped.items():
             if key in active_mr_keys:
                 continue
             best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
+            mr_state = best.get("target", {}).get("state", "")
+            if mr_state in ("merged", "closed"):
+                skipped_terminal += 1
+                logger.debug(f"Headhunter: skipping terminal MR {key} (state={mr_state})")
+                continue
             result.append(best)
         result.sort(key=lambda t: t.get("created_at", ""))
         self._last_poll_pending = len(result)
-        logger.info(f"Headhunter poll: {len(all_todos)} total todos, {len(actionable)} actionable, {len(active_mr_keys)} already active, {len(result)} new")
+        logger.info(f"Headhunter poll: {len(all_todos)} total todos, {len(actionable)} actionable, {len(active_mr_keys)} already active, {skipped_terminal} terminal, {len(result)} new")
         return result
 
     async def _get_active_mr_keys(self) -> set[tuple[int, int]]:
