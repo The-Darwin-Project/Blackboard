@@ -13,7 +13,7 @@
 # 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
 # 11. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
 # 12. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
-# 13. [Pattern]: refresh_mr_state(event_id) re-fetches MR+pipeline state from GitLab for Brain's refresh_gitlab_context tool.
+# 13. [Pattern]: refresh_mr_state(event_id, override_project_id, override_mr_iid) re-fetches MR+pipeline state from GitLab. Overrides allow chat/slack events to supply MR refs from agent completion reports. parse_mr_url() + resolve_project_id() handle URL-to-ID conversion.
 # 14. [Pattern]: poll_gitlab_mr_status(project_id, mr_iid) is a side-effect-free read-only poll for StateWatcher. Returns state_key fields only.
 # 15. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note).
 #     Normal closes: mark_feedback_sent always runs after MR comment post, regardless of dismiss outcome.
@@ -539,12 +539,59 @@ class Headhunter:
         logger.info(f"Headhunter event created: {event_id} for {todo['action_name']} on !{target['iid']}")
         return event_id
 
-    async def refresh_mr_state(self, event_id: str) -> dict:
+    @staticmethod
+    def parse_mr_url(url: str) -> tuple[int, int] | None:
+        """Extract (project_id, mr_iid) from a GitLab MR URL.
+
+        Supports both numeric project IDs and URL-encoded namespace paths.
+        Returns None if the URL doesn't match the expected pattern.
+        """
+        import re
+        from urllib.parse import unquote
+        m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m = re.search(r"/([\w._/-]+)/-/merge_requests/(\d+)", url)
+        if m:
+            return unquote(m.group(1)), int(m.group(2))
+        return None
+
+    async def resolve_project_id(self, path_or_id) -> int | None:
+        """Resolve a namespace/project path to a numeric project ID via GitLab API."""
+        if isinstance(path_or_id, int):
+            return path_or_id
+        try:
+            pid = int(path_or_id)
+            return pid
+        except (ValueError, TypeError):
+            pass
+        from urllib.parse import quote
+        encoded = quote(str(path_or_id), safe="")
+        try:
+            async with httpx.AsyncClient(verify=False, timeout=15) as client:
+                resp = await client.get(
+                    self._api_url(f"/projects/{encoded}"),
+                    headers=self._headers(),
+                )
+                if resp.is_success:
+                    return resp.json().get("id")
+        except Exception as e:
+            logger.warning(f"resolve_project_id failed for {path_or_id}: {e}")
+        return None
+
+    async def refresh_mr_state(self, event_id: str, *,
+                               override_project_id: int | None = None,
+                               override_mr_iid: int | None = None) -> dict:
         """Re-fetch current MR/pipeline state from GitLab and update event evidence.
 
         Called by Brain's refresh_gitlab_context tool. Returns a summary dict
         for the Brain conversation turn. On error, returns {error: str} and
         leaves evidence unchanged.
+
+        When override_project_id/override_mr_iid are provided (e.g., parsed
+        from an MR URL on a chat/slack event), they take precedence over
+        event evidence. The caller is responsible for hydrating gitlab_context
+        on the event after a successful fetch.
         """
         event = await self.blackboard.get_event(event_id)
         if not event:
@@ -553,14 +600,12 @@ class Headhunter:
         gl_ctx = None
         if event.event.evidence and hasattr(event.event.evidence, "gitlab_context"):
             gl_ctx = event.event.evidence.gitlab_context
-        if not gl_ctx:
-            return {"error": "Not a headhunter event (no gitlab_context)"}
 
-        project_id = gl_ctx.get("project_id")
-        mr_iid = gl_ctx.get("mr_iid")
-        source_branch = gl_ctx.get("source_branch", "")
+        project_id = override_project_id or (gl_ctx.get("project_id") if gl_ctx else None)
+        mr_iid = override_mr_iid or (gl_ctx.get("mr_iid") if gl_ctx else None)
+        source_branch = (gl_ctx.get("source_branch", "") if gl_ctx else "")
         if not project_id or not mr_iid:
-            return {"error": "Missing project_id or mr_iid in gitlab_context"}
+            return {"error": "No MR reference available. Supply mr_url or ensure the event has gitlab_context."}
 
         try:
             async with httpx.AsyncClient(verify=False, timeout=30) as client:
@@ -576,8 +621,9 @@ class Headhunter:
                             "mr_state": "closed", "merge_status": "unknown", "severity": "info"}
                 if mr_resp.status_code == 429:
                     logger.warning("refresh_mr_state: GitLab rate limited")
-                    return {"error": "GitLab rate limited", "pipeline_status": gl_ctx.get("pipeline_status", "unknown"),
-                            "mr_state": gl_ctx.get("mr_state", "unknown"), "merge_status": gl_ctx.get("merge_status", "unknown"),
+                    _fallback = gl_ctx or {}
+                    return {"error": "GitLab rate limited", "pipeline_status": _fallback.get("pipeline_status", "unknown"),
+                            "mr_state": _fallback.get("mr_state", "unknown"), "merge_status": _fallback.get("merge_status", "unknown"),
                             "severity": event.event.evidence.severity if event.event.evidence else "warning"}
 
                 mr_state = "unknown"
@@ -586,19 +632,22 @@ class Headhunter:
                     mr_data = mr_resp.json()
                     mr_state = mr_data.get("state", "unknown")
                     merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
+                    if not source_branch:
+                        source_branch = mr_data.get("source_branch", "")
                     if mr_state in ("merged", "closed"):
                         state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
                 else:
                     logger.warning(f"refresh_mr_state: MR fetch HTTP {mr_resp.status_code} for {event_id}")
+                    _fallback = gl_ctx or {}
                     return {
                         "error": f"MR fetch failed: HTTP {mr_resp.status_code}",
-                        "pipeline_status": gl_ctx.get("pipeline_status", "unknown"),
-                        "mr_state": gl_ctx.get("mr_state", "unknown"),
-                        "merge_status": gl_ctx.get("merge_status", "unknown"),
+                        "pipeline_status": _fallback.get("pipeline_status", "unknown"),
+                        "mr_state": _fallback.get("mr_state", "unknown"),
+                        "merge_status": _fallback.get("merge_status", "unknown"),
                         "severity": event.event.evidence.severity if event.event.evidence else "warning",
                     }
 
-                pipeline_id = gl_ctx.get("pipeline_id")
+                pipeline_id = (gl_ctx or {}).get("pipeline_id")
                 pipe_resp = await client.get(
                     self._api_url(f"/projects/{project_id}/pipelines"),
                     headers=headers,
@@ -616,7 +665,7 @@ class Headhunter:
             return {"error": f"GitLab API unavailable: {e}", "pipeline_status": "unknown",
                     "mr_state": "unknown", "merge_status": "unknown", "severity": "warning"}
 
-        action_name = gl_ctx.get("action_name", "assigned")
+        action_name = (gl_ctx or {}).get("action_name", "assigned")
         severity = self._classify_severity(action_name, pipeline_status)
         result = {
             "pipeline_status": pipeline_status,

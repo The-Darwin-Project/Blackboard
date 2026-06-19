@@ -730,6 +730,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Quick-check: re-fetch current MR and pipeline state from GitLab "
             "WITHOUT dispatching an agent. Returns a snapshot of the current state. "
+            "Works for any event source -- headhunter events carry MR context "
+            "automatically; for chat/slack events where an agent created an MR, "
+            "supply the MR URL from the agent's completion report. "
             "Can optionally subscribe to background state monitoring -- the system "
             "watches for MR/pipeline state changes (merged, pipeline completed, "
             "failed) and injects a notification turn when something changes, "
@@ -741,6 +744,16 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "check_condition": {
                     "type": "string",
                     "description": "What to verify (e.g., 'pipeline passed after retest', 'MR merged', 'pipeline completed after defer')",
+                },
+                "mr_url": {
+                    "type": "string",
+                    "description": (
+                        "Full GitLab MR URL. Required when the event has no "
+                        "gitlab_context (e.g., chat/slack events where an agent "
+                        "created an MR). The system extracts project and MR "
+                        "identifiers from the URL and hydrates the event context "
+                        "for subsequent calls."
+                    ),
                 },
                 "subscribe": {
                     "type": "boolean",
@@ -766,10 +779,12 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "refresh_kargo_context",
         "description": (
             "Re-read current Kargo Stage promotion state without dispatching an agent. "
-            "Returns promotion phase, failed step, and error message. Can optionally "
-            "subscribe to background state monitoring -- the system watches for "
-            "promotion state changes (succeeded, failed, progressing) and injects a "
-            "notification turn when something changes."
+            "Returns promotion phase, failed step, and error message. "
+            "Works for any event source -- Kargo events carry stage context "
+            "automatically; for other events, supply the project and stage names. "
+            "Can optionally subscribe to background state monitoring -- the system "
+            "watches for promotion state changes (succeeded, failed, progressing) "
+            "and injects a notification turn when something changes."
         ),
         "input_schema": {
             "type": "object",
@@ -777,6 +792,21 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "check_condition": {
                     "type": "string",
                     "description": "What to verify (e.g., 'promotion succeeded after retry', 'new promotion running')",
+                },
+                "kargo_project": {
+                    "type": "string",
+                    "description": (
+                        "Kargo project name. Required when the event has no "
+                        "kargo_context (e.g., chat/slack events). The system "
+                        "hydrates the event context for subsequent calls."
+                    ),
+                },
+                "kargo_stage": {
+                    "type": "string",
+                    "description": (
+                        "Kargo stage name. Required when the event has no "
+                        "kargo_context."
+                    ),
                 },
                 "subscribe": {
                     "type": "boolean",

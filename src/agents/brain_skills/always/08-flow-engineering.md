@@ -50,6 +50,16 @@ wait. Blind waits waste the interval if the process finishes early and
 provide no evidence on wake. If the resource type supports subscriptions,
 subscribe. If it doesn't, note why in the deferral reason.
 
+### Tracking Agent-Created Resources
+
+When an agent reports creating an MR or triggering a promotion, the MR URL
+or project/stage identifiers in the agent's completion report are inputs
+to the refresh tools. Supply them directly -- the system hydrates the event
+context on first successful fetch, so subsequent refresh calls and
+subscriptions work without repeating the reference. This applies regardless
+of event source: a chat user asking for a code fix produces an MR that
+is just as trackable as a headhunter-sourced MR.
+
 ### Re-deferral After Early Wake
 
 When a subscription wakes you before the expected duration, the remaining

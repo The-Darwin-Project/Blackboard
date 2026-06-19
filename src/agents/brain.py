@@ -3758,8 +3758,50 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
 
-            state = await headhunter.refresh_mr_state(event_id)
+            override_project_id = None
+            override_mr_iid = None
+            mr_url = (args.get("mr_url") or "").strip()
+            if mr_url:
+                parsed = headhunter.parse_mr_url(mr_url)
+                if parsed:
+                    raw_pid, override_mr_iid = parsed
+                    override_project_id = await headhunter.resolve_project_id(raw_pid)
+                    if not override_project_id:
+                        result_text = f"Could not resolve project from URL: {mr_url}"
+                        turn = ConversationTurn(
+                            turn=(await self._next_turn_number(event_id)),
+                            actor="brain", action="tool_result",
+                            waitingFor="refresh_gitlab_context",
+                            evidence=result_text,
+                            response_parts=response_parts,
+                        )
+                        await self._append_and_broadcast(event_id, turn)
+                        return True
+                else:
+                    result_text = f"Could not parse MR URL: {mr_url}"
+                    turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain", action="tool_result",
+                        waitingFor="refresh_gitlab_context",
+                        evidence=result_text,
+                        response_parts=response_parts,
+                    )
+                    await self._append_and_broadcast(event_id, turn)
+                    return True
+
+            state = await headhunter.refresh_mr_state(
+                event_id,
+                override_project_id=override_project_id,
+                override_mr_iid=override_mr_iid,
+            )
             mr_state = state.get("mr_state", "unknown")
+
+            if mr_url and override_project_id and override_mr_iid and "error" not in state:
+                await self.blackboard.update_event_gitlab_context(event_id, {
+                    "project_id": override_project_id,
+                    "mr_iid": override_mr_iid,
+                    "target_url": mr_url,
+                })
             if "error" in state:
                 result_text = (
                     f"MR State: {mr_state}\n"
@@ -3869,10 +3911,10 @@ class Brain:
             kc = {}
             if event and event.event and event.event.evidence:
                 kc = getattr(event.event.evidence, "kargo_context", None) or {}
-            project = kc.get("project", "")
-            stage = kc.get("stage", "")
+            project = (args.get("kargo_project") or "").strip() or kc.get("project", "")
+            stage = (args.get("kargo_stage") or "").strip() or kc.get("stage", "")
             if not project or not stage:
-                result_text = "Kargo Stage: unknown\nError: kargo_context missing project/stage"
+                result_text = "Kargo Stage: unknown\nError: No Kargo reference available. Supply kargo_project and kargo_stage, or ensure the event has kargo_context."
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain", action="tool_result",
@@ -3882,6 +3924,12 @@ class Brain:
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return True
+
+            if (args.get("kargo_project") or args.get("kargo_stage")) and not kc.get("project"):
+                await self.blackboard.update_event_kargo_context(event_id, {
+                    "project": project,
+                    "stage": stage,
+                })
 
             state = await kargo_observer.get_stage_status(project, stage)
             if "error" in state:
