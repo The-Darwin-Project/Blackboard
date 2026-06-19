@@ -546,7 +546,7 @@ class Headhunter:
         return event_id
 
     @staticmethod
-    def parse_mr_url(url: str) -> tuple[int, int] | None:
+    def parse_mr_url(url: str) -> tuple[int | str, int] | None:
         """Extract (project_id, mr_iid) from a GitLab MR URL.
 
         Supports both numeric project IDs and URL-encoded namespace paths.
@@ -554,12 +554,20 @@ class Headhunter:
         """
         import re
         from urllib.parse import unquote
+        # API-style URL: /projects/12345/merge_requests/29
         m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
         if m:
             return int(m.group(1)), int(m.group(2))
-        m = re.search(r"/([\w._/-]+)/-/merge_requests/(\d+)", url)
-        if m:
-            return unquote(m.group(1)), int(m.group(2))
+        # Web UI URL: https://host/group/subgroup/project/-/merge_requests/29
+        sep = "/-/merge_requests/"
+        if sep in url:
+            left, right = url.split(sep, 1)
+            mr_iid_str = right.split("/")[0].split("?")[0].split("#")[0]
+            if mr_iid_str.isdigit():
+                without_proto = left.split("://", 1)[-1]
+                project_path = without_proto.split("/", 1)[-1]
+                if project_path:
+                    return unquote(project_path), int(mr_iid_str)
         return None
 
     async def resolve_project_id(self, path_or_id) -> int | None:
