@@ -85,7 +85,7 @@ _TOOL_SKILL_MAP: dict[str, list[str]] = {
     "view_event_blackboard": ["observer-mode"],
     "get_neuron_details":    ["proactive-review"],
     "search_deep_memory":    ["proactive-review"],
-    "send_event_message":    ["intervention-boundary"],
+    "send_event_message":    ["intervention-boundary", "shared-context"],
     "list_active_events":    ["shared-context"],
     "propose_enhancement":   ["proactive-review"],
 }
