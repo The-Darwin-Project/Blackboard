@@ -1,5 +1,5 @@
 thinking_level: "high"
 temperature: 0.5
 priority: 25
-max_output_tokens: 2048
+max_output_tokens: 8192
 description: "Post-defer wake-up: verify stale assumptions before re-deferring"
