@@ -196,6 +196,8 @@ class ContextFlags(TypedDict, total=False):
     event_domain: str
     domain_confidence: str
     brain_has_classified: bool
+    is_first_human_turn: bool
+    is_operational_chat: bool
     _cached_active_ids: list[str]
     _cached_recent_closed: list[Any]
     _cached_mermaid: str
@@ -1497,6 +1499,20 @@ class Brain:
             flags["domain_confidence"] = "default"
             flags["brain_has_classified"] = False
 
+        flags["is_first_human_turn"] = (
+            event.source in ("chat", "slack")
+            and not any(
+                t.actor == "brain" and t.action in ("triage", "response")
+                for t in event.conversation
+            )
+        )
+        flags["is_operational_chat"] = (
+            event.source in ("chat", "slack")
+            and not flags["is_first_human_turn"]
+            and flags.get("brain_has_classified", False)
+            and flags.get("event_domain") != "casual"
+        )
+
         return flags
 
     def _match_phases(self, event: EventDocument, ctx: dict) -> list[str]:
@@ -1601,6 +1617,24 @@ class Brain:
                     resolved_contents.append(_wrap_section(kpath, kbody, self._skill_loader.get_tag_type(kpath)))
                 else:
                     logger.debug(f"Kargo tag '{kpath}' resolved to None in path_index")
+
+        # Gated posture skills for chat/slack events (mutually exclusive)
+        if context_flags and context_flags.get("is_first_human_turn"):
+            for path in self._skill_loader.find_paths_by_tag("user-energy"):
+                result = self._skill_loader.get_with_meta(path)
+                if result:
+                    body, _ = result
+                    resolved_contents.append(
+                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
+                    )
+        elif context_flags and context_flags.get("is_operational_chat"):
+            for path in self._skill_loader.find_paths_by_tag("operational-posture"):
+                result = self._skill_loader.get_with_meta(path)
+                if result:
+                    body, _ = result
+                    resolved_contents.append(
+                        _wrap_section(path, body, self._skill_loader.get_tag_type(path))
+                    )
 
         if "post-agent" in active_phases:
             rec = self._surface_agent_recommendation(event)

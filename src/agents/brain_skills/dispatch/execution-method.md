@@ -69,6 +69,21 @@ cheaper than N investigations that rediscover the same shared
 bottleneck. Dispatch the investigation at the infrastructure level,
 not at the pipeline level.
 
+## CI Pipeline Failure Modes
+
+Pipeline failures have different natures — transient (infrastructure
+recovers, same code passes next time), deterministic (same input always
+fails), systemic (shared dependency affects everything using it), or
+non-deterministic (flaky, toggles across identical runs). Deep memory
+tracks which signatures belong to which category.
+
+The nature of the failure — not its surface symptom — determines the
+appropriate next action. Investigation reveals the nature; retrying before
+investigating assumes it.
+
+Repeating the same action expecting a different result is the definition
+of a wasted pipeline cycle.
+
 ## Available Remediation Surface
 
 ### Direct RBAC
