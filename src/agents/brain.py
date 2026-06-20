@@ -45,7 +45,9 @@
 # 18. [Pattern]: _build_contents() returns structured [{role, parts}] array from Redis. Redis is single source of truth. No ChatSession.
 # 19. [Pattern]: _turn_to_parts() maps ConversationTurn -> provider-agnostic parts. Brain=model role, all others=user role.
 # 20. [Gotcha]: Consecutive same-role turns merged into one content block (Gemini requires alternating user/model).
-# 21. [Pattern]: response_parts on brain turns preserves thought_signature for Gemini 3 multi-turn function calling.
+# 21. [Pattern]: response_parts on brain turns preserves full thought context (thought text + thought_signature)
+#     for Gemini multi-turn function calling. gemini_client accumulates thought_parts from streaming chunks
+#     and merges with output parts. Forward-compatible with Gemini 3.5+ thought preservation.
 # 22. [Pattern]: Progressive skills: BrainSkillLoader globs brain_skills/ at startup. _build_system_prompt (async) assembles phase-specific prompt. _resolve_llm_params reads _phase.yaml priority. Brain-declared phases via set_phase replace heuristic PHASE_CONDITIONS; system states (waiting, intermediate) preempt Brain phase via early-return in _match_phases. BRAIN_PHASE_SKILLS maps declared phase to skill folders.
 #     _build_system_prompt wraps each resolved skill body with semantic XML tags (rule, skill,
 #     protocol, context) via _wrap_section(path, body, tag_type). Tag type resolved by
@@ -1347,7 +1349,7 @@ class Brain:
     def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
         """Legacy adaptive thinking -- fallback when progressive skills are disabled.
 
-        Gemini 3 Pro supports only 'low' and 'high' (not 'medium' or 'minimal').
+        Gemini 3.1 Pro supports 'low', 'medium', and 'high'.
         Use 'high' for analysis, 'low' for mechanical routing.
         Returns (thinking_level, temperature).
         """

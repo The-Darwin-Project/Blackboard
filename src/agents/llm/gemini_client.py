@@ -13,6 +13,10 @@
 # 11. [Pattern]: set_search_enabled() controls Google Search grounding. Adapter-level state, not LLMPort param.
 #     _build_config reads self._search_enabled to append GoogleSearch tool. Grounding metadata extracted
 #     from final candidate and yielded on the done=True chunk. Graceful fallback: None if not available.
+# 12. [Pattern]: generate_stream accumulates thought_parts (part.thought=True) separately from last_parts.
+#     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
+#     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
+#     with models that don't clear thought history.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -245,6 +249,10 @@ class GeminiAdapter:
     # LLMPort: generate_stream (async iterator)
     # -----------------------------------------------------------------
 
+    @staticmethod
+    def _is_thought_part(part) -> bool:
+        return hasattr(part, 'thought') and part.thought
+
     async def generate_stream(
         self,
         system_prompt: str,
@@ -267,6 +275,7 @@ class GeminiAdapter:
             contents=self._convert_contents(contents),
             config=config,
         )
+        thought_parts: list = []
         last_parts = None
         last_usage = None
         last_grounding = None
@@ -279,8 +288,10 @@ class GeminiAdapter:
                     if candidate.content and candidate.content.parts:
                         last_parts = candidate.content.parts
                         for part in candidate.content.parts:
-                            if hasattr(part, 'thought') and part.thought and hasattr(part, 'text') and part.text:
-                                yield LLMChunk(text=part.text, is_thought=True)
+                            if self._is_thought_part(part):
+                                thought_parts.append(part)
+                                if hasattr(part, 'text') and part.text:
+                                    yield LLMChunk(text=part.text, is_thought=True)
                     if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
                         gm = candidate.grounding_metadata
                         last_grounding = {
@@ -298,10 +309,12 @@ class GeminiAdapter:
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
                 self._record_usage(last_usage, estimate)
+                output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+                all_parts = thought_parts + output_parts
                 yield LLMChunk(
                     function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                     done=True,
-                    raw_parts=last_parts,
+                    raw_parts=all_parts,
                     grounding_metadata=last_grounding,
                 )
                 return
@@ -309,4 +322,6 @@ class GeminiAdapter:
         self._record_usage(last_usage, estimate)
         if last_grounding:
             logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
-        yield LLMChunk(done=True, raw_parts=last_parts, grounding_metadata=last_grounding)
+        output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+        all_parts = thought_parts + output_parts
+        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding)
