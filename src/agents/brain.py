@@ -2213,6 +2213,13 @@ class Brain:
         # that's a direct message TO JARVIS, not an observation FOR JARVIS)
         if function_name != "respond_to_jarvis":
             await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
+            # Emit skill pulses for tools with TOOL_SKILL_MAP entries
+            skill_paths = _TOOL_SKILL_MAP.get(function_name, [])
+            if skill_paths:
+                await self._emit_executive_pulse(
+                    event_id,
+                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
+                )
 
         if function_name in ("select_agent", "ask_agent_for_state"):
             agent_name = args.get("agent_name", "")
@@ -3010,12 +3017,6 @@ class Brain:
                 getattr(ev_for_ctx, "brain_phase", None),
                 ev_for_ctx.source if ev_for_ctx else None,
             )
-            skill_paths = _TOOL_SKILL_MAP.get("consult_deep_memory", [])
-            if skill_paths:
-                await self._emit_executive_pulse(
-                    event_id,
-                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
-                )
             memory_text = (
                 f"# Deep Memory: \"{safe_query}\"{filter_tag}\n"
                 f"{skill_refs}\n\n"
@@ -3914,12 +3915,6 @@ class Brain:
             ev_doc = await self.blackboard.get_event(event_id)
             refs = _build_skill_refs("refresh_gitlab_context", getattr(ev_doc, "brain_phase", None), getattr(ev_doc, "source", None))
             evidence = f"{refs}\n{evidence}" if refs else evidence
-            skill_paths = _TOOL_SKILL_MAP.get("refresh_gitlab_context", [])
-            if skill_paths:
-                await self._emit_executive_pulse(
-                    event_id,
-                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
-                )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -4021,12 +4016,6 @@ class Brain:
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
             refs = _build_skill_refs("refresh_kargo_context", getattr(event, "brain_phase", None), getattr(event, "source", None))
             evidence = f"{refs}\n{evidence}" if refs else evidence
-            skill_paths = _TOOL_SKILL_MAP.get("refresh_kargo_context", [])
-            if skill_paths:
-                await self._emit_executive_pulse(
-                    event_id,
-                    [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
-                )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
