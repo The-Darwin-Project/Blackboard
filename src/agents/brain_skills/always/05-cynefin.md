@@ -1,6 +1,7 @@
 ---
 description: "Cynefin sense-making framework for domain classification"
 tags: [cynefin, classification, triage]
+tools: [classify_event]
 ---
 # Cynefin Sense-Making Framework
 

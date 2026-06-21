@@ -2,6 +2,7 @@
 description: "Phase pipeline: gated workflow with Cynefin domain routing"
 tags: [phases, lifecycle, workflow, pipeline]
 tag_type: protocol
+tools: [set_phase]
 ---
 # Phase Pipeline
 

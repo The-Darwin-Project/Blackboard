@@ -1,6 +1,7 @@
 ---
 description: "Consult deep memory before routing to agents"
 tags: [memory, triage, history]
+tools: [consult_deep_memory, lookup_journal]
 ---
 # Deep Memory
 

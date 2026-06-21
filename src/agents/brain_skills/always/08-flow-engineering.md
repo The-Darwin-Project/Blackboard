@@ -1,6 +1,7 @@
 ---
 description: "Flow engineering principles for throughput optimization and congestion prevention"
 tags: [flow, queuing, batch-size, congestion, throughput]
+tools: [defer_event, refresh_gitlab_context, refresh_kargo_context, hold_watch]
 ---
 # Flow Engineering
 

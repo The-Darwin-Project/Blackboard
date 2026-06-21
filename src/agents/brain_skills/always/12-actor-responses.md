@@ -1,6 +1,7 @@
 ---
 description: "Decision tree for handling conversation turns from any actor"
 tags: [actors, turns, huddle, jarvis, intermediate]
+tools: [reply_to_agent, message_agent, respond_to_jarvis, wait_for_agent]
 ---
 # Actor Response Model
 

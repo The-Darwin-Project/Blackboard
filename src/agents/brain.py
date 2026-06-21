@@ -52,8 +52,8 @@
 #     _build_system_prompt wraps each resolved skill body with semantic XML tags (rule, skill,
 #     protocol, context) via _wrap_section(path, body, tag_type). Tag type resolved by
 #     BrainSkillLoader.get_tag_type(): frontmatter override > folder default > "skill".
-#     build_skill_refs (imported from brain_skill_loader) generates <skill id="..."> XML pointers
-#     for tool_result evidence on observation tools (deep_memory, refresh_gitlab, refresh_kargo).
+#     build_skill_refs is an instance method on BrainSkillLoader (dynamic from frontmatter tools:).
+#     Replay-time injection in _build_contents() replaces per-handler storage-time injection.
 # 22b. [Constraint]: section id values must be ASCII path chars (a-z, 0-9, -, _, /). No quotes,
 #     angle brackets, or ampersands in skill filenames -- would break the XML id attribute.
 # 29. [Pattern]: _format_recall_block reads _recall_lessons dict (populated by reflex gate).
@@ -298,9 +298,6 @@ def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
     safe_path = _SAFE_PATH_RE.sub('_', path)
     return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
-
-
-from .brain_skill_loader import build_skill_refs as _build_skill_refs, TOOL_SKILL_MAP as _TOOL_SKILL_MAP
 
 
 class Brain:
@@ -1982,18 +1979,33 @@ class Brain:
 
         context_text = header
 
+        # -- Pre-scan: find last eligible tool_result for skill pointer injection --
+        target_skill_turn = None
+        if self._skill_loader:
+            for t in reversed(event.conversation):
+                if (t.actor == "brain" and t.action == "tool_result"
+                        and t.waitingFor
+                        and self._skill_loader.get_tool_skills(t.waitingFor)):
+                    target_skill_turn = t
+                    break
+
         # -- Build structured conversation messages --
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
 
         for turn in event.conversation:
             role = "model" if turn.actor == "brain" else "user"
-            # tool_result turns are function responses -- must be on user role
-            # per Gemini multi-turn function calling protocol
             if turn.actor == "brain" and turn.action == "tool_result":
                 role = "user"
             parts = self._turn_to_parts(turn)
             if not parts:
-                continue  # Skip turns with no prompt content (e.g., brain.thoughts)
+                continue
+
+            if turn is target_skill_turn:
+                refs = self._skill_loader.build_skill_refs(
+                    turn.waitingFor, event.brain_phase, event.source,
+                )
+                if refs and parts[0].get("text"):
+                    parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
 
             if contents and contents[-1]["role"] == role:
                 contents[-1]["parts"].extend(parts)
@@ -2249,8 +2261,7 @@ class Brain:
         # that's a direct message TO JARVIS, not an observation FOR JARVIS)
         if function_name != "respond_to_jarvis":
             await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
-            # Emit skill pulses for tools with TOOL_SKILL_MAP entries
-            skill_paths = _TOOL_SKILL_MAP.get(function_name, [])
+            skill_paths = self._skill_loader.get_tool_skills(function_name) if self._skill_loader else []
             if skill_paths:
                 await self._emit_executive_pulse(
                     event_id,
@@ -3048,14 +3059,8 @@ class Brain:
                 event_source=ev_for_ctx.source if ev_for_ctx else None,
             )
 
-            skill_refs = _build_skill_refs(
-                "consult_deep_memory",
-                getattr(ev_for_ctx, "brain_phase", None),
-                ev_for_ctx.source if ev_for_ctx else None,
-            )
             memory_text = (
-                f"# Deep Memory: \"{safe_query}\"{filter_tag}\n"
-                f"{skill_refs}\n\n"
+                f"# Deep Memory: \"{safe_query}\"{filter_tag}\n\n"
             )
 
             # Embed once, pass vector to all 3 search methods
@@ -3378,7 +3383,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
-                waitingFor="jira",
+                waitingFor="fetch_jira_issue",
                 thoughts=result_text,
                 response_parts=response_parts,
             )
@@ -3426,7 +3431,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
-                waitingFor="jira",
+                waitingFor="comment_jira_issue",
                 thoughts=result_text,
                 response_parts=response_parts,
             )
@@ -3480,7 +3485,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
-                waitingFor="jira",
+                waitingFor="transition_jira_issue",
                 thoughts=result_text,
                 response_parts=response_parts,
             )
@@ -3948,9 +3953,6 @@ class Brain:
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             if args.get("subscribe"):
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
-            ev_doc = await self.blackboard.get_event(event_id)
-            refs = _build_skill_refs("refresh_gitlab_context", getattr(ev_doc, "brain_phase", None), getattr(ev_doc, "source", None))
-            evidence = f"{refs}\n{evidence}" if refs else evidence
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",
@@ -4050,8 +4052,6 @@ class Brain:
             evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
             if args.get("subscribe"):
                 evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
-            refs = _build_skill_refs("refresh_kargo_context", getattr(event, "brain_phase", None), getattr(event, "source", None))
-            evidence = f"{refs}\n{evidence}" if refs else evidence
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain", action="tool_result",

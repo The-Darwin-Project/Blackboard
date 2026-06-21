@@ -1,6 +1,7 @@
 ---
 description: "Wait-for-user, approval pause, and post-defer resume rules"
 tags: [waiting, user-interaction, approval, defer]
+tools: [wait_for_user, request_user_approval]
 ---
 # Wait-for-User Protocol
 

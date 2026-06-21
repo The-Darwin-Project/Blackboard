@@ -3,6 +3,7 @@ description: "Jira-sourced Headhunter event -- data environment, lifecycle, and 
 tags: [headhunter, jira, autonomous]
 requires:
   - coordination/pr-workflow.md
+tools: [fetch_jira_issue]
 ---
 # Headhunter Jira Source
 

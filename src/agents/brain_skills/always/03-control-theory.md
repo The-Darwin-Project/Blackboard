@@ -1,6 +1,7 @@
 ---
 description: "Domain-adaptive control theory: outer loop with evidence-driven domain routing"
 tags: [control-theory, verification, feedback, cynefin, domain-adaptive]
+tools: [wait_for_verification]
 ---
 # Control Theory: Domain-Adaptive Controller
 

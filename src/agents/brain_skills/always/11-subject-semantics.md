@@ -1,6 +1,7 @@
 ---
 description: "How to interpret the event's subject_type and use the right context"
 tags: [subject, service, kargo, jira, context]
+tools: [lookup_service]
 ---
 # Subject Types
 

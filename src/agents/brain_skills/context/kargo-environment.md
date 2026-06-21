@@ -1,6 +1,7 @@
 ---
 description: "Kargo promotion environment, capabilities, and verification principles"
 tags: [kargo, promotions, autonomous]
+tools: [refresh_kargo_context]
 ---
 # Kargo Promotion Environment
 

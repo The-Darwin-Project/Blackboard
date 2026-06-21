@@ -1,6 +1,7 @@
 ---
 description: "When and how to record numeric observations during events"
 tags: [observations, metrics, temporal, learning]
+tools: [record_observation, list_observations]
 ---
 # Observations
 

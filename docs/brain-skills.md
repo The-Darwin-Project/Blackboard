@@ -23,7 +23,7 @@ The Brain loads phase-specific skills (Markdown files) based on event state, rep
 1. **Startup:** `BrainSkillLoader` scans `src/agents/brain_skills/` for `.md` files organized by phase directory (filesystem cold start).
 2. **Per-event version check:** Brain reads `darwin:skills:version` from Redis. On change, acquires `_skills_reload_lock` and calls `reload_from_redis()`.
 3. **Atomic corpus swap:** All caches live in a frozen `_SkillCorpus` dataclass. Reload builds a new corpus, then swaps `self._corpus = new_corpus` in a single reference assignment (GIL-safe). No window of partial state.
-4. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), and `tags`.
+4. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), `tags`, and `tools` (canonical Brain function names for replay-time skill pointer injection).
 5. **Dependency resolution:** BFS with cycle detection ensures skills load in dependency order.
 6. **Template substitution:** Skills can reference variables like `{event_id}`, `{service}`, etc.
 7. **Phase exclusions:** Conflicting phases are never loaded simultaneously (e.g., `post-agent` excludes `triage` and `dispatch`).

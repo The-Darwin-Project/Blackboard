@@ -3,6 +3,7 @@ description: "Source-aware event close rules"
 requires:
   - source/{event.source}.md
 tags: [close, lifecycle]
+tools: [close_event]
 ---
 # When to Close
 

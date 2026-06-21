@@ -71,12 +71,24 @@ tags: [relevant, keywords]
 requires:                              # optional
   - always/02-safety.md                # dependency (loaded automatically)
 tag_type: protocol                     # optional override (see below)
+tools: [defer_event, refresh_kargo_context]  # optional: Brain function names
 ---
 # Skill Title
 
 Markdown body. Keep it concise — every token counts in the system
 instruction budget.
 ```
+
+### `tools:` Field
+
+The `tools:` list declares which Brain functions this skill is relevant to. The loader
+builds a reverse map (tool → skills) at startup. When FRIDAY calls a mapped function,
+the skill pointer (`<skill id="..." />`) is injected into the conversation at replay time,
+steering FRIDAY's attention to the right SI section before her next decision.
+
+Use **canonical function names** only (must match names in `BRAIN_TOOL_SCHEMAS`). Unknown
+names produce a startup warning. A skill with no `tools:` field is still loaded normally —
+it simply won't be injected as a pointer on any tool_result turn.
 
 ### Tag Types
 

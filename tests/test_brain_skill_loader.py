@@ -5,6 +5,8 @@
 # 3. [Pattern]: Redis tests use AsyncMock from conftest.py mock_redis fixture.
 # 4. [Pattern]: TestRedisDiscovery/TestCorpusSwap/TestFilesystemFallback/TestCorruptJson/TestRedisFlush
 #    cover the dual-source (Redis + filesystem) discovery path.
+# 5. [Pattern]: TestToolSkillMap covers dynamic tool→skill mapping from frontmatter tools: declarations.
+# 6. [Pattern]: TestBuildSkillRefs covers the instance method build_skill_refs XML pointer generation.
 """Unit tests for BrainSkillLoader: discovery, frontmatter, dependencies, tags, reload, Redis."""
 from __future__ import annotations
 
@@ -730,3 +732,314 @@ class TestRedisFlush:
 
         assert result is False
         assert "# Current" in loader.get_phase("always")[0]
+
+
+# =========================================================================
+# Dynamic Tool→Skill Map Tests
+# =========================================================================
+
+
+class TestToolSkillMap:
+    def test_builds_map_from_frontmatter(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+                "flow.md": "---\ntools: [defer_event, refresh_kargo_context]\n---\n# Flow",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tool_skills("classify_event") == ["always/cynefin.md"]
+        assert loader.get_tool_skills("defer_event") == ["always/flow.md"]
+        assert loader.get_tool_skills("refresh_kargo_context") == ["always/flow.md"]
+
+    def test_multiple_skills_per_tool(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "rules.md": "---\ntools: [select_agent]\n---\n# Rules",
+            },
+            "dispatch": {
+                "routing.md": "---\ntools: [select_agent]\n---\n# Routing",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        skills = loader.get_tool_skills("select_agent")
+        assert len(skills) == 2
+        assert "always/rules.md" in skills
+        assert "dispatch/routing.md" in skills
+
+    def test_no_tools_field_produces_empty(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"plain.md": "---\ntags: [x]\n---\n# Plain"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tool_skills("classify_event") == []
+
+    def test_unknown_tool_returns_empty(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tool_skills("nonexistent_tool") == []
+
+    def test_non_string_tools_ignored(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "bad.md": "---\ntools:\n  - classify_event\n  - 42\n  - true\n---\n# Bad",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tool_skills("classify_event") == ["always/bad.md"]
+
+    def test_reload_rebuilds_map(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "s.md": "---\ntools: [classify_event]\n---\n# V1",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        assert loader.get_tool_skills("classify_event") == ["always/s.md"]
+
+        (tmp_path / "always" / "s.md").write_text(
+            "---\ntools: [defer_event]\n---\n# V2"
+        )
+        loader.reload()
+        assert loader.get_tool_skills("classify_event") == []
+        assert loader.get_tool_skills("defer_event") == ["always/s.md"]
+
+    @pytest.mark.asyncio
+    async def test_redis_discovery_builds_map(self, tmp_path: Path, mock_redis):
+        skills = {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+            },
+        }
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# P"}})
+        _mock_pipeline(mock_redis, [
+            _build_redis_corpus(skills),
+            _build_redis_phase_config(skills),
+        ])
+
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        result = await loader.discover_from_redis()
+
+        assert result is True
+        assert loader.get_tool_skills("classify_event") == ["always/cynefin.md"]
+
+    @pytest.mark.asyncio
+    async def test_hot_reload_rebuilds_map(self, tmp_path: Path, mock_redis):
+        skills_v1 = {
+            "always": {
+                "s.md": "---\ntools: [classify_event]\n---\n# V1",
+            },
+        }
+        _make_skills(tmp_path, {"always": {"placeholder.md": "# P"}})
+        _mock_pipeline(mock_redis, [
+            _build_redis_corpus(skills_v1),
+            _build_redis_phase_config(skills_v1),
+        ])
+
+        loader = BrainSkillLoader(str(tmp_path), redis=mock_redis)
+        await loader.discover_from_redis()
+        assert loader.get_tool_skills("classify_event") == ["always/s.md"]
+
+        skills_v2 = {
+            "always": {
+                "s.md": "---\ntools: [defer_event]\n---\n# V2",
+            },
+        }
+        _mock_pipeline(mock_redis, [
+            _build_redis_corpus(skills_v2),
+            _build_redis_phase_config(skills_v2),
+        ])
+        await loader.discover_from_redis()
+        assert loader.get_tool_skills("classify_event") == []
+        assert loader.get_tool_skills("defer_event") == ["always/s.md"]
+
+
+class TestBuildSkillRefs:
+    def test_generates_tool_skill_refs(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs("classify_event")
+        assert '<skill id="always/cynefin.md" />' in refs
+
+    def test_includes_phase_skill(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+                "decision.md": "# Decision",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs("classify_event", brain_phase="triage")
+        assert '<skill id="always/cynefin.md" />' in refs
+        assert '<skill id="always/06-decision-guidelines.md" />' in refs
+
+    def test_includes_source_skill(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs(
+            "classify_event", event_source="headhunter",
+        )
+        assert '<skill id="source/headhunter.md" />' in refs
+
+    def test_deduplicates_skills(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "decision.md": "---\ntools: [classify_event]\n---\n# Decision",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs(
+            "classify_event", brain_phase="triage",
+        )
+        count = refs.count("always/decision.md")
+        assert count <= 1
+
+    def test_unmapped_tool_still_gets_phase_and_source(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"s.md": "# Filler"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs(
+            "unknown_tool", brain_phase="dispatch", event_source="chat",
+        )
+        assert '<skill id="dispatch/decision-routing.md" />' in refs
+        assert '<skill id="source/chat.md" />' in refs
+        assert "unknown_tool" not in refs
+
+    def test_empty_tool_name_returns_phase_only(self, tmp_path: Path):
+        _make_skills(tmp_path, {"always": {"s.md": "# S"}})
+        loader = BrainSkillLoader(str(tmp_path))
+        refs = loader.build_skill_refs("")
+        assert refs  # at least phase default
+
+
+class TestUnknownToolWarning:
+    def test_warns_on_unknown_tool_name(self, tmp_path: Path, caplog):
+        _make_skills(tmp_path, {
+            "always": {
+                "bad.md": "---\ntools: [nonexistent_tool_xyz]\n---\n# Bad",
+            },
+        })
+        import logging
+        with caplog.at_level(logging.WARNING):
+            loader = BrainSkillLoader(str(tmp_path))
+
+        assert loader.get_tool_skills("nonexistent_tool_xyz") == ["always/bad.md"]
+        assert any("nonexistent_tool_xyz" in msg for msg in caplog.messages)
+
+    def test_no_warning_for_known_tools(self, tmp_path: Path, caplog):
+        _make_skills(tmp_path, {
+            "always": {
+                "cynefin.md": "---\ntools: [classify_event]\n---\n# Cynefin",
+            },
+        })
+        import logging
+        with caplog.at_level(logging.WARNING):
+            BrainSkillLoader(str(tmp_path))
+
+        tool_warnings = [m for m in caplog.messages if "unknown tool" in m.lower()]
+        assert len(tool_warnings) == 0
+
+
+class TestReplayInjectionSelector:
+    """Test the pre-scan logic for finding the last eligible tool_result turn."""
+
+    @staticmethod
+    def _make_turn(actor="brain", action="tool_result", waiting_for="classify_event"):
+        from collections import namedtuple
+        Turn = namedtuple("Turn", ["actor", "action", "waitingFor"])
+        return Turn(actor=actor, action=action, waitingFor=waiting_for)
+
+    def _find_target(self, conversation, loader):
+        for t in reversed(conversation):
+            if (t.actor == "brain" and t.action == "tool_result"
+                    and t.waitingFor
+                    and loader.get_tool_skills(t.waitingFor)):
+                return t
+        return None
+
+    def test_finds_last_eligible_tool_result(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"c.md": "---\ntools: [classify_event]\n---\n# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for="classify_event")
+        t2 = self._make_turn(waiting_for="classify_event")
+        target = self._find_target([t1, t2], loader)
+        assert target is t2
+
+    def test_trailing_response_after_tool_result(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"c.md": "---\ntools: [classify_event]\n---\n# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for="classify_event")
+        t2 = self._make_turn(actor="brain", action="response", waiting_for=None)
+        target = self._find_target([t1, t2], loader)
+        assert target is t1
+
+    def test_empty_waitingfor_skipped(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"c.md": "---\ntools: [classify_event]\n---\n# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for="")
+        target = self._find_target([t1], loader)
+        assert target is None
+
+    def test_none_waitingfor_skipped(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"c.md": "---\ntools: [classify_event]\n---\n# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for=None)
+        target = self._find_target([t1], loader)
+        assert target is None
+
+    def test_noncanonical_jira_skipped(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "rules.md": "---\ntools: [fetch_jira_issue]\n---\n# Rules",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for="jira")
+        target = self._find_target([t1], loader)
+        assert target is None
+
+    def test_canonical_jira_found(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {
+                "rules.md": "---\ntools: [fetch_jira_issue]\n---\n# Rules",
+            },
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+
+        t1 = self._make_turn(waiting_for="fetch_jira_issue")
+        target = self._find_target([t1], loader)
+        assert target is t1
+
+    def test_empty_conversation_no_crash(self, tmp_path: Path):
+        _make_skills(tmp_path, {
+            "always": {"c.md": "---\ntools: [classify_event]\n---\n# C"},
+        })
+        loader = BrainSkillLoader(str(tmp_path))
+        target = self._find_target([], loader)
+        assert target is None

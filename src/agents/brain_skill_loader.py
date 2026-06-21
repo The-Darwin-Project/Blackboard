@@ -15,8 +15,9 @@
 #    Reload replaces self._corpus atomically -- no window of partial state.
 # 10. [Pattern]: async discover_from_redis() reads HGETALL with sorted keys + corrupt JSON resilience.
 #     Critical always/* corruption aborts swap (fail-closed). Non-critical phases skip with warning.
-# 11. [Pattern]: TOOL_SKILL_MAP, PHASE_SKILL_MAP, build_skill_refs() own the tool→skill and
-#     phase→skill mappings. Brain imports build_skill_refs and calls it for tool_result evidence.
+# 11. [Pattern]: Dynamic tool→skill mapping: frontmatter `tools:` lists build reverse map at startup
+#     into _SkillCorpus.tool_skill_map (atomic swap on hot-reload). Instance methods get_tool_skills()
+#     and build_skill_refs() replace the old module-level static dict. PHASE_SKILL_MAP stays module-level.
 #     Dedup via seen set prevents duplicate <skill id> tags when tool and phase map to the same skill.
 """
 Filesystem-driven brain skill discovery, loading, and dependency resolution.
@@ -64,6 +65,7 @@ class _SkillCorpus:
     phase_meta: dict[str, dict] = field(default_factory=dict)
     tag_index: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     path_index: dict[str, tuple[str, dict]] = field(default_factory=dict)
+    tool_skill_map: dict[str, list[str]] = field(default_factory=dict)
 
 
 class BrainSkillLoader:
@@ -109,15 +111,19 @@ class BrainSkillLoader:
                 for tag in meta.get("tags", []):
                     tag_index[tag].append(rel_path)
 
+        tool_map = self._build_tool_map(path_index)
+
         self._corpus = _SkillCorpus(
-            cache=cache, phase_meta=phase_meta, tag_index=tag_index, path_index=path_index,
+            cache=cache, phase_meta=phase_meta, tag_index=tag_index,
+            path_index=path_index, tool_skill_map=tool_map,
         )
 
         total_files = sum(len(v) for v in cache.values())
         total_tags = len(tag_index)
         logger.info(
             f"Brain skills loaded: {len(cache)} phases, "
-            f"{total_files} files, {total_tags} tags"
+            f"{total_files} files, {total_tags} tags, "
+            f"{len(tool_map)} tool mappings"
         )
 
     @staticmethod
@@ -134,6 +140,28 @@ class BrainSkillLoader:
             meta = {}
         body = text[end + 3:].strip()
         return body, meta
+
+    @staticmethod
+    def _build_tool_map(path_index: dict[str, tuple[str, dict]]) -> dict[str, list[str]]:
+        """Build reverse map: tool_name -> [skill_paths] from frontmatter tools: lists."""
+        tool_map: dict[str, list[str]] = {}
+        for rel_path, (_body, meta) in path_index.items():
+            for tool in meta.get("tools", []):
+                if isinstance(tool, str):
+                    tool_map.setdefault(tool, []).append(rel_path)
+
+        try:
+            from .llm.types import BRAIN_TOOL_SCHEMAS
+            known = {s["name"] for s in BRAIN_TOOL_SCHEMAS}
+            for tool_name, skill_paths in tool_map.items():
+                if tool_name not in known:
+                    logger.warning(
+                        f"Skill(s) {skill_paths} declare unknown tool: '{tool_name}'"
+                    )
+        except ImportError:
+            pass
+
+        return tool_map
 
     # ------------------------------------------------------------------
     # Async Redis discovery
@@ -204,11 +232,14 @@ class BrainSkillLoader:
             logger.error("Redis corpus missing always/ phase -- aborting swap")
             return False
 
+        tool_map = self._build_tool_map(path_index)
+
         self._corpus = _SkillCorpus(
-            cache=cache, phase_meta=phase_meta, tag_index=tag_index, path_index=path_index,
+            cache=cache, phase_meta=phase_meta, tag_index=tag_index,
+            path_index=path_index, tool_skill_map=tool_map,
         )
         total_files = sum(len(v) for v in cache.values())
-        logger.info(f"Brain skills loaded from Redis: {len(cache)} phases, {total_files} files")
+        logger.info(f"Brain skills loaded from Redis: {len(cache)} phases, {total_files} files, {len(tool_map)} tool mappings")
         return True
 
     async def reload_from_redis(self) -> bool:
@@ -302,6 +333,54 @@ class BrainSkillLoader:
         """Re-discover from filesystem via atomic corpus swap."""
         self._discover()
 
+    # ------------------------------------------------------------------
+    # Tool → Skill mapping (dynamic, from frontmatter)
+    # ------------------------------------------------------------------
+
+    def get_tool_skills(self, tool_name: str) -> list[str]:
+        """Return skill paths for a tool from dynamic corpus map."""
+        return self._corpus.tool_skill_map.get(tool_name, [])
+
+    def build_skill_refs(
+        self,
+        tool_name: str,
+        brain_phase: str | None = None,
+        event_source: str | None = None,
+    ) -> str:
+        """Build skill pointer XML block for a tool_result turn.
+
+        Returns newline-joined <skill id="..." /> tags for:
+        - Tool-specific skills (from frontmatter tools: declarations)
+        - Phase-specific skill (what to do next in current phase)
+        - Source-specific skill (event source behavioral context)
+        Deduplicates when multiple layers map to the same skill.
+        """
+        from ..models import _resolve_phase  # noqa: deferred to avoid circular import
+
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        for skill in self.get_tool_skills(tool_name):
+            if skill not in seen:
+                refs.append(f'<skill id="{skill}" />')
+                seen.add(skill)
+
+        phase = _resolve_phase(brain_phase)
+        phase_skill = self._corpus.phase_meta.get(phase, {}).get(
+            "pointer_skill",
+        ) or PHASE_SKILL_MAP.get(phase, "always/06-decision-guidelines.md")
+        if phase_skill not in seen:
+            refs.append(f'<skill id="{phase_skill}" />')
+            seen.add(phase_skill)
+
+        if event_source:
+            source_skill = f"source/{event_source}.md"
+            if source_skill not in seen:
+                refs.append(f'<skill id="{source_skill}" />')
+                seen.add(source_skill)
+
+        return "\n".join(refs)
+
     def _resolve_bfs(
         self,
         initial_paths: list[str],
@@ -352,66 +431,11 @@ class BrainSkillLoader:
         return self._resolve_bfs(initial_paths, template_vars)
 
 
-TOOL_SKILL_MAP: dict[str, list[str]] = {
-    "consult_deep_memory": ["always/04-deep-memory.md"],
-    "classify_event": ["always/05-cynefin.md"],
-    "set_phase": ["always/09-phase-lifecycle.md"],
-    "defer_event": ["always/08-flow-engineering.md"],
-    "select_agent": ["dispatch/decision-routing.md", "always/01-function-rules.md"],
-    "wait_for_agent": ["always/12-actor-responses.md", "always/01-function-rules.md"],
-    "close_event": ["close/when-to-close.md"],
-    "report_incident": ["escalate/incident-tracking.md"],
-    "refresh_gitlab_context": ["always/08-flow-engineering.md", "context/gitlab-environment.md"],
-    "refresh_kargo_context": ["always/08-flow-engineering.md", "context/kargo-environment.md"],
-    "notify_user_slack": ["always/01-function-rules.md"],
-    "reply_to_agent": ["always/12-actor-responses.md"],
-    "message_agent": ["always/12-actor-responses.md"],
-    "respond_to_jarvis": ["always/12-actor-responses.md"],
-}
-
 PHASE_SKILL_MAP: dict[str, str] = {
     "triage": "always/06-decision-guidelines.md",
     "dispatch": "dispatch/decision-routing.md",
     "verify": "always/03-control-theory.md",
     "escalate": "escalate/incident-tracking.md",
 }
-
-
-def build_skill_refs(
-    tool_name: str,
-    brain_phase: str | None = None,
-    event_source: str | None = None,
-) -> str:
-    """Build skill pointer XML block for a tool_result turn.
-
-    Returns newline-joined <skill id="..." /> tags for:
-    - Tool-specific skills (what this tool relates to)
-    - Phase-specific skill (what to do next in current phase)
-    - Source-specific skill (event source behavioral context)
-    Deduplicates when multiple layers map to the same skill.
-    """
-    from ..models import _resolve_phase  # noqa: deferred to avoid circular import
-
-    refs: list[str] = []
-    seen: set[str] = set()
-
-    for skill in TOOL_SKILL_MAP.get(tool_name, []):
-        if skill not in seen:
-            refs.append(f'<skill id="{skill}" />')
-            seen.add(skill)
-
-    phase = _resolve_phase(brain_phase)
-    phase_skill = PHASE_SKILL_MAP.get(phase, "always/06-decision-guidelines.md")
-    if phase_skill not in seen:
-        refs.append(f'<skill id="{phase_skill}" />')
-        seen.add(phase_skill)
-
-    if event_source:
-        source_skill = f"source/{event_source}.md"
-        if source_skill not in seen:
-            refs.append(f'<skill id="{source_skill}" />')
-            seen.add(source_skill)
-
-    return "\n".join(refs)
 
 

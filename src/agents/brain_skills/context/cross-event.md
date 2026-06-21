@@ -1,6 +1,7 @@
 ---
 description: "Cross-event awareness and related event handling"
 tags: [cross-event, correlation, defer, merge]
+tools: [inspect_event]
 ---
 # Cross-Event Awareness
 

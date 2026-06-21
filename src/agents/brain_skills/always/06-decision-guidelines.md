@@ -3,6 +3,7 @@ description: "Core decision guidelines for event triage"
 requires:
   - always/04-deep-memory.md
 tags: [triage, decisions]
+tools: [fetch_jira_issue]
 ---
 # Decision Guidelines
 

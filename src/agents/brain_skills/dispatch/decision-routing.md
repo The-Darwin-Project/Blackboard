@@ -4,6 +4,7 @@ requires:
   - always/04-deep-memory.md
   - always/05-cynefin.md
 tags: [routing, dispatch, investigation]
+tools: [select_agent, create_plan, get_plan_progress]
 ---
 # Decision Routing
 
