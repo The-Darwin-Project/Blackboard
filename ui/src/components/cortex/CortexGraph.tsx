@@ -69,9 +69,11 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   const processedBatchesRef = useRef<Set<string>>(new Set());
   const activeRipplesRef = useRef(0);
   const lastPulseRef = useRef<Map<string, number>>(new Map());
+  const baseSizeRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     processedBatchesRef.current.clear();
+    baseSizeRef.current.clear();
     const graph = new MultiGraph();
     const executive = getExecutiveNeurons();
     const allNeurons = [...neurons, ...executive];
@@ -276,14 +278,18 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, { color, size, structural: false });
 
           // Temporal decay: briefly enlarge target node then decay back, emit spark on settle
-          const targetSize = graph.getNodeAttribute(pulse.neuron_id, 'size') as number;
-          graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize * 1.6);
+          // Use baseSizeRef to avoid compounding when multiple pulses hit before decay completes
+          if (!baseSizeRef.current.has(pulse.neuron_id)) {
+            baseSizeRef.current.set(pulse.neuron_id, graph.getNodeAttribute(pulse.neuron_id, 'size') as number);
+          }
+          const baseSize = baseSizeRef.current.get(pulse.neuron_id)!;
+          graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize * 1.6);
           setTimeout(() => {
             if (!graph.hasNode(pulse.neuron_id)) return;
-            graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize * 1.2);
+            graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize * 1.2);
             setTimeout(() => {
               if (!graph.hasNode(pulse.neuron_id)) return;
-              graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize);
+              graph.setNodeAttribute(pulse.neuron_id, 'size', baseSize);
               // Emit glowing spark outward on settle
               const sparkContainer = sigma.getContainer();
               if (sparkContainer && graph.hasNode(pulse.neuron_id)) {
