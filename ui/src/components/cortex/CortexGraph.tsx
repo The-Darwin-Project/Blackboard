@@ -340,7 +340,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     });
 
     sigma.refresh();
-  }, [glowingIds, dimmedIds, sigma]);
+  }, [glowingIds, dimmedIds, sigma, neurons]);
 
   return null;
 };
