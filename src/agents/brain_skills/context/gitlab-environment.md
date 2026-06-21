@@ -1,42 +1,42 @@
 ---
-description: "GitLab environment capabilities and constraints for headhunter events"
+description: "GitLab environment capabilities and constraints for MR events"
 tags: [gitlab, environment, capabilities]
 ---
 # GitLab Environment
 
-## Service Account Capabilities
+## Service Account Boundaries
 
-Darwin's GitLab SA can:
+Darwin's GitLab SA operates within defined boundaries. It can read MR details,
+pipelines, and job logs; post comments; trigger retests via GitOps commands;
+merge MRs when conditions are met; and update
+reviewers/assignees.
 
-- Read MR/PR details, pipelines, job logs
-- Post MR/PR comments (notes)
-- Trigger pipeline retests via PaC GitOps commands (/retest, /test, /ok-to-test, /cancel)
-- Merge MRs (when pipeline is green and merge_status is can_be_merged)
-- Update MR/PR reviewers/assignees
+Actions requiring human authority: MR approvals, force-pushes, rebasing
+through conflicts, branch/tag deletion. When the path forward requires
+one of these, the human is the actor -- notify and wait.
 
-Darwin's GitLab SA CANNOT:
+## Pipeline Verification
 
-- Approve MRs (human approval required)
-- Force-push branches
-- Auto-rebase (conflicts require human resolution)
-- Delete branches or tags
+Pipeline state is observable. After any action that changes pipeline state
+(retest, code push, MR update), the fresh state must be verified before
+deciding next steps. Agent reports of "I triggered a retest" are actions,
+not outcomes -- the outcome lives in the pipeline status.
 
-## Pipeline Expectations
+Konflux/Tekton pipelines appear as external pipeline status in GitLab.
+Their completion time varies -- the nature of the pipeline determines
+appropriate verification timing, not a fixed interval.
 
-- Retry failed pipelines once. If the retry also fails, the failure reason must be understood before escalating.
-- Konflux/Tekton pipelines are external. GitLab shows them as "external" pipeline status.
-- When the developer reports a pipeline is running, defer until it completes, then use refresh_gitlab_context to check the result.
-- After an agent retests a pipeline, defer then use refresh_gitlab_context to verify the retest result before closing.
+## MR State Semantics
 
-## MR/PR Lifecycle
+An MR's `merge_status` and pipeline result together determine what's possible:
 
-1. Check pipeline status
-2. If failed: retest via PaC GitOps command
-3. If green + can_be_merged: merge
-4. If green + cannot_be_merged on a submodule MR: close the MR/PR (obsolete, newer update merged)
-5. If green + cannot_be_merged on a regular MR: report conflict to maintainer
-6. If retest fails: the failure reason must be known before escalating. Comment with failure analysis, notify maintainer, create incident.
+- **Pipeline green + mergeable**: the MR is ready for its intended action.
+- **Pipeline green + not mergeable**: something blocks merge (conflicts, missing approvals, branch protection). The blocking reason determines who needs to act.
+- **Pipeline failed**: the failure nature determines the response -- transient failures warrant a retest, deterministic failures require investigation.
+- **Submodule MRs** that become not-mergeable after pipeline passes are typically obsoleted by a newer update that already merged.
 
-## Maintainer Resolution
+## Maintainer Communication
 
-Maintainer contacts are pre-resolved in the event evidence. Notify each address via Slack to reach them.
+Maintainer contacts are pre-resolved in event evidence. When human action
+is needed (approval, conflict resolution, decision), reach them via the
+available notification channels.
