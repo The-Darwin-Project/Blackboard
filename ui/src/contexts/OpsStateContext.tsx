@@ -69,7 +69,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
 
   const selectEvent = useCallback((id: string) => {
     setSelectedEventId(id);
-    sessionStorage.setItem('darwin:selectedEventId', id);
+    try { sessionStorage.setItem('darwin:selectedEventId', id); } catch { /* quota */ }
   }, []);
 
   const deselectEvent = useCallback(() => {

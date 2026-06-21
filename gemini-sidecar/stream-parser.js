@@ -46,7 +46,7 @@ function parseStreamLine(line) {
                     parts.push(block.text);
                 } else if (block.type === 'tool_use' && block.name) {
                     const hint = block.input?.file_path || block.input?.command || block.input?.query || '';
-                    const suffix = hint ? `: ${hint.toString()}` : '';
+                    const suffix = hint ? `: ${hint.toString().slice(0, 2000)}` : '';
                     parts.push(`[tool] ${block.name}${suffix}`);
                 }
             }
@@ -66,7 +66,7 @@ function parseStreamLine(line) {
         // --- Gemini: tool_use event (top-level, not nested in assistant message) ---
         if (obj.type === 'tool_use' && obj.tool_name) {
             const hint = obj.parameters?.file_path || obj.parameters?.command || obj.parameters?.query || '';
-            const suffix = hint ? `: ${hint.toString()}` : '';
+            const suffix = hint ? `: ${hint.toString().slice(0, 2000)}` : '';
             return { text: `[tool] ${obj.tool_name}${suffix}`, sessionId: null, toolCalls: null, done: false };
         }
 
