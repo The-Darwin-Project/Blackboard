@@ -145,10 +145,9 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: nodeColor,
-        label: n.type === 'skill' ? '' : label, // skill labels hidden by default, shown on hover
+        label: n.type === 'skill' ? '' : label,
         type: 'circle',
         fixed: isFixed,
-        forceLabel: n.type !== 'skill', // suppress skill labels from default rendering
       });
     }
 
@@ -467,7 +466,7 @@ export default function CortexGraph({
           labelColor: { color: '#94a3b8' },
           labelFont: 'Inter, system-ui, sans-serif',
           labelSize: 10,
-          labelRenderedSizeThreshold: 5,
+          labelRenderedSizeThreshold: 4,
           renderLabels: true,
           enableEdgeEvents: false,
           stagePadding: 30,
