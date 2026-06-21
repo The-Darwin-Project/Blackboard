@@ -173,6 +173,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     if (msg.type === 'progress' && msg.actor) {
       const actor = msg.actor as string;
       const evtId = msg.event_id as string;
+      const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
       const isEphemeralEvent = evtId && (
         msg.event_source === 'headhunter'
         || msg.event_source === 'timekeeper'
@@ -184,14 +185,13 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
           e.source === 'headhunter' || e.source === 'timekeeper' || e.subject_type === 'kargo_stage'
         ))
       );
-      if (!isEphemeralEvent && AGENTS.includes(actor as typeof AGENTS[number])) {
+      if (isInternalAgent) {
         setAgentStreams((prev) => {
           const current = prev[actor] || { messages: [], eventId: null, isActive: false };
           const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
           return { ...prev, [actor]: { ...current, messages, eventId: evtId || current.eventId, isActive: true } };
         });
-      }
-      if (isEphemeralEvent && evtId) {
+      } else if (isEphemeralEvent && evtId) {
         setEphemeralStream((prev) => ({
           ...prev,
           [evtId]: [...(prev[evtId] || []), msg.message as string].slice(-MAX_BUFFER),
