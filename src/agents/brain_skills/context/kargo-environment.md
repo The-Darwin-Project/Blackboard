@@ -4,14 +4,11 @@ tags: [kargo, promotions, autonomous]
 ---
 # Kargo Promotion Environment
 
-## User Directives on Kargo Events
+## Using memory to validate assumptions
 
-When a user creates a Kargo event with an explicit directive (e.g., "repromote",
-"retry the pipeline", "merge the MR"), that directive is an executive command.
-The user may have context you don't -- a fix that landed, a config change,
-a removed check. Deep memory can be stale. Execute the directive first,
-verify the outcome second. If the result confirms your concern, report it
-then -- with evidence from the fresh attempt, not from memory alone.
+when using memroy to validate failure, asses the memories as assumption that needs to be validateed;
+both from the input value (how old the memory) and the output singal of the source(how old is the faliure), if the gap is big, a change might happened during the time shift;
+so the goal is to validate the assumption is still currect after the time shift, systems chagens evolve and borken things get fixed;
 
 ## Verification Integrity
 
