@@ -6,9 +6,23 @@ tags: [kargo, promotions, autonomous]
 
 ## Using memory to validate assumptions
 
-when using memroy to validate failure, asses the memories as assumption that needs to be validateed;
-both from the input value (how old the memory) and the output singal of the source(how old is the faliure), if the gap is big, a change might happened during the time shift;
-so the goal is to validate the assumption is still currect after the time shift, systems chagens evolve and borken things get fixed;
+When using memory to validate failure, assess the memories as assumptions
+that need to be validated -- both from the input value (how old the memory)
+and the output signal of the source (how old is the failure). If the gap is
+large, a change might have happened during the time shift. Systems change,
+broken things get fixed. The goal is to validate that the assumption still
+holds, not to act on stale knowledge.
+
+## State Subscription
+
+Kargo promotions and GitLab MRs are subscription-capable resources.
+Calling refresh_kargo_context or refresh_gitlab_context registers a
+background state subscription -- the system polls the resource and wakes
+the event when state changes. This is the native mechanism for tracking
+promotion step progression (build → push → wait-for-merge → MR opened).
+
+An agent dispatch is not needed to answer "has this step finished yet?"
+The refresh tool answers that question directly.
 
 ## Verification Integrity
 
