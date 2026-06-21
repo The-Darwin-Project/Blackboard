@@ -39,7 +39,9 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 function getNeuronSize(heat: number, type: string): number {
   const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
     : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : 3;
-  return base + Math.min(heat * 0.2, 6);
+  const maxGrowth = type === 'skill' ? 3 : 6;
+  const scale = type === 'skill' ? 0.1 : 0.2;
+  return base + Math.min(heat * scale, maxGrowth);
 }
 
 interface GraphLoaderProps {
@@ -79,7 +81,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     }
 
     // Concentric ring layout: brain core -> executive (ring 1) -> skills (ring 2) -> knowledge (ring 3) -> events (ring 4)
-    const RING = { executive: 250, skills: 380, knowledge: { min: 460, max: 650 }, events: 800 };
+    const RING = { executive: 280, skills: 460, knowledge: { min: 560, max: 720 }, events: 880 };
 
     // Count executive and skill nodes for even distribution
     const toolNodes = allNeurons.filter(n => n.type === 'tool');
@@ -132,16 +134,21 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       const isExecutive = n.type === 'tool' || n.type === 'phase' || n.type === 'agent' || n.type === 'domain';
       const isFixed = isExecutive || n.type === 'skill';
       // Skill color resolved inline (tag_type in payload, not available in getNeuronColor signature)
-      const nodeColor = n.type === 'skill'
+      let nodeColor = n.type === 'skill'
         ? (SKILL_TAG_COLORS[(n.payload as { tag_type?: string })?.tag_type ?? ''] ?? NEURON_COLORS.skill)
         : getNeuronColor(n);
+      // Dim cold skills (heat=0) to 40% opacity
+      if (n.type === 'skill' && n.heat === 0) {
+        nodeColor = nodeColor + '66'; // hex alpha ~40%
+      }
       graph.addNode(n.id, {
         x, y,
         size: getNeuronSize(n.heat, n.type),
         color: nodeColor,
-        label,
+        label: n.type === 'skill' ? '' : label, // skill labels hidden by default, shown on hover
         type: 'circle',
         fixed: isFixed,
+        forceLabel: n.type !== 'skill', // suppress skill labels from default rendering
       });
     }
 
@@ -186,7 +193,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           const edgeId = `struct:${phaseId}:${node.id}`;
           if (!graph.hasEdge(edgeId)) {
             graph.addEdgeWithKey(edgeId, phaseId, node.id, {
-              color: '#334155', size: 0.5, structural: true,
+              color: '#334155', size: 0.8, structural: true,
             });
           }
         }
@@ -321,7 +328,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
     sigma.setSetting('nodeReducer', (node, data) => {
       if (dimmedIds?.has(node)) return { ...data, color: '#1e293b', size: 2, label: '' };
       if (glowingIds.has(node)) {
-        return { ...data, color: '#fbbf24', size: (data.size ?? 4) * 1.8 };
+        const glowData: Record<string, unknown> = { ...data, color: '#fbbf24', size: (data.size ?? 4) * 1.8 };
+        // Reveal skill labels when glowing (normally hidden)
+        if (node.startsWith('skill:')) {
+          const n = neurons.find(nn => nn.id === node);
+          if (n) glowData.label = (n.payload?.label as string) ?? node.slice(6);
+        }
+        return glowData;
       }
       return data;
     });
@@ -343,6 +356,48 @@ const FA2Controller: FC = () => {
   }, [start, stop]);
 
   return null;
+};
+
+const NavigationControls: FC = () => {
+  const sigma = useSigma();
+  const fitted = useRef(false);
+
+  useEffect(() => {
+    if (!fitted.current && sigma.getGraph()?.order > 0) {
+      fitted.current = true;
+      setTimeout(() => sigma.getCamera().animatedReset({ duration: 300 }), 100);
+    }
+  }, [sigma]);
+
+  const zoomIn = () => {
+    const camera = sigma.getCamera();
+    camera.animatedZoom({ duration: 200, factor: 1.5 });
+  };
+  const zoomOut = () => {
+    const camera = sigma.getCamera();
+    camera.animatedUnzoom({ duration: 200, factor: 1.5 });
+  };
+  const fitToView = () => {
+    sigma.getCamera().animatedReset({ duration: 300 });
+  };
+
+  return (
+    <div style={{
+      position: 'absolute', bottom: 12, right: 12, zIndex: 10,
+      display: 'flex', flexDirection: 'column', gap: 4,
+    }}>
+      <button onClick={zoomIn} style={navBtnStyle} title="Zoom in">+</button>
+      <button onClick={zoomOut} style={navBtnStyle} title="Zoom out">−</button>
+      <button onClick={fitToView} style={navBtnStyle} title="Fit to view">⊙</button>
+    </div>
+  );
+};
+
+const navBtnStyle: React.CSSProperties = {
+  width: 28, height: 28, borderRadius: 4,
+  background: '#1e293b', border: '1px solid #334155', color: '#94a3b8',
+  fontSize: 16, lineHeight: '26px', textAlign: 'center',
+  cursor: 'pointer', padding: 0,
 };
 
 const DragHandler: FC<{ onClick?: (id: string | null, pos?: { x: number; y: number }) => void }> = ({ onClick }) => {
@@ -412,10 +467,10 @@ export default function CortexGraph({
           labelColor: { color: '#94a3b8' },
           labelFont: 'Inter, system-ui, sans-serif',
           labelSize: 10,
-          labelRenderedSizeThreshold: 4,
+          labelRenderedSizeThreshold: 5,
           renderLabels: true,
           enableEdgeEvents: false,
-          stagePadding: 0,
+          stagePadding: 30,
           nodeProgramClasses: {
             circle: NodeCircleProgram,
             square: NodeSquareProgram,
@@ -431,6 +486,7 @@ export default function CortexGraph({
         />
         <FA2Controller />
         <DragHandler onClick={onClickNeuron} />
+        <NavigationControls />
       </SigmaContainer>
     </div>
   );
