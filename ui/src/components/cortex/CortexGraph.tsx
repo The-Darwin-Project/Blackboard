@@ -275,7 +275,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
           graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, { color, size, structural: false });
 
-          // Temporal decay: briefly enlarge target node then decay back
+          // Temporal decay: briefly enlarge target node then decay back, emit spark on settle
           const targetSize = graph.getNodeAttribute(pulse.neuron_id, 'size') as number;
           graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize * 1.6);
           setTimeout(() => {
@@ -284,6 +284,24 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
             setTimeout(() => {
               if (!graph.hasNode(pulse.neuron_id)) return;
               graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize);
+              // Emit glowing spark outward on settle
+              const sparkContainer = sigma.getContainer();
+              if (sparkContainer && graph.hasNode(pulse.neuron_id)) {
+                const attrs = graph.getNodeAttributes(pulse.neuron_id);
+                const vp = sigma.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 40 + Math.random() * 60;
+                const spark = document.createElement('div');
+                spark.className = 'neuron-spark';
+                spark.style.left = `${vp.x - 3}px`;
+                spark.style.top = `${vp.y - 3}px`;
+                spark.style.color = attrs.color as string;
+                spark.style.setProperty('--dx', `${Math.cos(angle) * dist}px`);
+                spark.style.setProperty('--dy', `${Math.sin(angle) * dist}px`);
+                sparkContainer.appendChild(spark);
+                spark.addEventListener('animationend', () => spark.remove());
+                setTimeout(() => spark.remove(), 1400);
+              }
             }, 3000);
           }, 2000);
 
