@@ -3,7 +3,7 @@
 // 1. [Pattern]: Replaces Dashboard.tsx as the single owner of shared operational state.
 // 2. [Pattern]: WS ownership: owns progress, turn, event_created, event_closed. ConversationFeed keeps brain_thinking, attachment, message_status.
 // 3. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
-// 4. [Pattern]: Agent registry polling (10s) and ephemeral stream (keyed by event_id) sessionStorage sync live here.
+// 4. [Pattern]: Agent registry polling (10s) and ephemeral stream (keyed by event_id) are in-memory only — not persisted.
 // 5. [Gotcha]: Context value uses stable references (useCallback) to minimize re-renders of consumers.
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
@@ -83,16 +83,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     return init;
   });
 
-  const [ephemeralStream, setEphemeralStream] = useState<Record<string, string[]>>(() => {
-    try {
-      const stored = sessionStorage.getItem('darwin:ephemeralStream');
-      return stored ? JSON.parse(stored) : {};
-    } catch { return {}; }
-  });
-
-  useEffect(() => {
-    try { sessionStorage.setItem('darwin:ephemeralStream', JSON.stringify(ephemeralStream)); } catch { /* noop */ }
-  }, [ephemeralStream]);
+  const [ephemeralStream, setEphemeralStream] = useState<Record<string, string[]>>({});
 
   const [ephemeralAgents, setEphemeralAgents] = useState<AgentRegistryEntry[]>([]);
   const [registeredAgents, setRegisteredAgents] = useState<AgentRegistryEntry[]>([]);
