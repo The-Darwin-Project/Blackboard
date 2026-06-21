@@ -60,6 +60,7 @@ const FA2_SETTINGS = {
   barnesHutOptimize: true,
   slowDown: 80,
   edgeWeightInfluence: 0,
+  adjustSizes: true,
   linLogMode: true,
 };
 
@@ -152,6 +153,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         label: n.type === 'skill' ? '' : label,
         type: 'circle',
         fixed: isFixed,
+        weight: isFixed ? 1 : 1 + Math.log(n.heat + 1),
       });
     }
 
