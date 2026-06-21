@@ -4,9 +4,10 @@
 // 2. [Pattern]: Reconnect signal fires on onopen when retryRef > 0 (not initial connect).
 // 3. [Gotcha]: subscribersRef and reconnectSubscribersRef are Sets -- never recreate, only mutate.
 // 4. [Pattern]: onclose code 4001 = auth rejection -- triggers logout via getWSAuthFailureCallback(), skips reconnect.
-// 5. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections. Heartbeat cleared on unmount.
-// 6. [Pattern]: Visibility change listener reconnects immediately when tab regains focus.
-// 7. [Constraint]: Max backoff is 5s (not 30s) for fast recovery.
+// 5. [Pattern]: 5 consecutive close events without onopen = pre-handshake auth rejection (403 upgrade fail). Triggers re-auth.
+// 6. [Pattern]: 30s heartbeat ping keeps HAProxy from dropping idle connections. Heartbeat cleared on unmount.
+// 7. [Pattern]: Visibility change listener reconnects immediately when tab regains focus.
+// 8. [Constraint]: Max backoff is 5s (not 30s) for fast recovery.
 /**
  * WebSocket context provider -- shares a single WS connection across
  * multiple consumers (ConversationFeed, AgentStreamCards, Dashboard).
@@ -135,8 +136,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
           getWSAuthFailureCallback()?.();
           return;
         }
-        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 5000);
         retryRef.current++;
+        if (retryRef.current > 5) {
+          console.warn('[WS] 5 consecutive failures without connecting -- likely auth issue, triggering re-auth');
+          getWSAuthFailureCallback()?.();
+          return;
+        }
+        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 5000);
         setReconnecting(true);
         console.log(`[WS] Reconnecting in ${delay}ms (attempt ${retryRef.current})`);
         reconnectTimerRef.current = setTimeout(connect, delay);
