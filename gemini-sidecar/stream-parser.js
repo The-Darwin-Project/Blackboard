@@ -46,7 +46,7 @@ function parseStreamLine(line) {
                     parts.push(block.text);
                 } else if (block.type === 'tool_use' && block.name) {
                     const hint = block.input?.file_path || block.input?.command || block.input?.query || '';
-                    const suffix = hint ? `: ${hint.toString().slice(0, 120)}` : '';
+                    const suffix = hint ? `: ${hint.toString()}` : '';
                     parts.push(`[tool] ${block.name}${suffix}`);
                 }
             }
@@ -57,8 +57,8 @@ function parseStreamLine(line) {
         if (obj.type === 'user' && obj.tool_use_result) {
             const file = obj.tool_use_result?.file;
             if (file?.filePath) {
-                const preview = (file.content || '').slice(0, 200).replace(/\n/g, ' ');
-                return { text: `[${file.filePath}] → ${preview}${(file.content || '').length > 200 ? '...' : ''}`, sessionId: null, toolCalls: null, done: false };
+                const preview = (file.content || '').slice(0, 500).replace(/\n/g, ' ');
+                return { text: `[${file.filePath}] → ${preview}${(file.content || '').length > 500 ? '...' : ''}`, sessionId: null, toolCalls: null, done: false };
             }
             return null;
         }
@@ -66,7 +66,7 @@ function parseStreamLine(line) {
         // --- Gemini: tool_use event (top-level, not nested in assistant message) ---
         if (obj.type === 'tool_use' && obj.tool_name) {
             const hint = obj.parameters?.file_path || obj.parameters?.command || obj.parameters?.query || '';
-            const suffix = hint ? `: ${hint.toString().slice(0, 120)}` : '';
+            const suffix = hint ? `: ${hint.toString()}` : '';
             return { text: `[tool] ${obj.tool_name}${suffix}`, sessionId: null, toolCalls: null, done: false };
         }
 
@@ -80,8 +80,8 @@ function parseStreamLine(line) {
                 raw = obj.content;
             }
             const len = raw.length;
-            const preview = raw.slice(0, 200).replace(/\n/g, ' ');
-            const suffix = preview ? ` → ${preview}${len > 200 ? '...' : ''}` : '';
+            const preview = raw.slice(0, 500).replace(/\n/g, ' ');
+            const suffix = preview ? ` → ${preview}${len > 500 ? '...' : ''}` : '';
             return { text: `[${name}]${suffix}`, sessionId: null, toolCalls: null, done: false };
         }
 
