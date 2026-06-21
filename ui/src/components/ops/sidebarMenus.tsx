@@ -79,7 +79,14 @@ export function kargoStageMenuItems(
     {
       id: 'create-event', label: 'Create Event', icon: <PlusCircle size={18} />, color: '#3b82f6',
       disabled: !connected,
-      onClick: () => send({ type: 'create_kargo_event', project: stage.project, stage: stage.stage }),
+      onClick: () => {
+        const directive = window.prompt(
+          `Create event for ${stage.stage}@${stage.project}\n\nWhat should FRIDAY do? (optional)`,
+        );
+        if (directive !== null) {
+          send({ type: 'create_kargo_event', project: stage.project, stage: stage.stage, directive: directive || undefined });
+        }
+      },
     },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     { id: 'copy-stage', label: 'Copy Stage Name', icon: <Copy size={18} />, color: '#64748b',

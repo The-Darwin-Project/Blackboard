@@ -5345,7 +5345,7 @@ class Brain:
         logger.critical(f"EMERGENCY STOP: {cancelled} tasks cancelled")
         return cancelled
 
-    async def create_kargo_event(self, project: str, stage: str) -> dict:
+    async def create_kargo_event(self, project: str, stage: str, *, directive: str = "") -> dict:
         """Create a Kargo event from the dashboard (user right-click -> Create Event)."""
         observer = self.agents.get("_kargo_observer")
         if observer is None:
@@ -5359,6 +5359,15 @@ class Brain:
             if aligner is None:
                 return {"status": "error", "detail": "Aligner not available"}
             event_id = await aligner.handle_failed_promotion(**status)
+            if event_id and directive:
+                user_turn = ConversationTurn(
+                    turn=2,
+                    actor="user",
+                    action="message",
+                    thoughts=directive,
+                    user_name="dashboard",
+                )
+                await self.blackboard.append_turn(event_id, user_turn)
             if event_id:
                 return {"status": "created", "detail": f"Event {event_id} created for {stage}@{project}"}
             return {"status": "skipped", "detail": "Active event exists or cooldown"}

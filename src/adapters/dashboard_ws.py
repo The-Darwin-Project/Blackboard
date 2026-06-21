@@ -200,11 +200,12 @@ class DashboardWSAdapter:
     async def _handle_create_kargo_event(self, ws: WebSocket, data: dict) -> None:
         project = data.get("project", "")
         stage = data.get("stage", "")
+        directive = data.get("directive", "")
         if not project or not stage:
             await ws.send_json({"type": "kargo_event_result", "status": "error", "detail": "Missing project or stage"})
             return
         try:
-            result = await self._brain.create_kargo_event(project, stage)
+            result = await self._brain.create_kargo_event(project, stage, directive=directive)
             await ws.send_json({"type": "kargo_event_result", **result})
         except Exception as e:
             logger.error("create_kargo_event WS handler error: %s", e)
