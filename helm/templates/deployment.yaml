@@ -159,6 +159,8 @@ spec:
               value: {{ .Values.app.agentWsMode | quote }}
             - name: BRAIN_MAX_CONCURRENT_DISPATCHES
               value: {{ .Values.app.maxConcurrentDispatches | default 0 | quote }}
+            - name: MAX_ACTIVE_EVENTS
+              value: {{ .Values.app.maxActiveEvents | default 20 | quote }}
             {{- if .Values.brain }}
             - name: BRAIN_RECONCILE_WORKERS
               value: {{ .Values.brain.reconcileWorkers | default 0 | quote }}
@@ -240,8 +242,6 @@ spec:
               value: "{{ .Values.aligner.thresholds.memory }}"
             - name: ALIGNER_ERROR_RATE_THRESHOLD
               value: "{{ .Values.aligner.thresholds.errorRate }}"
-            - name: ALIGNER_MAX_ACTIVE
-              value: "{{ .Values.aligner.maxActive }}"
             {{- end }}
             {{- if .Values.headhunter }}
             # Headhunter (GitLab todo poller)
@@ -249,22 +249,12 @@ spec:
               value: "{{ .Values.headhunter.enabled }}"
             - name: HEADHUNTER_POLL_INTERVAL
               value: "{{ .Values.headhunter.pollInterval }}"
-            - name: HEADHUNTER_MAX_ACTIVE
-              value: "{{ .Values.headhunter.maxActive }}"
             - name: HEADHUNTER_STARTUP_DELAY
               value: "{{ .Values.headhunter.startupDelay }}"
             - name: HEADHUNTER_MAINTAINER_SOURCE
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
-            {{- if and .Values.ephemeralAgents.overflow (gt (int (.Values.ephemeralAgents.overflow.chat | default 0)) 0) }}
-            - name: CHAT_MAX_ACTIVE
-              value: {{ .Values.ephemeralAgents.overflow.chat | quote }}
-            {{- end }}
-            {{- if and .Values.ephemeralAgents.overflow (gt (int (.Values.ephemeralAgents.overflow.slack | default 0)) 0) }}
-            - name: SLACK_MAX_ACTIVE
-              value: {{ .Values.ephemeralAgents.overflow.slack | quote }}
-            {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
             - name: TEKTON_EVENTLISTENER_URL
               value: "http://el-{{ .Release.Name }}-ephemeral-agent:8080"
@@ -379,8 +369,6 @@ spec:
               value: "{{ .Values.nightwatcher.sweepCron }}"
             - name: NIGHTWATCHER_MIN_PENDING
               value: "{{ .Values.nightwatcher.minPending }}"
-            - name: NIGHTWATCHER_MAX_ACTIVE
-              value: "{{ .Values.nightwatcher.maxActive }}"
             - name: NIGHTWATCHER_DISPATCH_CAP
               value: "{{ .Values.nightwatcher.dispatchCap }}"
             - name: LLM_MODEL_NIGHTWATCHER
@@ -498,8 +486,6 @@ spec:
                   key: bot-account-id
             - name: HEADHUNTER_JIRA_LABEL
               value: {{ .Values.jira.label | quote }}
-            - name: HEADHUNTER_JIRA_MAX_ACTIVE
-              value: {{ .Values.jira.maxActive | default "1" | quote }}
             - name: LLM_MODEL_HEADHUNTER_JIRA
               value: {{ .Values.jira.model | quote }}
             {{- range $label, $url := .Values.jira.skills }}

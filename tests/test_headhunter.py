@@ -85,6 +85,15 @@ class StubBlackboard:
     async def get_active_events(self):
         return [e["id"] for e in self._active]
 
+    async def get_active_events_with_status(self):
+        result = {}
+        for e in self._active:
+            status = e.get("status", "active")
+            if hasattr(status, "value"):
+                status = status.value
+            result[e["id"]] = status
+        return result
+
     async def get_event(self, event_id):
         for e in self._active:
             if e["id"] == event_id:
@@ -96,7 +105,7 @@ class StubBlackboard:
 
 
 def _make_headhunter(blackboard=None, **env_overrides) -> Headhunter:
-    defaults = {"GITLAB_HOST": "gitlab.example.com", "HEADHUNTER_MAX_ACTIVE": "1"}
+    defaults = {"GITLAB_HOST": "gitlab.example.com", "MAX_ACTIVE_EVENTS": "20"}
     defaults.update(env_overrides)
     with patch.dict(os.environ, defaults):
         hh = Headhunter(blackboard or StubBlackboard())
@@ -194,15 +203,9 @@ class TestFlowGate:
         assert await hh.check_flow_gate() is True
 
     @pytest.mark.asyncio
-    async def test_blocks_when_max_active_reached(self):
-        active_event = MagicMock()
-        active_event.source = "headhunter"
-        active_event.status.value = "active"
-        active_event.id = "evt-1"
-        bb = StubBlackboard(active_events=[{"id": "evt-1"}])
-        bb.get_event = AsyncMock(return_value=active_event)
-        bb.get_active_events = AsyncMock(return_value=["evt-1"])
-        hh = _make_headhunter(blackboard=bb)
+    async def test_blocks_when_global_cap_reached(self):
+        bb = StubBlackboard(active_events=[{"id": "evt-1", "status": "active"}])
+        hh = _make_headhunter(blackboard=bb, MAX_ACTIVE_EVENTS="1")
         assert await hh.check_flow_gate() is False
 
 

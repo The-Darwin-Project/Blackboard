@@ -300,6 +300,10 @@ export interface FlowMetrics {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  wip_used: number;
+  wip_cap: number;
+  wip_utilization_pct: number;
+  wip_available: number;
   avg_reconcile_ms: number;
   snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
@@ -313,6 +317,10 @@ export interface FlowSnapshot {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  wip_used: number;
+  wip_cap: number;
+  wip_utilization_pct: number;
+  wip_available: number;
   busy_agents: number;
   idle_agents: number;
   active_subscriptions: number;

@@ -630,6 +630,10 @@ class FlowMetricsResponse(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    wip_used: int = 0
+    wip_cap: int = 0
+    wip_utilization_pct: float = 0.0
+    wip_available: int = 0
     avg_reconcile_ms: float = 0.0
     snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
@@ -644,6 +648,10 @@ class FlowSnapshot(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    wip_used: int = 0
+    wip_cap: int = 0
+    wip_utilization_pct: float = 0.0
+    wip_available: int = 0
     busy_agents: int = 0
     idle_agents: int = 0
     active_subscriptions: int = 0

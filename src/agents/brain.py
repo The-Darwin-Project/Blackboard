@@ -71,19 +71,18 @@
 #     emits pulse (tool:brain_response), updates _last_processed, sets _waiting_for_user for slack/chat.
 # 34. [Gotcha]: Legacy brain.think stays IN LLM prompt with [Internal observation] wrapper (backward
 #     compat for old Redis events). New code MUST produce brain.thoughts or brain.response, not brain.think.
-# 25. [Pattern]: WIP cap (two layers):
-#     Layer 1 (per-source): _get_source_wip_limit + _count_source_wip gate NEW->ACTIVE transition.
-#       Counts events in ACTIVE+DEFERRED status for the source. NEW events are input buffer, not WIP.
-#       ONLY applies to _EPHEMERAL_ONLY_SOURCES (aligner, headhunter, timekeeper) -- sources whose
-#       events exclusively use ephemeral agents. Internal-agent sources (chat, slack) are NOT gated
-#       at admission; their bottleneck is agent idle/busy at dispatch time.
-#       {SOURCE}_MAX_ACTIVE env var (default 1 for ephemeral sources). Event close is the release trigger.
-#       Events in _waiting_for_user are excluded from WIP count (Propose and Prompt slot release).
+# 25. [Pattern]: WIP cap (unified global, soft):
+#     WIW (new) -> WIP (active/deferred, capped) -> WIO (closed/resolved).
+#     _count_global_wip() counts ACTIVE+DEFERRED minus _waiting_for_user (pipeline-based, O(1)).
+#     Gate: automated sources rejected at cap; _BYPASS_SOURCES (chat/slack/jarvis) always admitted.
+#     MAX_ACTIVE_EVENTS env var (default 20). Non-atomic (count+admit gap bounded by worker concurrency).
+#     Bypass events still count in wip_used, reducing room for automated events.
+#     JARVIS bounded by single-active-meta-event invariant (effective ceiling = cap + 1).
 #     Layer 2 (global): _dispatch_semaphore on select_agent. May recursively call defer_event -- safe,
 #       defer_event does not recurse back into select_agent.
 #     DO NOT add agent-dispatching logic to the defer_event handler.
-# 26. [Pattern]: Ephemeral dispatch is two-tier: (a) primary -- headhunter/timekeeper/kargo_stage always use ephemeral,
-#     (b) overflow -- chat/slack scale to ephemeral when local sidecars are full, gated by {SOURCE}_MAX_ACTIVE env var.
+# 26. [Pattern]: Ephemeral dispatch: (a) primary -- headhunter/timekeeper/kargo_stage always use ephemeral,
+#     (b) overflow -- chat/slack scale to ephemeral when local sidecars are full and _ephemeral_provisioner exists.
 #     Circuit breaker for overflow defers (local was already full); circuit breaker for primary falls back to local.
 #     Provisioner is pure plumbing (spawn/terminate). Capacity logic lives in Brain (event-based WIP gate).
 #     Volume write gate: write_event_to_volume runs only when agent_id_override is None (local sidecar dispatch).
@@ -421,46 +420,25 @@ class Brain:
         self._journal_cache[service] = (now, entries)
         return entries
 
-    # Sources whose events exclusively use ephemeral agents (Tier 1).
-    # These get WIP-gated at admission (NEW->ACTIVE). Internal-agent sources
-    # (chat, slack) are NOT gated here -- their bottleneck is dispatch-time
-    # agent availability, not event count.
-    _EPHEMERAL_ONLY_SOURCES = frozenset({"aligner", "headhunter", "timekeeper"})
+    # Sources that bypass the global WIP cap entirely (admitted immediately).
+    # User-initiated + meta-cognitive events don't queue behind automated work.
+    # The 1.3x headroom in cap sizing accounts for bypass-event overhead.
+    _BYPASS_SOURCES = frozenset({"chat", "slack", "jarvis"})
 
     # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
     EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst"})
 
-    def _get_source_wip_limit(self, source: str) -> int:
-        """Per-source WIP limit for ephemeral-only sources.
+    async def _count_global_wip(self) -> int:
+        """Count all events in WIP (active + deferred), minus _waiting_for_user.
 
-        Returns 0 (unlimited) for sources that use internal agents (chat,
-        slack). Only Tier 1 ephemeral sources are admission-gated.
+        Uses pipeline-based get_active_events_with_status() for O(1) Redis
+        round trips. NEW events are input buffer and excluded from WIP count.
         """
-        if source not in self._EPHEMERAL_ONLY_SOURCES:
-            return 0
-        env_key = f"{source.upper().replace('-', '_')}_MAX_ACTIVE"
-        return int(os.environ.get(env_key, "1"))
-
-    async def _count_source_wip(self, source: str, exclude_id: str = "") -> int:
-        """Count events admitted for a source (status ACTIVE or DEFERRED).
-
-        NEW events are in the input buffer and don't count as WIP.
-        CLOSED events are out of the system.
-        Events parked in _waiting_for_user (Propose and Prompt awaiting
-        maintainer reply) are excluded -- they release the WIP slot so
-        new events can be admitted while the proposal awaits authorization.
-        """
-        active_ids = await self.blackboard.get_active_events()
-        count = 0
-        for eid in active_ids:
-            if eid == exclude_id:
-                continue
-            if eid in self._waiting_for_user:
-                continue
-            evt = await self.blackboard.get_event(eid)
-            if evt and evt.source == source and evt.status in (EventStatus.ACTIVE, EventStatus.DEFERRED):
-                count += 1
-        return count
+        status_map = await self.blackboard.get_active_events_with_status()
+        return sum(
+            1 for eid, s in status_map.items()
+            if s in ("active", "deferred") and eid not in self._waiting_for_user
+        )
 
     async def _get_adapter(self):
         """Lazy-load LLM adapter (Gemini or Claude based on LLM_PROVIDER)."""
@@ -710,27 +688,34 @@ class Brain:
             )
             return
 
-        # Lifecycle: transition NEW -> ACTIVE on first processing
-        # Per-source WIP gate: count events already admitted (ACTIVE + DEFERRED)
-        # for this source. If at capacity, leave event as NEW and skip processing.
+        # Lifecycle: transition NEW -> ACTIVE (global WIP cap gate)
         if event.status == EventStatus.NEW:
-            source_limit = self._get_source_wip_limit(event.source)
-            if source_limit > 0:
-                wip = await self._count_source_wip(event.source, exclude_id=event_id)
-                if wip >= source_limit:
+            if event.source in self._BYPASS_SOURCES:
+                # User/JARVIS: rush into WIP immediately, no cap check
+                if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
+                    logger.info(f"Event {event_id} (bypass:{event.source}) transitioned NEW -> ACTIVE")
+                    await self._broadcast({
+                        "type": "event_status_changed",
+                        "event_id": event_id,
+                        "status": EventStatus.ACTIVE.value,
+                    })
+            else:
+                # Automated sources: admit only if global cap allows
+                cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+                wip = await self._count_global_wip()
+                if wip >= cap:
                     logger.info(
-                        "Source WIP gate: %s at capacity (%d/%d). "
-                        "Event %s stays NEW.",
-                        event.source, wip, source_limit, event_id,
+                        "Global WIP gate: at capacity (%d/%d). Event %s stays NEW.",
+                        wip, cap, event_id,
                     )
                     return
-            if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
-                logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
-                await self._broadcast({
-                    "type": "event_status_changed",
-                    "event_id": event_id,
-                    "status": EventStatus.ACTIVE.value,
-                })
+                if await self.blackboard.transition_event_status(event_id, "new", EventStatus.ACTIVE):
+                    logger.info(f"Event {event_id} transitioned NEW -> ACTIVE")
+                    await self._broadcast({
+                        "type": "event_status_changed",
+                        "event_id": event_id,
+                        "status": EventStatus.ACTIVE.value,
+                    })
 
         # Health check: nudge idle events, escalate to human after max nudges.
         # Guards: skip if deferred (intentional wait), waiting for user/jarvis, or last real turn is brain.defer (just woke).
@@ -4698,18 +4683,18 @@ class Brain:
                     # Tier 2: MMC overflow -- scale C when local sidecars are full
                     # Local sidecars are role-locked (1 per role = MM1). Ephemeral agents
                     # shape-shift via WS msg.role, breaking the per-role bottleneck.
-                    if not use_ephemeral and self._ephemeral_provisioner and event_doc and registry:
+                    if (not use_ephemeral and self._ephemeral_provisioner
+                            and event_doc and event_doc.source in ("chat", "slack")
+                            and registry):
                         local_available = await registry.get_available(agent_name)
                         if local_available is None:
-                            source_env_key = f"{event_doc.source.upper().replace('-', '_')}_MAX_ACTIVE"
-                            if os.environ.get(source_env_key):
-                                logger.info(
-                                    "MMC overflow: no local sidecar for %s, scaling to ephemeral "
-                                    "(source=%s, event=%s)",
-                                    agent_name, event_doc.source, event_id,
-                                )
-                                use_ephemeral = True
-                                ephemeral_is_overflow = True
+                            logger.info(
+                                "MMC overflow: no local sidecar for %s, scaling to ephemeral "
+                                "(source=%s, event=%s)",
+                                agent_name, event_doc.source, event_id,
+                            )
+                            use_ephemeral = True
+                            ephemeral_is_overflow = True
 
                     # Safety: ephemeral-only role selected but provisioner unavailable
                     if agent_name in self.EPHEMERAL_ONLY_ROLES and not use_ephemeral:
@@ -5745,10 +5730,8 @@ class Brain:
         """Start the ReconcileScheduler with trigger-based event processing.
 
         Replaces the old monolithic while-loop with fair N-worker scheduling.
-        Workers are auto-derived from source caps * 1.3 (configurable via
-        BRAIN_RECONCILE_WORKERS env var, 0 = auto).
+        Workers = BRAIN_RECONCILE_WORKERS if > 0, else MAX_ACTIVE_EVENTS (auto).
         """
-        import math
         from ..scheduling import ReconcileScheduler
         from ..scheduling.triggers import QueueTrigger, ResyncTrigger, StalenessGuard
 
@@ -5809,20 +5792,10 @@ class Brain:
         await self._scheduler.start()
 
     def _derive_workers(self) -> int:
-        """Auto-derive worker count from source caps, or use explicit override."""
-        import math
+        """Worker count: explicit override or auto (= MAX_ACTIVE_EVENTS). Floor of 1."""
         configured = int(os.getenv("BRAIN_RECONCILE_WORKERS", "0"))
-        if configured > 0:
-            return configured
-        caps = (
-            int(os.getenv("ALIGNER_MAX_ACTIVE", "2"))
-            + int(os.getenv("HEADHUNTER_MAX_ACTIVE", "3"))
-            + int(os.getenv("NIGHTWATCHER_MAX_ACTIVE", "1"))
-            + int(os.getenv("CHAT_MAX_ACTIVE", "1"))
-            + int(os.getenv("SLACK_MAX_ACTIVE", "1"))
-            + 1  # JARVIS meta-event
-        )
-        return math.ceil(caps * 1.3)
+        workers = configured if configured > 0 else int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        return max(1, workers)
 
     async def _on_reconcile_error(self, event_id: str, exc: Exception) -> None:
         """Error handler for ReconcileScheduler worker failures."""

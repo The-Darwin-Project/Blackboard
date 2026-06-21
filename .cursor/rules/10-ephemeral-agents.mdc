@@ -15,9 +15,11 @@ alwaysApply: true
 ## Queue Discipline
 
 * **NEVER** fall back to local sidecars for trigger-source events (headhunter, etc.)
-* If source's `maxActive` reached, Brain DEFERS the event. It stays in queue until a slot opens.
-* Each trigger agent owns its concurrency budget via its own `maxActive` in values.yaml.
-* Convention: `{SOURCE}_MAX_ACTIVE` env var (e.g., `HEADHUNTER_MAX_ACTIVE`).
+* Global WIP cap (`MAX_ACTIVE_EVENTS`, default 20) gates NEW→ACTIVE admission for automated sources.
+* Bypass sources (chat, slack, jarvis) always admitted immediately — no cap check.
+* If cap reached, automated events stay NEW in queue until a slot opens (event closes or defers with `_waiting_for_user`).
+* Cap is SOFT (non-atomic count+admit, bounded by worker concurrency).
+* MMC overflow (ephemeral scaling for chat/slack) triggers when `_ephemeral_provisioner` exists and local sidecar unavailable.
 
 ## Dynamic Role Switching
 

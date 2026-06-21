@@ -10,6 +10,8 @@
 # 8. [Constraint]: No hardcoded emails, URLs, or tokens -- all from env vars.
 # 9. [Pattern]: Label-driven skill selection: HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>.
 #    Labels on issue (beyond base "darwin") map to system prompts fetched from git. 5-min cache.
+# 10. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Counts new+active+deferred
+#     conservatively (no _waiting_for_user subtraction). Backs off when system full.
 #    Teams self-serve by updating rules in their own repo. Fallback: built-in BA prompt.
 # 10. [Pattern]: Redis-backed state (darwin:headhunter:jira:{key}, 7d TTL) replaces in-memory dict.
 #     _get_issue_state/_set_issue_state are the canonical accessors.
@@ -243,7 +245,7 @@ class HeadhunterJira:
         self._bot_account_id = os.getenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "")
         self._jira_label = os.getenv("HEADHUNTER_JIRA_LABEL", "darwin")
         self._model = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-4-6")
-        self._max_active = int(os.getenv("HEADHUNTER_JIRA_MAX_ACTIVE", "1"))
+        self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
         self._claude_adapter = None
         # Label-driven skill selection: env HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>
         self._skill_urls: dict[str, str] = {}
@@ -664,8 +666,10 @@ class HeadhunterJira:
         return keys - {""}
 
     async def check_flow_gate(self) -> bool:
-        """Return True if a Jira slot is available (active jira events < max_active)."""
-        return len(await self._get_active_jira_keys()) < self._max_active
+        """Back off when system is at global WIP capacity (conservative count)."""
+        status_map = await self.blackboard.get_active_events_with_status()
+        wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        return wip_used < self._wip_cap
 
     # =========================================================================
     # Cold-Start Recovery
@@ -712,11 +716,11 @@ class HeadhunterJira:
                         comment_id, _analysis = result
                         await self._set_issue_state(key, {"phase": "analyzed", "last_comment_id": comment_id})
 
-        # Phase 2: Create events for To Do issues (gated by Jira-specific WIP limit)
-        active_jira_keys = await self._get_active_jira_keys()
-        if len(active_jira_keys) >= self._max_active:
+        # Phase 2: Create events for To Do issues (gated by global WIP cap)
+        if not await self.check_flow_gate():
             logger.debug("Jira flow gate closed -- skipping event creation")
             return
+        active_jira_keys = await self._get_active_jira_keys()
         todo_issues = await self.poll_todo()
         logger.debug(f"Jira To Do issues: {len(todo_issues)}")
         for issue in todo_issues:
@@ -726,7 +730,7 @@ class HeadhunterJira:
             state = await self._get_issue_state(key)
             if state and state.get("phase") == "event_created":
                 continue
-            if len(active_jira_keys) >= self._max_active:
+            if not await self.check_flow_gate():
                 logger.info("Jira flow gate closed mid-cycle -- stopping")
                 break
             try:

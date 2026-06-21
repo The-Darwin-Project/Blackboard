@@ -4,7 +4,7 @@
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
 # 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
 # 4. [Pattern]: Single-tier LLM analysis via _load_gitlab_si() from headhunter_skills/gitlab-mr-triage.md. Bot Instructions flow as MR description context in prompt. _EMERGENCY_SI fallback when skill file missing; _emergency_plan() when LLM unavailable.
-# 5. [Pattern]: Flow gate checks active+queued headhunter events < max_active before creating new events.
+# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count includes NEW (prevents single-cycle flooding). No _waiting_for_user subtraction (no Brain reference).
 # 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up. Brain calls
 #     process_event_feedback directly on close (no signal). Phase 2 only.
@@ -140,7 +140,7 @@ class Headhunter:
         self._adapter = None
         self._close_signal = close_signal
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
-        self._max_active = int(os.getenv("HEADHUNTER_MAX_ACTIVE", "1"))
+        self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
         # _processed_todos removed: dedup now checks active events, not in-memory set
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
@@ -817,14 +817,15 @@ class Headhunter:
         return self._last_poll_pending
 
     async def check_flow_gate(self) -> bool:
-        """Return True if a slot is available (active+queued headhunter events < max_active)."""
-        active_ids = await self.blackboard.get_active_events()
-        count = 0
-        for eid in active_ids:
-            event = await self.blackboard.get_event(eid)
-            if event and event.source == "headhunter" and event.status.value in ("new", "active", "deferred"):
-                count += 1
-        return count < self._max_active
+        """Back off when system is at global WIP capacity (conservative count).
+
+        Counts NEW+ACTIVE+DEFERRED to prevent single-cycle flooding (HH creates
+        events as NEW in a loop). No _waiting_for_user subtraction — HH doesn't
+        have Brain reference. Conservative estimate is intentional.
+        """
+        status_map = await self.blackboard.get_active_events_with_status()
+        wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        return wip_used < self._wip_cap
 
     # =========================================================================
     # Main Loop (Circuit Breaker)
@@ -839,7 +840,7 @@ class Headhunter:
         startup_delay = int(os.getenv("HEADHUNTER_STARTUP_DELAY", "180"))
         logger.info(
             f"Headhunter waiting {startup_delay}s for sidecars to connect before first poll "
-            f"(poll={self._poll_interval}s, max_active={self._max_active}, model={self._model_name})"
+            f"(poll={self._poll_interval}s, cap={self._wip_cap}, model={self._model_name})"
         )
         await asyncio.sleep(startup_delay)
         logger.info("Headhunter started")

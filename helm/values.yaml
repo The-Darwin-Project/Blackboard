@@ -213,7 +213,8 @@ app:
   feedbackFormUrl: "" # Google Form URL for detailed feedback (empty = hide link)
   agentWsMode: "reverse" # "legacy" or "reverse" -- gates dispatch path (rollback: set to "legacy")
   agentWsPath: "/agent/ws" # WebSocket endpoint path for agent connections
-  maxConcurrentDispatches: 0 # Global WIP cap for local sidecar dispatches: 0=disabled, N=max concurrent. Does NOT affect ephemeral agents (separate {SOURCE}_MAX_ACTIVE caps).
+  maxConcurrentDispatches: 0 # Dispatch semaphore for local sidecar concurrency: 0=disabled, N=max concurrent
+  maxActiveEvents: 20 # Global WIP cap: max events in active+deferred (bypass: chat/slack/jarvis)
 # =============================================================================
 # Skill Reconciler Sidecar (Git-to-Redis hot-reload for brain skills)
 # =============================================================================
@@ -363,7 +364,6 @@ observer:
 # Aligner Anomaly Thresholds
 # =============================================================================
 aligner:
-  maxActive: "2" # max concurrent ephemeral agents for aligner-sourced events (kargo_stage)
   thresholds:
     cpu: "80.0" # CPU % above which Flash analyzes the service
     memory: "85.0" # Memory % above which Flash analyzes the service
@@ -415,23 +415,12 @@ ephemeralAgents:
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
     keep: 5 # Number of TaskRuns to retain (when strategy=keep)
     schedule: "0 */6 * * *" # Cron schedule for the Tekton Operator pruner
-  # MMC overflow: when local sidecars are full (role-locked, 1 per role = MM1),
-  # scale C with ephemeral agents (shape-shifting, any role per event).
-  # Set per-source limits to enable overflow. 0 = disabled, no overflow for that source.
-  # IMPORTANT: maxConcurrentDispatches (WIP cap) fires BEFORE overflow in the dispatch
-  # pipeline. When using overflow, keep maxConcurrentDispatches at 0 (disabled, recommended)
-  # or set it to local_sidecars + overflow_cap (e.g., 4 + 2 = 6). Setting it to the local
-  # sidecar count (4) defeats overflow -- events defer at the WIP gate before reaching overflow.
-  overflow:
-    chat: 1 # Max ephemeral agents for chat overflow (0 = disabled)
-    slack: 1 # Max ephemeral agents for slack overflow (0 = disabled)
 # =============================================================================
 # Headhunter (GitLab Todo Poller)
 # =============================================================================
 headhunter:
   enabled: false # Set to true + configure GITLAB_HOST to activate
   pollInterval: "300" # seconds between poll cycles
-  maxActive: "3" # max concurrent headhunter events (flow gate)
   startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
@@ -443,7 +432,6 @@ jira:
   existingSecret: "" # e.g., "darwin-jira-creds" (keys: email, api-token, bot-account-id)
   url: ""
   label: "darwin"
-  maxActive: 1 # Independent WIP limit for Jira events (separate from GitLab headhunter)
   model: "claude-sonnet-4-6"
   skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
 # =============================================================================
@@ -507,7 +495,6 @@ nightwatcher:
   enabled: false # Set to true to intercept Brain escalations for batch consolidation
   sweepCron: "0 6,18 * * *" # Twice daily: 06:00 UTC (morning) and 18:00 UTC (evening)
   minPending: "1" # Minimum pending escalations to trigger a sweep
-  maxActive: "1" # Ephemeral agent concurrency limit for nightwatcher source
   dispatchCap: "3" # Max investigation dispatches per sweep
 # =============================================================================
 # Dex OIDC Identity Provider (bundled, reverse-proxied via Brain at /dex/*)

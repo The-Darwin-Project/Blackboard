@@ -71,6 +71,7 @@ def stub_blackboard():
     bb = MagicMock()
     bb.create_event = AsyncMock(return_value="evt-jira-001")
     bb.get_active_events = AsyncMock(return_value=[])
+    bb.get_active_events_with_status = AsyncMock(return_value={})
     bb.get_event = AsyncMock(return_value=None)
     bb.redis = _make_mock_redis()
     return bb

@@ -557,13 +557,19 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         logger.warning("Flow enrichment from snapshot failed: %s", exc)
 
     hh_pending = 0
+    wip_used = 0
+    wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
     try:
         brain = await get_brain()
         hh = brain.agents.get("_headhunter") if brain else None
         if hh:
             hh_pending = hh.pending_count
+        if brain:
+            wip_used = await brain._count_global_wip()
     except Exception:
         pass
+    wip_utilization_pct = (wip_used / wip_cap * 100) if wip_cap > 0 else 0.0
+    wip_available = max(0, wip_cap - wip_used)
 
     return FlowMetricsResponse(
         queue_depth=flow["queue_depth"],
@@ -575,6 +581,10 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         deferred_events=latest.deferred_events if latest else 0,
         waiting_approval_events=flow.get("waiting_approval_events", 0),
         headhunter_pending=hh_pending,
+        wip_used=wip_used,
+        wip_cap=wip_cap,
+        wip_utilization_pct=round(wip_utilization_pct, 1),
+        wip_available=wip_available,
         avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
         snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,

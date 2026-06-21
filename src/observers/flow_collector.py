@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -93,9 +94,12 @@ class FlowCollector:
         # Queue depth + active event count from blackboard (O(1) Redis ops)
         flow = await self._blackboard.get_flow_metrics()
 
-        # Event status + age computation (two-step: cheap status map, then full docs for age)
+        # Event status + age + WIP computation
         status_map = await self._blackboard.get_active_events_with_status()
         deferred_count = sum(1 for s in status_map.values() if s == "deferred")
+        # RAW wip_used (no _waiting_for_user subtraction — FlowCollector has no Brain ref)
+        wip_used_raw = sum(1 for s in status_map.values() if s in ("active", "deferred"))
+        wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
 
         ages: list[float] = []
         if status_map:
@@ -141,6 +145,10 @@ class FlowCollector:
             deferred_events=deferred_count,
             waiting_approval_events=flow.get("waiting_approval_events", 0),
             headhunter_pending=hh_pending,
+            wip_used=wip_used_raw,
+            wip_cap=wip_cap,
+            wip_utilization_pct=round(wip_used_raw / wip_cap * 100, 1) if wip_cap > 0 else 0.0,
+            wip_available=max(0, wip_cap - wip_used_raw),
             busy_agents=busy,
             idle_agents=idle,
             active_subscriptions=active_subs,
