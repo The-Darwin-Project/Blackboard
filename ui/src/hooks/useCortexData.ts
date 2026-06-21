@@ -17,7 +17,8 @@ export function useCortexGraph() {
   return useQuery<CognitiveGraphResponse>({
     queryKey: ['cognitive-graph'],
     queryFn: getCognitiveGraph,
-    staleTime: 60_000,
+    staleTime: 30_000,
+    refetchInterval: 30_000,
   });
 }
 

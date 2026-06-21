@@ -39,9 +39,10 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 function getNeuronSize(heat: number, type: string): number {
   const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
     : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : 3;
-  const maxGrowth = type === 'skill' ? 3 : 6;
-  const scale = type === 'skill' ? 0.1 : 0.2;
-  return base + Math.min(heat * scale, maxGrowth);
+  const maxGrowth = type === 'skill' ? 2 : 4;
+  // Logarithmic scaling: heat=1→+0.7, heat=10→+2.3, heat=50→+3.9, heat=100→+4 (capped)
+  const growth = heat > 0 ? Math.min(Math.log(heat + 1) * 1.0, maxGrowth) : 0;
+  return base + growth;
 }
 
 interface GraphLoaderProps {
