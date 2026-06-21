@@ -7,10 +7,12 @@ import { useState, useMemo, useCallback, useEffect, type FC } from 'react';
 import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
+import { getEventReport } from '../../api/client';
 import CortexGraph from './CortexGraph';
 import CortexLiveFeed from './CortexLiveFeed';
 import EventDrillDown from './EventDrillDown';
 import NeuronInfoPanel from './NeuronInfoPanel';
+import MarkdownViewer from '../MarkdownViewer';
 import { getExecutiveNeurons } from './cortex-constants';
 import type { Neuron } from './types';
 
@@ -28,6 +30,7 @@ const CortexPage: FC = () => {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [selectedNeuron, setSelectedNeuron] = useState<{ id: string; pos: { x: number; y: number } } | null>(null);
   const [feedOpen, setFeedOpen] = useState(true);
+  const [reportViewer, setReportViewer] = useState<{ title: string; content: string } | null>(null);
 
   const neurons: Neuron[] = graphData?.neurons ?? [];
 
@@ -54,9 +57,12 @@ const CortexPage: FC = () => {
 
   const handleClickNeuron = useCallback((id: string | null, pos?: { x: number; y: number }) => {
     if (id === null) { setSelectedNeuron(null); return; }
-    // Event nodes: open drill-down panel instead of neuron info
+    // Event nodes: fetch report and show in floating viewer
     if (activeEvents?.some(e => e.id === id)) {
       setSelectedEventId(prev => prev === id ? null : id);
+      getEventReport(id)
+        .then(data => setReportViewer({ title: `Report: ${id.slice(0, 12)}`, content: data.markdown }))
+        .catch(() => {});
       return;
     }
     if (!mergedNeurons.some(n => n.id === id)) return;
@@ -104,6 +110,13 @@ const CortexPage: FC = () => {
           const neuron = mergedNeurons.find(n => n.id === selectedNeuron.id);
           return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} /> : null;
         })()}
+        {reportViewer && (
+          <MarkdownViewer
+            filename={reportViewer.title}
+            content={reportViewer.content}
+            onClose={() => setReportViewer(null)}
+          />
+        )}
 
         {/* Active events bar */}
         <div className="flex-shrink-0 border-t border-border px-3 py-1.5 flex items-center gap-1.5 overflow-x-auto">
