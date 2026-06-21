@@ -68,6 +68,7 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
   const activityTimersRef = useRef<Map<string, number>>(new Map());
   const processedBatchesRef = useRef<Set<string>>(new Set());
   const activeRipplesRef = useRef(0);
+  const lastPulseRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     processedBatchesRef.current.clear();
@@ -217,8 +218,8 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         processedBatchesRef.current = new Set(entries.slice(-200));
       }
 
-      // Skip stale batches on graph rebuild — only replay edges still within fade window (10s)
-      if (now - batch.timestamp > 10) continue;
+      // Skip stale batches on graph rebuild — only replay edges still within fade window (30s)
+      if (now - batch.timestamp > 30) continue;
 
       const evtId = batch.event_id;
       if (!evtId) continue;
@@ -238,9 +239,13 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
         });
       }
 
-      for (const pulse of batch.pulses) {
+      for (let pulseIdx = 0; pulseIdx < batch.pulses.length; pulseIdx++) {
+        const pulse = batch.pulses[pulseIdx];
         const edgeId = `activity:${evtId}:${pulse.neuron_id}:${batch.timestamp}`;
         if (graph.hasEdge(edgeId) || !graph.hasNode(pulse.neuron_id)) continue;
+
+        // Record pulse time for temporal decay (breathing effect)
+        lastPulseRef.current.set(pulse.neuron_id, Date.now());
 
         let source = evtId;
         let size = 4;
@@ -262,55 +267,72 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
           source = evtId;
         }
 
-        graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, {
-          color,
-          size,
-          structural: false,
-        });
+        // Sequential chain: stagger edge creation by 120ms per pulse for cascade effect
+        const delay = pulseIdx * 120;
+        const createEdge = () => {
+          if (!graph.hasNode(source) || !graph.hasNode(pulse.neuron_id)) return;
+          if (graph.hasEdge(edgeId)) return;
 
-        // 5s solid, then 5s fade
-        const createdAt = Date.now();
-        const timer = window.setInterval(() => {
-          if (!graph.hasEdge(edgeId)) { clearInterval(timer); return; }
-          const elapsed = (Date.now() - createdAt) / 1000;
-          if (elapsed < 5) return;
-          const fadeElapsed = elapsed - 5;
-          const linearOpacity = Math.max(0, 1.0 - fadeElapsed / 5);
-          const opacity = linearOpacity * linearOpacity;
-          if (opacity <= 0) {
-            graph.dropEdge(edgeId);
-            clearInterval(timer);
-            activityTimersRef.current.delete(edgeId);
-          } else {
-            graph.setEdgeAttribute(edgeId, 'size', Math.max(0.5, size * opacity));
-          }
-        }, 500);
-        activityTimersRef.current.set(edgeId, timer);
+          graph.addEdgeWithKey(edgeId, source, pulse.neuron_id, { color, size, structural: false });
 
-        // Ripple overlay for skill pulses (capped at 10 concurrent)
-        if (pulse.neuron_type === 'skill' && graph.hasNode(pulse.neuron_id)) {
-          const container = sigma.getContainer();
-          if (container && activeRipplesRef.current < 10) {
-            activeRipplesRef.current++;
-            const nodeAttrs = graph.getNodeAttributes(pulse.neuron_id);
-            const viewPos = sigma.graphToViewport({ x: nodeAttrs.x as number, y: nodeAttrs.y as number });
-            const ripple = document.createElement('div');
-            ripple.className = 'skill-ripple';
-            ripple.style.left = `${viewPos.x - 6}px`;
-            ripple.style.top = `${viewPos.y - 6}px`;
-            ripple.style.color = graph.getNodeAttribute(pulse.neuron_id, 'color') as string;
-            container.appendChild(ripple);
-            let cleaned = false;
-            const cleanup = () => {
-              if (cleaned) return;
-              cleaned = true;
-              ripple.remove();
-              activeRipplesRef.current--;
-            };
-            ripple.addEventListener('animationend', cleanup);
-            setTimeout(cleanup, 700); // fallback if animationend doesn't fire
+          // Temporal decay: briefly enlarge target node then decay back
+          const targetSize = graph.getNodeAttribute(pulse.neuron_id, 'size') as number;
+          graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize * 1.6);
+          setTimeout(() => {
+            if (!graph.hasNode(pulse.neuron_id)) return;
+            graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize * 1.2);
+            setTimeout(() => {
+              if (!graph.hasNode(pulse.neuron_id)) return;
+              graph.setNodeAttribute(pulse.neuron_id, 'size', targetSize);
+            }, 3000);
+          }, 2000);
+
+          // 10s solid, then 20s fade (reasoning trail persists longer)
+          const createdAt = Date.now();
+          const timer = window.setInterval(() => {
+            if (!graph.hasEdge(edgeId)) { clearInterval(timer); return; }
+            const elapsed = (Date.now() - createdAt) / 1000;
+            if (elapsed < 10) return;
+            const fadeElapsed = elapsed - 10;
+            const linearOpacity = Math.max(0, 1.0 - fadeElapsed / 20);
+            const opacity = linearOpacity * linearOpacity;
+            if (opacity <= 0) {
+              graph.dropEdge(edgeId);
+              clearInterval(timer);
+              activityTimersRef.current.delete(edgeId);
+            } else {
+              graph.setEdgeAttribute(edgeId, 'size', Math.max(0.5, size * opacity));
+            }
+          }, 1000);
+          activityTimersRef.current.set(edgeId, timer);
+
+          // Ripple overlay for skill pulses (capped at 10 concurrent)
+          if (pulse.neuron_type === 'skill') {
+            const container = sigma.getContainer();
+            if (container && activeRipplesRef.current < 10) {
+              activeRipplesRef.current++;
+              const nodeAttrs = graph.getNodeAttributes(pulse.neuron_id);
+              const viewPos = sigma.graphToViewport({ x: nodeAttrs.x as number, y: nodeAttrs.y as number });
+              const ripple = document.createElement('div');
+              ripple.className = 'skill-ripple';
+              ripple.style.left = `${viewPos.x - 6}px`;
+              ripple.style.top = `${viewPos.y - 6}px`;
+              ripple.style.color = graph.getNodeAttribute(pulse.neuron_id, 'color') as string;
+              container.appendChild(ripple);
+              let cleaned = false;
+              const cleanup = () => {
+                if (cleaned) return;
+                cleaned = true;
+                ripple.remove();
+                activeRipplesRef.current--;
+              };
+              ripple.addEventListener('animationend', cleanup);
+              setTimeout(cleanup, 700);
+            }
           }
-        }
+        };
+
+        if (delay > 0) { setTimeout(createEdge, delay); } else { createEdge(); }
       }
     }
   }, [liveBatches, sigma, activeEvents]);
