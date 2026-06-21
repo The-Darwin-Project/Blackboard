@@ -54,9 +54,14 @@ const CortexPage: FC = () => {
 
   const handleClickNeuron = useCallback((id: string | null, pos?: { x: number; y: number }) => {
     if (id === null) { setSelectedNeuron(null); return; }
+    // Event nodes: open drill-down panel instead of neuron info
+    if (activeEvents?.some(e => e.id === id)) {
+      setSelectedEventId(prev => prev === id ? null : id);
+      return;
+    }
     if (!mergedNeurons.some(n => n.id === id)) return;
     setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
-  }, [mergedNeurons]);
+  }, [mergedNeurons, activeEvents]);
 
   const handleCloseNeuron = useCallback(() => setSelectedNeuron(null), []);
 
