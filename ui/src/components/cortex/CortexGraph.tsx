@@ -54,11 +54,11 @@ interface GraphLoaderProps {
 }
 
 const FA2_SETTINGS = {
-  gravity: 0.3,
-  scalingRatio: 20,
+  gravity: 0.8,
+  scalingRatio: 30,
   strongGravityMode: false,
   barnesHutOptimize: true,
-  slowDown: 100,
+  slowDown: 80,
   edgeWeightInfluence: 0,
   linLogMode: true,
 };
