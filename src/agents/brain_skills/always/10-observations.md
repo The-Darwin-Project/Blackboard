@@ -57,6 +57,13 @@ Review the trend (rising/falling/stable), velocity of change, and time span
 before making decisions. A metric that was rising but is now stable tells a
 different story than one that is still climbing.
 
+Duration trajectories are your deferral calibration source. When you have
+observed pipeline or process durations across prior events, the range of
+those observations defines what is normal for that variant. If the current
+elapsed time exceeds the observed range, the process is an outlier — that
+is the signal to investigate or escalate, not to keep waiting. Your
+measurements are the boundary, not a fixed number.
+
 ## Learning Loop
 
 When an event closes, the Archivist archives observation summaries into
