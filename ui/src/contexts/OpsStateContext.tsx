@@ -2,7 +2,7 @@
 // @ai-rules:
 // 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
 // 2. [Pattern]: resolveStreamTarget() is a named export pure function (tested in resolveStreamTarget.test.ts).
-//    Agent-first routing with oncall sub-check: (a.current_role || a.role) === actor routes to ephemeral.
+//    Agent-first routing with oncall sub-check: matches (bound_event_id || current_event_id) AND (current_role || role).
 // 3. [Pattern]: Turn handler uses resolveStreamTarget — only mutates agentStreams when target is 'agent'.
 //    Prevents oncall turn from deactivating the permanent agent tile.
 // 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
@@ -84,12 +84,14 @@ export function resolveStreamTarget(
     ))
   );
 
-  // Oncall sub-check: bound ephemeral agent with matching runtime role.
-  // Uses (current_role || role) because ephemeral sidecars register with
-  // empty role; runtime dispatch role is set via mark_busy → current_role.
-  const isBoundOncall = isInternalAgent && evtId &&
+  // Oncall sub-check: ephemeral agent working on this event with matching role.
+  // Checks both bound_event_id (set at registration) and current_event_id
+  // (set by mark_busy at dispatch) because pre-registered idle oncall pods
+  // have null bound_event_id until dispatched.
+  const isBoundOncall = isInternalAgent && !!evtId &&
     ephemeralAgents.some(a =>
-      a.bound_event_id === evtId && (a.current_role || a.role) === actor
+      (a.bound_event_id === evtId || a.current_event_id === evtId)
+      && (a.current_role || a.role) === actor
     );
 
   if (isBoundOncall) return 'ephemeral';
@@ -303,6 +305,18 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateActive();
         invalidateClosed();
         invalidateHeadhunter();
+
+        setAgentStreams((prev) => {
+          const next = { ...prev };
+          let changed = false;
+          for (const a of AGENTS) {
+            if (next[a]?.eventId === closedId) {
+              next[a] = { messages: [], eventId: null, isActive: false };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
 
         setEphemeralStream((prev) => {
           if (!prev[closedId]) return prev;

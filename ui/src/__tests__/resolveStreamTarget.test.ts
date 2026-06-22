@@ -80,11 +80,21 @@ describe('resolveStreamTarget', () => {
   // Oncall collision cases (3 — Run #3 C)
   // ---------------------------------------------------------------------------
   describe('oncall collision', () => {
-    it('routes oncall sysadmin (current_role match) to ephemeral', () => {
+    it('routes oncall sysadmin (current_role match via bound_event_id) to ephemeral', () => {
       const agents = [makeAgent({
         role: '',
         current_role: 'sysadmin',
         bound_event_id: 'evt-hh-1',
+      })];
+      expect(resolveStreamTarget('sysadmin', 'evt-hh-1', 'headhunter', '', agents)).toBe('ephemeral');
+    });
+
+    it('routes oncall sysadmin (current_role match via current_event_id) to ephemeral', () => {
+      const agents = [makeAgent({
+        role: '',
+        current_role: 'sysadmin',
+        bound_event_id: null,
+        current_event_id: 'evt-hh-1',
       })];
       expect(resolveStreamTarget('sysadmin', 'evt-hh-1', 'headhunter', '', agents)).toBe('ephemeral');
     });
