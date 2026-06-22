@@ -12,6 +12,7 @@ When multiple issues surface from the same event trace, system, or timeframe, ap
 1. **Shared PV Check**: Do these symptoms observe the same process variable? If two issues both measure the same system output, they may be the same error from different observation points.
 2. **Root Cause Collapse Test**: If I fix one issue, does the other disappear? If yes, classify the shared root cause, not the individual symptoms.
 3. **Controller Action Smell Test**: Am I proposing separate controller actions for symptoms that share a single error signal? One mechanism that closes the shared error is the target.
+4. **Active Object Verification**: Extract the target git object identifiers from the incoming event — MR/PR ID, commit SHA, pipeline ID, promotion name. Check active events across all sources for matching identifiers. Different observers (Headhunter watching a GitLab MR, Aligner watching a Kargo promotion) may fire on the same underlying git object from different angles. If another active event already tracks the same object, yield to whichever is furthest along in its lifecycle.
 
 Before deciding how to respond to an event, classify it into a domain:
 

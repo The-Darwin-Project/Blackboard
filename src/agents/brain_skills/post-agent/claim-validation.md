@@ -37,3 +37,12 @@ will not resolve.
 If the second check contradicts the original claim, discard the claim and
 proceed with the corrected understanding. Do not escalate on unconfirmed
 infrastructure claims.
+
+## Ops Journal Ground Truth
+
+Before acting on agent-reported pipeline or resource states, check whether
+the Ops Journal already records a terminal outcome for the same artifact
+(MR, pipeline ID, promotion). If another event has already driven that
+artifact to completion, the current event is redundant — close it rather
+than deferring on a resource that is already resolved. This prevents zombie
+deferrals when parallel events track the same object.
