@@ -9,7 +9,7 @@ roles: [sysadmin, developer, architect, security_analyst]
 
 ## Cluster Inspection
 
-- K8s MCP (`K8s_<cluster>`) -- remote cluster read-only access. Pass `namespace` explicitly from session context.
+- K8s MCP (`K8s_<cluster>`) -- remote cluster read-only access including Tekton-specific operations (TaskRun log retrieval) and generic resource reads. Pass `namespace` explicitly from session context. See `darwin-k8s-mcp` for queue-state and pipeline condition interpretation.
 - KubeArchive MCP (`KubeArchive_<cluster>`) -- archived PipelineRuns, TaskRuns, and pod logs. Konflux retains only 3 latest runs; use KubeArchive when live cluster data is pruned.
   Drill from pipeline run to task run to step log for failure diagnosis.
 - ArgoCD MCP -- application state, resource tree, workload logs, sync history

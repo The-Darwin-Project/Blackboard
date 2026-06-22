@@ -42,6 +42,7 @@ Vanilla GitLab CI pipelines are triggered by the GitLab CI/CD service, not a Tek
 - `/retest` with duplicate suppression: if all runs for the current commit already succeeded, no new run is created. Post `/retest <name>` to force a re-run.
 - `/ok-to-test` authorization: the contributor is trusted for this MR/PR. Subsequent pushes trigger pipelines automatically without another `/ok-to-test`.
 - After posting any trigger command, check pipeline status to confirm it was accepted (status changed to `running` or `pending`). Report the current state and return -- do not poll.
+- On subsequent dispatches, if the pipeline is still non-terminal, check queue state on the build cluster (see `darwin-k8s-mcp`) and include it in the report.
 
 ## Failure Modes
 

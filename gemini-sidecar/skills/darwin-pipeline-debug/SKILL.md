@@ -46,6 +46,19 @@ A pipeline can contain multiple jobs or tasks. Each may map to a separate execut
 
 Do NOT stop at the first failure you find. Multiple jobs/tasks can fail independently for different reasons. Report ALL of them.
 
+## Step 1.5: Check Pipeline Queue State
+
+When a pipeline has been in a non-terminal state longer than expected (not
+immediately after triggering -- the queue controller needs time to reconcile):
+
+1. Read the PipelineRun `.status.conditions` on the build cluster.
+2. If `reason: PipelineRunPending` -- the pipeline is queued, not running.
+   Report queue state to FRIDAY rather than treating it as a slow pipeline.
+3. If available, check the corresponding Kueue Workload `Admitted` condition
+   for the definitive admission signal (see `darwin-k8s-mcp` for details).
+
+Include queue state in the report to FRIDAY so she can calibrate her deferral.
+
 ## Step 2: Drill Into Each Failure
 
 ### GitLab-native jobs
@@ -99,6 +112,7 @@ After retesting:
 
 1. Check pipeline status immediately. If `running` or `pending`:
    - Report back with current state. FRIDAY will defer and re-dispatch you later to check the result.
+   - On subsequent dispatches, if the pipeline is still non-terminal, check queue state per Step 1.5.
 2. If `success`: report that retry resolved the issue.
 3. If `failed`: enumerate failed jobs/tasks again (Step 1) and report updated errors.
 

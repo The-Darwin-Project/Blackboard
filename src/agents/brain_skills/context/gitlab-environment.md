@@ -23,6 +23,16 @@ Tekton pipelines appear as external pipeline status in GitLab.
 Their completion time varies -- the nature of the pipeline determines
 appropriate verification timing, not a fixed interval.
 
+## Build Cluster Queue State
+
+Pipeline status from external CI APIs does not reflect build-cluster queue
+state. A pipeline showing `running` externally may be waiting in a resource
+queue on the build cluster rather than actively executing. When your
+observation trajectories show a pipeline exceeding its typical duration range,
+the discrepancy may be queue-related rather than pipeline-related. Agent
+reports from build cluster investigation will distinguish queue state from
+execution state.
+
 ## Maintainer Communication
 
 Maintainer contacts are pre-resolved in event evidence. When human action

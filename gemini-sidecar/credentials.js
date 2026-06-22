@@ -5,7 +5,7 @@
 // 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
 // 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
 // 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
-// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config). If meta.kubearchiveUrl is set, also registers KubeArchive_<name> MCP (kubearchive-mcp.js with SA token from kubeconfig). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
+// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config,tekton). Tekton toolset adds TaskRun log retrieval; start/restart tools are permanently blocked by --read-only. If meta.kubearchiveUrl is set, also registers KubeArchive_<name> MCP (kubearchive-mcp.js with SA token from kubeconfig). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -437,7 +437,7 @@ const REMOTE_CLUSTERS_PATH = '/secrets/remote-clusters';
 /**
  * Scan mounted remote cluster kubeconfigs and register a kubernetes-mcp-server
  * instance for each one. Each cluster appears as K8s_<name> in the CLI's MCP
- * tool list. All instances run in --read-only --toolsets core,config mode.
+ * tool list. All instances run in --read-only --toolsets core,config,tekton mode.
  */
 function setupRemoteK8sMCPs() {
   if (!fs.existsSync(REMOTE_CLUSTERS_PATH)) return;
@@ -458,7 +458,7 @@ function setupRemoteK8sMCPs() {
     const mcpName = `K8s_${name}`;
     const mcpConfig = {
       command: mcpBin,
-      args: ['--kubeconfig', kubeconfigPath, '--read-only', '--toolsets', 'core,config'],
+      args: ['--kubeconfig', kubeconfigPath, '--read-only', '--toolsets', 'core,config,tekton'],
     };
 
     try {

@@ -35,7 +35,8 @@ After posting, check pipeline status to confirm the retest was accepted.
 After retesting:
 
 1. Check pipeline status immediately. If `running` or `pending`:
-   - Report back with current state. FRIDAY will defer and re-dispatch you later to check the result.
+   - Report back with current state. FRIDAY will defer and re-dispatch you later.
+   - On subsequent dispatches, if the pipeline is still non-terminal, check queue state on the build cluster (see `darwin-k8s-mcp`) and include it in the report.
 2. If `success`: proceed to merge.
 3. If `failed`: read the failed job log and report the error.
 
