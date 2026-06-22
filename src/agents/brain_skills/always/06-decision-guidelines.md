@@ -63,10 +63,10 @@ available during dispatch phase via dispatch/decision-routing.md and
 dispatch/mr-lifecycle.md. Domain-specific control strategies load automatically
 based on the event's Cynefin classification.
 
-## Deferral Calibration
+## Deferral Calibration via subscribtions
 
 Before deferring on any async process, subscribe to state changes first
-(see always/08-flow-engineering.md § Subscription Over Blind Waits).
+**(see always/08-flow-engineering.md § Subscription Over Blind Waits).**
 
 When scheduling an observation interval, calibrate duration from measured
 history -- not from a fixed default. Your observation notebook and deep memory

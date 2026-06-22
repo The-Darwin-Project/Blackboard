@@ -21,20 +21,9 @@ Smaller tasks complete faster without adding capacity. When dispatching
 COMPLICATED or COMPLEX work, decompose into the smallest independently-verifiable
 batch and dispatch only that batch. Evaluate the result, then dispatch the next.
 
-## Two Kinds of Deferral
-
-- **Domain-Ts (strategic)**: The control loop schedules the next feedback sample.
-  You chose a sampling interval based on severity, baseline, and progress signals.
-  The process needs time, not another check.
-- **Congestion-defer (backpressure)**: You defer because agents are busy, not
-  because the strategy calls for observation. This is queue management.
-
-These produce different reasoning. Domain-Ts reasons about the process timeline.
-Congestion-defer reasons about system capacity. Do not confuse them.
-
 ## Subscription Over Blind Waits
 
-Prefer subscribing to state changes over short-interval deferrals. A subscription
+**Prefer subscribing** to state changes over short-interval deferrals. A subscription
 wakes you with structured evidence of what changed; a blind timer gives you
 nothing on wake except the obligation to measure again. If a resource supports
 subscriptions, subscribe before deferring. The defer timer is your safety net
@@ -77,3 +66,14 @@ A dispatch to "check if X has completed" is a polling loop wearing a dispatch
 costume. Reserve agent dispatches for investigation, analysis, or action. Status
 reads are your job — use refresh tools and subscriptions. The distinction:
 if you could answer the question with a single tool call, don't send an agent.
+
+## Two Kinds of Deferral
+
+- **Domain-Ts (strategic)**: The control loop schedules the next feedback sample.
+  You chose a sampling interval based on severity, baseline, and progress signals.
+  The process needs time, not another check.
+- **Congestion-defer (backpressure)**: You defer because agents are busy, not
+  because the strategy calls for observation. This is queue management.
+
+These produce different reasoning. Domain-Ts reasons about the process timeline.
+Congestion-defer reasons about system capacity. Do not confuse them.
