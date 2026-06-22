@@ -714,3 +714,30 @@ export async function dismissProposals(timestamps: number[]): Promise<void> {
     body: JSON.stringify({ timestamps }),
   });
 }
+
+// =============================================================================
+// Field Notes Notebook API
+// =============================================================================
+
+import type { NotebookResponse } from './types';
+
+export async function getNotebook(): Promise<NotebookResponse> {
+  return fetchApi<NotebookResponse>('/api/notebook');
+}
+
+export async function updateNote(
+  noteId: string,
+  body: { content?: string; category?: string },
+): Promise<void> {
+  await fetchApi<{ status: string }>(`/api/notebook/${encodeURIComponent(noteId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteNote(noteId: string): Promise<void> {
+  await fetchApi<{ status: string }>(`/api/notebook/${encodeURIComponent(noteId)}`, {
+    method: 'DELETE',
+  });
+}

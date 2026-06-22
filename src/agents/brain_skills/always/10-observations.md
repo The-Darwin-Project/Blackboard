@@ -1,7 +1,7 @@
 ---
-description: "When and how to record numeric observations during events"
-tags: [observations, metrics, temporal, learning]
-tools: [record_observation, list_observations]
+description: "When and how to record numeric observations and qualitative field notes during events"
+tags: [observations, metrics, temporal, learning, field-notes]
+tools: [record_observation, list_observations, take_note, review_notes]
 ---
 # Observations
 
@@ -64,9 +64,45 @@ elapsed time exceeds the observed range, the process is an outlier — that
 is the signal to investigate or escalate, not to keep waiting. Your
 measurements are the boundary, not a fixed number.
 
+## Field Notes
+
+Not everything worth remembering is a number. Field notes capture qualitative
+knowledge — environment quirks, corrections, cross-event patterns, workflow
+details, and conventions.
+
+### When to Note
+
+- An environment behaves unexpectedly (DNS quirks, rate limits, scheduling)
+- A user or peer corrects a mistake you made — the correction is always worth a note
+- You notice a pattern that spans multiple events (recurring failure mode, common root cause)
+- You discover how a process or pipeline actually works (vs how docs say it works)
+- You learn a team or project naming/style convention
+
+### Categories
+
+- **env-quirk**: infrastructure or environment behaviour ("CNV2 DNS resolves .svc before .cluster.local")
+- **correction**: something you got wrong that was corrected ("MintMaker MRs should not be retested, only closed")
+- **cross-event**: pattern spanning multiple events ("arm64 pipeline failures correlate with Tuesday maintenance windows")
+- **workflow**: how a process actually works ("Konflux release requires both FBC and operator snapshot")
+- **convention**: team or project naming/style convention ("PR titles use imperative mood, no prefix")
+
+### Note vs Other Tools
+
+- **Numbers → observation, facts/patterns → note.** If it has a unit (ms, %, count), use `record_observation`. If it is a sentence about how things work, use `take_note`.
+- **Changes future handling → note, changes current event → conversation.** If you discover something that will help on future events, note it. If it only matters right now, say it in the conversation.
+- **Environment-level → note, event-to-event → sticky note.** Field notes are global knowledge. Sticky notes bridge two specific consecutive events.
+
+### Review Before Decisions
+
+Call `review_notes` during triage to check what knowledge has been captured.
+Notes complement deep memory — they capture recent, not-yet-digested knowledge
+that may not have been archived yet.
+
 ## Learning Loop
 
 When an event closes, the Archivist archives observation summaries into
 deep memory. Future events involving the same service will surface past
 patterns -- typical error counts, normal recovery times, recurring spikes.
-The more you measure, the smarter the system becomes.
+Field notes are periodically digested into Reference Facts for long-term
+recall via `consult_deep_memory`. The more you measure and note, the
+smarter the system becomes.

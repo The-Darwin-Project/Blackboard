@@ -10,6 +10,7 @@
 # 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 # 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag).
+# 11. [Pattern]: Field Notes Notebook (darwin:notebook HASH). RENAMENX for atomic drain; ResponseError for missing-source guard. Quarantine via RENAME after MAX_DIGEST_RETRIES. Retry counter is Redis INCR with TTL (survives pod restart).
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -35,7 +36,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from redis.exceptions import WatchError
+from redis.exceptions import ResponseError, WatchError
 
 from ..models import (
     ConversationMessage,
@@ -3041,3 +3042,164 @@ return 0
             "time_of_day_utc": time_of_day_utc,
             "series": series_summaries,
         }
+
+    # =========================================================================
+    # Field Notes Notebook (qualitative knowledge capture)
+    # =========================================================================
+    NOTEBOOK_KEY = "darwin:notebook"
+    NOTEBOOK_DIGESTING_KEY = "darwin:notebook:digesting"
+    NOTEBOOK_QUARANTINE_KEY = "darwin:notebook:quarantine"
+    NOTEBOOK_RETRY_KEY = "darwin:notebook:digesting:retries"
+    NOTEBOOK_TTL_SECONDS = 604800  # 7 days
+    MAX_NOTES = 200
+    MAX_DIGEST_RETRIES = 3
+    VALID_CATEGORIES = frozenset({
+        "env-quirk", "correction", "cross-event", "workflow", "convention",
+    })
+
+    async def take_note(
+        self, event_id: str, content: str, category: str,
+    ) -> dict:
+        """Record a qualitative field note. Returns {note_id, count}."""
+        content = content[:2000]
+        note_id = str(uuid.uuid4())
+        note = json.dumps({
+            "note_id": note_id,
+            "content": content,
+            "category": category,
+            "event_id": event_id,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        pipe = self.redis.pipeline()
+        pipe.hset(self.NOTEBOOK_KEY, note_id, note)
+        pipe.expire(self.NOTEBOOK_KEY, self.NOTEBOOK_TTL_SECONDS)
+        pipe.hlen(self.NOTEBOOK_KEY)
+        results = await pipe.execute()
+        count = results[2]
+
+        if count > self.MAX_NOTES:
+            all_notes = await self.redis.hgetall(self.NOTEBOOK_KEY)
+            entries = []
+            corrupt_ids = []
+            for nid, raw in all_notes.items():
+                nid_str = nid if isinstance(nid, str) else nid.decode()
+                try:
+                    entries.append((nid_str, json.loads(raw)))
+                except (json.JSONDecodeError, TypeError):
+                    corrupt_ids.append(nid_str)
+            if corrupt_ids:
+                await self.redis.hdel(self.NOTEBOOK_KEY, *corrupt_ids)
+                count -= len(corrupt_ids)
+            entries.sort(key=lambda x: x[1].get("timestamp", ""))
+            excess = len(entries) - self.MAX_NOTES
+            if excess > 0:
+                to_remove = [p[0] for p in entries[:excess]]
+                await self.redis.hdel(self.NOTEBOOK_KEY, *to_remove)
+                count -= excess
+
+        return {"note_id": note_id, "count": count}
+
+    async def get_notes(self) -> list[dict]:
+        """Return all notebook entries sorted by timestamp."""
+        raw = await self.redis.hgetall(self.NOTEBOOK_KEY)
+        notes = []
+        for _, val in raw.items():
+            v = val if isinstance(val, str) else val.decode()
+            try:
+                notes.append(json.loads(v))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupt notebook entry skipped")
+                continue
+        notes.sort(key=lambda n: n.get("timestamp", ""))
+        return notes
+
+    _UPDATE_NOTE_LUA = """
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return 0 end
+local note = cjson.decode(raw)
+if ARGV[2] ~= '' then note['content'] = ARGV[2] end
+if ARGV[3] ~= '' then note['category'] = ARGV[3] end
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(note))
+return 1
+"""
+
+    async def update_note(
+        self, note_id: str, content: str | None = None, category: str | None = None,
+    ) -> bool:
+        """Atomically update a note's content and/or category via Lua. Returns False if not found."""
+        result = await self.redis.eval(
+            self._UPDATE_NOTE_LUA, 1, self.NOTEBOOK_KEY,
+            note_id,
+            content[:2000] if content is not None else "",
+            category if category is not None else "",
+        )
+        return bool(result)
+
+    async def delete_note(self, note_id: str) -> bool:
+        """Delete a note. Returns False if not found."""
+        removed = await self.redis.hdel(self.NOTEBOOK_KEY, note_id)
+        return removed > 0
+
+    async def drain_notes(self) -> list[dict]:
+        """Atomically move notebook to digesting key via RENAMENX.
+
+        Returns [] if source empty or target already exists (orphan batch).
+        """
+        try:
+            renamed = await self.redis.renamenx(
+                self.NOTEBOOK_KEY, self.NOTEBOOK_DIGESTING_KEY,
+            )
+        except ResponseError as e:
+            if "no such key" in str(e).lower():
+                return []
+            raise
+        if not renamed:
+            logger.warning(
+                "Notebook drain skipped: digesting key exists (orphan batch)",
+            )
+            return []
+        return await self.get_drained_notes()
+
+    async def has_drained_notes(self) -> bool:
+        """Check if an orphan digesting batch exists."""
+        return bool(await self.redis.exists(self.NOTEBOOK_DIGESTING_KEY))
+
+    async def get_drained_notes(self) -> list[dict]:
+        """Read the digesting batch without removing it."""
+        raw = await self.redis.hgetall(self.NOTEBOOK_DIGESTING_KEY)
+        notes = []
+        for _, val in raw.items():
+            v = val if isinstance(val, str) else val.decode()
+            try:
+                notes.append(json.loads(v))
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupt digesting entry skipped")
+                continue
+        notes.sort(key=lambda n: n.get("timestamp", ""))
+        return notes
+
+    async def clear_drained_notes(self) -> None:
+        """Delete the digesting key after successful digest."""
+        pipe = self.redis.pipeline()
+        pipe.delete(self.NOTEBOOK_DIGESTING_KEY)
+        pipe.delete(self.NOTEBOOK_RETRY_KEY)
+        await pipe.execute()
+
+    async def quarantine_drained_notes(self) -> None:
+        """Move failed digesting batch to timestamped quarantine key (no overwrite)."""
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        quarantine_key = f"{self.NOTEBOOK_QUARANTINE_KEY}:{ts}"
+        try:
+            await self.redis.rename(self.NOTEBOOK_DIGESTING_KEY, quarantine_key)
+        except ResponseError:
+            logger.warning("Quarantine rename failed (source missing?)")
+        await self.redis.delete(self.NOTEBOOK_RETRY_KEY)
+        await self.redis.expire(quarantine_key, self.NOTEBOOK_TTL_SECONDS)
+
+    async def increment_digest_retries(self) -> int:
+        """Increment and return the durable retry counter for the digesting batch."""
+        pipe = self.redis.pipeline()
+        pipe.incr(self.NOTEBOOK_RETRY_KEY)
+        pipe.expire(self.NOTEBOOK_RETRY_KEY, self.NOTEBOOK_TTL_SECONDS)
+        results = await pipe.execute()
+        return results[0]

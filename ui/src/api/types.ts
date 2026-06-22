@@ -540,6 +540,23 @@ export interface AgentRegistryEntry {
 
 export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'security_analyst' | 'brain';
 
+// =============================================================================
+// Field Notes Notebook
+// =============================================================================
+
+export interface FieldNote {
+  note_id: string;
+  content: string;
+  category: 'env-quirk' | 'correction' | 'cross-event' | 'workflow' | 'convention';
+  event_id: string;
+  timestamp: string;
+}
+
+export interface NotebookResponse {
+  notes: FieldNote[];
+  count: number;
+}
+
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {
     // Aligner events (observation)

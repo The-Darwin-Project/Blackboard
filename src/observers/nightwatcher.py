@@ -137,6 +137,11 @@ class NightwatcherObserver:
         window_start = ws.isoformat()
         window_end = now_utc.isoformat()
 
+        try:
+            await self._archivist.digest_field_notes(self.blackboard)
+        except Exception:
+            logger.warning("Field notes digest failed (non-fatal)", exc_info=True)
+
         escalations, json_members = await self.blackboard.lease_pending_escalations(time.time())
         pending_count = len(escalations)
         logger.info("Nightwatcher sweep: %d pending escalations", pending_count)

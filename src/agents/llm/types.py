@@ -1015,6 +1015,53 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {},
         },
     },
+    {
+        "name": "take_note",
+        "description": (
+            "Record a qualitative field note — an environment quirk, a correction, "
+            "a cross-event correlation, a workflow detail, or a convention you discovered. "
+            "Notes accumulate in the shared notebook and are periodically digested into "
+            "Reference Facts for long-term recall. "
+            "<bridge>See always/10-observations.md § Field Notes for when to note vs observe.</bridge>"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The note content — what you learned, discovered, or want to remember. "
+                        "Max ~2000 chars."
+                    ),
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["env-quirk", "correction", "cross-event", "workflow", "convention"],
+                    "description": (
+                        "env-quirk: infrastructure or environment behaviour. "
+                        "correction: something you got wrong that was corrected. "
+                        "cross-event: pattern spanning multiple events. "
+                        "workflow: how a process or pipeline actually works. "
+                        "convention: team or project naming/style convention."
+                    ),
+                },
+            },
+            "required": ["content", "category"],
+        },
+    },
+    {
+        "name": "review_notes",
+        "description": (
+            "Review all field notes currently in the notebook. "
+            "Returns every note with its category, content, source event, and timestamp. "
+            "Use to check what knowledge has been captured before making decisions. "
+            "<bridge>See always/10-observations.md § Field Notes.</bridge>"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 

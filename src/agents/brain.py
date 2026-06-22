@@ -2582,6 +2582,46 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             return True
 
+        elif function_name == "take_note":
+            content = args.get("content", "")
+            category = args.get("category", "convention")
+            if category not in self.blackboard.VALID_CATEGORIES:
+                category = "convention"
+            result = await self.blackboard.take_note(event_id, content, category)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=f"Noted ({result['note_id'][:8]}): {content[:80]}",
+                waitingFor="take_note",
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
+        elif function_name == "review_notes":
+            notes = await self.blackboard.get_notes()
+            if not notes:
+                summary_text = "No field notes recorded yet."
+            else:
+                lines = [f"{len(notes)} field notes in notebook:"]
+                for n in notes:
+                    lines.append(
+                        f"  • [{n.get('category', '?')}] {n.get('content', '')[:120]}"
+                        f" (evt:{n.get('event_id', '?')[:8]}, {n.get('timestamp', '?')})"
+                    )
+                summary_text = "\n".join(lines)
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=summary_text,
+                waitingFor="review_notes",
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return True
+
         elif function_name == "close_event":
             summary = args.get("summary", "Event closed.")
             await self._close_and_broadcast(event_id, summary)

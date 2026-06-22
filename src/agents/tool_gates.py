@@ -221,7 +221,7 @@ def _tools_close(_ctx: GateContext) -> set[str]:
 
 
 def _tools_observation(_ctx: GateContext) -> set[str]:
-    return {"record_observation", "list_observations"}
+    return {"record_observation", "list_observations", "take_note", "review_notes"}
 
 
 def _tools_jira_comment(_ctx: GateContext) -> set[str]:
@@ -270,6 +270,7 @@ def _tools_domain_casual(_ctx: GateContext) -> set[str]:
         "classify_event", "set_phase", "wait_for_user",
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
+        "take_note", "review_notes",
     }
 
 
