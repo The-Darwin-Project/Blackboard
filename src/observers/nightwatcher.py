@@ -373,6 +373,21 @@ class NightwatcherObserver:
         if successful_jsons:
             await self.blackboard.commit_inflight(successful_jsons)
 
+        # Clear escalation flags for successfully committed services (best-effort:
+        # if clear fails, recovery or next escalation cycle will reset the flag)
+        for eid in successful_event_ids:
+            esc = ctx.escalations_by_id.get(eid)
+            if esc and esc.service:
+                try:
+                    await self.blackboard.clear_escalation_flag(
+                        esc.service, expected_event_id=eid,
+                    )
+                except Exception:
+                    logger.warning(
+                        f"Failed to clear escalation flag for {esc.service} "
+                        f"(eid={eid}), best-effort — recovery or next escalation will reset"
+                    )
+
         report = ShiftReport(
             shift_date=shift_date, window=window,
             window_start=window_start, window_end=window_end,

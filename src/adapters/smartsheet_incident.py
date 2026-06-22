@@ -86,7 +86,8 @@ class SmartsheetIncidentAdapter:
                 json=[{"toBottom": True, "cells": cells}],
             )
             if resp.status_code >= 400:
-                logger.error("Smartsheet API error %d: %s", resp.status_code, resp.text[:500])
+                safe_text = resp.text[:500].replace('\n', ' ').replace('\r', '')
+                logger.error("Smartsheet API error %d: %s", resp.status_code, safe_text)
             resp.raise_for_status()
         result = resp.json().get("result", [{}])
         row_id = result[0].get("id", "") if result else ""

@@ -1,6 +1,6 @@
 # BlackBoard/src/state/blackboard.py
 # @ai-rules:
-# 1. [Constraint]: All Redis mutations use WATCH/MULTI/EXEC. Catch redis.WatchError specifically -- NEVER bare Exception.
+# 1. [Constraint]: Redis mutations use WATCH/MULTI/EXEC or Lua scripts for atomicity. Catch redis.WatchError specifically -- NEVER bare Exception.
 # 2. [Pattern]: mark_turns_delivered/evaluated/mark_turn_status/update_turn_evidence follow the pipeline pattern from append_turn.
 # 3. [Gotcha]: close_event uses WATCH/MULTI/EXEC to prevent turn loss from concurrent writers.
 # 4. [Pattern]: Ops journal (darwin:journal:{service}) is a capped LIST (RPUSH + LTRIM). Brain caches reads with 60s TTL.
@@ -9,6 +9,7 @@
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
 # 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
+# 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag).
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -153,8 +154,23 @@ class BlackboardState:
     Agents interact with this class, never directly with Redis.
     """
     
+    _LUA_CLEAR_ESCALATION = """
+local val = redis.call('HGET', KEYS[1], 'escalation_flag')
+if not val or val == '' then return 0 end
+local delim = string.find(val, '|')
+local prefix = delim and string.sub(val, 1, delim - 1) or val
+if prefix == ARGV[1] then
+    redis.call('HDEL', KEYS[1], 'escalation_flag')
+    return 1
+end
+return 0
+"""
+
     def __init__(self, redis: Redis):
         self.redis = redis
+        self._clear_escalation_script = self.redis.register_script(
+            self._LUA_CLEAR_ESCALATION
+        )
     
     # =========================================================================
     # Structure Layer (Topology Graph)
@@ -774,6 +790,7 @@ class BlackboardState:
             gitops_config_path=data.get("gitops_config_path"),
             replicas_ready=int(data["replicas_ready"]) if data.get("replicas_ready") else None,
             replicas_desired=int(data["replicas_desired"]) if data.get("replicas_desired") else None,
+            escalation_flag=data.get("escalation_flag"),
         )
     
     async def get_all_services(self) -> dict[str, Service]:
@@ -787,7 +804,39 @@ class BlackboardState:
                 services[name] = service
         
         return services
-    
+
+    # =========================================================================
+    # Escalation Flag (Service-level suppression)
+    # =========================================================================
+
+    async def get_escalation_flag(self, service: str) -> Optional[str]:
+        """Targeted HGET for escalation flag — cheaper than full get_service()."""
+        return await self.redis.hget(f"darwin:service:{service}", "escalation_flag")
+
+    async def set_escalation_flag(self, service: str, event_id: str, reason: str) -> None:
+        """Set escalation suppression flag on a service HASH."""
+        safe_reason = reason.replace('\n', ' ').replace('\r', '').replace('|', '-')[:100]
+        value = f"{event_id}|{safe_reason}"
+        await self.redis.hset(f"darwin:service:{service}", "escalation_flag", value)
+        logger.info(f"Escalation flag SET for {service}: {event_id}")
+
+    async def clear_escalation_flag(
+        self, service: str, expected_event_id: str | None = None,
+    ) -> int:
+        """Clear escalation flag. Atomic compare-and-delete when expected_event_id given."""
+        key = f"darwin:service:{service}"
+        if expected_event_id:
+            result = await self._clear_escalation_script(
+                keys=[key], args=[expected_event_id],
+            )
+        else:
+            result = await self.redis.hdel(key, "escalation_flag")
+        logger.info(
+            f"Escalation flag CLEAR for {service}: "
+            f"expected={expected_event_id}, result={result}"
+        )
+        return int(result)
+
     # =========================================================================
     # Metrics History Layer (Time-Series)
     # =========================================================================

@@ -2964,6 +2964,8 @@ class Brain:
                     rows.append(f"| Replicas | {svc.replicas_ready}/{svc.replicas_desired} |")
                 rows.append(f"| CPU | {svc.metrics.cpu:.1f}% |")
                 rows.append(f"| Memory | {svc.metrics.memory:.1f}% |")
+                if svc.escalation_flag:
+                    rows.append(f"| Escalation | {svc.escalation_flag} |")
                 result_text = f"## Service: {service_name}\n\n| Field | Value |\n|---|---|\n" + "\n".join(rows)
             else:
                 known = await self.blackboard.get_services()
@@ -3549,6 +3551,14 @@ class Brain:
                 try:
                     await self.blackboard.stage_escalation(staged)
                     self._incident_created.add(event_id)
+                    if event_doc.service:
+                        try:
+                            await self.blackboard.set_escalation_flag(
+                                event_doc.service, event_id,
+                                args.get("summary", "escalated")[:100],
+                            )
+                        except Exception as ef:
+                            logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
                     result_text = (
                         f"Escalation staged [nightwatcher] for consolidation "
                         f"(event {event_id}, service {event_doc.service})"
@@ -3587,6 +3597,14 @@ class Brain:
                     try:
                         result = await adapter.create_incident(fields)
                         self._incident_created.add(event_id)
+                        if event_doc.service:
+                            try:
+                                await self.blackboard.set_escalation_flag(
+                                    event_doc.service, event_id,
+                                    args.get("summary", "escalated")[:100],
+                                )
+                            except Exception as ef:
+                                logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
                         verify_preceded = any(
                             t.actor == "brain" and t.action == "phase"
                             and (t.thoughts or "").startswith("Phase: VERIFY")

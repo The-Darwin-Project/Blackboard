@@ -87,6 +87,7 @@ class Service(BaseModel):
     gitops_config_path: Optional[str] = Field(None, description="Config path within gitops repo (e.g., helm/values.yaml, kustomize/overlays)")
     replicas_ready: Optional[int] = Field(None, description="Number of ready replicas from K8s")
     replicas_desired: Optional[int] = Field(None, description="Desired replica count from K8s")
+    escalation_flag: Optional[str] = Field(None, description="Escalation suppression: event_id|reason")
 
 
 # =============================================================================

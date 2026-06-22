@@ -460,6 +460,18 @@ class Aligner:
         except Exception:
             pass  # Journal unavailable is not fatal
 
+        # Escalation flag context for Flash awareness
+        escalation_context = ""
+        try:
+            escalation_flag = await self.blackboard.get_escalation_flag(service)
+            if escalation_flag:
+                escalation_context = (
+                    f"\nEscalation pending for {service}: {escalation_flag}\n"
+                    f"Do not create new events while escalation is pending.\n"
+                )
+        except Exception as e:
+            logger.debug(f"Escalation flag read failed for {service} (non-fatal): {e}")
+
         try:
             adapter = await self._get_adapter()
             if adapter:
@@ -473,7 +485,7 @@ class Aligner:
                     f"avg_err={avg_err:.2f}% max_err={max_err:.2f}% replicas={latest['replicas']}\n"
                     f"Latest reading: CPU={latest['cpu']:.1f}% MEM={latest['memory']:.1f}% ERR={latest['error_rate']:.2f}%\n"
                     f"Active event exists for this service: {'yes' if has_active else 'no'}\n"
-                    f"{journal_context}\n"
+                    f"{journal_context}{escalation_context}\n"
                     f"Analyze this data. If the ops journal shows this issue was JUST resolved (within the last few minutes), "
                     f"do NOT create a new event -- it is likely a residual alert. Use your tools to report what you observe, "
                     f"or return text only if everything is normal or recently resolved."
@@ -545,7 +557,13 @@ class Aligner:
                                 {"service": service},
                                 narrative=observation,
                             )
-                            await self._notify_active_events(service, observation)
+                            try:
+                                await self._notify_active_events(service, observation)
+                            finally:
+                                try:
+                                    await self.blackboard.clear_escalation_flag(service)
+                                except Exception as ce:
+                                    logger.warning(f"Failed to clear escalation flag on recovery for {service}: {ce}")
 
                 elif response.text:
                     # Flash returned text only (no function call) -- normal state, log and skip
@@ -620,9 +638,20 @@ class Aligner:
             )
             return
 
-        # Get current metrics for structured evidence
+        # Layer 3: escalation suppression (flag set by Brain on report_incident)
         from ..models import EventEvidence, EventMetrics
-        svc = await self.blackboard.get_service(service)
+        try:
+            svc = await self.blackboard.get_service(service)
+        except Exception:
+            svc = None
+        if svc and svc.escalation_flag:
+            flag_eid = svc.escalation_flag.split('|')[0]
+            logger.info(
+                f"Skipping event for {service} ({anomaly_type}): "
+                f"escalation pending ({flag_eid})"
+            )
+            return
+
         evidence_parts = [f"Service: {service}", f"Anomaly: {anomaly_type}"]
         if svc:
             evidence_parts.append(f"CPU: {svc.metrics.cpu:.1f}%")
@@ -823,6 +852,16 @@ class Aligner:
             logger.info(f"Skipping Kargo event for {service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
             return None
 
+        # Layer 3: escalation suppression
+        try:
+            flag = await self.blackboard.get_escalation_flag(service)
+        except Exception:
+            flag = None
+        if flag:
+            flag_eid = flag.split('|')[0]
+            logger.info(f"Skipping Kargo event for {service}: escalation pending ({flag_eid})")
+            return None
+
         from ..models import EventEvidence
         evidence = EventEvidence(
             display_text=f"[kargo] Promotion failed: {stage}@{project} -- {message[:200]}",
@@ -863,7 +902,13 @@ class Aligner:
     ) -> None:
         """Notify active events that a newer promotion succeeded (called by KargoObserver)."""
         msg = f"[kargo] Promotion succeeded: {stage}@{project} (promotion={promotion})"
-        await self._notify_active_events(service, msg)
+        try:
+            await self._notify_active_events(service, msg)
+        finally:
+            try:
+                await self.blackboard.clear_escalation_flag(service)
+            except Exception as ce:
+                logger.warning(f"Failed to clear escalation flag on Kargo recovery for {service}: {ce}")
 
     def get_active_rules(self) -> list[dict]:
         """Get list of active filter rules."""
