@@ -4660,6 +4660,7 @@ class Brain:
                     "message": progress_data.get("message", ""),
                     "event_source": event_source,
                     "subject_type": subject_type,
+                    "ephemeral": is_ephemeral_dispatch,
                 })
                 if progress_data.get("source") == "agent_message":
                     turn = ConversationTurn(
@@ -4692,6 +4693,20 @@ class Brain:
                 logger.info(f"Skipping session resume for {agent_name} on {event_id}: mode changed {prior_mode}->{mode}")
                 self._agent_sessions.get(event_id, {}).pop(agent_name, None)
                 self._agent_session_modes.get(event_id, {}).pop(agent_name, None)
+            # Determine ephemeral dispatch early so all progress broadcasts include the flag.
+            # This lets the UI route immediately without waiting for registry polling.
+            is_ephemeral_dispatch = False
+            if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
+                event_doc_early = await self.blackboard.get_event(event_id)
+                if self._ephemeral_provisioner and (
+                    agent_name in self.EPHEMERAL_ONLY_ROLES
+                    or (event_doc_early and (
+                        event_doc_early.source in ("headhunter", "timekeeper")
+                        or getattr(event_doc_early, "subject_type", "service") == "kargo_stage"
+                    ))
+                ):
+                    is_ephemeral_dispatch = True
+
             # Immediate progress so UI shows activity during CLI cold start
             await self._broadcast({
                 "type": "progress",
@@ -4700,6 +4715,7 @@ class Brain:
                 "message": f"{agent_name} starting...",
                 "event_source": event_source,
                 "subject_type": subject_type,
+                "ephemeral": is_ephemeral_dispatch,
             })
             if self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory"):
                 from ..dependencies import get_registry_and_bridge

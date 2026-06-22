@@ -177,4 +177,21 @@ describe('resolveStreamTarget', () => {
       expect(resolveStreamTarget('sysadmin', 'evt-hh-1', '', '', agents)).toBe('ephemeral');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Backend ephemeral flag (instant routing, no poll dependency)
+  // ---------------------------------------------------------------------------
+  describe('backend ephemeral flag', () => {
+    it('routes internal agent to ephemeral when backend flag is true', () => {
+      expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', [], undefined, true)).toBe('ephemeral');
+    });
+
+    it('does not override routing when backend flag is false', () => {
+      expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', [], undefined, false)).toBe('agent');
+    });
+
+    it('requires evtId with ephemeral flag', () => {
+      expect(resolveStreamTarget('sysadmin', '', 'chat', '', [], undefined, true)).toBe('agent');
+    });
+  });
 });

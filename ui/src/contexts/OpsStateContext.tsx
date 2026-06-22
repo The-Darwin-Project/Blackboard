@@ -2,7 +2,8 @@
 // @ai-rules:
 // 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
 // 2. [Pattern]: resolveStreamTarget() is a named export pure function (tested in resolveStreamTarget.test.ts).
-//    Agent-first routing with oncall sub-check: matches (bound_event_id || current_event_id) AND (current_role || role).
+//    Backend `ephemeral` flag on progress messages is authoritative (no polling delay).
+//    Fallback: agent-first routing with oncall sub-check via (bound_event_id || current_event_id) AND (current_role || role).
 // 3. [Pattern]: Turn handler uses resolveStreamTarget — only mutates agentStreams when target is 'agent'.
 //    Prevents oncall turn from deactivating the permanent agent tile.
 // 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
@@ -70,8 +71,14 @@ export function resolveStreamTarget(
   subjectType: string = '',
   ephemeralAgents: AgentRegistryEntry[] = [],
   activeEvents: ActiveEvent[] | undefined = undefined,
+  ephemeralFlag: boolean = false,
 ): StreamTarget {
   const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
+
+  // Backend ephemeral flag is authoritative and instant (no polling delay).
+  // When present, it short-circuits all heuristic checks.
+  if (ephemeralFlag && evtId) return 'ephemeral';
+
   const isEphemeralEvent = !!evtId && (
     eventSource === 'headhunter'
     || eventSource === 'timekeeper'
@@ -85,9 +92,6 @@ export function resolveStreamTarget(
   );
 
   // Oncall sub-check: ephemeral agent working on this event with matching role.
-  // Checks both bound_event_id (set at registration) and current_event_id
-  // (set by mark_busy at dispatch) because pre-registered idle oncall pods
-  // have null bound_event_id until dispatched.
   const isBoundOncall = isInternalAgent && !!evtId &&
     ephemeralAgents.some(a =>
       (a.bound_event_id === evtId || a.current_event_id === evtId)
@@ -260,6 +264,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         ((msg as Record<string, unknown>).subject_type ?? '') as string,
         ephemeralAgentsRef.current,
         activeEventsRef.current,
+        !!(msg as Record<string, unknown>).ephemeral,
       );
       if (target === 'agent') {
         setAgentStreams((prev) => {
