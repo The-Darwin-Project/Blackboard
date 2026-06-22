@@ -1,16 +1,23 @@
 // BlackBoard/ui/src/contexts/OpsStateContext.tsx
 // @ai-rules:
-// 1. [Pattern]: Replaces Dashboard.tsx as the single owner of shared operational state.
-// 2. [Pattern]: WS ownership: owns progress, turn, event_created, event_closed. ConversationFeed keeps brain_thinking, attachment, message_status.
-// 3. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
-// 4. [Pattern]: Agent registry polling (10s) and ephemeral stream (keyed by event_id) are in-memory only — not persisted.
-// 5. [Gotcha]: Context value uses stable references (useCallback) to minimize re-renders of consumers.
+// 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
+// 2. [Pattern]: resolveStreamTarget() is a named export pure function (tested in resolveStreamTarget.test.ts).
+//    Agent-first routing with oncall sub-check: (a.current_role || a.role) === actor routes to ephemeral.
+// 3. [Pattern]: Turn handler uses resolveStreamTarget — only mutates agentStreams when target is 'agent'.
+//    Prevents oncall turn from deactivating the permanent agent tile.
+// 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
+//    Late progress after close is discarded via recentlyClosedRef guard.
+// 5. [Pattern]: Mark-and-sweep GC (60s interval, staleCandidatesRef): prune on second consecutive miss
+//    (120s grace). Stale computation + ref mutation outside setState (React Strict Mode safe).
+// 6. [Constraint]: agentStreams NOT cleared on close or reconnect — memory-bounded, preserves review context.
+// 7. [Gotcha]: Auto-hotspot: only internal agents with isActive in agentStreams auto-promote.
+// 8. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
-import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
+import type { ActiveEvent, AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
 const MAX_BUFFER = 100;
@@ -52,6 +59,43 @@ export interface OpsState {
   toggleAutoHotspot: () => void;
   connected: boolean;
   send: (data: Record<string, unknown>) => void;
+}
+
+export type StreamTarget = 'agent' | 'ephemeral' | 'drop';
+
+export function resolveStreamTarget(
+  actor: string,
+  evtId: string,
+  eventSource: string,
+  subjectType: string = '',
+  ephemeralAgents: AgentRegistryEntry[] = [],
+  activeEvents: ActiveEvent[] | undefined = undefined,
+): StreamTarget {
+  const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
+  const isEphemeralEvent = !!evtId && (
+    eventSource === 'headhunter'
+    || eventSource === 'timekeeper'
+    || eventSource === 'nightwatcher'
+    || evtId.startsWith('nw-sweep-')
+    || subjectType === 'kargo_stage'
+    || ephemeralAgents.some((a) => a.bound_event_id === evtId)
+    || activeEvents?.some((e) => e.id === evtId && (
+      e.source === 'headhunter' || e.source === 'timekeeper' || e.subject_type === 'kargo_stage'
+    ))
+  );
+
+  // Oncall sub-check: bound ephemeral agent with matching runtime role.
+  // Uses (current_role || role) because ephemeral sidecars register with
+  // empty role; runtime dispatch role is set via mark_busy → current_role.
+  const isBoundOncall = isInternalAgent && evtId &&
+    ephemeralAgents.some(a =>
+      a.bound_event_id === evtId && (a.current_role || a.role) === actor
+    );
+
+  if (isBoundOncall) return 'ephemeral';
+  if (isInternalAgent) return 'agent';
+  if (isEphemeralEvent && evtId) return 'ephemeral';
+  return 'drop';
 }
 
 const OpsStateContext = createContext<OpsState | null>(null);
@@ -166,45 +210,85 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   activeEventsRef.current = activeEvents;
   const selectedEventIdRef = useRef(selectedEventId);
   selectedEventIdRef.current = selectedEventId;
+  const recentlyClosedRef = useRef<Set<string>>(new Set());
+  const staleCandidatesRef = useRef<Set<string>>(new Set());
+  const ephemeralStreamRef = useRef(ephemeralStream);
+  ephemeralStreamRef.current = ephemeralStream;
 
   useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
+
+  useEffect(() => {
+    const gc = setInterval(() => {
+      const activeIds = new Set(
+        (activeEventsRef.current ?? []).map(e => e.id)
+      );
+      const boundIds = new Set(
+        ephemeralAgentsRef.current
+          .map(a => a.bound_event_id)
+          .filter((id): id is string => !!id)
+      );
+
+      const currentKeys = Object.keys(ephemeralStreamRef.current);
+      const nowStale = currentKeys.filter(
+        k => !activeIds.has(k) && !boundIds.has(k) && !k.startsWith('nw-sweep-')
+      );
+
+      const toDelete = nowStale.filter(k => staleCandidatesRef.current.has(k));
+      staleCandidatesRef.current = new Set(nowStale);
+
+      if (toDelete.length > 0) {
+        setEphemeralStream((prev) => {
+          const next = { ...prev };
+          for (const k of toDelete) delete next[k];
+          return next;
+        });
+      }
+    }, 60_000);
+    return () => clearInterval(gc);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- refs and setter are stable
 
   useWSMessage((msg) => {
     if (msg.type === 'progress' && msg.actor) {
       const actor = msg.actor as string;
       const evtId = msg.event_id as string;
-      const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
-      const isEphemeralEvent = evtId && (
-        msg.event_source === 'headhunter'
-        || msg.event_source === 'timekeeper'
-        || msg.event_source === 'nightwatcher'
-        || evtId.startsWith('nw-sweep-')
-        || (msg as Record<string, unknown>).subject_type === 'kargo_stage'
-        || ephemeralAgentsRef.current.some((a) => a.bound_event_id === evtId)
-        || activeEventsRef.current?.some((e) => e.id === evtId && (
-          e.source === 'headhunter' || e.source === 'timekeeper' || e.subject_type === 'kargo_stage'
-        ))
+      if (evtId && recentlyClosedRef.current.has(evtId)) return;
+      const target = resolveStreamTarget(
+        actor, evtId,
+        (msg.event_source ?? '') as string,
+        ((msg as Record<string, unknown>).subject_type ?? '') as string,
+        ephemeralAgentsRef.current,
+        activeEventsRef.current,
       );
-      if (isInternalAgent) {
+      if (target === 'agent') {
         setAgentStreams((prev) => {
           const current = prev[actor] || { messages: [], eventId: null, isActive: false };
           const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
           return { ...prev, [actor]: { ...current, messages, eventId: evtId || current.eventId, isActive: true } };
         });
-      } else if (isEphemeralEvent && evtId) {
+      } else if (target === 'ephemeral') {
         setEphemeralStream((prev) => ({
           ...prev,
           [evtId]: [...(prev[evtId] || []), msg.message as string].slice(-MAX_BUFFER),
         }));
+      } else {
+        console.warn('[OPS] Dropped progress:', actor, evtId, msg.event_source);
       }
     } else if (msg.type === 'turn') {
       const turn = msg.turn as Record<string, unknown>;
       const actor = turn?.actor as string;
-      if (actor && AGENTS.includes(actor as typeof AGENTS[number])) {
-        setAgentStreams((prev) => ({
-          ...prev,
-          [actor]: { ...prev[actor], isActive: false },
-        }));
+      if (actor) {
+        const turnTarget = resolveStreamTarget(
+          actor, (msg.event_id ?? '') as string,
+          '', '',
+          ephemeralAgentsRef.current,
+          activeEventsRef.current,
+        );
+        if (turnTarget === 'agent') {
+          setAgentStreams((prev) => ({
+            ...prev,
+            [actor]: { ...prev[actor], isActive: false },
+          }));
+        }
       }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
@@ -212,12 +296,26 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       selectEvent(msg.event_id as string);
       invalidateActive();
     } else if (msg.type === 'event_closed') {
-      if (msg.event_id) {
-        optimisticRemoveEvent(msg.event_id as string);
-        invalidateEvent(msg.event_id as string);
+      const closedId = msg.event_id as string;
+      if (closedId) {
+        optimisticRemoveEvent(closedId);
+        invalidateEvent(closedId);
         invalidateActive();
         invalidateClosed();
         invalidateHeadhunter();
+
+        setEphemeralStream((prev) => {
+          if (!prev[closedId]) return prev;
+          const next = { ...prev };
+          delete next[closedId];
+          return next;
+        });
+
+        recentlyClosedRef.current.add(closedId);
+        if (recentlyClosedRef.current.size > 50) {
+          const oldest = recentlyClosedRef.current.values().next().value as string | undefined;
+          if (oldest !== undefined) recentlyClosedRef.current.delete(oldest);
+        }
       }
     } else if (msg.type === 'event_status_changed') {
       if (msg.event_id && msg.status === 'deferred' && msg.defer_until) {
