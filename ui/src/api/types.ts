@@ -99,6 +99,7 @@ export interface GraphNode {
     gitops_config_path?: string;
     replicas_ready?: number;
     replicas_desired?: number;
+    escalation_flag?: string;
   };
 }
 

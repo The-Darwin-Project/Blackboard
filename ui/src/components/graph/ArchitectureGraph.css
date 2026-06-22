@@ -129,6 +129,13 @@
   color: #93c5fd;
 }
 
+.service-node-badge-escalated {
+  background: #7f1d1d;
+  color: #fca5a5;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
 /* Ticket node card */
 .ticket-node {
   background: #1e1e2e;

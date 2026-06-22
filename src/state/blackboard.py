@@ -492,6 +492,7 @@ return 0
                     "gitops_config_path": metadata.gitops_config_path if metadata else None,
                     "replicas_ready": metadata.replicas_ready if metadata else None,
                     "replicas_desired": metadata.replicas_desired if metadata else None,
+                    "escalation_flag": metadata.escalation_flag if metadata else None,
                     "icon": icon,
                 }
             ))

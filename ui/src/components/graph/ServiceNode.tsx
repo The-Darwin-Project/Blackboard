@@ -26,6 +26,7 @@ interface ServiceNodeData {
   gitops_config_path?: string;
   replicas_ready?: number;
   replicas_desired?: number;
+  escalation_flag?: string;
   icon?: string;
 }
 
@@ -79,6 +80,11 @@ function ServiceNodeComponent({ data }: NodeProps & { data: ServiceNodeData }) {
           {data.gitops_repo && (
             <span className="service-node-badge service-node-badge-gitops" title={`GitOps: ${data.gitops_repo}`}>
               🔗 GitOps
+            </span>
+          )}
+          {data.escalation_flag && (
+            <span className="service-node-badge service-node-badge-escalated" title={data.escalation_flag}>
+              ESCALATED
             </span>
           )}
         </div>
