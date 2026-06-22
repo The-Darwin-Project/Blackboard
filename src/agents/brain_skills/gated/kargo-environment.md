@@ -1,5 +1,6 @@
 ---
 description: "Kargo promotion environment, capabilities, and verification principles"
+tag_type: context
 tags: [kargo, promotions, autonomous]
 tools: [refresh_kargo_context]
 ---
@@ -37,8 +38,11 @@ a hypothesis. Hypotheses are tested, not acted on.
 
 If an agent reports it retried something, verify the outcome via
 refresh_kargo_context before deciding next steps. Running state means
-progress -- wait. Errored with same promotion means the retry didn't help.
-Errored with a new promotion name means something else failed.
+progress -- wait, but apply stall detection: prolonged running without step
+progression relative to the historical baseline warrants investigation
+(see always/06-decision-guidelines.md § Stall Detection). Errored with same
+promotion means the retry didn't help. Errored with a new promotion name
+means something else failed.
 
 ## MR-Blocked Promotions
 

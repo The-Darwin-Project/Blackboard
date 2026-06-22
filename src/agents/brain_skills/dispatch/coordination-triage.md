@@ -50,25 +50,14 @@ When dispatching in a sequential pair (Developer then QE):
 - **First agent (Developer)**: Remind them that a teammate will verify after them. They should leave notes about shared concerns -- especially test files they created or modified -- via team coordination.
 - **Second agent (QE)**: Include a summary of what the previous agent changed (files, branches, test modifications) so they don't start blind. If the Developer wrote tests, QE should review and extend them, not duplicate.
 
-## SecurityAnalyst only
+## SecurityAnalyst Dispatch
 
-Use when the task is:
+SecurityAnalyst capabilities and routing criteria: see always/00-identity.md.
+SecurityAnalyst does NOT implement fixes -- always hand off to Developer.
 
-- Dependency vulnerability scan
-- Container image security analysis
-- RBAC or IAM policy review
-- Supply chain verification
-- SBOM generation request
-
-## SecurityAnalyst then Developer (sequential dispatch)
-
-Use when the task requires:
-
-- CVE remediation (SecurityAnalyst scans, Developer implements bumps)
-- Security fix + verification cycle
-- Dependency audit with auto-fixable findings
-
-Dispatch SecurityAnalyst first for scanning. When SecurityAnalyst completes, evaluate findings. Then dispatch Developer to implement approved fixes.
+When the task requires both scanning and remediation (CVE fix, dependency audit
+with auto-fixable findings): dispatch SecurityAnalyst first for scanning, evaluate
+findings, then dispatch Developer to implement approved fixes.
 
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
@@ -97,20 +86,8 @@ When a Developer completes an implementation that resulted in a code merge:
 
 Do NOT skip the SysAdmin deployment validation step. The QE cannot verify functional correctness if the new code is not deployed yet.
 
-## Message vs Route Decision
-
-Before dispatching, ask: "Does this require code changes, investigation tools, or multi-step execution?"
-
-| Work Required | Tool |
-|---|---|
-| No code/infra changes -- relay, coordinate, or check status | message_agent |
-| Agent-to-agent coordination or peer messaging | message_agent |
-| Read-only query that needs no investigation tools | message_agent |
-| Code changes, config edits, or git operations | select_agent |
-| Evidence gathering requiring kubectl, logs, or API calls | select_agent |
-| Multi-step task with implementation + verification | select_agent |
-
-When in doubt, use message_agent -- it is lightweight and the agent can escalate if the task turns out to need more. select_agent is for work that requires code changes, investigation tools, or multi-step execution plans.
+Dispatch method (route vs message) decision framework: see always/01-function-rules.md
+§ Route vs Message.
 
 ## Plan Before Routing (COMPLICATED/COMPLEX only)
 
@@ -119,12 +96,11 @@ chalk your intended agent sequence on the blackboard. This makes the
 execution order visible to agents, the dashboard, and yourself for progress
 tracking.
 
-For CLEAR or CHAOTIC events, route directly -- the routing turn IS the plan.
+For CLEAR events, route directly -- the routing turn IS the plan.
+For CHAOTIC events, escalate first -- see always/09-phase-lifecycle.md § CHAOTIC Events.
 If you later discover the event needs multi-step planning, reclassify to
 match the new complexity, then create a plan.
 
 ## When Unclear
-
-If the dispatch tool is unclear (message_agent vs select_agent), default to message_agent -- the agent can escalate via team_huddle if the task needs more capability. Prefer lightweight first.
 
 If the agent role is unclear (Developer vs QE vs both), default to Developer then QE -- verification is safer than skipping it.

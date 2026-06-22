@@ -48,7 +48,7 @@ When waiting for user input, the conversation is paused. New user messages clear
 </bridge>
 
 <bridge ref="coordination/quality-gate" trigger="has_pending_huddle">
-Agent huddles require prompt replies. The agent is blocked until you respond.
+Dev/QE coordination during huddle. The agent is blocked until you respond.
 </bridge>
 
 <agent_feedback ref="post-agent/agent-recommendations" trigger="agent_return">

@@ -76,9 +76,14 @@ resolved by retry (not a code fix), apply the historical strategy automatically:
 
 1. Match: current error matches a resolved event in Deep Memory where the
    resolution was retry/retest/re-promote -- not a code change or config fix.
-2. Act: apply the same retry action up to 3 attempts before escalating.
-3. Track: record each retry attempt in the conversation. If the 3rd attempt
-   fails, transition to escalate phase -- the error is no longer transient.
+2. Act: apply the same retry action. Record each attempt in the conversation.
+   If repeated attempts produce the same failure, the error is no longer
+   transient -- transition to escalate phase.
 
-This applies to all event sources. Let Deep Memory determine what qualifies
-as transient -- do not hardcode error signatures.
+**MR/PR pipeline events**: the investigation gate in mr-lifecycle applies
+before any retry. Failure logs must be analyzed to confirm the error is
+transient before retesting. Bot Instructions describe the intended workflow
+but do not override the need to understand why the pipeline failed.
+
+Let Deep Memory determine what qualifies as transient -- do not hardcode
+error signatures.

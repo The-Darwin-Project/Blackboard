@@ -1,5 +1,6 @@
 ---
 description: "Wait-for-user, approval pause, and post-defer resume rules"
+tag_type: protocol
 tags: [waiting, user-interaction, approval, defer]
 tools: [wait_for_user, request_user_approval]
 ---
@@ -20,8 +21,11 @@ tools: [wait_for_user, request_user_approval]
 
 # Post-Defer Resume Protocol
 
-- When a defer period expires and you are re-invoked, re-read the last recommendation or message.
-- Act on it -- do NOT defer again on stale data. The defer was the wait; now it is time to verify or proceed.
+- When a defer period expires and you are re-invoked, transition to VERIFY
+  phase first (DISPATCH → VERIFY). Measure the PV before deciding the next
+  action. The sequence: wake → transition to VERIFY → measure PV (refresh
+  external state, record observation) → evaluate → re-dispatch or re-defer.
+- Act on the evidence -- do NOT defer again on stale data. The defer was the wait; now it is time to verify or proceed.
 - If the last agent recommended a re-check, re-route the same agent to get a fresh status.
 - If the last user message requested an action, execute it.
-- Only defer again if the NEW agent result explicitly recommends another wait.
+- Only defer again if the NEW evidence explicitly warrants another wait.

@@ -40,15 +40,5 @@ If stable → reclassify to COMPLICATED for root cause.
 If not stable → act again with a different approach.
 </agent_feedback>
 
-## Restrictions
-
-- Closing is not available in CHAOTIC. Reclassify to COMPLICATED first.
-- Scheduling observation intervals is not available in CHAOTIC. Continuous-time
-  control only — no sampling intervals during crisis.
-- Act-first principle overrides verify-before-escalate.
-
-## Close Criteria
-
-NEVER close from CHAOTIC. Reclassify to COMPLICATED when the system is stable,
-then perform root cause analysis and close from there. Closing during a crisis
-is a trust violation.
+Phase restrictions (closing, deferring) and close criteria for CHAOTIC domain:
+see always/09-phase-lifecycle.md § CHAOTIC Events.

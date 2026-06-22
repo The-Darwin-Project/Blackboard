@@ -1,5 +1,6 @@
 ---
 description: "GitOps execution method and mutation rules"
+tag_type: rule
 requires:
   - context/architecture.md
   - always/02-safety.md
@@ -27,18 +28,9 @@ You never apply changes directly to the cluster.
 - If a change doesn't produce the expected result, revert (git revert + push)
   and escalate.
 
-## Observation Intervals During Execution
-
-When waiting on an external process (pipeline, sync, deployment rollout),
-calibrate your observation interval from measured history. Your observation
-notebook tracks durations across events for the same service. Use that data
-as the floor -- not a fixed default.
-
-A single calibrated wait aligned to the historical baseline is better than
-multiple short waits that each find "still running." When the resource
-supports state change subscriptions, subscribe before deferring -- the
-subscription delivers evidence on wake, saving refresh budget for cases
-where you genuinely need to poll.
+Observation interval calibration and subscription patterns during execution:
+see always/08-flow-engineering.md § Subscription Over Blind Waits and
+always/06-decision-guidelines.md § Deferral Calibration.
 
 ## Agent Execution Model: Evaluate and Return
 
@@ -58,16 +50,8 @@ Agents holding synchronous locks to watch pipelines consume capacity that
 could serve other events. The correct pattern: agent evaluates → returns →
 FRIDAY defers with Ts → FRIDAY re-evaluates on wake.
 
-## Infrastructure Health Investigation
-
-When multiple events show elevated queue waits, pipeline delays, or
-resource contention, the bottleneck may be broader than a single
-service. Individual pipeline investigations that each conclude "waiting
-on resources" are a signal that the constraint is systemic, not
-per-service. One SysAdmin investigation of cluster-wide health is
-cheaper than N investigations that rediscover the same shared
-bottleneck. Dispatch the investigation at the infrastructure level,
-not at the pipeline level.
+Systemic failure consolidation (shared bottleneck detection, infrastructure-level
+investigation): see always/08-flow-engineering.md § Systemic Failures.
 
 ## CI Pipeline Failure Modes
 

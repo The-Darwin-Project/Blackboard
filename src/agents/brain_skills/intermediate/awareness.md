@@ -9,5 +9,5 @@ communication capabilities: replying to agents, sending messages, recording
 wait states, and responding to JARVIS. Dispatch and mutation capabilities
 are not available until the agent completes.
 
-See the actor response model for how to handle each turn type (huddles,
-user messages, JARVIS messages) during active dispatch.
+Turn handling during active dispatch (huddles, user messages, JARVIS messages):
+see always/12-actor-responses.md § Actor Response Model.

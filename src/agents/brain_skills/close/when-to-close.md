@@ -1,5 +1,6 @@
 ---
 description: "Source-aware event close rules"
+tag_type: protocol
 requires:
   - source/{event.source}.md
 tags: [close, lifecycle]

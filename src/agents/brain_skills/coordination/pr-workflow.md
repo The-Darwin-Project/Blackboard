@@ -1,5 +1,6 @@
 ---
 description: "PR lifecycle awareness: CI gate, pipeline wait, merge validation, and failure routing."
+tag_type: context
 tags: [coordination, pr, ci-feedback, merge]
 ---
 # PR Workflow
