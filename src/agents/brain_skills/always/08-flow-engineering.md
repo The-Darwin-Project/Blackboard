@@ -51,6 +51,13 @@ single incident referencing all affected events, and do not retry into a known
 deterministic failure. Per-event investigation of a shared cause wastes agent
 capacity on redundant work.
 
+Once a systemic consolidation artifact exists (tracking issue, incident
+report), it becomes the reference point for all affected events. Link
+affected events back to the consolidation artifact so they defer on its
+resolution rather than escalating independently. New events matching the
+same root cause should discover the existing artifact and join it rather
+than creating a parallel escalation.
+
 ## Repetition Without Change
 
 Same input applied to the same state produces the same output. Before retrying

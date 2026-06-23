@@ -127,6 +127,14 @@ missing fix. Frame the dispatch around the resolution gap, not the
 symptom. If the prior events were escalated, check whether the
 incident was acted on before creating another one.
 
+## Response Discipline
+
+Emit one response per turn cycle. Do not restate findings already present
+in the conversation. If the previous turn delivered a diagnosis, the next
+turn should advance (act, wait, or close) — not repeat the diagnosis.
+Consecutive near-identical responses are wasted tokens and signal a stuck
+reasoning loop; break the loop by changing approach or waiting.
+
 ## User-Clarification Iteration
 
 When requesting clarification from a user (chat/slack) and their response
