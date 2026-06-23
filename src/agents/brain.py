@@ -4049,7 +4049,8 @@ class Brain:
                     "stage": stage,
                 })
 
-            state = await kargo_observer.get_stage_status(project, stage)
+            promotion_id = (args.get("promotion_id") or "").strip()
+            state = await kargo_observer.get_stage_status(project, stage, promotion_id=promotion_id)
             if "error" in state:
                 result_text = (
                     f"Kargo Stage: {stage}@{project}\n"

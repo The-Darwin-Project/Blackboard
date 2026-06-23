@@ -820,6 +820,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "kargo_context."
                     ),
                 },
+                "promotion_id": {
+                    "type": "string",
+                    "description": (
+                        "Specific Promotion name to query. Use when an agent's "
+                        "completion report references a new promotion that "
+                        "differs from the event's original context."
+                    ),
+                },
                 "subscribe": {
                     "type": "boolean",
                     "description": (

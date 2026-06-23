@@ -317,11 +317,40 @@ class KargoObserver:
                     await self._fire_broadcast()
                 self._active_watches.pop(stage_key, None)
 
-    async def get_stage_status(self, project: str, stage: str) -> dict:
-        """On-demand read for Brain's refresh_kargo_context tool."""
+    async def get_stage_status(self, project: str, stage: str, promotion_id: str = "") -> dict:
+        """On-demand read for Brain's refresh_kargo_context tool.
+
+        When promotion_id is supplied, fetches that specific Promotion directly
+        instead of reading lastPromotion from the Stage status. Otherwise,
+        prefers currentPromotion (active) over lastPromotion (completed).
+        """
         if not self._k8s_available:
             return {"error": "K8s client not available"}
         try:
+            if promotion_id:
+                promo_result = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self._custom_api.get_namespaced_custom_object(
+                        group=KARGO_GROUP, version=KARGO_VERSION,
+                        namespace=project, plural="promotions", name=promotion_id,
+                    ),
+                )
+                promo_status = promo_result.get("status", {})
+                freight = promo_result.get("spec", {}).get("freight", {})
+                return {
+                    "project": project,
+                    "stage": stage,
+                    "promotion": promotion_id,
+                    "freight": freight.get("name", "") if isinstance(freight, dict) else "",
+                    "phase": promo_status.get("phase", ""),
+                    "message": promo_status.get("message", ""),
+                    "failed_step": self._extract_failed_step(promo_status),
+                    "started_at": promo_status.get("startedAt", ""),
+                    "finished_at": promo_status.get("finishedAt", ""),
+                    "mr_url": self._extract_mr_url(promo_status),
+                    "_promo_status": promo_status,
+                }
+
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self._custom_api.get_namespaced_custom_object(
@@ -330,19 +359,22 @@ class KargoObserver:
                 ),
             )
             status = result.get("status", {})
+            current_promo = status.get("currentPromotion", {})
             last_promo = status.get("lastPromotion", {})
-            promo_status = last_promo.get("status", {})
+            promo = current_promo if current_promo.get("name") else last_promo
+            promo_status = promo.get("status", {})
             return {
                 "project": project,
                 "stage": stage,
-                "promotion": last_promo.get("name", ""),
-                "freight": last_promo.get("freight", {}).get("name", ""),
+                "promotion": promo.get("name", ""),
+                "freight": promo.get("freight", {}).get("name", ""),
                 "phase": promo_status.get("phase", ""),
                 "message": promo_status.get("message", ""),
                 "failed_step": self._extract_failed_step(promo_status),
                 "started_at": promo_status.get("startedAt", ""),
                 "finished_at": promo_status.get("finishedAt", ""),
                 "mr_url": self._extract_mr_url(promo_status),
+                "_promo_status": promo_status,
             }
         except Exception as e:
             logger.error(f"KargoObserver get_stage_status failed for {project}/{stage}: {e}")
