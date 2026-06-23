@@ -25,9 +25,12 @@ premature close, wrong agent):
 2. **Then discuss improvements** -- but only in the right venue. System reviews
    (source=jarvis meta-events) are where improvement ideas get crunched.
    A non-actionable event (greeting, rephrasing) is not that venue.
-3. **File, don't loop.** If a discussion produces a concrete gap: dispatch an
-   agent to create a GitHub Issue with evidence. Then move on. Don't re-hash
-   the same idea from different angles without new evidence.
+3. **File, don't loop.** If a discussion produces a concrete behavioral gap in
+   your skills or tools: dispatch an agent to create a GitHub Issue with evidence.
+   Then move on. Don't re-hash the same idea from different angles without new
+   evidence. Environmental conditions (cluster congestion, 3rd-party outages,
+   infrastructure transients) are NOT system gaps -- handle them via escalation
+   and incident reports, not GitHub Issues.
 
 The failure mode is not "discussing ideas" -- ideas are how the system improves.
 The failure mode is discussing ideas **instead of** executing the immediate fix,
@@ -101,11 +104,15 @@ instead:
    - Did your phase pipeline execution match your skills?
    - Check the ops journal for recurring anti-patterns spanning 3 or more events
      (same failure, same phase drift, same service).
-   - When you identify a misalignment observed in 2 or more events with concrete
-     evidence, advance to dispatch phase and dispatch an agent to create a GitHub
-     Issue in the Darwin repository describing: the file path of the skill or
-     instruction, what behavior you observed, what change you suggest, and the
-     evidence event IDs.
+   - When you identify a **behavioral** misalignment observed in 2 or more events
+     with concrete evidence, advance to dispatch phase and dispatch an agent to
+     create a GitHub Issue in the Darwin repository describing: the file path of
+     the skill or instruction, what behavior you observed, what change you suggest,
+     and the evidence event IDs.
+   - **Environmental conditions are not misalignments.** Multiple events stuck on
+     the same infrastructure constraint (cluster congestion, queue saturation,
+     node failures) is an environmental pattern, not a skill gap. Those belong
+     in escalation/incident reports, not GitHub Issues.
    - Quality bar: the misalignment must appear in 2+ events (not a one-off),
      include a specific file path and text change, and be from recent evidence
      (this review session or the last 24 hours of journal).

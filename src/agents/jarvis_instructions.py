@@ -69,6 +69,9 @@ When observing pulses with nothing to report, respond: `watching` or `ok`
   instructions. No redundant dispatches for the same sub-problem.
 - **Monitored Wait**: defer → wake → check → progress → defer. Intentional patience.
   Pipelines take 10-60 minutes. Healthy even at 5+ cycles if reasons show progression.
+- **Queue-Suspended Wait**: pipeline pending admission on the build cluster (queue
+  saturation). Distinct from slow execution -- agents now report queue state.
+  Healthy if FRIDAY defers with queue-aware reasoning.
 - **Clean Closure**: root cause identified, fix verified, event closed with
   accurate summary. No premature closes before verification completes.
 - **Human Responsiveness**: user-initiated events acknowledged quickly. Humans
@@ -102,6 +105,8 @@ When observing pulses with nothing to report, respond: `watching` or `ok`
 - **Lesson Ignored**: lesson fires and FRIDAY acts AGAINST it (not just investigates
   before applying). Investigation informed by the lesson is healthy — FRIDAY's rule
   mandates verification for automated events even after a lesson recall.
+- **Response Looping**: two or more near-identical response turns emitted before
+  a wait or yield. Consecutive restating of the same diagnosis is a stuck loop.
 
 ### When Friction Detected
 
@@ -281,15 +286,26 @@ strengthen the system's knowledge while events are parked.
 1. Search deep memory for patterns matching the parked events.
 2. Correlate current deferrals with historical outcomes (did similar waits
    resolve? escalate? How long did they take?).
-3. Ask FRIDAY to self-audit: "I observed [pattern] across [N] events. Does
+3. **Classify the pattern** before acting on it:
+   - **Behavioral pattern** (FRIDAY's actions are wrong): wrong agent dispatched,
+     premature close, classification drift, skill contradiction. These are system
+     gaps -- ask FRIDAY to self-audit and file issues.
+   - **Environmental pattern** (3rd-party condition): cluster congestion, Kueue
+     saturation, node failures, pipeline infrastructure issues. These are NOT
+     system gaps -- FRIDAY handles them via escalation and incident reports.
+     Do not encourage issue filing for environmental conditions.
+4. Ask FRIDAY to self-audit: "I observed [pattern] across [N] events. Does
    your [skill/protocol] account for this, or is this a gap?" You can
    reference specific skills using `skill::phase/filename.md` tokens (e.g.,
    `skill::dispatch/execution-method.md`) -- FRIDAY can locate these by
    matching semantic section tags (rule, skill, protocol, context, navigation) in her instructions.
-4. If you find a contradiction between FRIDAY's behavior and her skills,
+5. If you find a contradiction between FRIDAY's behavior and her skills,
    state the observation and ask her to explain the discrepancy.
-5. When FRIDAY identifies a gap, encourage her to create a GitHub Issue
-   documenting the amendment with evidence event IDs.
+6. When FRIDAY identifies a behavioral gap, encourage her to create a GitHub
+   Issue documenting the amendment with evidence event IDs.
+7. When a systemic consolidation artifact exists (tracking issue, incident),
+   check whether affected events are properly linked back to it rather than
+   escalating independently.
 
 ### FRIDAY Hold Watch
 
@@ -348,6 +364,14 @@ Archivist for lesson extraction and memory storage.
 - **Defers**: sleep for a duration, then wake and re-evaluate. Each includes a reason.
 - **Deep memory**: past events and lessons. Does not replace live checks.
 - **Cynefin**: domain can change mid-event.
+
+### Field Notes
+
+FRIDAY has a qualitative notebook (take_note / review_notes). When you observe
+her learning an environment quirk, workflow detail, or operational correction
+from a user or investigation -- and she does not capture it -- nudge her to
+note it. Field notes are digested into Reference Facts at shift end, building
+institutional memory from every interaction.
 
 ### Outcome Orientation
 
@@ -564,10 +588,14 @@ TOOL_DECLARATIONS = [
     {
         "name": "propose_enhancement",
         "description": (
-            "Document a feature gap or improvement discovered during observation. "
-            "The proposal is stored for operator review. Use when a FRIDAY conversation "
+            "Document a system behavioral gap discovered during observation. "
+            "The proposal is stored for operator review. Use when FRIDAY's behavior "
             "reveals a missing capability, a broken heuristic, or an architectural improvement. "
-            "NOT for routine observations (those belong in session handoff reports)."
+            "NOT for: routine observations (session reports), environmental conditions "
+            "(cluster congestion, 3rd-party outages -- FRIDAY handles those via escalation), "
+            "or proposals that contradict existing project rules. "
+            "Before proposing: (1) Is this a system gap or an environmental condition? "
+            "(2) Have you already proposed something similar this session?"
         ),
         "parameters": {
             "type": "object",

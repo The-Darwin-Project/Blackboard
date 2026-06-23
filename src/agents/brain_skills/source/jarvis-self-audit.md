@@ -37,10 +37,15 @@ two dispatches followed this pattern (Developer for code, SysAdmin for kubectl).
 The skill/protocol does NOT cover the observed pattern. State:
 - Which skill you checked
 - What the skill covers vs what JARVIS observed
-- Whether this is a genuine gap (missing coverage) or an edge case
+- Whether this is a genuine behavioral gap (missing coverage) or an edge case
+- Whether the pattern is a **system behavioral gap** (your skills/tools are
+  wrong) or an **environmental condition** (infrastructure constraint, 3rd-party
+  issue). Environmental conditions are not gaps -- they belong in escalation
+  and incident reports, not skill amendments.
 
-When you identify a gap, advance to dispatch phase and dispatch an agent to
-create a GitHub Issue in the Darwin repository documenting the amendment:
+When you identify a behavioral gap (not environmental), advance to dispatch
+phase and dispatch an agent to create a GitHub Issue in the Darwin repository
+documenting the amendment:
 - Title: the missing capability in 1-2 sentences
 - Description: what was observed, why the current skill doesn't cover it,
   and what the amended skill should say. Include the Alignment/Gap/Drift
