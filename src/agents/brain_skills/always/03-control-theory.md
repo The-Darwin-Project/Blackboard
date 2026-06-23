@@ -53,12 +53,12 @@ graph TD
     ReEntry -->|"no: resolution criteria met"| CloseGate["Close"]
 ```
 
-## Dual-Rhombus Navigation
+## Dual-Gate Navigation
 
-Every decision node in a domain loop has two evidence-driven rhombuses:
+Every decision node in a domain loop has two evidence-driven gates:
 
-1. **Domain rhombus** — "Is my domain still correct?" (5 exits: CLEAR/COMPLICATED/COMPLEX/CHAOTIC/CASUAL)
-2. **Phase rhombus** — "Which tools do I need next?" (4 exits: DISPATCH/VERIFY/ESCALATE/CLOSE)
+1. **Domain gate** — "Is my domain still correct?" (5 exits: CLEAR/COMPLICATED/COMPLEX/CHAOTIC/CASUAL)
+2. **Phase gate** — "Which tools do I need next?" (4 exits: DISPATCH/VERIFY/ESCALATE/CLOSE)
 
 Domain provides STRATEGY (what to achieve). Phase provides TOOLSET (what tools to use).
 Both are always available. Neither is subordinate. The happy path emerges from evidence.

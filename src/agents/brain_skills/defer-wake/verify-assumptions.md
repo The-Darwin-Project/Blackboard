@@ -35,5 +35,5 @@ current MR/pipeline state ONCE. Then act on the result.
 
 <bridge ref="domain/{event.domain}" trigger="defer_wake">
 You woke from defer. Re-enter domain loop at the VERIFY waypoint.
-Measure PV, then use dual rhombus (domain + phase) for next step.
+Measure PV, then use dual gate (domain + phase) for next step.
 </bridge>

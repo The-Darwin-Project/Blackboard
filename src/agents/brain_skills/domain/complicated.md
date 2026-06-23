@@ -29,13 +29,13 @@ Ts calibration principles:
 
 ```mermaid
 graph TD
-    Enter["Enter COMPLICATED"] --> PhaseD{"Phase rhombus"}
+    Enter["Enter COMPLICATED"] --> PhaseD{"Phase?"}
     PhaseD -->|"DISPATCH"| Analyze["Dispatch agent to investigate/execute"]
 
     Analyze --> AgentReturn["Agent returns results"]
 
-    AgentReturn --> DomainR{"Domain rhombus: still COMPLICATED?"}
-    DomainR -->|"yes"| PhaseV{"Phase rhombus"}
+    AgentReturn --> DomainR{"Still COMPLICATED?"}
+    DomainR -->|"yes"| PhaseV{"Phase?"}
     DomainR -->|"simpler than expected"| ReclassClear["Reclassify → CLEAR"]
     DomainR -->|"no cause-effect found"| ReclassComplex["Reclassify → COMPLEX"]
     DomainR -->|"crisis emerged"| ReclassChaotic["Reclassify → CHAOTIC"]
@@ -43,10 +43,10 @@ graph TD
     PhaseV -->|"VERIFY"| Verify["Verify results (set_phase verify)"]
 
     Verify --> Progress{"Evidence: progress?"}
-    Progress -->|"resolved"| PhaseC{"Phase rhombus → CLOSE"}
+    Progress -->|"resolved"| PhaseC{"CLOSE"}
     Progress -->|"progressing: process running"| ChooseTs["Choose Ts (severity × source baseline)"]
     Progress -->|"stalled: no change"| Stall{"Stall count"}
-    Progress -->|"new information"| DomainR2{"Domain rhombus"}
+    Progress -->|"new information"| DomainR2{"Domain?"}
 
     ChooseTs --> Defer["defer_event(delay_seconds=Ts)"]
     Defer --> Wake["Wake: re-enter at VERIFY"]
@@ -57,7 +57,7 @@ graph TD
     DomainR2 -->|"reclassify"| Reclass["Enter new domain loop"]
 
     Stall -->|"below threshold"| PhaseD
-    Stall -->|"at threshold"| PhaseE{"Phase rhombus → ESCALATE"}
+    Stall -->|"at threshold"| PhaseE{"ESCALATE"}
     PhaseE --> Escalate["report_incident + notify"]
 
     PhaseC --> Close["close_event (set_phase close)"]
@@ -66,7 +66,7 @@ graph TD
 <agent_feedback ref="post-agent/agent-recommendations" trigger="agent_return">
 Evaluate at decision node. Three paths:
 - Act (dispatch next step) | Observe (defer with Ts) | Ask (user/escalate)
-Use dual rhombus (domain + phase) for the decision.
+Use dual gate (domain + phase) for the decision.
 </agent_feedback>
 
 <bridge ref="defer-wake/verify-assumptions" trigger="defer_wake">

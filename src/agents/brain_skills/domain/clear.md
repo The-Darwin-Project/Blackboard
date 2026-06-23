@@ -28,20 +28,20 @@ Severity affects verification depth, not strategy.
 
 ```mermaid
 graph TD
-    Enter["Enter CLEAR"] --> PhaseD{"Phase rhombus"}
+    Enter["Enter CLEAR"] --> PhaseD{"Phase?"}
     PhaseD -->|"DISPATCH"| Route["Route known fix to agent"]
 
     Route --> AgentReturn["Agent returns"]
 
-    AgentReturn --> DomainR{"Domain rhombus: still CLEAR?"}
-    DomainR -->|"yes: fix applied"| PhaseV{"Phase rhombus"}
+    AgentReturn --> DomainR{"Still CLEAR?"}
+    DomainR -->|"yes: fix applied"| PhaseV{"Phase?"}
     DomainR -->|"fix failed / unexpected complexity"| Reclass["Reclassify → COMPLICATED"]
 
     PhaseV -->|"VERIFY"| Verify["Verify fix (set_phase verify)"]
 
     Verify --> Fixed{"Evidence: fix worked?"}
-    Fixed -->|"yes"| PhaseC{"Phase rhombus"}
-    Fixed -->|"no: still broken"| DomainR2{"Domain rhombus"}
+    Fixed -->|"yes"| PhaseC{"CLOSE"}
+    Fixed -->|"no: still broken"| DomainR2{"Domain?"}
 
     DomainR2 -->|"CLEAR: try alternate known fix"| PhaseD
     DomainR2 -->|"not CLEAR anymore"| Reclass
@@ -51,13 +51,13 @@ graph TD
 
 <agent_feedback ref="post-agent/agent-recommendations" trigger="agent_return">
 In CLEAR context: did the known fix work? Binary outcome.
-If yes → verify and close. If no → domain rhombus (likely COMPLICATED).
+If yes → verify and close. If no → domain gate (likely COMPLICATED).
 </agent_feedback>
 
 ## Close Criteria
 
 Fix verified = done. No Ts needed — CLEAR events should resolve in a single
-dispatch-verify cycle. If the fix fails, the domain rhombus routes you to
+dispatch-verify cycle. If the fix fails, the domain gate routes you to
 COMPLICATED for expert analysis.
 
 ## Async Wait Reclassification

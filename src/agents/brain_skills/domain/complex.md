@@ -29,13 +29,13 @@ Probe design principles:
 
 ```mermaid
 graph TD
-    Enter["Enter COMPLEX"] --> PhaseD{"Phase rhombus"}
+    Enter["Enter COMPLEX"] --> PhaseD{"Phase?"}
     PhaseD -->|"DISPATCH"| Probe["Dispatch small, safe-to-fail probe"]
 
     Probe --> AgentReturn["Agent returns probe results"]
 
-    AgentReturn --> DomainR{"Domain rhombus: still COMPLEX?"}
-    DomainR -->|"yes: no pattern yet"| PhaseV{"Phase rhombus"}
+    AgentReturn --> DomainR{"Still COMPLEX?"}
+    DomainR -->|"yes: no pattern yet"| PhaseV{"Phase?"}
     DomainR -->|"pattern emerged → cause-effect visible"| ReclassComp["Reclassify → COMPLICATED"]
     DomainR -->|"crisis"| ReclassChaotic["Reclassify → CHAOTIC"]
     DomainR -->|"probe revealed known fix"| ReclassClear["Reclassify → CLEAR"]
@@ -55,7 +55,7 @@ graph TD
 
     AdjustProbe --> PhaseD
     ProbeCount -->|"no"| PhaseD
-    ProbeCount -->|"yes"| PhaseE{"Phase rhombus → ESCALATE"}
+    ProbeCount -->|"yes"| PhaseE{"ESCALATE"}
     PhaseE --> Escalate["Escalate: novel situation beyond probing"]
 ```
 
@@ -82,4 +82,4 @@ Pattern amplified and proven to work. NOT "I tried something" — "the emergent
 solution held across verification." If the pattern resolves the issue,
 reclassify to COMPLICATED for final verification, then close from there.
 
-If critical severity arrives mid-loop → domain rhombus → CHAOTIC.
+If critical severity arrives mid-loop → domain gate → CHAOTIC.

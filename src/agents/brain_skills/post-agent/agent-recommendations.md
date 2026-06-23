@@ -78,5 +78,5 @@ the proposed fix.
 <bridge ref="domain/{event.domain}" trigger="agent_return">
 Return to domain loop decision node. Three paths:
 - Act (dispatch) | Observe (defer with Ts) | Ask (user/escalate)
-Use dual rhombus (domain + phase) at the decision node.
+Use dual gate (domain + phase) at the decision node.
 </bridge>

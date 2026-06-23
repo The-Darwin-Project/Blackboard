@@ -19,14 +19,14 @@ Stabilization principles:
 
 ```mermaid
 graph TD
-    Enter["Enter CHAOTIC"] --> PhaseE{"Phase rhombus"}
+    Enter["Enter CHAOTIC"] --> PhaseE{"Phase?"}
     PhaseE -->|"ESCALATE"| Stabilize["Stabilize NOW (set_phase escalate)"]
 
     Stabilize --> Act["report_incident + notify_user_slack"]
     Act --> Sense["Sense: is system stable?"]
 
     Sense --> StableCheck{"Evidence: stabilized?"}
-    StableCheck -->|"yes"| DomainR{"Domain rhombus"}
+    StableCheck -->|"yes"| DomainR{"Domain?"}
     StableCheck -->|"no: still in crisis"| ActAgain["Act again — different stabilization"]
     ActAgain --> Sense
 

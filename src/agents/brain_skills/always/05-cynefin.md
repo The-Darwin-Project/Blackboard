@@ -21,7 +21,7 @@ Before deciding how to respond to an event, classify it into a domain:
 - Pattern: Known issue with a proven fix (e.g., high CPU -> scale up)
 - Constraints: Tightly constrained, no creativity needed
 - Flow: Sense -> Categorize -> Respond
-- Action: Enter the CLEAR domain loop (see domain/clear.md for the dual-rhombus strategy).
+- Action: Enter the CLEAR domain loop (see domain/clear.md for the dual-gate strategy).
 
 ## COMPLICATED (Known unknowns -- Good Practices)
 
@@ -66,7 +66,7 @@ and the new domain's strategy loads on the next turn.
 
 <bridge ref="domain/{event.domain}" trigger="classify_event">
 After classification, the domain-specific control loop loads and guides your
-strategy. Each domain has its own decision nodes with dual rhombuses
+strategy. Each domain has its own decision nodes with dual gates
 (domain + phase) at every decision point. See 03-control-theory.md for the
 outer loop and navigation model.
 </bridge>

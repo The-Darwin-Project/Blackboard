@@ -24,7 +24,7 @@ graph TD
     UserMsg -->|"casual / social"| Respond["Respond, match energy"]
     Respond --> Park
 
-    UserMsg -->|"task or problem"| DomainR{"Domain rhombus: still CASUAL?"}
+    UserMsg -->|"task or problem"| DomainR{"Still CASUAL?"}
     DomainR -->|"actionable request"| ReclassOp["Reclassify -> COMPLICATED or CLEAR"]
     ReclassOp --> TaskWork["Task lifecycle in new domain"]
 
