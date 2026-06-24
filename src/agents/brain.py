@@ -5214,6 +5214,77 @@ class Brain:
         """Access the BrainSkillLoader instance (may be None if loading failed)."""
         return self._skill_loader
 
+    # -- Public facades for main.py / routes/ wiring --
+
+    async def broadcast(self, message: dict) -> None:
+        """Public facade for _broadcast. Used by main.py + nightwatcher wiring."""
+        await self._broadcast(message)
+
+    def set_live_adapter(self, adapter) -> None:
+        """Set the JARVIS LiveAPIAdapter reference."""
+        self._live_adapter = adapter
+
+    def set_ephemeral_provisioner(self, provisioner) -> None:
+        """Set the EphemeralProvisioner reference."""
+        self._ephemeral_provisioner = provisioner
+
+    def get_ephemeral_provisioner(self):
+        """Get the EphemeralProvisioner reference (may be None)."""
+        return self._ephemeral_provisioner
+
+    def set_headhunter_close_signal(self, signal: asyncio.Event) -> None:
+        """Set the headhunter shutdown signal."""
+        self._headhunter_close_signal = signal
+
+    def get_smartsheet_incident_adapter(self):
+        """Public facade for _get_smartsheet_incident_adapter."""
+        return self._get_smartsheet_incident_adapter()
+
+    def get_staleness_guard_metrics(self) -> list[dict]:
+        """Return StalenessGuard trigger metrics for /flow endpoint."""
+        if not self._scheduler:
+            return []
+        from ..scheduling.triggers import StalenessGuard
+        return [
+            t.metrics() for t in self._scheduler._triggers
+            if isinstance(t, StalenessGuard)
+        ]
+
+    def get_active_subscription_count(self) -> int:
+        """Return active StateWatcher subscription count for /flow endpoint."""
+        if not self._state_watcher:
+            return 0
+        return self._state_watcher.active_count
+
+    async def count_global_wip(self) -> int:
+        """Public facade for _count_global_wip."""
+        return await self._count_global_wip()
+
+    def has_subscription(self, event_id: str) -> bool:
+        """Check if StateWatcher has an active subscription for this event."""
+        if self._state_watcher:
+            return self._state_watcher.has_subscription(event_id)
+        return False
+
+    def cancel_subscription(self, event_id: str) -> None:
+        """Cancel StateWatcher subscription for this event."""
+        if self._state_watcher:
+            self._state_watcher.cancel(event_id)
+
+    def clear_cycle_id(self, event_id: str) -> None:
+        """Remove the cycle ID tracking for this event."""
+        self._cycle_id_for_event.pop(event_id, None)
+
+    async def append_and_broadcast(
+        self, event_id: str, turn: ConversationTurn, event: "EventDocument | None" = None
+    ) -> None:
+        """Public facade for _append_and_broadcast."""
+        await self._append_and_broadcast(event_id, turn, event)
+
+    async def next_turn_number(self, event_id: str) -> int:
+        """Public facade for _next_turn_number."""
+        return await self._next_turn_number(event_id)
+
     async def close_jarvis_meta_event(self, event_id: str) -> None:
         """Called by adapter on stream teardown. Routes to _close_and_broadcast."""
         try:

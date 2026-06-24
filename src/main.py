@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
         # === PULSE TRACKING (Cognitive Recall Graph -- Layer 1) ===
         if os.getenv("PULSE_TRACKING_ENABLED", "false").lower() == "true":
             from .memory.pulse_tracker import PulseTracker
-            pulse_tracker = PulseTracker(redis=redis, broadcast=brain._broadcast)
+            pulse_tracker = PulseTracker(redis=redis, broadcast=brain.broadcast)
             archivist.pulse_port = pulse_tracker
             brain.pulse_port = pulse_tracker
             app.state.pulse_tracker = pulse_tracker
@@ -177,7 +177,7 @@ async def lifespan(app: FastAPI):
                     brain=brain,
                 )
                 pulse_tracker.add_observer(live_adapter)
-                brain._live_adapter = live_adapter
+                brain.set_live_adapter(live_adapter)
                 app.state.live_adapter = live_adapter
                 logger.info("Cortex observer registered (on-demand, will activate on first pulse, shadow=%s)",
                             os.getenv("SYSTEM2_SHADOW", "true"))
@@ -203,7 +203,7 @@ async def lifespan(app: FastAPI):
                 event_listener_url=el_url,
             )
             agent_registry.set_ephemeral_registered_callback(provisioner.on_ephemeral_registered)
-            brain._ephemeral_provisioner = provisioner
+            brain.set_ephemeral_provisioner(provisioner)
             logger.info("EphemeralProvisioner initialized (url=%s)", el_url)
         
         # === DEX OIDC Key Adapter ===
@@ -222,7 +222,7 @@ async def lifespan(app: FastAPI):
         headhunter_close_signal: asyncio.Event | None = None
         if headhunter_enabled and gitlab_host:
             headhunter_close_signal = asyncio.Event()
-            brain._headhunter_close_signal = headhunter_close_signal
+            brain.set_headhunter_close_signal(headhunter_close_signal)
 
         # Start Brain event loop
         asyncio.create_task(brain.start_event_loop())
@@ -329,7 +329,7 @@ async def lifespan(app: FastAPI):
                 await aligner.handle_promotion_recovery(**kwargs)
 
             async def kargo_broadcast_callback() -> None:
-                await brain._broadcast({
+                await brain.broadcast({
                     "type": "kargo_stages_update",
                     "stages": kargo_observer.get_failed_stages(),
                 })
@@ -361,7 +361,7 @@ async def lifespan(app: FastAPI):
         
         # === NIGHTWATCHER OBSERVER ===
         nightwatcher_enabled = os.getenv("NIGHTWATCHER_ENABLED", "false").lower() == "true"
-        smartsheet_adapter = brain._get_smartsheet_incident_adapter()
+        smartsheet_adapter = brain.get_smartsheet_incident_adapter()
         if smartsheet_adapter:
             try:
                 await smartsheet_adapter._ensure_columns()
@@ -382,11 +382,11 @@ async def lifespan(app: FastAPI):
                 blackboard=blackboard,
                 registry=agent_registry,
                 bridge=task_bridge,
-                provisioner=getattr(brain, '_ephemeral_provisioner', None),
+                provisioner=brain.get_ephemeral_provisioner(),
                 smartsheet_adapter=smartsheet_adapter,
                 archivist=archivist,
                 slack_notify=slack_inst.post_nightwatcher_summary if slack_inst else None,
-                broadcast=brain._broadcast,
+                broadcast=brain.broadcast,
             )
             await nightwatcher_observer.start()
             logger.info("NightwatcherObserver started")
@@ -510,7 +510,6 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     Returns queue depth, active events, and per-role agent utilization.
     """
     from .dependencies import _blackboard, get_registry_and_bridge, get_brain
-    from .scheduling.triggers import StalenessGuard
 
     flow = {"queue_depth": 0, "active_events": 0}
     if _blackboard is not None:
@@ -540,12 +539,9 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     active_subs = 0
     try:
         brain = await get_brain()
-        if brain and brain._scheduler:
-            for trigger in brain._scheduler._triggers:
-                if isinstance(trigger, StalenessGuard):
-                    staleness_guards.append(trigger.metrics())
-        if brain and brain._state_watcher:
-            active_subs = brain._state_watcher.active_count
+        if brain:
+            staleness_guards = brain.get_staleness_guard_metrics()
+            active_subs = brain.get_active_subscription_count()
     except Exception:
         pass
 
@@ -566,7 +562,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         if hh:
             hh_pending = hh.pending_count
         if brain:
-            wip_used = await brain._count_global_wip()
+            wip_used = await brain.count_global_wip()
     except Exception:
         pass
     wip_utilization_pct = (wip_used / wip_cap * 100) if wip_cap > 0 else 0.0

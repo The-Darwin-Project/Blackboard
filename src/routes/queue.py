@@ -61,8 +61,8 @@ def _serialize_evidence(event: EventDocument) -> dict:
 def _has_active_subscription(event_id: str) -> bool:
     """Check if StateWatcher has an active subscription for this event."""
     from ..dependencies import _brain
-    if _brain and _brain._state_watcher:
-        return _brain._state_watcher.has_subscription(event_id)
+    if _brain:
+        return _brain.has_subscription(event_id)
     return False
 
 
@@ -199,7 +199,7 @@ async def update_plan_step(
 ):
     """Update a plan step status. Called by agent sidecars via bb_update_plan_step MCP tool.
 
-    Uses brain._append_and_broadcast to go through the standard broadcast pipeline
+    Uses brain.append_and_broadcast to go through the standard broadcast pipeline
     (WS push to UI, Slack mirror, agent blackboard_update).
     """
     from ..dependencies import get_brain
@@ -209,13 +209,13 @@ async def update_plan_step(
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
 
     turn = ConversationTurn(
-        turn=(await brain._next_turn_number(event_id)),
+        turn=(await brain.next_turn_number(event_id)),
         actor=req.role or "agent",
         action="plan_step",
         thoughts=req.notes or f"Step {req.step_id}: {req.status}",
         taskForAgent={"step_id": req.step_id, "status": req.status},
     )
-    await brain._append_and_broadcast(event_id, turn)
+    await brain.append_and_broadcast(event_id, turn)
     return {"ok": True, "turn": turn.turn}
 
 
@@ -322,9 +322,8 @@ async def close_event_by_user(
     try:
         brain = await get_brain()
         await brain.cancel_active_task(event_id, f"User force-close: {body.reason}")
-        if brain._state_watcher:
-            brain._state_watcher.cancel(event_id)
-        brain._cycle_id_for_event.pop(event_id, None)
+        brain.cancel_subscription(event_id)
+        brain.clear_cycle_id(event_id)
     except RuntimeError:
         pass  # Brain not initialized
     await blackboard.close_event(event_id, close_summary, close_reason="user_closed")
