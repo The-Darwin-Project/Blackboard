@@ -557,6 +557,29 @@ export interface NotebookResponse {
   count: number;
 }
 
+// =============================================================================
+// Knowledge Facts (darwin_knowledge)
+// =============================================================================
+
+export type KnowledgeScope = 'convention' | 'ownership' | 'historical' | 'relationship';
+
+export interface KnowledgeFact {
+  knowledge_id: string;
+  topic: string;
+  fact: string;
+  scope: KnowledgeScope;
+  source: string;
+  confidence: number;
+  valid_until: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface KnowledgePoint {
+  id: string;
+  payload: KnowledgeFact;
+}
+
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {
     // Aligner events (observation)

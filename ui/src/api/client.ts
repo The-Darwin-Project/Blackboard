@@ -716,6 +716,46 @@ export async function dismissProposals(timestamps: number[]): Promise<void> {
 }
 
 // =============================================================================
+// Knowledge Facts API (darwin_knowledge)
+// =============================================================================
+
+import type { KnowledgePoint } from './types';
+
+export async function getKnowledge(limit = 100): Promise<KnowledgePoint[]> {
+  return fetchApi<KnowledgePoint[]>(`/queue/admin/knowledge?limit=${limit}`);
+}
+
+export async function createKnowledge(payload: {
+  topic: string;
+  fact: string;
+  scope: import('./types').KnowledgeScope;
+  source: string;
+  confidence?: number;
+  valid_until?: number | null;
+}): Promise<{ status: string; knowledge_id: string }> {
+  return fetchApi('/queue/admin/knowledge', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateKnowledge(
+  knowledgeId: string,
+  payload: { fact?: string; source?: string; confidence?: number; valid_until?: number | null },
+): Promise<{ status: string; knowledge_id: string }> {
+  return fetchApi(`/queue/admin/knowledge/${encodeURIComponent(knowledgeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteKnowledge(knowledgeId: string): Promise<{ status: string }> {
+  return fetchApi(`/queue/admin/knowledge/${encodeURIComponent(knowledgeId)}`, {
+    method: 'DELETE',
+  });
+}
+
+// =============================================================================
 // Field Notes Notebook API
 // =============================================================================
 
