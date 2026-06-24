@@ -1,7 +1,7 @@
 // BlackBoard/ui/src/hooks/useResizablePanel.ts
 // @ai-rules:
 // 1. [Pattern]: Generic resize hook used by EventSidebar, EventChatPanel, ActivityPanel, ChatInput.
-// 2. [Constraint]: panelRef typed as RefObject<HTMLElement> (not HTMLDivElement) — ChatInput uses <form>.
+// 2. [Constraint]: panelRef generic — consumers pass element type (HTMLDivElement, HTMLFormElement).
 // 3. [Pattern]: When storageKey omitted, skip localStorage entirely. When enabled=false, skip writes.
 import { useState, useEffect, useCallback, useRef, type RefObject } from 'react';
 
@@ -14,14 +14,14 @@ export interface UseResizablePanelOptions {
   enabled?: boolean;
 }
 
-export interface UseResizablePanelReturn {
+export interface UseResizablePanelReturn<T extends HTMLElement> {
   size: number;
   isResizing: boolean;
   startResize: (e: React.MouseEvent) => void;
-  panelRef: RefObject<HTMLElement>;
+  panelRef: RefObject<T | null>;
 }
 
-export function useResizablePanel(options: UseResizablePanelOptions): UseResizablePanelReturn {
+export function useResizablePanel<T extends HTMLElement = HTMLDivElement>(options: UseResizablePanelOptions): UseResizablePanelReturn<T> {
   const { direction, min, max, defaultSize, storageKey, enabled = true } = options;
 
   const [size, setSize] = useState(() => {
@@ -30,7 +30,7 @@ export function useResizablePanel(options: UseResizablePanelOptions): UseResizab
     return stored ? (parseInt(stored, 10) || defaultSize) : defaultSize;
   });
   const [isResizing, setIsResizing] = useState(false);
-  const panelRef = useRef<HTMLElement>(null);
+  const panelRef = useRef<T>(null);
 
   useEffect(() => {
     if (storageKey && enabled) {

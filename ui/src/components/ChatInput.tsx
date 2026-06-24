@@ -26,7 +26,7 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const { sendMessage, isPending } = useChat(wsSend);
-  const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel({
+  const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel<HTMLFormElement>({
     direction: 'vertical', min: MIN_INPUT_HEIGHT, max: MAX_INPUT_HEIGHT, defaultSize: DEFAULT_INPUT_HEIGHT,
   });
 

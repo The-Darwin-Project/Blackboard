@@ -54,6 +54,7 @@ export const MOCK_EVENT_DOC = {
   source: 'chat' as const,
   status: 'active',
   service: 'inventory-api',
+  subject_type: undefined as string | undefined,
   event: {
     reason: 'Split the darwin-store backend into inventory and customer management services',
     evidence: {
