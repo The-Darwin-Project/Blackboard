@@ -2384,6 +2384,7 @@ class Brain:
                         thoughts="The message was not delivered. "
                                  "The agent may still be working -- check for recent updates "
                                  "from them before deciding next steps.",
+                        waitingFor="reply_to_agent",
                         response_parts=response_parts,
                     )
                     await self._append_and_broadcast(event_id, followup)
@@ -2397,6 +2398,7 @@ class Brain:
                     thoughts="The message was not delivered. "
                              "The agent may still be working -- check for recent updates "
                              "from them before deciding next steps.",
+                    waitingFor="reply_to_agent",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, followup)
@@ -2405,6 +2407,7 @@ class Brain:
                 actor="brain",
                 action="reply",
                 thoughts=f"Reply to {agent_id}: {message}",
+                waitingFor="reply_to_agent",
             )
             await self._append_and_broadcast(event_id, turn)
             return False
@@ -2430,6 +2433,7 @@ class Brain:
                             f"Use select_agent to dispatch it -- this provisions an on-call pod. "
                             f"message_agent only works for agents that are already running."
                         ),
+                        waitingFor="message_agent",
                         response_parts=response_parts,
                     )
                     await self._append_and_broadcast(event_id, followup)
@@ -2441,6 +2445,7 @@ class Brain:
                 action="message",
                 thoughts=f"Message to {agent_name}: {message}",
                 selectedAgents=[agent_name],
+                waitingFor="message_agent",
             )
             await self._append_and_broadcast(event_id, turn)
 
@@ -2474,6 +2479,7 @@ class Brain:
                                 thoughts="The message was not delivered. "
                                          "The agent may still be working -- check for recent updates "
                                          "from them before deciding next steps.",
+                                waitingFor="message_agent",
                                 response_parts=response_parts,
                             )
                             await self._append_and_broadcast(event_id, followup)
@@ -2520,6 +2526,7 @@ class Brain:
                                 thoughts="The message was not delivered. "
                                          "The agent may still be working -- check for recent updates "
                                          "from them before deciding next steps.",
+                                waitingFor="message_agent",
                                 response_parts=response_parts,
                             )
                             await self._append_and_broadcast(event_id, followup)
@@ -2533,6 +2540,7 @@ class Brain:
                             thoughts="The message was not delivered. "
                                      "The agent may still be working -- check for recent updates "
                                      "from them before deciding next steps.",
+                            waitingFor="message_agent",
                             response_parts=response_parts,
                         )
                         await self._append_and_broadcast(event_id, followup)
@@ -2552,6 +2560,7 @@ class Brain:
                     f"{(' ' + unit) if unit else ''}"
                     f" (point #{result['count']}, event age {result['event_age_minutes']}m)"
                 ),
+                waitingFor="record_observation",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -2578,6 +2587,7 @@ class Brain:
                 actor="brain",
                 action="tool_result",
                 thoughts=summary_text,
+                waitingFor="list_observations",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -2712,6 +2722,7 @@ class Brain:
                     action="verify",
                     thoughts=f"Waiting for verification: {condition}",
                     evidence=f"target_service:{target_service}",
+                    waitingFor="wait_for_verification",
                 )
                 await self._append_and_broadcast(event_id, verify_turn)
                 confirm_turn = ConversationTurn(
@@ -2724,6 +2735,7 @@ class Brain:
                         f"Memory: {state.get('memory', 0):.1f}%, "
                         f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
                     ),
+                    waitingFor="wait_for_verification",
                 )
                 await self._append_and_broadcast(event_id, confirm_turn)
             else:
@@ -2734,6 +2746,7 @@ class Brain:
                     thoughts="Verification data is not available for this service right now. "
                              "Consider what other tools or participants in the conversation "
                              "might confirm whether the situation has changed since the last check.",
+                    waitingFor="wait_for_verification",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -2749,6 +2762,7 @@ class Brain:
                     action="tool_result",
                     thoughts="This event is currently waiting for user input and "
                              "cannot be deferred until the user responds.",
+                    waitingFor="defer_event",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -2769,6 +2783,7 @@ class Brain:
                 actor="brain",
                 action="defer",
                 thoughts=f"Deferring event for {delay}s: {reason}",
+                waitingFor="defer_event",
             )
             await self._append_and_broadcast(event_id, turn)
             # Update event status + store defer_until timestamp
@@ -2826,6 +2841,7 @@ class Brain:
                     thoughts="wait_for_user is not available for automated events. "
                              "Use request_user_approval to pause for human authorization, "
                              "or defer_event to wait for external processes.",
+                    waitingFor="wait_for_user",
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return False
@@ -3247,7 +3263,8 @@ class Brain:
                         turn = ConversationTurn(
                             turn=(await self._next_turn_number(event_id)),
                             actor="brain", action="notify",
-                            thoughts=result_text, response_parts=response_parts,
+                            thoughts=result_text, waitingFor="notify_user_slack",
+                            response_parts=response_parts,
                         )
                         await self._append_and_broadcast(event_id, turn)
                         await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
@@ -3343,6 +3360,7 @@ class Brain:
                 actor="brain",
                 action="notify",
                 thoughts=result_text,
+                waitingFor="notify_user_slack",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -3374,6 +3392,7 @@ class Brain:
                 actor="brain",
                 action="notify",
                 thoughts=result_text,
+                waitingFor="notify_gitlab_result",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -3527,7 +3546,8 @@ class Brain:
                 await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
+                    actor="brain", action="notify", thoughts=result_text,
+                    waitingFor="report_incident", response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return False
@@ -3535,7 +3555,8 @@ class Brain:
                 result_text = f"Incident already created for event {event_id}. Skipping duplicate."
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
+                    actor="brain", action="notify", thoughts=result_text,
+                    waitingFor="report_incident", response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return True
@@ -3549,7 +3570,8 @@ class Brain:
                 result_text = f"Incident already created for event {event_id} (recovered from conversation history). Skipping duplicate."
                 turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text, response_parts=response_parts,
+                    actor="brain", action="notify", thoughts=result_text,
+                    waitingFor="report_incident", response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
                 return True
@@ -3664,6 +3686,7 @@ class Brain:
                 actor="brain",
                 action="notify",
                 thoughts=result_text,
+                waitingFor="report_incident",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -3680,6 +3703,7 @@ class Brain:
                     action="tool_result",
                     thoughts="Plan creation needs at least one step with an assigned participant and objective. "
                              "Review the conversation to identify which agents should act and on what.",
+                    waitingFor="create_plan",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -3696,6 +3720,7 @@ class Brain:
                 plan=plan_md,
                 thoughts=f"Plan created: {len(steps)} steps. {reasoning}",
                 taskForAgent={"steps": step_map, "source": "brain"},
+                waitingFor="create_plan",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -3846,6 +3871,7 @@ class Brain:
                     actor="brain",
                     action="phase",
                     thoughts=f"Phase: {phase.upper()} (confirmed). {reasoning}",
+                    waitingFor="set_phase",
                     response_parts=response_parts,
                     timestamp=time.time(),
                 )
@@ -3859,6 +3885,7 @@ class Brain:
                 actor="brain",
                 action="phase",
                 thoughts=thoughts,
+                waitingFor="set_phase",
                 response_parts=response_parts,
                 timestamp=time.time(),
             )
@@ -4117,6 +4144,7 @@ class Brain:
                     thoughts="Response was too brief. JARVIS needs to understand your reasoning. "
                              "Include what you observed, whether you agree or disagree, "
                              "and what your next action will be.",
+                    waitingFor="respond_to_jarvis",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -4127,6 +4155,7 @@ class Brain:
                 actor="brain",
                 action="respond_jarvis",
                 thoughts=response_text,
+                waitingFor="respond_to_jarvis",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)
@@ -4146,6 +4175,7 @@ class Brain:
                     actor="brain",
                     action="tool_result",
                     thoughts="Error: event_id is required.",
+                    waitingFor="inspect_event",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -4157,6 +4187,7 @@ class Brain:
                     actor="brain",
                     action="tool_result",
                     thoughts=f"Event {target_id} not found in active storage.",
+                    waitingFor="inspect_event",
                     response_parts=response_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
@@ -4188,6 +4219,7 @@ class Brain:
                 actor="brain",
                 action="tool_result",
                 thoughts=result_text,
+                waitingFor="inspect_event",
                 response_parts=response_parts,
             )
             await self._append_and_broadcast(event_id, turn)

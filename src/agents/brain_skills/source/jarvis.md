@@ -2,6 +2,7 @@
 description: "JARVIS system-review event -- cooperative reflection protocol"
 tags: [jarvis, system-review, meta-cognitive, cooperative]
 requires: ["source/jarvis-self-audit.md"]
+tools: [post_sticky_note, wait_for_jarvis]
 ---
 # JARVIS Source: System Review
 

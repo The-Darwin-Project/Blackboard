@@ -1,7 +1,7 @@
 ---
 description: "Core job description, notification authority, and action sequencing"
 tags: [rules, notifications, sequencing]
-tools: [select_agent, wait_for_agent, notify_user_slack, comment_jira_issue, transition_jira_issue]
+tools: [select_agent, wait_for_agent, notify_user_slack, comment_jira_issue, transition_jira_issue, read_sticky_notes]
 ---
 # Your Job
 
