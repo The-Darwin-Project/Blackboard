@@ -2,6 +2,7 @@
 # @ai-rules:
 # 1. [Constraint]: Shadow flag gates ALL write tools. Read tools always active.
 # 2. [Pattern]: PulseObserver protocol -- receives PulseBatch from PulseTracker.add_observer().
+# 2b. [Pattern]: Brain accessed via BrainLifecyclePort + BrainIntrospectionPort -- no private attr access.
 # 3. [Gotcha]: Live API session is on-demand. Lazy-connects on first pulse, closes after 5min idle.
 # 4. [Pattern]: Rate limit: max 1 intervention per 10 FRIDAY turns per event.
 # 5. [Constraint]: google.genai Client with vertexai=True. Model from LLM_MODEL_SYSTEM2 env var.
@@ -51,7 +52,7 @@ import logging
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Union
 
 from ..agents.jarvis_instructions import (
     HANDOFF_REPORT_PROMPT,
@@ -65,6 +66,7 @@ from ..models import _resolve_phase
 if TYPE_CHECKING:
     from ..agents.archivist import Archivist
     from ..memory.pulse_tracker import PulseTracker
+    from ..ports import BrainIntrospectionPort, BrainLifecyclePort
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
@@ -114,7 +116,7 @@ class LiveAPIAdapter:
         archivist: Archivist,
         pulse_tracker: PulseTracker,
         broadcast: Callable[[dict], Coroutine[Any, Any, None]],
-        brain: Any = None,
+        brain: Any = None,  # Expects BrainLifecyclePort & BrainIntrospectionPort at runtime
     ):
         self._blackboard = blackboard
         self._archivist = archivist
@@ -958,9 +960,9 @@ class LiveAPIAdapter:
         )
         await self._blackboard.append_turn(event_id, turn)
         # Wake FRIDAY: clear in-memory wait + hold_watch + transition deferred->active + thaw if frozen
-        if hasattr(self, "_brain") and self._brain:
+        if self._brain:
             self._brain.clear_waiting(event_id)
-            self._brain._clear_jarvis_wait(event_id)
+            self._brain.clear_jarvis_wait(event_id)
             self._brain.clear_hold_watch(event_id)
             await self._brain.resume_if_parked(event_id)
         from ..models import EventStatus
@@ -1061,7 +1063,7 @@ class LiveAPIAdapter:
             )
 
         skill_manifest = ""
-        loader = getattr(self._brain, "_skill_loader", None) if self._brain else None
+        loader = self._brain.get_skill_loader() if self._brain else None
         if loader:
             manifest_lines = []
             file_count = 0
@@ -1179,10 +1181,9 @@ class LiveAPIAdapter:
             stale_events = []
             if self._brain:
                 for eid in active_ids:
-                    # Events with running agent tasks are NOT stale -- work is happening in sidecars
-                    if eid in self._brain._active_tasks and not self._brain._active_tasks[eid].done():
+                    if self._brain.is_task_running(eid):
                         continue
-                    last = self._brain._last_processed.get(eid, now)
+                    last = self._brain.last_processed_time(eid)
                     if (now - last) > idle_threshold:
                         stale_events.append(eid)
 
@@ -1203,7 +1204,7 @@ class LiveAPIAdapter:
             if self._active_meta_event_id:
                 continue
             # Skip meta-event creation while FRIDAY is waiting for JARVIS
-            if self._brain and self._brain._waiting_for_jarvis:
+            if self._brain and self._brain.has_jarvis_waiters():
                 logger.debug("Skipping meta-event: wait_for_jarvis active")
                 continue
 
@@ -1455,8 +1456,8 @@ class LiveAPIAdapter:
                     await self._connect()
                     if self._session:
                         if self._brain:
-                            for eid in list(self._brain._waiting_for_jarvis.keys()):
-                                self._brain._clear_jarvis_wait(eid)
+                            for eid in self._brain.pending_jarvis_event_ids():
+                                self._brain.clear_jarvis_wait(eid)
                             logger.info("Cortex reconnect: cleared stale JARVIS wait states")
                         await self._replay_pending_context()
                         return
