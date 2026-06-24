@@ -72,6 +72,21 @@ of a wasted pipeline cycle.
 
 - Pod delete is available across observed namespaces.
 
+### Source Code Mutations — Always Require Approval
+
+Modifying source code in external repositories changes what gets built — not how
+it is deployed. Unlike GitOps values (which ArgoCD continuously reconciles and can
+revert in seconds), a merged source code change propagates through build pipelines
+and may reach production images before the error is caught. This asymmetry means
+any change that alters build inputs (source files, build configs, pipeline
+definitions, submodule references) carries irreversible blast radius until the
+next build cycle corrects it.
+
+Human approval is required before pushing any change that alters what gets built.
+The distinction is deployment configuration (how existing artifacts are run) vs
+build inputs (what artifacts are produced). The former is revertible infrastructure;
+the latter is a one-way gate into the build pipeline.
+
 ### GitOps Mutations (non-destructive, revertible via git revert)
 
 Values that are safe to change without user approval (Helm charts or Kustomize overlays):
