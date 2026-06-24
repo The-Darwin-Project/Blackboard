@@ -17,6 +17,10 @@
 // 9. [Pattern]: Inline ref assignment (lines 214-223) is intentional per React 19 docs
 //    for non-layout refs. useEffect alternative introduces timing gap that breaks WS
 //    callback stale-closure fix. React Strict Mode double-invoke is safe (idempotent).
+// 10. [Pattern]: ephemeralAgents derived via useMemo([registeredAgents, activeEvents]),
+//     not useState. Reactive to React Query cache changes — no 10s poll coupling.
+//     Cold-start guard: if (!activeEvents) return all ephemeral (React Query undefined before first fetch).
+//     ephemeralAgentsRef render-phase sync stays for WS handlers and GC.
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -120,13 +124,16 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(
     () => sessionStorage.getItem('darwin:selectedEventId'),
   );
+  const selectedEventIdRef = useRef(selectedEventId);
 
   const selectEvent = useCallback((id: string) => {
+    selectedEventIdRef.current = id;
     setSelectedEventId(id);
     try { sessionStorage.setItem('darwin:selectedEventId', id); } catch { /* quota */ }
   }, []);
 
   const deselectEvent = useCallback(() => {
+    selectedEventIdRef.current = null;
     setSelectedEventId(null);
     sessionStorage.removeItem('darwin:selectedEventId');
   }, []);
@@ -139,7 +146,6 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
 
   const [ephemeralStream, setEphemeralStream] = useState<Record<string, string[]>>({});
 
-  const [ephemeralAgents, setEphemeralAgents] = useState<AgentRegistryEntry[]>([]);
   const [registeredAgents, setRegisteredAgents] = useState<AgentRegistryEntry[]>([]);
 
   useEffect(() => {
@@ -147,24 +153,12 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       try {
         const agents = await getAgents();
         setRegisteredAgents(agents);
-        const ephemeral = agents.filter((a: AgentRegistryEntry) => a.ephemeral);
-        const activeIds = activeEventsRef.current?.map(e => e.id);
-        if (activeIds) hasLoadedActiveEventsRef.current = true;
-        setEphemeralAgents(
-          !activeIds && !hasLoadedActiveEventsRef.current
-            ? ephemeral
-            : ephemeral.filter(a =>
-                !a.bound_event_id
-                || (activeIds ?? []).includes(a.bound_event_id)
-                || a.bound_event_id.startsWith('nw-sweep-')
-              )
-        );
         setAgentStreams(prev => {
           const next = { ...prev };
           let changed = false;
           for (const a of AGENTS) {
             const reg = agents.find((r: AgentRegistryEntry) => r.role === a && !r.ephemeral);
-            if (reg && !reg.busy && next[a]?.isActive) {
+            if (next[a]?.isActive && (!reg || !reg.busy)) {
               next[a] = { ...next[a], isActive: false };
               changed = true;
             }
@@ -217,17 +211,26 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
+  const ephemeralAgents = useMemo(() => {
+    const ephemeral = registeredAgents.filter((a: AgentRegistryEntry) => a.ephemeral);
+    const activeIds = activeEvents?.map(e => e.id);
+    if (!activeIds) return ephemeral;
+    return ephemeral.filter(a =>
+      !a.bound_event_id
+      || activeIds.includes(a.bound_event_id)
+      || a.bound_event_id.startsWith('nw-sweep-')
+    );
+  }, [registeredAgents, activeEvents]);
+
   const ephemeralAgentsRef = useRef(ephemeralAgents);
   ephemeralAgentsRef.current = ephemeralAgents;
   const activeEventsRef = useRef(activeEvents);
   activeEventsRef.current = activeEvents;
-  const selectedEventIdRef = useRef(selectedEventId);
   selectedEventIdRef.current = selectedEventId;
   const recentlyClosedRef = useRef<Set<string>>(new Set());
   const staleCandidatesRef = useRef<Set<string>>(new Set());
   const ephemeralStreamRef = useRef(ephemeralStream);
   ephemeralStreamRef.current = ephemeralStream;
-  const hasLoadedActiveEventsRef = useRef(false);
 
   useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
 
@@ -347,6 +350,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         }
 
         if (closedId === selectedEventIdRef.current) {
+          selectedEventIdRef.current = null;
           setSelectedEventId(null);
           sessionStorage.removeItem('darwin:selectedEventId');
         }
