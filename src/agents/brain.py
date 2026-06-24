@@ -2304,6 +2304,7 @@ class Brain:
                 actor="brain",
                 action=action,
                 thoughts=f"Routing to {agent_name}: {task}",
+                result="Agent dispatched -- call wait_for_agent next. Do not call set_phase while the agent is working.",
                 selectedAgents=[agent_name],
                 taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
                 response_parts=response_parts,
