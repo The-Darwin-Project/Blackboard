@@ -10,5 +10,6 @@ export { useKargoStages, useKargoStagesInvalidation } from './useKargo';
 export { useMetrics } from './useMetrics';
 export { useObservations } from './useObservations';
 export { useActiveEvents, useEventDocument, useQueueInvalidation } from './useQueue';
+export { useResizablePanel } from './useResizablePanel';
 export { useService, useTopology } from './useTopology';
 export { useWebSocket } from './useWebSocket';

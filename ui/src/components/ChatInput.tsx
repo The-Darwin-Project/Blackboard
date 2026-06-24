@@ -7,9 +7,10 @@
  * Event-aware chat input with image paste support.
  * Handles both "reply to event" (WS) and "create new event" (REST) modes.
  */
-import { useState, useEffect, useCallback, useRef, type FormEvent, type KeyboardEvent } from 'react';
+import { useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Send, Loader2 } from 'lucide-react';
 import { useChat } from '../hooks';
+import { useResizablePanel } from '../hooks/useResizablePanel';
 import { resizeImage } from '../utils/imageResize';
 
 interface ChatInputProps {
@@ -25,9 +26,9 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [pendingImage, setPendingImage] = useState<string | null>(null);
   const { sendMessage, isPending } = useChat(wsSend);
-  const [formHeight, setFormHeight] = useState(DEFAULT_INPUT_HEIGHT);
-  const [isResizing, setIsResizing] = useState(false);
-  const formRef = useRef<HTMLFormElement>(null);
+  const { size: formHeight, isResizing, startResize, panelRef: formRef } = useResizablePanel({
+    direction: 'vertical', min: MIN_INPUT_HEIGHT, max: MAX_INPUT_HEIGHT, defaultSize: DEFAULT_INPUT_HEIGHT,
+  });
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -70,31 +71,6 @@ function ChatInput({ eventId, wsSend }: ChatInputProps) {
     }
   };
 
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      if (!formRef.current) return;
-      const rect = formRef.current.getBoundingClientRect();
-      const newH = rect.bottom - e.clientY;
-      setFormHeight(Math.min(MAX_INPUT_HEIGHT, Math.max(MIN_INPUT_HEIGHT, newH)));
-    };
-    const onUp = () => setIsResizing(false);
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
-    return () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, [isResizing]);
 
   return (
     <form ref={formRef} onSubmit={handleSubmit} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', height: formHeight }}>

@@ -4,8 +4,9 @@
 // 2. [Pattern]: Collapsed state shows compact status strip (bell count, WS status, version, user).
 // 3. [Pattern]: Expanded state shows ActivityStream on left, controls on right.
 // 4. [Pattern]: Receives bell, status, user props from Layout via OpsStateContext.
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp, Wifi, WifiOff, Activity, CheckCircle2, AlertCircle, User, LogOut, Square } from 'lucide-react';
+import { useResizablePanel } from '../../hooks/useResizablePanel';
 import ActivityStream from '../ActivityStream';
 import FlowHealthWidget from './FlowHealthWidget';
 import WaitingBell from '../WaitingBell';
@@ -34,12 +35,10 @@ export default function ActivityPanel() {
     window.addEventListener('darwin:toggleActivity', handler);
     return () => window.removeEventListener('darwin:toggleActivity', handler);
   }, []);
-  const [height, setHeight] = useState(() => {
-    const stored = localStorage.getItem('darwin:activityHeight');
-    return stored ? parseInt(stored) : DEFAULT_HEIGHT;
+  const { size: height, isResizing, startResize, panelRef } = useResizablePanel({
+    direction: 'vertical', min: 80, max: MAX_HEIGHT, defaultSize: DEFAULT_HEIGHT,
+    storageKey: 'darwin:activityHeight', enabled: expanded,
   });
-  const [isResizing, setIsResizing] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
 
   const isOnline = !isError;
   const statusColor = isOnline ? 'text-status-healthy' : 'text-status-critical';
@@ -50,34 +49,6 @@ export default function ActivityPanel() {
     localStorage.setItem('darwin:activityExpanded', String(expanded));
   }, [expanded]);
 
-  useEffect(() => {
-    if (expanded) localStorage.setItem('darwin:activityHeight', String(height));
-  }, [height, expanded]);
-
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      if (!panelRef.current) return;
-      const rect = panelRef.current.getBoundingClientRect();
-      setHeight(Math.min(MAX_HEIGHT, Math.max(80, rect.bottom - e.clientY)));
-    };
-    const onUp = () => setIsResizing(false);
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
-    return () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, [isResizing]);
 
   const ToggleIcon = expanded ? ChevronDown : ChevronUp;
 

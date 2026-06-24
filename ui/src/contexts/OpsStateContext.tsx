@@ -14,6 +14,9 @@
 // 6. [Constraint]: agentStreams NOT cleared on close or reconnect — memory-bounded, preserves review context.
 // 7. [Gotcha]: Auto-hotspot: only internal agents with isActive in agentStreams auto-promote.
 // 8. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
+// 9. [Pattern]: Inline ref assignment (lines 214-223) is intentional per React 19 docs
+//    for non-layout refs. useEffect alternative introduces timing gap that breaks WS
+//    callback stale-closure fix. React Strict Mode double-invoke is safe (idempotent).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -146,24 +149,27 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         setRegisteredAgents(agents);
         const ephemeral = agents.filter((a: AgentRegistryEntry) => a.ephemeral);
         const activeIds = activeEventsRef.current?.map(e => e.id);
+        if (activeIds) hasLoadedActiveEventsRef.current = true;
         setEphemeralAgents(
-          activeIds && activeIds.length > 0
-            ? ephemeral.filter(a =>
+          !activeIds && !hasLoadedActiveEventsRef.current
+            ? ephemeral
+            : ephemeral.filter(a =>
                 !a.bound_event_id
-                || activeIds.includes(a.bound_event_id)
+                || (activeIds ?? []).includes(a.bound_event_id)
                 || a.bound_event_id.startsWith('nw-sweep-')
               )
-            : ephemeral
         );
         setAgentStreams(prev => {
           const next = { ...prev };
+          let changed = false;
           for (const a of AGENTS) {
             const reg = agents.find((r: AgentRegistryEntry) => r.role === a && !r.ephemeral);
             if (reg && !reg.busy && next[a]?.isActive) {
               next[a] = { ...next[a], isActive: false };
+              changed = true;
             }
           }
-          return next;
+          return changed ? next : prev;
         });
       } catch { /* fire-and-forget */ }
     };
@@ -221,6 +227,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
   const staleCandidatesRef = useRef<Set<string>>(new Set());
   const ephemeralStreamRef = useRef(ephemeralStream);
   ephemeralStreamRef.current = ephemeralStream;
+  const hasLoadedActiveEventsRef = useRef(false);
 
   useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
 
@@ -301,7 +308,9 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
     } else if (msg.type === 'event_created' && msg.event_id) {
-      selectEvent(msg.event_id as string);
+      if (!selectedEventIdRef.current) {
+        selectEvent(msg.event_id as string);
+      }
       invalidateActive();
     } else if (msg.type === 'event_closed') {
       const closedId = msg.event_id as string;

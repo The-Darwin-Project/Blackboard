@@ -5,8 +5,8 @@
 // 3. [Pattern]: key={eventId} on ConversationFeed forces state reset on event switch.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage (darwin:chatPanelWidth).
 // 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
-import { useState, useEffect, useCallback, useRef } from 'react';
 import { X } from 'lucide-react';
+import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useOpsState } from '../../contexts/OpsStateContext';
 import { useEventDocument, useActiveEvents, useQueueInvalidation } from '../../hooks/useQueue';
 import { STATUS_COLORS } from '../../constants/colors';
@@ -42,45 +42,10 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
   const events = isDemoMode ? MOCK_EVENTS : activeEvents || [];
   const listEvt = events.find(e => e.id === eventId);
 
-  const [width, setWidth] = useState(() => {
-    const stored = localStorage.getItem('darwin:chatPanelWidth');
-    return stored ? (parseInt(stored, 10) || DEFAULT_WIDTH) : DEFAULT_WIDTH;
+  const { size: width, isResizing, startResize, panelRef } = useResizablePanel({
+    direction: 'horizontal', min: MIN_WIDTH, max: MAX_WIDTH, defaultSize: DEFAULT_WIDTH,
+    storageKey: 'darwin:chatPanelWidth',
   });
-  const [isResizing, setIsResizing] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    localStorage.setItem('darwin:chatPanelWidth', String(width));
-  }, [width]);
-
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      if (!panelRef.current) return;
-      const rect = panelRef.current.getBoundingClientRect();
-      setWidth(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, e.clientX - rect.left)));
-    };
-    const onUp = () => {
-      setIsResizing(false);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    return () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, [isResizing]);
 
   if (!isMockEvent && docLoading) {
     return (
@@ -172,9 +137,9 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
           <CollapsibleSection title="Details">
             <div className="space-y-1.5 text-[13px] text-text-muted">
               <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} size={18} />{doc.source}</span></div>
-              <div className="flex justify-between"><span>{(doc as any).subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
-              {(doc as any).event?.evidence?.triggered_by && (
-                <div className="flex justify-between"><span>User</span><span className="text-text-secondary">{(doc as any).event.evidence.triggered_by}</span></div>
+              <div className="flex justify-between"><span>{doc.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
+              {doc.event?.evidence?.triggered_by && (
+                <div className="flex justify-between"><span>User</span><span className="text-text-secondary">{doc.event.evidence.triggered_by}</span></div>
               )}
               <div className="flex justify-between"><span>Status</span>
                 <span className="px-1.5 py-0.5 rounded text-[12px] font-medium"

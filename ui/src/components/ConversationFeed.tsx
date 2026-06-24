@@ -15,12 +15,12 @@ import MarkdownViewer from './MarkdownViewer';
 import SourceIcon from './SourceIcon';
 import { DOMAIN_COLORS, SEVERITY_COLORS, PHASE_COLORS } from '../constants/colors';
 
-function eventToMarkdown(event: { id: string; source: string; status: string; service: string; event: { reason: string; evidence: unknown; timeDate: string }; conversation: ConversationTurn[] }): string {
+function eventToMarkdown(event: { id: string; source: string; status: string; service: string; subject_type?: string; event: { reason: string; evidence: unknown; timeDate: string }; conversation: ConversationTurn[] }): string {
   const evidence = event.event.evidence;
   const evidenceText = typeof evidence === 'string' ? evidence : (evidence as Record<string, string>)?.display_text || '';
   const lines: string[] = [
     `# Event: ${event.id}`, '',
-    `- **Source:** ${event.source}`, `- **${(event as any).subject_type === 'kargo_stage' ? 'Stage' : 'Service'}:** ${event.service}`,
+    `- **Source:** ${event.source}`, `- **${event.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}:** ${event.service}`,
     `- **Status:** ${event.status}`, `- **Reason:** ${event.event.reason}`,
     `- **Evidence:** ${evidenceText}`, `- **Time:** ${event.event.timeDate}`,
     '', '## Conversation', '',
@@ -166,7 +166,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             )}
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <SourceIcon source={selectedEvent.source} subjectType={(selectedEvent as any).subject_type} size={14} />
+            <SourceIcon source={selectedEvent.source} subjectType={selectedEvent.subject_type} size={14} />
             <span style={{ fontSize: 11, color: '#64748b' }}>{selectedEvent.source} | {selectedEvent.conversation.length} turns</span>
           </div>
         </div>

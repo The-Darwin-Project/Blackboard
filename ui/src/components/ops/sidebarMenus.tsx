@@ -9,6 +9,7 @@ import {
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
 } from 'lucide-react';
 import { ACTOR_COLORS } from '../../constants/colors';
+import { safeOpen } from '../../utils/safeOpen';
 import type { AgentRegistryEntry, KargoStageStatus, JiraMission } from '../../api/types';
 import type { HeadhunterTodo } from '../../api/client';
 import type { ContextMenuItem } from './ContextMenu';
@@ -46,7 +47,7 @@ export function eventMenuItems(
     { id: 'plan', label: 'Open Plan', icon: <ListChecks size={18} />, color: '#8b5cf6', onClick: () => selectEvent(evt.id) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     ...(mrUrl ? [
-      { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => window.open(mrUrl, '_blank') },
+      { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(mrUrl) },
       { id: 'copy-mr', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(mrUrl) },
       { id: 'sep-mr', label: '', icon: null, separator: true, onClick: () => {} },
     ] : []),
@@ -64,7 +65,7 @@ export function eventMenuItems(
 
 export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
   return [
-    { id: 'open', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => window.open(todo.target_url, '_blank') },
+    { id: 'open', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     { id: 'copy', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(todo.target_url) },
   ];
@@ -93,7 +94,7 @@ export function kargoStageMenuItems(
       onClick: () => navigator.clipboard.writeText(`${stage.stage}@${stage.project}`) },
     ...(stage.mr_url ? [
       { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b',
-        onClick: () => window.open(stage.mr_url, '_blank') },
+        onClick: () => safeOpen(stage.mr_url) },
     ] : []),
   ];
 }
@@ -109,7 +110,7 @@ export function jiraMissionMenuItems(
       onClick: () => mission.analysis && openContentTile(`${mission.key}: Analysis`, mission.analysis),
     },
     { id: 'open-jira', label: 'Open in Jira', icon: <ExternalLink size={18} />, color: '#2684FF',
-      onClick: () => window.open(mission.issue_url, '_blank') },
+      onClick: () => safeOpen(mission.issue_url) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     { id: 'approve', label: 'Approve (→ To Do)', icon: <CheckCircle2 size={18} />, color: '#22c55e',
       onClick: () => actions.approve(mission.key) },

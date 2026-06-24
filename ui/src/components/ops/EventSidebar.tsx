@@ -6,8 +6,9 @@
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
 // 5. [Pattern]: ctxMenu cleared on all collapse paths (collapseSidebar, toggleSidebar, chevron button).
 // 6. [Pattern]: ChatInput only visible when !selectedEventId (event chat lives in EventChatPanel).
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
@@ -19,6 +20,7 @@ import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
 import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
+import { safeOpen } from '../../utils/safeOpen';
 import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
 const DEV_MODE = import.meta.env.DEV;
@@ -28,6 +30,7 @@ import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 
 const MIN_WIDTH = 64;
 const DEFAULT_WIDTH = 500;
+const EXPANDED_MIN_WIDTH = 250;
 const MAX_WIDTH = 800;
 
 export default function EventSidebar() {
@@ -48,43 +51,12 @@ export default function EventSidebar() {
     };
   }, []);
 
-  const [width, setWidth] = useState(() => {
-    const stored = localStorage.getItem('darwin:sidebarWidth');
-    return stored ? parseInt(stored) : DEFAULT_WIDTH;
+  const { size: width, isResizing, startResize, panelRef: sidebarRef } = useResizablePanel({
+    direction: 'horizontal', min: EXPANDED_MIN_WIDTH, max: MAX_WIDTH, defaultSize: DEFAULT_WIDTH,
+    storageKey: 'darwin:sidebarWidth', enabled: !collapsed,
   });
-  const [isResizing, setIsResizing] = useState(false);
-  const sidebarRef = useRef<HTMLDivElement>(null);
 
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
-
-  useEffect(() => {
-    if (!collapsed) localStorage.setItem('darwin:sidebarWidth', String(width));
-  }, [width, collapsed]);
-
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const onMove = (e: MouseEvent) => {
-      if (!sidebarRef.current) return;
-      const rect = sidebarRef.current.getBoundingClientRect();
-      setWidth(Math.min(MAX_WIDTH, Math.max(DEFAULT_WIDTH, e.clientX - rect.left)));
-    };
-    const onUp = () => setIsResizing(false);
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    return () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, [isResizing]);
 
   // Data sources
   const { data: activeEvents } = useActiveEvents();
@@ -123,7 +95,6 @@ export default function EventSidebar() {
   const closedSource = isDemoMode ? MOCK_CLOSED_EVENTS : (closedEvents || []);
   const recentClosed = closedSource;
   const activeEvts = events.filter(e => e.status === 'active' || e.status === 'new');
-  const waitingEvts = events.filter(e => e.status === 'waiting_approval');
   const deferredEvts = events.filter(e => e.status === 'deferred');
   const approvalEvts = isDemoMode ? [] : (waitingApprovalEvents || []);
 
@@ -227,15 +198,6 @@ export default function EventSidebar() {
               countColor={events.length > 0 ? '#3b82f6' : '#64748b'}>
               {events.length === 0 && <EmptyLabel>No active events</EmptyLabel>}
               {activeEvts.map(evt => (
-                <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
-                  onClick={() => selectEvent(evt.id)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setCtxMenu({ x: e.clientX, y: e.clientY, items: eventMenuItems(evt, selectEvent, send, connected) });
-                  }}
-                />
-              ))}
-              {waitingEvts.map(evt => (
                 <EventNode key={evt.id} evt={evt} isSelected={selectedEventId === evt.id}
                   onClick={() => selectEvent(evt.id)}
                   onContextMenu={(e) => {
@@ -349,7 +311,7 @@ export default function EventSidebar() {
                   label={`!${todo.mr_iid} ${todo.mr_title?.slice(0, 30) || ''}`}
                   sublabel={todo.action.replace(/_/g, ' ')}
                   sublabelColor={todo.pipeline_status === 'failed' ? '#ef4444' : '#64748b'}
-                  onClick={() => window.open(todo.target_url, '_blank')}
+                  onClick={() => safeOpen(todo.target_url)}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setCtxMenu({ x: e.clientX, y: e.clientY, items: hhMenuItems(todo) });

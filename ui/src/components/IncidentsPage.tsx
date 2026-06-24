@@ -7,6 +7,7 @@
  */
 import { ExternalLink } from 'lucide-react';
 import { useIncidents } from '../hooks/useIncidents';
+import { safeOpen } from '../utils/safeOpen';
 import type { Incident } from '../api/client';
 
 const PRIORITY_COLORS: Record<string, string> = {
@@ -79,7 +80,7 @@ export default function IncidentsPage() {
             {incidents.map((row, i) => (
               <tr key={row.issue_key || i}
                 className="border-b border-border hover:bg-bg-tertiary cursor-pointer transition-colors"
-                onClick={() => row.sheet_url && window.open(row.sheet_url, '_blank')}>
+                onClick={() => safeOpen(row.sheet_url)}>
                 {COLUMNS.map(col => {
                   const val = row[col.key] ?? '';
                   const td = col.wrap
