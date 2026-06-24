@@ -2325,9 +2325,8 @@ return 0
                 except Exception:
                     pass
 
-            # Lazy import to avoid circular dependency (Brain imports blackboard)
-            from ..agents.brain import Brain
-            markdown = Brain._event_to_markdown(event, service_meta, mermaid)
+            from ..utils.event_markdown import event_to_markdown
+            markdown = event_to_markdown(event, service_meta, mermaid)
 
             # Add journal context
             journal = await self.get_journal(event.service)

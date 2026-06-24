@@ -3,7 +3,7 @@
 # 1. [Gotcha]: GET /closed/list MUST stay before GET /{event_id} to avoid "closed" matching as event_id.
 # 2. [Pattern]: POST /{event_id}/close uses blackboard.close_event() + explicit delete_slack_mapping() for Slack cleanup (Brain path uses _close_and_broadcast instead).
 # 3. [Gotcha]: Pre-existing route order issue -- closed/list is after /{event_id}. Works because /closed/list is 2 segments.
-# 4. [Pattern]: GET /{event_id}/report uses Brain._event_to_markdown (staticmethod) -- no Brain instance needed.
+# 4. [Pattern]: GET /{event_id}/report uses event_to_markdown from src/utils/event_markdown.
 # 5. [Policy]: GET /headhunter/pending drops todos whose MR target.state is merged or closed only; unknown/missing state kept.
 # 6. [Pattern]: list_active_events and list_closed_events include created_by_email for BFF multi-tenant filtering.
 # 7. [Pattern]: PATCH lessons/{id}/demote and verify endpoints read-modify-write Qdrant point (payload + re-embed). Legacy lessons missing channel/verification_count default to external/0.
@@ -373,8 +373,8 @@ async def get_event_report(
         except Exception:
             pass
 
-    from ..agents.brain import Brain
-    content = Brain._event_to_markdown(event, service_meta, mermaid)
+    from ..utils.event_markdown import event_to_markdown
+    content = event_to_markdown(event, service_meta, mermaid)
 
     # Add journal context
     journal = await blackboard.get_journal(event.service)
@@ -696,11 +696,11 @@ async def extract_lessons(
 
     event_reports: dict[str, str] = {}
     if req.event_ids:
-        from ..agents.brain import Brain
+        from ..utils.event_markdown import event_to_markdown
         for eid in req.event_ids[:10]:
             event = await blackboard.get_event(eid)
             if event:
-                event_reports[eid] = Brain._event_to_markdown(event)
+                event_reports[eid] = event_to_markdown(event)
 
     result = await archivist.extract_lessons(
         document=req.document,

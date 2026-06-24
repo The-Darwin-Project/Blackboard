@@ -13,9 +13,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
-from ..dependencies import get_blackboard, get_brain
+from ..dependencies import get_blackboard
 from ..models import ArchitectureEvent
 from ..state.blackboard import BlackboardState
+from ..utils.event_markdown import event_to_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,6 @@ async def list_events(
 async def get_event_document(
     event_id: str,
     blackboard: BlackboardState = Depends(get_blackboard),
-    brain=Depends(get_brain),
 ):
     """Return event markdown document for ephemeral agent bootstrap.
 
@@ -61,5 +61,5 @@ async def get_event_document(
             mermaid = await blackboard.generate_mermaid()
         except Exception:
             pass
-    content = brain._event_to_markdown(event, service_meta, mermaid)
+    content = event_to_markdown(event, service_meta, mermaid)
     return PlainTextResponse(content=content, media_type="text/markdown")
