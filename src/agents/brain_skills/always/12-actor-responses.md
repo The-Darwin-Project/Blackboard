@@ -28,7 +28,9 @@ graph TD
 
     WhoIsIt -->|jarvis| JarvisType{"action?"}
     JarvisType -->|evidence| JarvisEvidence["Cross-event intelligence.\nFactor into your next decision.\nNo response required."]
-    JarvisType -->|message| JarvisMsg["Event bridge: cross-event observation.\nCorrection before reflection.\nRespond with your reasoning."]
+    JarvisType -->|message| JarvisNewInfo{"new information\nor question?"}
+    JarvisNewInfo -->|yes| JarvisMsg["Cross-event observation.\nRespond with your reasoning.\nOne exchange, then done."]
+    JarvisNewInfo -->|"no (ack/echo)"| JarvisSilence["Acknowledgment or echo.\nNo response needed.\nSilence closes the exchange."]
     JarvisType -->|insight| JarvisInsight["Evidence-backed advisory.\nEvaluate against your context.\nIf you disagree, explain why."]
 
     WhoIsIt -->|aligner| AlignerTurn["New metric observation.\nFactor into current assessment.\nMay trigger reclassification."]
@@ -68,7 +70,7 @@ New aligner observations may warrant domain reclassification if the evidence shi
 - **Blackboard push**: The conversation is append-only and broadcast — when you append a turn, the working agent sees it automatically. This is why messaging works without interrupting the agent's flow.
 - **Huddle = blocked agent**: The agent cannot continue until you respond. Delay here directly extends the event's wall-clock time. Reply promptly with actionable guidance.
 - **JARVIS during dispatch**: JARVIS observes across events; you have full context of this one. Acknowledge cross-event intelligence but do not change course until the agent reports — the agent has information JARVIS does not (live cluster state, code context).
-- **JARVIS during wait states**: JARVIS observes your state via the pulse stream — he does not need conversational confirmation that you are waiting. Do not use `respond_jarvis` for courtesy exchanges, validation-seeking ("do you agree?"), or pleasantries while waiting -- whether deferred for a pipeline, waiting for an agent to finish, or parked on user input. Silence keeps you efficient. If JARVIS surfaces cross-event intelligence, factor it in silently. If JARVIS asks a direct question, answer once and return to waiting.
+- **JARVIS during wait states**: JARVIS observes your state via the pulse stream — he does not need conversational confirmation that you are waiting. Do not use `respond_to_jarvis` for courtesy exchanges, validation-seeking ("do you agree?"), or pleasantries while waiting — whether deferred for a pipeline, waiting for an agent to finish, or parked on user input. Silence keeps you efficient. If JARVIS surfaces cross-event intelligence, factor it in silently. If JARVIS asks a direct question, answer once and return to waiting. When JARVIS sends a bare acknowledgment ("Acknowledged", "Confirmed", "Understood") with no new information or question, the exchange is already closed — responding creates an infinite loop where each acknowledgment triggers another.
 - **JARVIS as event bridge**: JARVIS sees across events via the pulse stream. His
   observations carry cross-event intelligence you cannot access from within one event.
   Correction before reflection: resolve the immediate issue first, then explore

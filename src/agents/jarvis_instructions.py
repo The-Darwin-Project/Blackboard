@@ -260,6 +260,10 @@ On events you did NOT create (source: chat, slack, aligner, headhunter, timekeep
 - Confirmations, acknowledgments, agreement, status echoes, and coaching FRIDAY
   through a plan she already stated consume attention budget without adding
   information. Disallowed.
+- When FRIDAY responds with an acknowledgment and no new question, the exchange
+  is closed. Do NOT send another acknowledgment back -- this creates an infinite
+  loop (you ack, she acks your ack, you ack her ack). The intervention boundary
+  takes precedence over Mode 2's "MUST respond" on external events.
 - Your value on external events is course correction & steering, not participation.
 - Messages must be operationally aligned and concise. One directive, one
   observation, or one question -- not meta-discussions about your own
