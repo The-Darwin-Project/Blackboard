@@ -8,6 +8,7 @@
 //    Prevents oncall turn from deactivating the permanent agent tile.
 // 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
 //    Late progress after close is discarded via recentlyClosedRef guard.
+//    Auto-deselects selectedEventId if the closed event matches (clears sessionStorage).
 // 5. [Pattern]: Mark-and-sweep GC (60s interval, staleCandidatesRef): prune on second consecutive miss
 //    (120s grace). Stale computation + ref mutation outside setState (React Strict Mode safe).
 // 6. [Constraint]: agentStreams NOT cleared on close or reconnect — memory-bounded, preserves review context.
@@ -334,6 +335,11 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         if (recentlyClosedRef.current.size > 50) {
           const oldest = recentlyClosedRef.current.values().next().value as string | undefined;
           if (oldest !== undefined) recentlyClosedRef.current.delete(oldest);
+        }
+
+        if (closedId === selectedEventIdRef.current) {
+          setSelectedEventId(null);
+          sessionStorage.removeItem('darwin:selectedEventId');
         }
       }
     } else if (msg.type === 'event_status_changed') {

@@ -1,32 +1,29 @@
 // BlackBoard/ui/src/components/ops/EventSidebar.tsx
 // @ai-rules:
 // 1. [Pattern]: Persistent sidebar. Unified system state tree: Agents, Events, HH Queue, Schedules.
-// 2. [Pattern]: Accordion sections (Chat, Plan, Details) appear when an event is selected. ChatInput pinned bottom.
+// 2. [Pattern]: Event detail area extracted to EventChatPanel. Sidebar is tree-only + new-event ChatInput.
 // 3. [Pattern]: Right-click context menus per node type. Icons + color from ACTOR_COLORS and lucide-react.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
-// 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
+// 5. [Pattern]: ctxMenu cleared on all collapse paths (collapseSidebar, toggleSidebar, chevron button).
+// 6. [Pattern]: ChatInput only visible when !selectedEventId (event chat lives in EventChatPanel).
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useWaitingApprovalEvents, useEventDocument, useHeadhunterPending, useQueueInvalidation } from '../../hooks/useQueue';
+import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
-import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
+import { ACTOR_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
 import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
-import { MOCK_EVENTS, MOCK_EVENT_DOC, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
-import MockConversationFeed from './MockConversationFeed';
+import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
 const DEV_MODE = import.meta.env.DEV;
-import { ConversationFeed } from '../ConversationFeed';
-import { PlanProgress, usePlanState } from '../PlanProgress';
 import ChatInput from '../ChatInput';
 import CollapsibleSection from '../CollapsibleSection';
-import DeferCountdownBar from '../DeferCountdownBar';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 
 const MIN_WIDTH = 64;
@@ -34,12 +31,12 @@ const DEFAULT_WIDTH = 500;
 const MAX_WIDTH = 800;
 
 export default function EventSidebar() {
-  const { selectedEventId, selectEvent, deselectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsState();
+  const { selectedEventId, selectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsState();
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
-    const toggle = () => setCollapsed(c => !c);
-    const collapse = () => setCollapsed(true);
+    const toggle = () => { setCollapsed(c => !c); setCtxMenu(null); };
+    const collapse = () => { setCollapsed(true); setCtxMenu(null); };
     const expand = () => setCollapsed(false);
     window.addEventListener('darwin:toggleSidebar', toggle);
     window.addEventListener('darwin:collapseSidebar', collapse);
@@ -101,10 +98,6 @@ export default function EventSidebar() {
   const { data: jiraMissions = [] } = useJiraMissions();
   const jiraActions = useJiraActions();
   const { data: schedules = [] } = useSchedules();
-  const { invalidateActive } = useQueueInvalidation();
-
-  const { data: eventDoc, isLoading: docLoading, isError: docError } = useEventDocument(selectedEventId);
-  const { hasPlan, steps: planSteps } = usePlanState(eventDoc?.conversation || []);
 
   if (collapsed) {
     return (
@@ -133,7 +126,6 @@ export default function EventSidebar() {
   const waitingEvts = events.filter(e => e.status === 'waiting_approval');
   const deferredEvts = events.filter(e => e.status === 'deferred');
   const approvalEvts = isDemoMode ? [] : (waitingApprovalEvents || []);
-  const isMockEvent = isDemoMode && selectedEventId?.startsWith('evt-demo');
 
   return (
     <div ref={sidebarRef} className="flex-shrink-0 h-full bg-bg-secondary border-r border-border flex relative"
@@ -142,7 +134,7 @@ export default function EventSidebar() {
         {/* Header */}
         <div className="px-3 py-2 border-b border-border flex items-center justify-between flex-shrink-0">
           <span className="text-xs font-semibold text-text-secondary uppercase tracking-wider">System</span>
-          <button onClick={() => setCollapsed(true)}
+          <button onClick={() => { setCollapsed(true); setCtxMenu(null); }}
             className="p-1 rounded hover:bg-bg-tertiary text-text-muted hover:text-text-secondary transition-colors"
             title="Collapse sidebar">
             <ChevronLeft size={18} />
@@ -152,8 +144,7 @@ export default function EventSidebar() {
         {/* Tree + event detail area */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
           {/* System tree - constrained when event selected so chat gets remaining space */}
-          <div className={`overflow-auto ${selectedEventId ? 'flex-shrink-0' : 'flex-1'}`}
-            style={selectedEventId ? { maxHeight: '35vh' } : undefined}>
+          <div className="overflow-auto flex-1">
           <CollapsibleSection title="System" defaultOpen={!selectedEventId} badge={
             <span className="text-[12px] text-text-muted">{AGENTS.length + events.length + kargoStages.length + demoHH.length + schedules.length}</span>
           }>
@@ -386,124 +377,14 @@ export default function EventSidebar() {
           </CollapsibleSection>
           </div>
 
-          {/* Event detail area -- takes remaining vertical space */}
-          {selectedEventId && (() => {
-            if (isMockEvent) { /* fall through to render with MOCK_EVENT_DOC */ }
-            else if (docLoading) {
-              return (
-                <div className="flex-1 min-h-0 flex items-center justify-center border-t border-border">
-                  <div className="text-center text-text-muted text-sm animate-pulse">Loading event...</div>
-                </div>
-              );
-            } else if (docError || !eventDoc) {
-              return (
-                <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 border-t border-border px-4">
-                  <span className="text-text-muted text-sm">Event conversation unavailable</span>
-                  <span className="text-text-muted text-xs">Document may have been archived or cleaned up.</span>
-                  <button onClick={deselectEvent}
-                    className="mt-2 text-xs px-3 py-1 rounded border border-border hover:bg-bg-tertiary text-text-secondary transition-colors">
-                    Close
-                  </button>
-                </div>
-              );
-            }
-            const doc = isMockEvent ? MOCK_EVENT_DOC : eventDoc!;
-            const showPlan = hasPlan;
-            const listEvt = events.find(e => e.id === selectedEventId);
-            return (
-              <div className="flex-1 min-h-0 flex flex-col overflow-hidden border-t border-border">
-                <div className="flex-shrink-0 px-1.5 pt-2 pb-1">
-                <div className="flex flex-col gap-2 px-3 py-2 rounded-lg border"
-                  style={{ background: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}08`, borderColor: `${STATUS_COLORS[doc.status]?.border || '#3b82f6'}30` }}>
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    {isDemoMode && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold flex-shrink-0">DEMO</span>}
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[doc.status]?.border || '#3b82f6' }} />
-                    <SourceIcon source={doc.source} size={16} />
-                    <span className="text-[13px] font-mono truncate flex-1" style={{ color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>{selectedEventId}</span>
-                    <span className="text-[11px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
-                      style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>
-                      {STATUS_COLORS[doc.status]?.label || doc.status}
-                    </span>
-                    <button onClick={deselectEvent}
-                      className="flex items-center justify-center w-6 h-6 rounded border border-border hover:border-red-500/50 hover:bg-red-500/10 text-text-muted hover:text-red-400 transition-colors text-sm font-bold flex-shrink-0"
-                      title="Close event">&times;</button>
-                  </div>
-                  {doc.status === 'deferred' && (
-                    <DeferCountdownBar
-                      deferUntil={listEvt?.defer_until}
-                      deferStartedAt={listEvt?.defer_started_at}
-                      conversation={doc.conversation as import('../../api/types').ConversationTurn[]}
-                    />
-                  )}
-                </div>
-                </div>
-
-                {/* Chat -- flex-1, takes remaining vertical space with independent scroll */}
-                <CollapsibleSection title="Chat" defaultOpen flexContent badge={
-                  <span className="text-[12px] text-text-muted">{doc.conversation.length}</span>
-                }>
-                  {isMockEvent
-                    ? <MockConversationFeed />
-                    : <ConversationFeed eventId={selectedEventId} onInvalidateActive={invalidateActive} onOpenContentTile={openContentTile} />
-                  }
-                </CollapsibleSection>
-
-                {/* Plan + Details -- fixed at bottom with constrained height */}
-                <div className="flex-shrink-0 overflow-auto px-1.5 pb-1" style={{ maxHeight: '25vh' }}>
-                  {showPlan && (
-                    <CollapsibleSection title="Plan" badge={
-                      <span className="text-[12px] text-text-muted">{planSteps.filter(s => s.status === 'completed').length}/{planSteps.length}</span>
-                    }>
-                      <PlanProgress conversation={doc.conversation as import('../../api/types').ConversationTurn[]} />
-                    </CollapsibleSection>
-                  )}
-                  <CollapsibleSection title="Details">
-                    <div className="space-y-1.5 text-[13px] text-text-muted">
-                      <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} size={18} />{doc.source}</span></div>
-                      <div className="flex justify-between"><span>{(doc as any).subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
-                      {(doc as any).event?.evidence?.triggered_by && (
-                        <div className="flex justify-between"><span>User</span><span className="text-text-secondary">{(doc as any).event.evidence.triggered_by}</span></div>
-                      )}
-                      <div className="flex justify-between"><span>Status</span>
-                        <span className="px-1.5 py-0.5 rounded text-[12px] font-medium"
-                          style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#94a3b8' }}>
-                          {doc.status}
-                        </span>
-                      </div>
-                      <div className="flex justify-between"><span>Turns</span><span>{doc.conversation.length}</span></div>
-                    </div>
-                  </CollapsibleSection>
-                  {doc.sticky_notes && doc.sticky_notes.length > 0 && (
-                    <CollapsibleSection title="Sticky Notes" badge={
-                      <span className="text-[12px] text-yellow-400">{doc.sticky_notes.length}</span>
-                    }>
-                      <div className="space-y-1.5">
-                        {doc.sticky_notes.map((note: { timestamp: string; content: string; read: boolean }, i: number) => (
-                          <div key={i} className="text-[13px] rounded px-2 py-1.5"
-                            style={{
-                              borderLeft: `3px solid ${note.read ? '#475569' : '#facc15'}`,
-                              background: note.read ? '#1e293b40' : '#facc1508',
-                              opacity: note.read ? 0.6 : 1,
-                            }}>
-                            <div className="text-text-muted text-[11px] mb-0.5">
-                              {new Date(note.timestamp).toLocaleString()}
-                            </div>
-                            <div className="text-text-secondary">{note.content}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </CollapsibleSection>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
         </div>
 
-        {/* ChatInput pinned bottom -- always visible. Creates new events when no event selected, sends messages to active event when selected. */}
-        <div className="flex-shrink-0 border-t border-border">
-          <ChatInput eventId={selectedEventId} wsSend={connected ? send as (msg: object) => void : undefined} />
-        </div>
+        {/* ChatInput pinned bottom -- creates new events. Hidden when event selected (chat moves to EventChatPanel). */}
+        {!collapsed && !selectedEventId && (
+          <div className="flex-shrink-0 border-t border-border">
+            <ChatInput wsSend={connected ? send as (msg: object) => void : undefined} />
+          </div>
+        )}
       </div>
 
       {/* Resize handle */}

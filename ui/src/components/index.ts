@@ -19,6 +19,7 @@ export { default as ReportsPage } from './ReportsPage';
 export { default as AgentRegistryPanel } from './AgentRegistryPanel';
 export { default as StreamGrid } from './ops/StreamGrid';
 export { default as GridTile } from './ops/GridTile';
+export { default as EventChatPanel } from './ops/EventChatPanel';
 export { default as EventSidebar } from './ops/EventSidebar';
 export { default as ActivityPanel } from './ops/ActivityPanel';
 export { default as TopologyView } from './ops/TopologyView';

@@ -1,9 +1,11 @@
 // BlackBoard/ui/src/components/Layout.tsx
 // @ai-rules:
 // 1. [Pattern]: Operations Center shell -- header (logo + tabs only), persistent sidebar, main content (Outlet), bottom bar.
-// 2. [Pattern]: OpsStateProvider wraps children. All controls (bell, status, user, STOP, auto) live in ActivityPanel bottom bar.
-// 3. [Pattern]: Header tabs are route-based (useLocation + useNavigate). Active tab highlighted.
-// 4. [Gotcha]: darwin:selectEvent custom event listener bridges WaitingBell -> OpsStateContext.selectEvent.
+// 2. [Pattern]: Conditional EventChatPanel between sidebar and Outlet when selectedEventId is set.
+// 3. [Pattern]: Auto-collapse sidebar coordination via darwin:collapseSidebar/expandSidebar custom events.
+// 4. [Pattern]: Escape handler placed BEFORE altKey guard; includes isContentEditable check. Alt+] closes chat panel. ContextMenu has its own keydown Escape handler (both fire = "escape everything" UX).
+// 5. [Pattern]: min-width: 400px guard on main content prevents crush when sidebar + chat panel open.
+// 6. [Gotcha]: darwin:selectEvent custom event listener bridges WaitingBell -> OpsStateContext.selectEvent.
 /**
  * Darwin Operations Center layout.
  * Header: logo + tabs only (clean, minimal).
@@ -15,6 +17,7 @@ import { Activity } from 'lucide-react';
 import { OpsStateProvider, useOpsState } from '../contexts/OpsStateContext';
 import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
+import EventChatPanel from './ops/EventChatPanel';
 import ActivityPanel from './ops/ActivityPanel';
 
 const BASE_TABS = [
@@ -34,7 +37,7 @@ const BASE_TABS = [
 function LayoutInner() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { selectEvent } = useOpsState();
+  const { selectEvent, selectedEventId, deselectEvent } = useOpsState();
   const { data: config } = useConfig();
 
   const TABS = useMemo(() => {
@@ -61,20 +64,41 @@ function LayoutInner() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement;
-      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+      const inTextControl = active && (
+        active.tagName === 'INPUT'
+        || active.tagName === 'TEXTAREA'
+        || (active as HTMLElement)?.isContentEditable
+      );
+
+      if (e.key === 'Escape' && !e.altKey && !inTextControl && selectedEventId) {
+        e.preventDefault();
+        deselectEvent();
+        return;
+      }
+
+      if (inTextControl) return;
       if (!e.altKey) return;
+
       const tabIndex = parseInt(e.key);
       if (tabIndex >= 1 && tabIndex <= TABS.length) {
         e.preventDefault();
         navigate(TABS[tabIndex - 1].id);
       }
       if (e.key === '[') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleSidebar')); }
-      if (e.key === ']') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleSidebar')); }
+      if (e.key === ']') { e.preventDefault(); if (selectedEventId) deselectEvent(); }
       if (e.key === '`') { e.preventDefault(); window.dispatchEvent(new CustomEvent('darwin:toggleActivity')); }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [navigate]);
+  }, [navigate, selectedEventId, deselectEvent, TABS]);
+
+  useEffect(() => {
+    if (selectedEventId) {
+      window.dispatchEvent(new CustomEvent('darwin:collapseSidebar'));
+    } else {
+      window.dispatchEvent(new CustomEvent('darwin:expandSidebar'));
+    }
+  }, [selectedEventId]);
 
   return (
     <div className="h-screen bg-bg-primary flex flex-col overflow-hidden">
@@ -101,10 +125,13 @@ function LayoutInner() {
         </nav>
       </header>
 
-      {/* Body: Sidebar + Main Content */}
+      {/* Body: Sidebar + Chat Panel + Main Content */}
       <div className="flex flex-1 overflow-hidden min-h-0">
         <EventSidebar />
-        <main className="flex-1 overflow-hidden min-w-0 relative">
+        {selectedEventId && (
+          <EventChatPanel eventId={selectedEventId} onClose={deselectEvent} />
+        )}
+        <main className="flex-1 overflow-hidden min-w-0 relative" style={{ minWidth: 400 }}>
           <div className="absolute inset-0 overflow-hidden">
             <Outlet />
           </div>
