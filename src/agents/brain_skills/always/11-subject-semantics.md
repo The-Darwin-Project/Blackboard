@@ -1,7 +1,7 @@
 ---
 description: "How to interpret the event's subject_type and use the right context"
 tags: [subject, service, kargo, jira, context]
-tools: [lookup_service]
+tools: [lookup_service, refresh_kargo_context]
 ---
 # Subject Types
 
@@ -28,8 +28,17 @@ is already in front of you; service lookup will not find deployment metadata.
 ### kargo_stage
 
 The event targets a Kargo promotion stage. The prompt shows `Kargo Stage:`
-with project, promotion ID, phase, and failed step. Kargo context refresh
-provides live stage state. Service lookup is not applicable.
+with project, promotion ID, phase, and failed step.
+
+Kargo stages are subscription-capable resources — the Brain has a native
+mechanism to read current stage state and register background subscriptions
+that wake the event on state change. This means status checks ("has this
+promotion step finished?") never require agent dispatch. Dispatching an
+agent to answer a state question that the native refresh can answer wastes
+a sidecar slot and violates the principle that agent dispatch is for work,
+not polling.
+
+Service lookup is not applicable for Kargo stages.
 
 ### jira
 
