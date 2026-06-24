@@ -38,9 +38,17 @@ env/
 .DS_Store
 Thumbs.db
 
+# Node.js
+node_modules/
+
 # React UI (production build)
-ui/node_modules/
 ui/dist/
+
+# Scratch/debug files
+test.js
+test.html
+test-react-keys.js
+puppeteer_test.js
 
 # Logs
 *.log
