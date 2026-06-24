@@ -1964,11 +1964,11 @@ class Brain:
 
         context_text = header
 
-        # -- Pre-scan: find last eligible tool_result for skill pointer injection --
+        # -- Pre-scan: find last eligible tool_result/route for skill pointer injection --
         target_skill_turn = None
         if self._skill_loader:
             for t in reversed(event.conversation):
-                if (t.actor == "brain" and t.action == "tool_result"
+                if (t.actor == "brain" and t.action in ("tool_result", "route")
                         and t.waitingFor
                         and self._skill_loader.get_tool_skills(t.waitingFor)):
                     target_skill_turn = t
@@ -2303,8 +2303,8 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action=action,
+                waitingFor="select_agent",
                 thoughts=f"Routing to {agent_name}: {task}",
-                result="Agent dispatched -- call wait_for_agent next. Do not call set_phase while the agent is working.",
                 selectedAgents=[agent_name],
                 taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
                 response_parts=response_parts,
