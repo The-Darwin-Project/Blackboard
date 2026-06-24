@@ -5187,6 +5187,33 @@ class Brain:
         self._hold_watch_events.pop(event_id, None)
         self._hold_watch_park_time.pop(event_id, None)
 
+    def clear_jarvis_wait(self, event_id: str) -> None:
+        """Public facade for _clear_jarvis_wait. Satisfies BrainLifecyclePort."""
+        self._clear_jarvis_wait(event_id)
+
+    # -- BrainIntrospectionPort methods --
+
+    def is_task_running(self, event_id: str) -> bool:
+        """True if an agent task is actively running for this event."""
+        task = self._active_tasks.get(event_id)
+        return task is not None and not task.done()
+
+    def last_processed_time(self, event_id: str) -> float:
+        """Timestamp of last processing for this event. Returns current time if unknown."""
+        return self._last_processed.get(event_id, time.time())
+
+    def has_jarvis_waiters(self) -> bool:
+        """True if any event is currently waiting for JARVIS."""
+        return bool(self._waiting_for_jarvis)
+
+    def pending_jarvis_event_ids(self) -> list[str]:
+        """Event IDs currently waiting for JARVIS response."""
+        return list(self._waiting_for_jarvis.keys())
+
+    def get_skill_loader(self):
+        """Access the BrainSkillLoader instance (may be None if loading failed)."""
+        return self._skill_loader
+
     async def close_jarvis_meta_event(self, event_id: str) -> None:
         """Called by adapter on stream teardown. Routes to _close_and_broadcast."""
         try:
