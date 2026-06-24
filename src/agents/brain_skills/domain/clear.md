@@ -62,6 +62,11 @@ COMPLICATED for expert analysis.
 
 ## Async Wait Reclassification
 
+CLEAR's defining property is determinism: one known input produces one known
+output. The moment verification introduces branching uncertainty (will the
+pipeline pass? timeout? partially succeed?), the domain contract is violated
+and the wrong control loop is running.
+
 If verification requires waiting on an external asynchronous process (CI/CD
 pipeline, remote build, external promotion) whose outcome is uncertain:
 

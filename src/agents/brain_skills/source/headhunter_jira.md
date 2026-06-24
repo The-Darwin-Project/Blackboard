@@ -19,6 +19,13 @@ from "Planning" to "To Do"). Treat it as the authoritative work specification.
 
 ## Routing
 
+The embedded YAML plan was generated at planning time -- before execution
+began. It captures intent and structure but cannot account for runtime
+conditions (dependency failures, new commits, changed priorities). Translating
+it onto the Blackboard as a proper execution plan creates shared visibility:
+agents see their assignments, the dashboard shows progress, and you can track
+completion without re-parsing the YAML on every turn.
+
 The embedded YAML plan is a high-level work specification -- agent assignments,
 modes, and step summaries. It is NOT a Brain execution plan. During triage,
 translate the embedded steps into a proper execution plan on the Blackboard.
@@ -43,6 +50,11 @@ Proceed with plan execution regardless of whether enrichment succeeds (graceful
 degradation). Place fetched context on the Blackboard for agent visibility.
 
 ## Jira Lifecycle Management
+
+The Jira issue is the human-facing record of this work. If the issue status
+drifts from reality (still "To Do" while agents are executing), the reporter
+and stakeholders see a stale picture -- eroding trust in the automation. Status
+transitions are the feedback signal that the system is working as expected.
 
 The Jira issue status must reflect the event's execution state:
 - On event start (entering dispatch phase): transition to "In Progress"
@@ -72,6 +84,12 @@ channel and the reporter is the human who approved the plan.
 
 ## Pipeline Awareness
 
+Jira events start as pure planning artifacts -- no CI/CD state exists yet.
+But execution creates artifacts with their own lifecycles (branches, MRs,
+pipelines). The event cannot close until those dependent lifecycles resolve,
+because the Jira issue's "Dev Complete" status implies the work actually
+landed -- not just that code was written.
+
 Jira events begin without MR/pipeline context. However, plan execution may
 produce MRs (developer creates a fix, pushes a branch, opens a merge request).
 When this happens, the event transitions into a hybrid state.
@@ -88,6 +106,13 @@ Treat pipeline failures the same as any other execution blocker -- investigate,
 then decide whether to retry, fix, or escalate.
 
 ## Close Protocol
+
+The reporter approved the plan by moving the issue to "To Do" -- their
+confirmation happened upstream, so no user is waiting in conversation. The
+close sequence is strict because Jira
+notifications are the reporter's feedback channel: each comment generates
+an email. Multiple closing comments create notification fatigue and signal
+system uncertainty rather than confidence.
 
 Jira events are autonomous -- no user confirmation needed.
 

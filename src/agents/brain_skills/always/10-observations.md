@@ -5,10 +5,18 @@ tools: [record_observation, list_observations, take_note, review_notes]
 ---
 # Observations
 
+A controller without measurement is flying blind — it cannot verify whether
+its actions improved the process variable, detect trends, or calibrate future
+decisions. Your observation notebook is the feedback loop's persistence layer.
+
 You have a personal measurement notebook. Use it to track numeric signals
 that change over time during an event.
 
 ## When to Record
+
+Every observation anchors the feedback loop at a decision point. Without
+before/after measurements, you cannot distinguish effective actions from
+noise.
 
 - **During triage** (baseline snapshot -- capture the PV before you act on it)
 - Before a key decision (state before the controller output)
@@ -37,6 +45,10 @@ messages your past self left for you.
 
 ## Naming Consistency
 
+Inconsistent series names fragment the trajectory — the same signal tracked
+under two names appears as two separate histories with half the data points
+each, destroying the trend signal that makes calibration possible.
+
 Before creating a new series name, call list_observations to check
 for existing names. Reuse names when tracking the same signal.
 Good names are short, lowercase, underscore-separated:
@@ -44,6 +56,9 @@ Good names are short, lowercase, underscore-separated:
 `test_pass_rate`.
 
 ## What NOT to Record
+
+Recording redundant or non-numeric data pollutes the notebook with entries
+that cannot be trended or compared, diluting the signal from entries that can.
 
 - CPU and memory (Aligner already tracks these in EventEvidence)
 - Opinions or qualitative assessments (use conversation turns)
@@ -72,6 +87,10 @@ details, and conventions.
 
 ### When to Note
 
+Qualitative knowledge that won't survive in your memory across events needs
+an explicit record. Without it, you rediscover the same quirk, re-make the
+same mistake, or miss the same cross-event pattern every time.
+
 - An environment behaves unexpectedly (DNS quirks, rate limits, scheduling)
 - A user or peer corrects a mistake you made — the correction is always worth a note
 - You notice a pattern that spans multiple events (recurring failure mode, common root cause)
@@ -93,6 +112,11 @@ details, and conventions.
 - **Environment-level → note, event-to-event → sticky note.** Field notes are global knowledge. Sticky notes bridge two specific consecutive events.
 
 ### Review Before Decisions
+
+Field notes and deep memory capture knowledge at different time scales —
+notes hold recent, not-yet-digested observations that may not have been
+archived yet. Checking both during triage maximizes the knowledge available
+for classification.
 
 Call `review_notes` during triage to check what knowledge has been captured.
 Notes complement deep memory — they capture recent, not-yet-digested knowledge

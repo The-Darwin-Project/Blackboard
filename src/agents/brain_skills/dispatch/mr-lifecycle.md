@@ -4,6 +4,8 @@ tags: [headhunter, mr, lifecycle]
 ---
 # MR/PR Lifecycle Awareness
 
+An MR/PR is a moving target — its state can change between event creation and dispatch. Acting on stale state (retesting an already-merged MR, investigating a closed one, dispatching while a pipeline is mid-run) wastes dispatch cycles on work that either no longer matters or will produce misleading results.
+
 Source control events track MR/PR lifecycles. The MR/PR may have progressed since
 the event was created -- it could already be merged, the pipeline may have
 passed, or conflicts may have appeared. Refresh external state (budget-gated,
@@ -21,6 +23,8 @@ MR/PR open + pipeline failed means the pipeline needs attention. The embedded
 plan (Bot Instructions) describes the specific actions for this MR.
 
 ## Investigation Before Action
+
+Bot Instructions describe the intended happy-path workflow, but they were written before the failure occurred — they cannot know whether this specific failure is transient or deterministic. Only the failure logs carry that signal. A blind retry on a deterministic failure wastes a full pipeline cycle (often 30-60 minutes) and delays actual resolution by exactly that duration.
 
 When an MR/PR pipeline has failed, the failure logs must be analyzed BEFORE
 any retry, retest, or remediation action -- even when Bot Instructions
@@ -41,10 +45,9 @@ Sequence:
    signature → do NOT retest. Close or escalate based on the Bot Instructions
    failure path.
 
-A blind retry on a deterministic failure wastes a full pipeline cycle and
-delays actual resolution.
-
 ## MR/PR Comment Retrieval
+
+CI bots, reviewers, and prior agents leave context in MR/PR comments that doesn't appear in the pipeline API response — test result summaries, approval status, known issues flagged by the author, and prior fix attempts. Operating without this context means the investigating agent may propose a fix that was already tried and failed, or miss approval blockers invisible in pipeline status alone.
 
 CI bot output, review feedback, and prior action history live primarily in
 MR/PR comments. When investigating or executing on an MR/PR event:
@@ -59,6 +62,8 @@ Skipping comment retrieval means operating on incomplete evidence.
 
 ## MR/PR Holistic State
 
+Pipeline failure is the loudest signal, but it's not the only reason an MR/PR is blocked. Investigating only the pipeline while ignoring merge conflicts or stale rebases leads to a fix that passes CI but still can't merge — the agent's work was correct but incomplete. A recent merge to the target branch may have already introduced the fix that this MR/PR needs.
+
 A pipeline failure is not the only reason an MR/PR is blocked. An MR/PR can also be
 blocked by merge conflicts, missing rebase against the target branch, or
 outdated dependencies. A recent merge to the target branch may have already
@@ -69,6 +74,8 @@ merge conflicts, rebase state, and recent merges to the target branch that
 may resolve the issue without a code change.
 
 ## Bot MR Merge Conflicts
+
+Bot-authored MRs are generated artifacts — their content comes from automated processes (Kargo stages, submodule updaters, release pipelines), not human authoring. Merge conflicts in generated content can't be resolved by an agent editing individual lines; the bot needs to regenerate from its source data against the updated target branch. Dispatching an agent to resolve a bot's conflict is the wrong abstraction level.
 
 Merge conflicts on bot-authored MRs are not investigable -- they resolve
 by bot regeneration or rebase, not by human or agent conflict resolution.
@@ -86,6 +93,8 @@ and notify the maintainer. When no prior cadence data exists, give the bot
 one deferral window before treating it as stale.
 
 ## MR/PR Pipeline Fix Principle
+
+The entire purpose of an MR/PR pipeline is to validate changes before they reach main. Merging an untested fix to main first and then rebasing the MR defeats this validation gate — main now contains a change that was never pipeline-validated, and the MR pipeline result no longer tests the original change in isolation.
 
 When an MR/PR pipeline fails and a fix is needed (e.g., Dockerfile update, dependency bump):
 

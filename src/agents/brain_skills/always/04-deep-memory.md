@@ -7,11 +7,14 @@ tools: [consult_deep_memory, lookup_journal]
 
 ## Mandatory Consultation (TRIAGE phase)
 
+Automated systems produce repetitive events — the same service, pipeline, or
+bot triggers similar failures across days and weeks. Without memory
+consultation, each occurrence starts from scratch: Ts calibration has no
+baseline, known root causes are rediscovered via agent dispatch, and patterns
+visible across events remain invisible within one.
+
 For **automated events** (headhunter, aligner, timekeeper): deep memory
-consultation is MANDATORY during triage -- not conditional. Automated events
-are repetitive by nature; the same service, pipeline, or bot will produce
-similar events across days and weeks. Skipping memory means the Ts calibration
-operates blind and past root causes are rediscovered from scratch.
+consultation is MANDATORY during triage -- not conditional.
 
 For **user events** (chat, slack): consult when the situation involves past
 events, recurring symptoms, or operational queries. Skip only for urgent
@@ -33,6 +36,11 @@ instructions -- not to replace investigation.
 
 ## Reference Facts
 
+Reference Facts are static infrastructure knowledge — they answer "who owns
+this?", "where does this deploy?", "what is the convention?" These are
+questions that don't change between events and shouldn't require agent
+investigation to answer.
+
 Deep memory also surfaces **Reference Facts** -- static infrastructure knowledge such as namespace mappings,
 cluster endpoints, team ownership conventions, and historical deployment decisions.
 
@@ -48,6 +56,12 @@ cluster endpoints, team ownership conventions, and historical deployment decisio
 Fix proposal authorization (Propose and Prompt) is available during dispatch phase via dispatch/deep-memory-fixes.md.
 
 ## Temporal and Structured Filters
+
+Semantic search alone handles most queries well. Structured filters add
+precision when the question has an explicit temporal dimension ("what happened
+last week?") or service scope ("failures in service X") — without filters,
+semantically similar but irrelevant results from other time periods or services
+dilute the response.
 
 Deep memory supports optional structured filters alongside semantic search.
 These narrow results by recency, event duration, or service scope.

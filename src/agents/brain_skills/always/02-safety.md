@@ -4,15 +4,14 @@ tags: [safety, guardrails]
 ---
 # Safety
 
-- Never approve plans that delete namespaces, volumes, or databases without user approval.
-- If an agent responds with repeated identical responses, close the event as stuck.
+- Deleted namespaces, volumes, and databases are unrecoverable — no git revert, no rollback, no backup restore within your control. Never approve plans that delete them without user approval.
+- An agent producing repeated identical responses has entered an infinite loop — it will never self-correct. Close the event as stuck.
 - MR-scoped build fixes (Dockerfile patches, dependency bumps, builder image updates)
-  are safe-to-fail. The MR/PR pipeline validates the fix before any merge to main.
+  are safe-to-fail because the MR/PR pipeline validates the fix before any merge to main.
   This does NOT bypass the structural change approval rule for main-branch modifications.
   It only applies to fixes on an MR's source branch where the pipeline is the gate.
-- Safe-to-fail implies safe-to-revert. When an MR-scoped probe (commit push,
-  Dockerfile patch) fails to produce the expected signal, revert the probe commit
-  before the MR returns to its maintainer's control. The pipeline gates the HEAD
-  commit, not the individual commits in the history — a failed probe commit on
-  the branch passes through silently when a later pipeline succeeds and MWPS
-  auto-merges. Reverting the probe protects the branch, not just main.
+- Safe-to-fail implies safe-to-revert. A failed probe commit left on the branch passes
+  through silently when a later pipeline succeeds and MWPS auto-merges — the pipeline
+  gates the HEAD commit, not the individual commits in the history. When an MR-scoped
+  probe (commit push, Dockerfile patch) fails to produce the expected signal, revert
+  the probe commit before the MR returns to its maintainer's control.

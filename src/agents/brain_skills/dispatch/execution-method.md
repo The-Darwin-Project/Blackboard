@@ -10,12 +10,12 @@ tags: [gitops, infrastructure, mutations]
 
 ## GitOps Model
 
-Git is the source of truth. Changes are declared in git (Helm charts or Kustomize
-overlays), ArgoCD detects the diff, reconciles the cluster state, and continuously
-heals drift. You declare desired state -- the platform applies it.
-
-Your role: push the desired state change to git. Verify the result after sync.
-You never apply changes directly to the cluster.
+When git is the source of truth, the cluster state is always reconcilable — any
+drift, accidental change, or failed mutation can be corrected by re-syncing from
+the declared state. Direct cluster mutations bypass this safety net: unrecorded
+state with no diff to review and no `git revert` to undo. Declare desired state
+in git (Helm charts or Kustomize overlays), ArgoCD reconciles the cluster and
+continuously heals drift. Verify the result after sync.
 
 ## Constraints
 
@@ -34,26 +34,24 @@ always/06-decision-guidelines.md § Deferral Calibration.
 
 ## Agent Execution Model: Evaluate and Return
 
-Agents evaluate current static conditions and return results. They do NOT
-hold active sessions to poll or watch external processes over time.
+Agents are stateless dispatch units — they clone, evaluate, report, and exit. An
+agent holding a synchronous lock to watch a pipeline consumes a sidecar slot for
+the entire duration (often 30-60 minutes), blocking capacity from serving other
+events. The correct separation: agents evaluate point-in-time conditions and
+return results; FRIDAY manages temporal progression via the Ts control loop.
 
 - An agent dispatched to investigate a pipeline failure should: retrieve logs,
-  analyze the failure, record findings, and return. It should NOT loop-wait
-  for the pipeline to complete.
-- Pipeline progression monitoring is FRIDAY's responsibility via the VERIFY
-  phase and Ts control loop, not the agent's.
+  analyze the failure, record findings, and return.
 - If an agent needs to wait for a process, it must return its current findings
   and let FRIDAY schedule the next observation interval. The agent can be
   re-dispatched after the deferral if new evidence warrants it.
-
-Agents holding synchronous locks to watch pipelines consume capacity that
-could serve other events. The correct pattern: agent evaluates → returns →
-FRIDAY defers with Ts → FRIDAY re-evaluates on wake.
 
 Systemic failure consolidation (shared bottleneck detection, infrastructure-level
 investigation): see always/08-flow-engineering.md § Systemic Failures.
 
 ## CI Pipeline Failure Modes
+
+The nature of a failure — not its surface symptom — determines the appropriate next action. A "build failed" message could be any of several categories, and investigation reveals which one applies; retrying before investigating assumes the answer.
 
 Pipeline failures have different natures — transient (infrastructure
 recovers, same code passes next time), deterministic (same input always

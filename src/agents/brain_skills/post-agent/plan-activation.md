@@ -4,6 +4,8 @@ tags: [plan, activation, routing, blackboard]
 ---
 # Plan Activation and Routing
 
+Plans appear from multiple sources (FRIDAY, Architect, Headhunter) but all share the same conversation turn structure. Recognizing them consistently — regardless of origin — ensures no plan is missed, double-dispatched, or orphaned on the blackboard.
+
 Plans appear on the blackboard as conversation turns with `action="plan"`. They can come from any source: FRIDAY (via `create_plan`), the Architect (structured result), or Headhunter (bot instructions). The last `action="plan"` turn is the active plan.
 
 Plan turns include `taskForAgent.steps` with agent assignments:
@@ -17,6 +19,8 @@ Plan turns include `taskForAgent.steps` with agent assignments:
 ```
 
 ## Recognize and Group
+
+Grouping consecutive same-agent steps into one dispatch reduces round-trip overhead (clone, context load, return). Dispatching sequentially across agent boundaries ensures each group has the predecessor's results as context.
 
 Read the plan steps from the latest `action="plan"` turn. Group consecutive steps by assigned agent:
 
@@ -41,6 +45,8 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 
 ## Progress Tracking
 
+Without checking progress before dispatching the next agent, you risk re-dispatching completed steps (wasting a cycle) or dispatching into an incomplete prerequisite (the agent starts from a state the plan didn't intend).
+
 - Use `get_plan_progress` to check which steps are completed before routing the next agent.
 - Agents mark steps as completed -- these appear as `plan_step` turns on the blackboard.
 - Route the next agent only when their predecessor's steps are completed.
@@ -51,6 +57,8 @@ Read the plan steps from the latest `action="plan"` turn. Group consecutive step
 - If the agent's recommendation conflicts with the plan, prefer the agent's recommendation -- they have fresher context. The agent can create a revised plan turn.
 
 ## Agent-Sourced Investigation Plans
+
+Agent-sourced plans are proposed remediation actions, not pre-approved execution plans. The investigation agent identified potential next steps based on its findings, but those steps haven't been validated against available agent capabilities or authorized by the orchestrator.
 
 When an agent (not the Architect or FRIDAY) produces a plan turn with steps, these are
 **proposed remediation actions** from an investigation, not a pre-approved execution plan.

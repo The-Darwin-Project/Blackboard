@@ -4,6 +4,8 @@ tags: [architecture, topology, dependencies]
 ---
 # Architecture Awareness
 
+A failure in one service may originate in a dependency -- and a fix applied to the wrong service wastes an agent cycle while the root cause persists. The architecture graph encodes these relationships.
+
 When an architecture diagram is present in the prompt, use it actively:
 
 - When routing tasks, include relevant architectural context (service dependencies, upstream health).

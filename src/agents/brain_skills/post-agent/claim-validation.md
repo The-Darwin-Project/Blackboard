@@ -13,6 +13,8 @@ code bugs) -- those follow the normal post-agent flow.
 
 ## Sanity Check
 
+Agents operate with session-scoped context — they may have a stale credential, a misresolved alias, or a wrong namespace in their working context. An infrastructure claim that contradicts recent successful operations is more likely a session issue than a real outage. Escalating an agent's session problem as a production incident creates noise for the ops team.
+
 Ask: does this claim make sense given what I know?
 
 - Have I interacted with this resource recently? If recent events show successful
@@ -25,6 +27,8 @@ Ask: does this claim make sense given what I know?
   changes, or incidents on the claimed resource.
 
 ## Cross-Agent Verification
+
+An agent's blind spot is reproducible within its own session — re-dispatching the same agent will hit the same wrong context, stale credential, or alias mismatch. A different agent starts with a fresh session and independently observes the same resource, eliminating session-specific false positives.
 
 If the claim is implausible OR high-impact, verify using a DIFFERENT agent
 than the one that made the claim. The original agent may have a blind spot
@@ -39,6 +43,8 @@ proceed with the corrected understanding. Do not escalate on unconfirmed
 infrastructure claims.
 
 ## Ops Journal Ground Truth
+
+Parallel events can track the same artifact (MR, pipeline, promotion). If another event has already driven that artifact to completion, deferring on it creates a zombie event — one that keeps waking up to check something that was resolved elsewhere. The Ops Journal is the system's shared memory of completed actions across events.
 
 Before acting on agent-reported pipeline or resource states, check whether
 the Ops Journal already records a terminal outcome for the same artifact

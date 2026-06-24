@@ -6,11 +6,15 @@ tags: [dispatch, coordination, developer, qe]
 
 ## Task Decomposition (before dispatching)
 
+Large dispatches that bundle multiple steps create congestion collapse — if step 3 fails, the work from steps 1-2 is entangled and difficult to evaluate independently. Breaking work into the smallest independently-verifiable batch means each dispatch produces a clear signal: it worked or it didn't. This is the continuous delivery principle applied to agent dispatch.
+
 Before dispatching a multi-step task, ask: "Can this be broken into smaller independently-verifiable batches?" If yes, dispatch the first batch only. Evaluate the result. Then dispatch the next. This avoids congestion collapse when agents are loaded and reduces cycle time without adding capacity.
 
 When dispatching work to Developer or QE, use these rules.
 
 ## Developer only
+
+For tasks that don't produce new application behavior — status checks, read-only investigation, small config changes — sending both Developer and QE wastes a verification cycle on work that has no behavioral surface to verify.
 
 Use when the task is:
 
@@ -21,6 +25,8 @@ Use when the task is:
 
 ## QE only
 
+QE is purpose-built for verification and quality validation. When the implementation already exists and the question is "does it work correctly?", QE provides the answer without the overhead of a Developer dispatch.
+
 Use when the task is:
 
 - Writing tests only, no implementation changes
@@ -29,6 +35,8 @@ Use when the task is:
 - Running existing test suites against a branch
 
 ## Developer And QE (sequential dispatch)
+
+Implementation without verification is an open feedback loop — you shipped a change but have no signal about whether it works. Any task that creates new application behavior (code, fixes, features) needs verification to close the loop. The cost of shipping unverified work exceeds the cost of one QE dispatch cycle.
 
 Use when the task requires:
 
@@ -61,6 +69,8 @@ findings, then dispatch Developer to implement approved fixes.
 
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
+An investigator identifies the bug class; an architect identifies the exact code. These are different capabilities. Skipping the architect verification step means the Developer receives a problem description that may reference wrong file paths, miss related logic, or underestimate blast radius — producing a fix that addresses the symptom but not the full scope of the issue.
+
 When investigation (sysadmin or oncall) produces a **code fix proposal**:
 
 1. **Architect** (mode=investigate) -- verify findings against the actual codebase:
@@ -79,6 +89,8 @@ checkouts cause line number discrepancies between investigation and implementati
 
 ## Post-Implementation Pipeline (after Developer merge)
 
+A merged commit is not a deployed fix — it's a change sitting in a git repository. Until the CI/CD pipeline builds, pushes, and rolls out the new image, the production system is unchanged. Skipping deployment validation means closing the event based on a git state, not a cluster state.
+
 When a Developer completes an implementation that resulted in a code merge:
 
 1. **SysAdmin** (mode=investigate) -- validate deployment: confirm new image build, GitOps tag update, pod rollout, service health
@@ -90,6 +102,8 @@ Dispatch method (route vs message) decision framework: see always/01-function-ru
 § Route vs Message.
 
 ## Plan Before Routing (COMPLICATED/COMPLEX only)
+
+A plan chalked on the blackboard makes the execution order visible — to agents who can reference it, to the dashboard that tracks progress, and to yourself when evaluating whether the sequence is proceeding as intended. Without a plan, multi-agent sequences are ad-hoc decisions with no record of intent.
 
 For COMPLICATED or COMPLEX events, create a plan before routing agents to
 chalk your intended agent sequence on the blackboard. This makes the

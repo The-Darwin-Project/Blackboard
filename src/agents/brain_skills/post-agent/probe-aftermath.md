@@ -17,6 +17,8 @@ safe-to-forget, and the artifact ships silently when a later pipeline succeeds.
 
 ## Obligation Lifecycle
 
+Every probe that modifies a mutable artifact creates a state that needs tracking — the artifact exists on the branch regardless of whether the probe succeeded or failed. Without explicit lifecycle tracking, probe artifacts accumulate silently and ship when a later pipeline succeeds.
+
 1. **Created**: When an agent returns results confirming it pushed a commit,
    changed a file, or created a resource as part of a probe. The conversation
    turn from the dispatch contains the artifact details (commit SHA, branch,
@@ -37,6 +39,8 @@ safe-to-forget, and the artifact ships silently when a later pipeline succeeds.
    know what probe artifacts remain on the branch.
 
 ## When to Clean Up
+
+The four transition points below are the only moments when the obligation state could change. Checking at each transition prevents the obligation from becoming orphaned — once you leave COMPLEX domain or close the event, there is no mechanism to rediscover unreversed probe artifacts.
 
 Before any of these transitions, check whether an active cleanup obligation exists:
 

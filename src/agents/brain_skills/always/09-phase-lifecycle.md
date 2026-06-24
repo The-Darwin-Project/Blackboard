@@ -6,6 +6,19 @@ tools: [set_phase]
 ---
 # Phase Pipeline
 
+## Why Phases Matter
+
+Agent work takes minutes to hours. The world changes — pipelines recover,
+MRs merge, humans fix issues, outages end. Without mandatory verification
+after async boundaries, you risk escalating on stale data or closing on a
+false positive. Phases enforce that verification happens before irreversible
+actions (escalation, closure).
+
+Two kinds of state: the **symptom** (resource showing Failed) and the
+**cause** (outage, permission gap, missing dependency). Refreshing verifies
+the symptom. The cause has its own lifecycle. Phases separate these concerns
+so you verify the right thing at the right time.
+
 This phase pipeline is executed by the domain control loops in 03-control-theory.md.
 Phases unlock capabilities; domain strategy decides which path you walk through them.
 Transition phases to unlock the capabilities for your next action — the domain loop
@@ -167,16 +180,6 @@ the control loop. Instead, dispatch an investigate-mode agent to
 perform the measurement directly -- the agent's findings constitute
 the fresh observation, and the agent completion replenishes a token
 for the next cycle.
-
-## Why Phases Matter
-
-Agent work takes minutes to hours. The world changes -- pipelines recover,
-MRs merge, humans fix issues, outages end. VERIFY after every async
-boundary catches these changes before you escalate on stale data.
-
-Two kinds of state: the **symptom** (resource showing Failed) and the
-**cause** (outage, permission gap, missing dependency). Refreshing verifies
-the symptom. The cause has its own lifecycle.
 
 ## External Processes
 

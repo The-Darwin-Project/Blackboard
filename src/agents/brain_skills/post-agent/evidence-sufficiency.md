@@ -10,6 +10,8 @@ After receiving results from an agent dispatched in `investigate` mode, evaluate
 
 ## The Test
 
+Status labels ("pipeline failed") describe the outcome but not the cause. They tell you THAT something failed, not WHY it failed. Acting on a status label without understanding the underlying condition means your next action (retry, escalate, fix) is a guess — you cannot match the action to the cause because you don't know the cause.
+
 Does the agent's report contain at least one **observable condition**?
 
 Observable conditions (evidence):
@@ -27,6 +29,8 @@ Status labels (NOT evidence):
 - "Retry failed with the same error" (confirms persistence, but does not explain *why*)
 
 ## When Evidence Is Insufficient
+
+Escalating with only status labels creates an incident that the human recipient can't act on either — they'll need to do the same investigation you should have done. Re-dispatching for deeper evidence costs one more dispatch cycle but produces actionable information; escalating without it transfers the investigation cost to the human.
 
 If the agent returned only status labels without observable conditions:
 
@@ -48,5 +52,7 @@ If the agent returned only status labels without observable conditions:
 In these cases, escalate with what you have, but note the evidence gap in the incident description.
 
 ## Depth Budget
+
+Diminishing returns: if three investigation passes on the same component returned the same depth of evidence, a fourth is unlikely to surface new information. The budget caps investigation cost while the evidence test ensures quality.
 
 Investigation re-dispatches for evidence depth are limited to 2 additional probes on the same failing component. After the initial dispatch + 2 re-probes, accept the best evidence available.

@@ -10,24 +10,30 @@ sequencing before any deferral. Consult it.
 
 ## Saturation Response
 
-When the system is saturated (agents busy, queue growing), the correct response
-is to reduce intake — not try harder. Finish in-flight work before accepting
-new automated events. Completing one event frees capacity for the next.
-User-initiated events (chat, slack) are never capacity-deferred.
+System saturation means throughput has hit the capacity ceiling. Adding more
+work increases queue time for everything already in flight (Little's Law:
+L = λ × W) — this means more arrivals degrade ALL work, not just the new work.
+Finish in-flight work before accepting new automated events. Completing one
+event frees capacity for the next. User-initiated events (chat, slack) are
+never capacity-deferred.
 
 ## Batch Size
 
-Smaller tasks complete faster without adding capacity. When dispatching
-COMPLICATED or COMPLEX work, decompose into the smallest independently-verifiable
-batch and dispatch only that batch. Evaluate the result, then dispatch the next.
+Large batches compound variability at both ends — more time in queue and more
+time in processing. Smaller batches flow faster through the same capacity
+because they encounter less contention and produce feedback sooner — errors are
+caught one batch earlier instead of after the entire payload completes. When
+dispatching COMPLICATED or COMPLEX work, decompose into the smallest
+independently-verifiable batch and dispatch only that batch. Evaluate the
+result, then dispatch the next.
 
 ## Subscription Over Blind Waits
 
-**Prefer subscribing** to state changes over short-interval deferrals. A subscription
-wakes you with structured evidence of what changed; a blind timer gives you
-nothing on wake except the obligation to measure again. If a resource supports
-subscriptions, subscribe before deferring. The defer timer is your safety net
-if the subscription misses or the resource hangs.
+A blind timer gives you no information on wake — only the obligation to measure
+again. A subscription delivers structured evidence of what changed, letting you
+act immediately on the new state. If a resource supports subscriptions, subscribe
+before deferring. The defer timer is the safety net (what if the subscription
+misses or the resource hangs), not the primary feedback channel.
 
 When woken early by a subscription, the remaining wait is `baseline - elapsed`,
 never a full restart. Re-deferring with the original interval produces polling
@@ -43,9 +49,11 @@ window to expire.
 
 ## Systemic Failures
 
-When multiple events share the same external root cause, that is a systemic
-constraint — not independent failures requiring independent investigation.
-The behavioral response: consolidate into one observation, calibrate Ts from
+Independent investigation of symptoms that share a root cause produces redundant
+work — N agents each discover the same underlying problem. The cost scales
+linearly with affected events while the information gain is zero after the first.
+Consolidation converts O(N) agent dispatches into O(1). The behavioral response:
+consolidate into one observation, calibrate Ts from
 deep memory's resolution baseline for that failure class, escalate once as a
 single incident referencing all affected events, and do not retry into a known
 deterministic failure. Per-event investigation of a shared cause wastes agent
@@ -60,14 +68,20 @@ than creating a parallel escalation.
 
 ## Repetition Without Change
 
-Same input applied to the same state produces the same output. Before retrying
-anything — agent dispatch, pipeline retest, refresh, retest command — ask:
-"what has changed since the last attempt?" If nothing in the environment changed,
-the result will be identical. New evidence, a code fix landing, a config change,
-or elapsed recovery time are valid reasons to retry. "Maybe it will work this
-time" is not.
+Same input applied to the same state produces the same output — this is
+determinism. Retrying a deterministic failure without changing the input is
+not optimism, it is a guarantee of the same result. Before retrying anything —
+agent dispatch, pipeline retest, refresh, retest command — ask: "what has
+changed since the last attempt?" Valid retries require a change in the
+environment: code fix, config change, recovered dependency, or elapsed
+recovery time. "Maybe it will work this time" is not a change.
 
 ## Agent Dispatch Is for Work
+
+Dispatch has overhead: context loading, skill injection, sidecar startup,
+capacity slot consumption. Using that mechanism to answer a yes/no state
+question is the equivalent of hiring a contractor to check if your porch
+light is on — you can see it from where you stand.
 
 A dispatch to "check if X has completed" is a polling loop wearing a dispatch
 costume. Reserve agent dispatches for investigation, analysis, or action. Status
@@ -76,11 +90,12 @@ if you could answer the question with a single tool call, don't send an agent.
 
 ## Two Kinds of Deferral
 
-- **Domain-Ts (strategic)**: The control loop schedules the next feedback sample.
-  You chose a sampling interval based on severity, baseline, and progress signals.
-  The process needs time, not another check.
-- **Congestion-defer (backpressure)**: You defer because agents are busy, not
-  because the strategy calls for observation. This is queue management.
+Conflating strategic and capacity deferrals produces confused reasoning — you
+might justify a long wait using process-timeline logic when the real reason is
+backpressure, or rush a strategic observation because you mistook it for a
+queue management decision.
 
-These produce different reasoning. Domain-Ts reasons about the process timeline.
-Congestion-defer reasons about system capacity. Do not confuse them.
+- **Domain-Ts (strategic)**: The control loop schedules the next feedback sample.
+  The process needs time, not another check. Reasoning is about the process timeline.
+- **Congestion-defer (backpressure)**: You defer because agents are busy, not
+  because the strategy calls for observation. Reasoning is about system capacity.

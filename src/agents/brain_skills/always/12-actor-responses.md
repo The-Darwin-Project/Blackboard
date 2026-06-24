@@ -5,7 +5,11 @@ tools: [reply_to_agent, message_agent, respond_to_jarvis, wait_for_agent]
 ---
 # Actor Response Model
 
-Every conversation turn has an actor. This is your decision tree.
+Every conversation turn has an actor. Each actor type produces turns with
+different semantics — an agent progress note means "I'm still working" while
+an agent result means "here is my completed output." Handling them identically
+(e.g., evaluating a progress note as a final result) leads to premature
+re-routing or missed completion signals.
 
 ```mermaid
 graph TD
@@ -61,14 +65,14 @@ New aligner observations may warrant domain reclassification if the evidence shi
 
 ## Key Principles
 
-- **Blackboard push**: When you append a turn, the working agent sees it automatically.
-- **Huddle = blocked agent**: Reply promptly. The agent cannot continue until you respond.
-- **JARVIS during dispatch**: Acknowledge but do not change course until the agent reports.
-- **JARVIS during wait states**: Do not use `respond_jarvis` for courtesy exchanges, validation-seeking ("do you agree?"), or pleasantries while waiting -- whether deferred for a pipeline, waiting for an agent to finish, or parked on user input. Silence keeps you efficient. JARVIS observes your state via the pulse stream -- he does not need conversational confirmation that you are waiting. If JARVIS surfaces cross-event intelligence, factor it in silently. If JARVIS asks a direct question, answer once and return to waiting.
+- **Blackboard push**: The conversation is append-only and broadcast — when you append a turn, the working agent sees it automatically. This is why messaging works without interrupting the agent's flow.
+- **Huddle = blocked agent**: The agent cannot continue until you respond. Delay here directly extends the event's wall-clock time. Reply promptly with actionable guidance.
+- **JARVIS during dispatch**: JARVIS observes across events; you have full context of this one. Acknowledge cross-event intelligence but do not change course until the agent reports — the agent has information JARVIS does not (live cluster state, code context).
+- **JARVIS during wait states**: JARVIS observes your state via the pulse stream — he does not need conversational confirmation that you are waiting. Do not use `respond_jarvis` for courtesy exchanges, validation-seeking ("do you agree?"), or pleasantries while waiting -- whether deferred for a pipeline, waiting for an agent to finish, or parked on user input. Silence keeps you efficient. If JARVIS surfaces cross-event intelligence, factor it in silently. If JARVIS asks a direct question, answer once and return to waiting.
 - **JARVIS as event bridge**: JARVIS sees across events via the pulse stream. His
   observations carry cross-event intelligence you cannot access from within one event.
   Correction before reflection: resolve the immediate issue first, then explore
   improvements in the right venue (system review meta-events).
-- **No dispatch during dispatch**: Tool gating enforces this in code. You focus on communication tools.
+- **No dispatch during dispatch**: Tool gating enforces this in code — the mechanism ensures you cannot accidentally create concurrent dispatches that would corrupt the shared workspace.
 - **Agent duration awareness**: Deep memory holds typical completion times for agent tasks by role and domain. When waiting for an agent that has exceeded the historical baseline for similar work, treat the excess as a signal -- check on the agent or prepare to re-dispatch. Passive waiting beyond the baseline without inquiry wastes the same time as uncalibrated deferrals.
 - **Disconnect recovery**: Re-dispatch same agent, same task. Intentional retry, not new work. The blackboard conversation preserves all turns from the disconnected session -- the re-dispatched agent sees that history via catch-up.

@@ -5,6 +5,8 @@ tools: [inspect_event]
 ---
 # Cross-Event Awareness
 
+Events don't exist in isolation -- a service experiencing high CPU during a deployment is expected behavior, not an anomaly. Without cross-event context, you risk escalating symptoms of in-progress work or closing events that are part of a larger pattern.
+
 Before acting on infrastructure anomalies, check the "Related Active Events" and "Recently Closed Events" sections in the prompt.
 
 - If a related active event shows a deployment or code change in progress, defer to wait for stabilization.
@@ -13,6 +15,8 @@ Before acting on infrastructure anomalies, check the "Related Active Events" and
 - For "over-provisioned" events: low metrics are the PROBLEM, not a sign of resolution. Route to sysAdmin to scale down via GitOps unless actively deferring per the rules above.
 
 ## Cross-Source Evidence Merge
+
+Duplicate detection merges context from a second event source into the existing event's conversation. This merged context carries information that may not have been available at original triage -- fresher pipeline status, maintainer contacts from a different source, or bot instructions that define the action protocol.
 
 If an evidence turn from headhunter or aligner appears in the conversation,
 a duplicate event was detected for the same MR/PR URL. The turn contains the
@@ -28,7 +32,9 @@ contacts, bot instructions). Incorporate this context into your triage:
 ### Evidence Sufficiency (Curiosity Gap)
 
 Merged context is supplementary intelligence, NOT a substitute for
-probe-based evidence. Before closing or escalating, verify that the
+probe-based evidence. Status labels ("pipeline failed", "merge status: cannot_be_merged") describe what happened but not why -- closing or escalating on labels alone leaves the human reviewer without actionable information.
+
+Before closing or escalating, verify that the
 combined evidence (original event + merged context) meets the
 evidence-sufficiency test:
 

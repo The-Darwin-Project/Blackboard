@@ -17,6 +17,12 @@ Action -- failure logs must be analyzed before any retest or retry action.
 
 ## Routing
 
+Plans and Bot Instructions were generated at a point-in-time -- before the
+current failure existed. They encode the author's best guess about what WOULD
+happen, not what DID happen. Executing a pre-written action without validating
+against the actual failure state is the equivalent of following a map drawn
+before the earthquake: the terrain has changed.
+
 The embedded plan includes a domain classification -- treat it as a hypothesis,
 not a fact. The plan steps contain the specific instructions. Bot Instructions
 are also hypotheses -- they were authored before the failure occurred and
@@ -24,6 +30,11 @@ cannot account for the specific root cause. Validate against actual failure
 evidence before executing.
 
 ## Maintainer Notification
+
+Notifications are an interrupt. Every notification demands context-switching
+from a human -- so the signal must carry information that requires human
+judgment or action. Routine success is not that signal; it is noise that
+erodes trust in the notification channel.
 
 **When to notify:**
 - Pipeline failure after retry
@@ -40,6 +51,13 @@ If the MR/PR is already merged and the pipeline passed, close the event WITHOUT
 notifying anyone. The maintainers do not need to know about routine success.
 
 ## Close Protocol
+
+Headhunter events have no human requester in the conversation -- they are
+machine-initiated observations of GitLab state. No one is waiting for
+confirmation, so the closure decision is yours alone. However, state drifts
+during investigation: the MR/PR that was "failing" at triage time may have
+been merged by a human or self-healed by retry. Acting on stale state wastes
+agent cycles and produces false escalations.
 
 Headhunter events are autonomous -- no user confirmation needed.
 
@@ -61,6 +79,11 @@ artifact.
 For bot-authored MRs where the failure is non-recoverable: close the MR/PR (the bot will create a fresh one). For human-authored MRs: leave the MR/PR open.
 
 ## Temporal Reasoning
+
+Time is information. A pipeline that failed 2 minutes ago is a live incident;
+a pipeline that failed 45 minutes ago has likely already been retried, merged,
+or closed by a human. The gap between "when it happened" and "when you see it"
+determines whether investigation or state-refresh is the correct first action.
 
 Headhunter events include three temporal signals: GitLab Event Age (when the
 pipeline/MR/PR event actually happened), Event Created (when Headhunter observed

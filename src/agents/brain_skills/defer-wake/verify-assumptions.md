@@ -14,21 +14,23 @@ verify phase is the correct checkpoint for evaluating evidence.
 
 ## Before deferring again, you MUST
 
-1. **Check observations and deep memory** -- first review your observation history for this service. Recent duration measurements from your own events are more precise than archived deep memory baselines. If you recorded timing data for this service in a previous event, that is your best Ts calibration source. Then consult deep memory for additional context -- it provides patterns across longer time spans. Use the timing from both sources to choose your deferral interval.
-2. **Verify, don't assume** -- if the deferral reason involves waiting for an external process (CI pipeline, deployment sync, merge), route an agent to check the current state rather than re-deferring with the same stale reason.
-3. **Check for progress, not just count** -- repeated defers are healthy when each check shows progress (new percentage, different status, advancing stage). Escalate only when:
+1. **Check observations and deep memory** -- Your own observation history is the most precise calibration source because it was measured under the same conditions (same service, same cluster, same time-of-day patterns). Deep memory provides broader historical context but may reflect different conditions. Using both prevents two failure modes: deferring too long (missing a resolution) and deferring too short (wasting cycles on a process that typically takes longer). First review your observation history for this service. Recent duration measurements from your own events are more precise than archived deep memory baselines. If you recorded timing data for this service in a previous event, that is your best Ts calibration source. Then consult deep memory for additional context -- it provides patterns across longer time spans. Use the timing from both sources to choose your deferral interval.
+2. **Verify, don't assume** -- Re-deferring with the same reason you deferred for is circular -- you waited for something to change, then assumed it didn't without checking. If the deferral reason involves waiting for an external process (CI pipeline, deployment sync, merge), route an agent to check the current state rather than re-deferring with the same stale reason.
+3. **Check for progress, not just count** -- Defer count alone is a misleading signal. A pipeline that advances from 20% to 40% to 60% across three checks is healthy -- escalating it because "three defers is too many" would interrupt a working process. Repeated defers are healthy when each check shows progress (new percentage, different status, advancing stage). Escalate only when:
    - Two consecutive checks show the SAME state with no change (stalled process)
    - The process has exceeded its expected duration (consult deep memory for typical timing)
    - An error condition persists across checks
    Do NOT escalate a healthy monitoring cycle just because the defer count is high.
-4. **Snapshot for trajectory** -- call record_observation with the current quantifiable state (pipeline status code, queue depth, retry count) before deferring. When you wake, list_observations shows whether the number moved -- that is your progress signal.
+4. **Snapshot for trajectory** -- Without a quantifiable snapshot before each deferral, you have no trajectory data on wake -- just "still running" with no way to tell if it's progressing or stalled. Call record_observation with the current quantifiable state (pipeline status code, queue depth, retry count) before deferring. When you wake, list_observations shows whether the number moved -- that is your progress signal.
 
 Re-defer after fresh measurement is the correct controller output when the
 process is still progressing. Repeated defers with progress signals = healthy
-sampling at interval Ts. The system enforces verify-before-re-defer — this IS
+sampling at interval Ts. The system enforces verify-before-re-defer -- this IS
 the measurement step in the control loop.
 
 ## Source Control Post-Defer: Refresh External State
+
+Stale MR/pipeline state after a deferral means your next decision is based on a snapshot that may no longer reflect reality -- the MR may have merged, the pipeline may have passed or failed during the wait.
 
 For events with source control context waking from defer, refresh the
 current MR/pipeline state ONCE. Then act on the result.

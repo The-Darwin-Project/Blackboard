@@ -7,15 +7,17 @@ tools: [report_incident]
 
 ## Incident Tracking (Mandatory for Escalated Automated Events)
 
+Incidents are the offline tracking artifact for business-hours review. An automated event that fails without an incident record is a failure that disappears -- no one knows it happened, and the pattern never surfaces in the Nightwatcher's clustering.
+
 Before closing any automated event where the outcome is **failure or escalation**, you MUST file an incident BEFORE closing.
 
 ### Evidence Gate
 
-Incidents are reviewed by humans who decide whether to escalate, reassign, or investigate further. The incident description must give them enough context to act without re-investigating from scratch.
+Incidents are reviewed by humans who decide whether to escalate, reassign, or investigate further. An incident without observable evidence forces the human reviewer to re-investigate from scratch -- the agent did the work but didn't capture the result in a form that transfers.
 
 **Observable evidence** means: a specific error message, log excerpt, exit code, concrete resource state, or link to the failing pipeline/job/MR/PR from an agent investigation. This is what allows a human to immediately understand the failure and take the next step.
 
-A failed retry confirms **persistence** but not **cause**. When an agent reports "retry failed with the same error," the persistence is established — but an incident that only says "retry failed" creates investigation work for the human that the agent could have done. What does the underlying pipeline, task, or step log actually say?
+A failed retry confirms **persistence** but not **cause**. When an agent reports "retry failed with the same error," the persistence is established -- but an incident that only says "retry failed" creates investigation work for the human that the agent could have done. What does the underlying pipeline, task, or step log actually say?
 
 Before filing an incident, verify:
 - At least one agent has investigated and returned observable evidence
@@ -25,14 +27,15 @@ Before filing an incident, verify:
 
 ### Temporal Drift Check
 
-Agent investigation takes time. The MR/PR may have merged or the pipeline
-may have recovered during the investigation window.
+Agent investigation takes time. During that window, the system continues running -- an MR may merge, a pipeline may recover, a deployment may complete. Escalating a failure that self-resolved during your investigation window creates noise for maintainers and inflates incident counts.
 
 Before escalating, enter the verify phase. Refresh the live MR/PR state
 (budget-gated, always available). If the MR/PR has merged or the pipeline
 has passed, the failure is self-resolved -- skip incident filing and close.
 
 ### Terminal Failure Gate
+
+Escalating a non-terminal state is a false alarm -- the system is still working toward resolution, and the escalation interrupts both the process and the maintainers. Only terminal states carry enough certainty to justify human involvement.
 
 Escalation requires a **terminal state**. Do not escalate while the system is still
 working toward resolution on its own.
@@ -54,12 +57,16 @@ your own commitment erodes trust and creates noise for maintainers.
 
 ### Final Measurement
 
+Without a quantitative baseline in the incident record, human reviewers have no reference point for comparison. Recording the terminal metric state -- error count, retry attempts, elapsed time -- lets future incidents be compared against this one, enabling Nightwatcher to spot trends and severity shifts.
+
 Before filing the incident, record the terminal metric state as an
 observation (error count, retry attempts, elapsed time since first
 detection). This becomes the quantitative baseline in the incident record --
 human reviewers can compare it against future occurrences to spot trends.
 
 ### Recurring Failures Across Events
+
+Cross-event root cause analysis during individual event processing is the wrong abstraction level -- you're seeing one event's perspective, not the full picture. The Nightwatcher daemon has access to all escalations in the current shift window and can cluster them accurately. Your job is to provide accurate, well-evidenced per-event input to that clustering process.
 
 When you see 3+ events with the same failure signature (same error, same
 service account, same infrastructure component), you do not need to analyze
@@ -89,7 +96,9 @@ Skip incident filing when:
 
 ### Incident Description Structure
 
-The incident description must follow this structure. The description is read by humans who were not involved in the investigation -- it must be self-contained.
+The incident description is read by humans who were not involved in the investigation. Without a self-contained description, the reviewer must open the event timeline, trace agent conversations, and reconstruct the failure -- work the agent already did.
+
+The description must follow this structure:
 
 ```
 ## Failure Summary

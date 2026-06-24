@@ -8,6 +8,8 @@ tools: [refresh_kargo_context]
 
 ## Using memory to validate assumptions
 
+Deep memory and observations are snapshots of past state -- they describe what was true at the time of recording, not what is true now. The gap between the memory's timestamp and the current failure is time during which the system may have changed. Acting on stale memory as if it were current fact leads to misdiagnosis: closing a failure as "known issue" when the known issue was already fixed, or escalating a resolved outage.
+
 When using memory to validate failure, assess the memories as assumptions
 that need to be validated -- both from the input value (how old the memory)
 and the output signal of the source (how old is the failure). If the gap is
@@ -16,6 +18,8 @@ broken things get fixed. The goal is to validate that the assumption still
 holds, not to act on stale knowledge.
 
 ## State Subscription
+
+Polling via agent dispatch is expensive -- it consumes an agent slot, requires a full dispatch-verify cycle, and introduces latency. The refresh tools register background subscriptions that poll automatically and wake the event on state change. This is the native, low-cost mechanism for tracking progression through multi-step processes.
 
 Kargo promotions and GitLab MRs are subscription-capable resources.
 Calling refresh_kargo_context or refresh_gitlab_context registers a
@@ -27,6 +31,8 @@ An agent dispatch is not needed to answer "has this step finished yet?"
 The refresh tool answers that question directly.
 
 ## Verification Integrity
+
+Closing a Kargo event without observable proof means the outcome is unverified -- the event record shows "resolved" but nothing confirms the promotion actually succeeded. This corrupts the Ops Journal and misleads Nightwatcher's clustering.
 
 Kargo promotions are observable resources. The evidence of success or failure
 lives in the stage status and the MR pipeline -- not in reasoning or memory.
@@ -46,10 +52,7 @@ means something else failed.
 
 ## MR-Blocked Promotions
 
-When a promotion failure is caused by an MR (merge timeout, pipeline failure,
-auto-merge timeout), the MR is the observable resource -- not the Kargo stage.
-The stage observer can only tell you it's still failing; the GitLab MR carries
-the actual signal (pipeline passed, MR merged, conflicts appeared).
+When a promotion fails because of an MR issue, the Kargo stage status is a lagging indicator -- it only reflects that something is wrong, not what. The MR itself carries the leading signal: pipeline passed, conflicts resolved, approvals granted. Deferring on Kargo stage status when the MR is the actual bottleneck wastes the deferral interval with no new information on wake.
 
 The MR URL from kargo_context enables direct tracking. Blind Kargo-level
 deferrals on an MR-blocked promotion waste the interval when the MR merges
@@ -57,13 +60,12 @@ early and provide no evidence on wake.
 
 ## Error Natures
 
+The nature of the error -- not its surface symptom -- determines what kind of investigation is needed. Different error types require fundamentally different response strategies: a merge timeout needs MR investigation, a config error needs code-level fixes, and a missing file points to an upstream repo change.
+
 - **MR/PR merge timeout**: `step "wait-for-merge" timed out` -- the MR pipeline may have failed or is stuck. The MR is the signal source.
 - **Config/expression error**: `failed to extract outputs: error compiling expression` -- the stage spec itself has a bug. Code-level fix required.
 - **Missing files**: `error reading YAML file ... no such file or directory` -- repo structure changed upstream.
 - **Auto-merge timeout**: `step "auto-merge" timed out` -- MR cannot merge (conflicts, approvals needed).
-
-The nature of the error -- not its surface symptom -- determines what kind
-of investigation is needed.
 
 ## Kargo Concepts
 

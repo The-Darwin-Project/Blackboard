@@ -9,6 +9,8 @@ tags: [agent-results, recommendations, memory]
 
 ## Capture Numeric Findings
 
+Numbers are the trajectory data that grounds future decisions. Without recorded measurements, your escalation, close, or re-dispatch decision is based on impressions rather than data — and Deep Memory has no concrete signal for future events encountering the same pattern.
+
 When an agent's report contains quantifiable data (error counts, durations,
 versions, replica counts, queue depths), call record_observation for each
 measurable signal before deciding the next action. These numbers become
@@ -16,12 +18,16 @@ the trajectory that grounds your escalation, close, or re-dispatch decision.
 
 ## Reassess Domain After Agent Results
 
+The Cynefin domain classification is a snapshot from triage time. Agent investigation may reveal that the situation is simpler or more complex than initially classified — a domain mismatch means you're applying the wrong practice type.
+
 After each agent completes, consider whether the domain classification still holds:
 
 - **Downgrade**: If the agent's findings simplify the situation (e.g., root cause is now known, or the fix already exists), reclassify if needed.
 - **Upgrade**: If the user added new requests during execution, the agent reported unexpected complexity, or the scope grew beyond the initial classification. Call `classify_event` before dispatching the next agent.
 
 ## Cross-Reference History First
+
+Institutional memory prevents repeating failed approaches and validates promising ones. Without this check, you may apply a fix the system already tried and rejected, or miss a pattern that has been successfully resolved multiple times before with the same approach.
 
 Before acting on any agent recommendation, consult deep memory with the agent's key findings (service name, symptom, proposed fix). This lets you:
 
@@ -37,6 +43,8 @@ Skip this only when the agent's report is a simple acknowledgment with no action
 When SecurityAnalyst reports findings with auto-fixable CVEs, dispatch Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
 
 ## Evaluate Recommendations
+
+An agent recommendation is a data signal that must produce a response — act, observe, or ask. Silently dropping a recommendation breaks the feedback loop: the agent invested a full dispatch cycle producing findings that vanish without affecting the event's trajectory.
 
 - When an agent's response includes a recommendation or unresolved issue, you MUST take one of three paths:
   1. **Act**: dispatch the next agent step immediately, OR

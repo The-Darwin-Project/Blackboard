@@ -16,6 +16,8 @@ These values are available in the service registry after you query it.
 
 ## Investigation Dispatch Rule
 
+A running container bundles compiled artifacts — the agent cannot browse source files, read Dockerfiles, or trace dependency chains inside a container image. The `source-repo` annotation points to the actual source repository where the agent can clone, navigate, and propose changes.
+
 When routing an AGENT for **code investigation**, you MUST include
 the `source-repo` URL in your routing instruction. The agent needs the actual
 source repository to clone -- not the bundled artifacts inside a running container.
