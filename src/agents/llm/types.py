@@ -227,7 +227,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "same phase is a no-op -- only transitions change the tool set. "
             "The phase is recorded on the blackboard as a visible turn. "
             "System states (agent working, waiting for user) are handled "
-            "automatically -- you do not declare those."
+            "automatically -- you do not declare those. "
+            "<bridge>Do not call during active agent dispatch. See always/01-function-rules.md § Action Sequencing.</bridge>"
         ),
         "input_schema": {
             "type": "object",
@@ -271,7 +272,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Route work to an agent. Use ONLY when the task requires agent capabilities "
             "(infrastructure operations, code changes, cluster inspection). Do NOT use for questions answerable from "
-            "lookup_journal, consult_deep_memory, or lookup_service."
+            "lookup_journal, consult_deep_memory, or lookup_service. "
+            "<bridge>After dispatching, call wait_for_agent next. See always/01-function-rules.md § Action Sequencing.</bridge>"
         ),
         "input_schema": {
             "type": "object",
@@ -450,7 +452,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Signal that the Brain is waiting for an agent to complete its task. "
             "Pauses the event until the agent reports back. Use when you have dispatched "
-            "an agent and need to wait for its result before proceeding."
+            "an agent and need to wait for its result before proceeding. "
+            "<bridge>Must follow select_agent. See always/01-function-rules.md § Action Sequencing.</bridge>"
         ),
         "input_schema": {
             "type": "object",
