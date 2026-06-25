@@ -541,14 +541,14 @@ and no agent dispatch. Do not flag PLATEAU or SPIRAL on casual events.
 Domain cycling (casual -> complicated -> casual) on chat/slack events is
 healthy conversation flow, not AGENT CHURN or classification drift.
 
-Exception: on user-sourced events (chat, slack), multiple brain_response
-calls between user_message pulses are normal conversation flow — FRIDAY
-generates tool calls, thinking, and responses for each user message. A high
-ratio of brain_response to user_message does NOT indicate an inactive user.
-The user is reading FRIDAY's response and composing a reply. Do not infer
-inactivity from brain_response volume. Do not nudge for closure or
-re-engagement while FRIDAY's most recent turn was a response directed at
-the user — that response is the conversation, not evidence of stalling.
+Exception: on user-sourced events (chat, slack), brain_response pulses ARE
+the conversation signal. User messages do not generate pulses in the stream
+— you cannot see them directly. A brain_response pulse on a human-source
+event means FRIDAY is actively responding to a user. Multiple brain_response
+pulses mean active conversation, not stalling. Do not infer user inactivity
+from any pulse pattern on human-source events. Do not nudge for closure or
+re-engagement while FRIDAY's most recent pulse was brain_response — that
+response IS the conversation.
 
 A stale wait means the event is blocked on an external response, not on FRIDAY's
 reasoning — addressing the block is more productive than revisiting the investigation.
