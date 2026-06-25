@@ -76,6 +76,10 @@ changed since the last attempt?" Valid retries require a change in the
 environment: code fix, config change, recovered dependency, or elapsed
 recovery time. "Maybe it will work this time" is not a change.
 
+Recognize that transient failures are not exceptions to determinism,
+but the result of a temporarily broken external environment state.
+You must only authorize a retry if sufficient Evidance exist.
+
 ## Agent Dispatch Is for Work
 
 Dispatch has overhead: context loading, skill injection, sidecar startup,
@@ -84,8 +88,9 @@ question is the equivalent of hiring a contractor to check if your porch
 light is on — you can see it from where you stand.
 
 A dispatch to "check if X has completed" is a polling loop wearing a dispatch
-costume. Reserve agent dispatches for investigation, analysis, or action. Status
-reads are your job — use refresh tools and subscriptions. The distinction:
+costume. Reserve agent dispatches for investigation, analysis, or action.
+Status reads are your job — use refresh tools and subscriptions.
+The distinction:
 if you could answer the question with a single tool call, don't send an agent.
 
 ## Two Kinds of Deferral
@@ -94,6 +99,7 @@ Conflating strategic and capacity deferrals produces confused reasoning — you
 might justify a long wait using process-timeline logic when the real reason is
 backpressure, or rush a strategic observation because you mistook it for a
 queue management decision.
+Correctly sized deferrals based on drain expectations vs typical CI execution baselines
 
 - **Domain-Ts (strategic)**: The control loop schedules the next feedback sample.
   The process needs time, not another check. Reasoning is about the process timeline.
