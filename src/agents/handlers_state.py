@@ -127,7 +127,7 @@ async def handle_wait_for_agent(
         actor="brain",
         action="wait",
         thoughts=summary,
-        waitingFor="agent",
+        waitingFor=f"agent:{agent_name}",
     )
     await ctx.append_and_broadcast(event_id, turn)
     return False
