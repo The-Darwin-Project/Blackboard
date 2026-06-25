@@ -5,7 +5,7 @@
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: notify_user_slack uses _resolve_slack_user (extracted as standalone helper).
-"""Group D: 6 external integration tool handlers."""
+"""Group D: 7 external integration tool handlers."""
 from __future__ import annotations
 
 import logging
@@ -645,6 +645,45 @@ async def handle_refresh_kargo_context(
 
 
 # ---------------------------------------------------------------------------
+# notify_gitlab_result
+# ---------------------------------------------------------------------------
+async def handle_notify_gitlab_result(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    bb = ctx.get_blackboard()
+    event_doc = await bb.get_event(event_id)
+    gl_ctx = None
+    if event_doc and event_doc.event.evidence:
+        ev = event_doc.event.evidence
+        gl_ctx = getattr(ev, "gitlab_context", None) if hasattr(ev, "gitlab_context") else None
+    if not gl_ctx:
+        result_text = "Cannot notify GitLab: no gitlab_context in event evidence. This tool is for headhunter-sourced events only."
+        await ctx.emit_pulse(event_id, [("tool:notify_gitlab_result", "tool", 0.3)])
+    else:
+        project_id = args.get("project_id", gl_ctx.get("project_id"))
+        mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
+        result_type = args.get("result", "success")
+        summary = args.get("summary", "")
+        reassign = args.get("reassign_reviewer", False)
+        result_text = (
+            f"GitLab notification queued: {result_type} on !{mr_iid} (project {project_id}). "
+            f"Summary: {summary[:200]}. Reassign reviewer: {reassign}. "
+            f"Feedback will be posted by Headhunter feedback loop on event close."
+        )
+        logger.info(f"notify_gitlab_result: event={event_id} project={project_id} mr=!{mr_iid} result={result_type}")
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain",
+        action="notify",
+        thoughts=result_text,
+        waitingFor="notify_gitlab_result",
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 from .tool_router import HANDLER_REGISTRY
@@ -655,3 +694,4 @@ HANDLER_REGISTRY["comment_jira_issue"] = handle_comment_jira_issue
 HANDLER_REGISTRY["transition_jira_issue"] = handle_transition_jira_issue
 HANDLER_REGISTRY["refresh_gitlab_context"] = handle_refresh_gitlab_context
 HANDLER_REGISTRY["refresh_kargo_context"] = handle_refresh_kargo_context
+HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result

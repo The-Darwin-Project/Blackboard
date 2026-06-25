@@ -19,9 +19,11 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from typing import Optional
 
+from ..auth import UserContext, require_auth
 from ..dependencies import get_archivist, get_brain, get_pulse_tracker
 
 logger = logging.getLogger(__name__)
@@ -240,9 +242,14 @@ async def get_proposals(limit: int = 100, include_dismissed: bool = False):
     return {"proposals": proposals, "count": len(proposals)}
 
 
+class DismissRequest(BaseModel):
+    timestamps: list[float] = Field(..., min_length=1)
+    reason: str | None = None
+
+
 @router.post("/cortex/proposals/dismiss")
-async def dismiss_proposals(body: dict):
-    """Mark proposals as dismissed by timestamp. Accepts {timestamps: [float, ...], reason: str}.
+async def dismiss_proposals(body: DismissRequest, user: UserContext = Depends(require_auth)):
+    """Mark proposals as dismissed by timestamp.
 
     Dismissed proposals are filtered from GET by default (use ?include_dismissed=true to see them).
     """
@@ -251,8 +258,6 @@ async def dismiss_proposals(body: dict):
         blackboard = await get_blackboard()
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
-    timestamps = body.get("timestamps", [])
-    if not timestamps:
-        raise HTTPException(400, "timestamps array required")
-    count = await blackboard.dismiss_proposals(timestamps)
+    count = await blackboard.dismiss_proposals(body.timestamps)
+    logger.info("Proposals dismissed by %s: %d proposals", user.email, count)
     return {"dismissed": count}

@@ -1607,23 +1607,35 @@ return 0
     ) -> bool:
         """Atomically set event status to DEFERRED and store defer_until timestamp.
 
-        Uses read-modify-write on the event document (protected by caller's per-event
-        asyncio.Lock). Also sets the defer_until key with TTL for the event loop.
+        Uses WATCH/MULTI/EXEC for optimistic locking (same pattern as
+        transition_event_status). Also sets the defer_until key with TTL.
         Returns True if the event was found and updated.
+
+        while True (no retry cap): caller appends a "defer" turn BEFORE calling
+        this method, so failure would leave conversation/state divergent.
+        WatchError means concurrent modification — self-resolves on next iteration.
         """
         key = f"{self.EVENT_PREFIX}{event_id}"
-        data = await self.redis.get(key)
-        if not data:
-            return False
-        event = EventDocument(**json.loads(data))
-        event.status = EventStatus.DEFERRED
-        await self.redis.set(key, json.dumps(event.model_dump()))
-        await self.redis.set(
-            f"{key}:defer_until",
-            str(defer_until),
-            ex=delay + 60,
-        )
-        return True
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return False
+                    event = EventDocument(**json.loads(data))
+                    event.status = EventStatus.DEFERRED
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    pipe.set(
+                        f"{key}:defer_until",
+                        str(defer_until),
+                        ex=delay + 60,
+                    )
+                    await pipe.execute()
+                    return True
+                except WatchError:
+                    continue
 
     # NOTE: notify_agent and dequeue_agent_notification REMOVED.
     # Agent communication now uses WebSocket (Brain -> Agent direct).

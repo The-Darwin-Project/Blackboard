@@ -35,7 +35,7 @@
 #     cleared in _close_and_broadcast. Enables defer_event notification injection without cross-component calls.
 # 28. [Pattern]: BrainToolRouter (tool_router.py + handlers_*.py). _execute_function_call is a thin
 #     dispatcher: pulse emission + HANDLER_REGISTRY lookup + ToolContext delegation. 36 handlers across
-#     4 modules (data, integration, state, dispatch). execute_tool_locked() for off-lock callers.
+#     8 modules (observations, lookup, planning, cross_event, verification, integration, state, dispatch).
 #     _BrainToolContext is the concrete Protocol impl — singleton per Brain instance.
 # 35. [Pattern]: StateWatcher subscription lifecycle: cycle_id (uuid4 per _process_event_inner) tracks
 #     subscribe+defer in same cycle. defer_event cancels stale (different-cycle) subscriptions only.
@@ -211,7 +211,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Populate tool handler registry (side-effect imports)
-import src.agents.handlers_data  # noqa: F401
+import src.agents.handlers_observations  # noqa: F401
+import src.agents.handlers_lookup  # noqa: F401
+import src.agents.handlers_planning  # noqa: F401
+import src.agents.handlers_cross_event  # noqa: F401
+import src.agents.handlers_verification  # noqa: F401
 import src.agents.handlers_integration  # noqa: F401
 import src.agents.handlers_state  # noqa: F401
 import src.agents.handlers_dispatch  # noqa: F401
@@ -289,16 +293,6 @@ import re as _re
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
 
 
-def _safe_int(val, *, default: int | None = None) -> int | None:
-    """Safely parse an integer from LLM tool args. Returns default on invalid input."""
-    if val is None or isinstance(val, bool):
-        return default
-    try:
-        result = int(val)
-        return result if result > 0 else default
-    except (ValueError, TypeError, OverflowError):
-        return default
-
 
 def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
@@ -351,12 +345,6 @@ class _BrainToolContext:
     def get_active_agent_for_event(self, eid: str) -> str | None:
         return self._b._active_agent_for_event.get(eid)
 
-    def set_active_task(self, eid: str, task: object) -> None:
-        self._b._active_tasks[eid] = task
-
-    def get_agent_class(self, name: str) -> object | None:
-        return self._b.agents.get(name)
-
     def get_agent_instance(self, name: str) -> object | None:
         return self._b.agents.get(name)
 
@@ -365,7 +353,7 @@ class _BrainToolContext:
         return self._b._ws_mode
 
     # --- Subscriptions ---
-    def get_state_watcher(self) -> object | None:
+    def get_state_watcher(self):
         return self._b._state_watcher
 
     def get_cycle_id(self, eid: str) -> str:
@@ -399,17 +387,11 @@ class _BrainToolContext:
         self._b._jarvis_wait_count[eid] = count
         return count
 
-    def set_jarvis_wait_task(self, eid: str, task: object) -> None:
-        self._b._jarvis_wait_tasks[eid] = task
-
     def set_hold_watch(self, eid: str, deferred_snapshot: frozenset) -> None:
         self._b._hold_watch_events[eid] = deferred_snapshot
 
     def set_hold_watch_park_time(self, eid: str) -> None:
         self._b._hold_watch_park_time[eid] = time.time()
-
-    def get_live_adapter(self) -> object | None:
-        return self._b._live_adapter
 
     # --- Dedup/cache ---
     def has_incident_been_created(self, eid: str) -> bool:
@@ -422,7 +404,7 @@ class _BrainToolContext:
         return await self._b._get_journal_cached(svc)
 
     # --- Timers ---
-    def get_idle_timeout(self) -> object:
+    def get_idle_timeout(self):
         return self._b._idle_timeout
 
     def get_last_processed(self, eid: str) -> float:
@@ -469,7 +451,7 @@ class _BrainToolContext:
         return self._b._get_slack_channel()
 
     def get_smartsheet_incident_adapter(self):
-        return self._b._get_smartsheet_incident_adapter()
+        return self._b._get_smartsheet_incident_adapter()  # satisfies IncidentAdapterPort
 
     async def deliver_to_jarvis(self, event_id: str, message: str) -> None:
         if self._b._live_adapter:

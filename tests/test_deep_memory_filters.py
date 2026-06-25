@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
-from src.agents.brain import _safe_int
+from src.agents.handler_utils import _safe_int
 
 
 class TestSafeInt:

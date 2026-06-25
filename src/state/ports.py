@@ -337,10 +337,33 @@ class EscalationRepository(Protocol):
 
 
 @runtime_checkable
+class CortexRepository(Protocol):
+    """Port for JARVIS/Cortex UI surface: proposals, shadow interventions, handoff reports.
+
+    5 methods, 1 consumer (routes/cognitive_graph.py).
+    Zero cross-domain dependencies — all pure Redis primitives.
+    """
+
+    async def get_shadow_event_ids(self) -> list[str]: ...
+
+    async def get_shadow_interventions(
+        self, event_id: str, limit: int = 50,
+    ) -> list[dict]: ...
+
+    async def get_proposals(
+        self, limit: int = 100, include_dismissed: bool = False,
+    ) -> list[dict]: ...
+
+    async def dismiss_proposals(self, timestamps: list) -> int: ...
+
+    async def get_handoff_reports(self, limit: int = 100) -> list[dict]: ...
+
+
+@runtime_checkable
 class EventRepository(Protocol):
     """Port for the core event lifecycle: creation, conversation, queue, and closure.
 
-    The largest domain — all WATCH/MULTI operations on EventDocument stay here.
+    42 methods. The largest domain — all WATCH/MULTI operations on EventDocument stay here.
     Cross-domain: close_event interacts with Topology (get_service),
     Observations (cleanup), and Reports (persist_report) — resolved
     at BlackboardState facade level.
@@ -450,6 +473,24 @@ class EventRepository(Protocol):
     async def get_recent_closed_by_source(
         self, source: str, minutes: int = 30,
     ) -> list[EventDocument]: ...
+
+    # --- Deferred events ---
+
+    async def defer_event_status(
+        self, event_id: str, defer_until: float, delay: int,
+    ) -> bool: ...
+
+    # --- Closed event queries ---
+
+    async def get_recently_closed_event_ids(
+        self, limit: int = 50, since_seconds: int = 86400,
+    ) -> list[str]: ...
+
+    async def get_all_closed_event_ids(self) -> list[str]: ...
+
+    # --- Jira mission state ---
+
+    async def clear_jira_mission_state(self, issue_key: str) -> None: ...
 
     # --- Headhunter feedback ---
 
