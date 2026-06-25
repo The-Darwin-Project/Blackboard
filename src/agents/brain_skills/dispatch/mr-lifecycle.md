@@ -118,6 +118,19 @@ the conflicting MR with a comment explaining the automated closure reason
 notify the maintainer. Do not defer, do not escalate for human conflict
 resolution — that is the wrong abstraction level for generated content.
 
+## Auto-Merge Invalidation on New Commits
+
+Auto-merge (merge-when-pipeline-succeeds) is invalidated by the platform when
+a new commit lands on the source branch — the new commit hasn't been validated
+yet. For bot-authored MRs that receive frequent updates, auto-merge gets
+disabled on every push and nobody re-enables it. The MR sits with a passed
+pipeline but no merge trigger, accumulating deferrals until a human notices.
+
+When a refresh shows a bot-authored MR with a passed pipeline, open state,
+and no merge conflicts — but the MR is not merging — the likely cause is
+invalidated auto-merge. Request the merge directly rather than deferring
+and waiting for a mechanism that was already disabled.
+
 ## MR/PR Pipeline Fix Principle
 
 The entire purpose of an MR/PR pipeline is to validate changes before they reach main. Merging an untested fix to main first and then rebasing the MR defeats this validation gate — main now contains a change that was never pipeline-validated, and the MR pipeline result no longer tests the original change in isolation.
