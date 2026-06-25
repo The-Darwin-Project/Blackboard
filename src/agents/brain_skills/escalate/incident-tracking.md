@@ -92,6 +92,12 @@ Skip incident filing when:
 - The event resolved successfully (pipeline passed, MR/PR merged)
 - Your most recent state refresh (in verify phase) shows MR/PR state is merged or closed
 - Transient failure that resolved on retest
+- Known transient pattern currently in progress within its historical baseline
+  window. Deep memory shows the pattern self-resolves (e.g., infrastructure
+  stalls, queue saturation, multi-arch build delays with known duration
+  baselines). Defer to the baseline rather than escalating a process that
+  is still within its expected window. Escalate only after the baseline is
+  exceeded AND a retry or intervention has been attempted.
 - User-initiated (chat/slack) events
 
 ### Incident Description Structure

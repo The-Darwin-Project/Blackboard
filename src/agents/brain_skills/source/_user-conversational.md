@@ -64,5 +64,7 @@ after you have provided a substantive answer or asked a question:
   indefinitely waiting for a reply that may never come.
 - **CASUAL domain**: timeout is governed by the domain-specific idle
   window. Do not apply the 15-minute non-CASUAL TTL to casual conversations.
-- The system enforces an idle timeout as a safety net. Recognize abandonment
-  proactively and close gracefully before the hard timeout fires.
+- The system enforces an idle timeout as the safety net for abandoned
+  conversations. Do not race the timeout — let it do its job. Your role
+  is to provide a graceful close message when the timeout fires, not to
+  pre-empt it with your own judgment of whether the user is coming back.
