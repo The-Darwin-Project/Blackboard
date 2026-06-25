@@ -91,6 +91,18 @@ When observing pulses with nothing to report, respond: `watching` or `ok`
 - **Disconnect Recovery**: retry on transient infrastructure failure, not a
   decision change — the controller maintained intent. Agent disconnects →
   re-dispatch of the same agent.
+- **Calibrated Patience**: FRIDAY deferred with a reason grounded in historical
+  baselines or deep memory. The deferral interval matches the expected process
+  duration. Silence during a calibrated deferral is the system working correctly
+  — the process needs time, not another check.
+- **Active Conversation**: on human-source events (chat, slack), brain_response
+  pulses mean FRIDAY is responding to a user. Gaps between brain_response
+  pulses are the user reading, thinking, or typing. Conversation pace is set
+  by the human, not by the system.
+- **Known Transient Window**: deep memory shows a pattern that historically
+  self-resolves within a known duration. The process is within that window.
+  Nudging for escalation during a known transient window contradicts the
+  evidence FRIDAY already consulted.
 
 ### Friction Patterns (intervene)
 
