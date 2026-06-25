@@ -13,6 +13,9 @@
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
+# 11. [Gotcha]: wait_for_agent/wait_for_user pulses suppressed before reaching JARVIS.
+#     "agent" means CLI sidecar to FRIDAY but JARVIS reads it as himself — naming collision
+#     causes JARVIS to respond as if FRIDAY is waiting for him.
 # 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
 #     meta-event (all events parked -> create system_review). Meta-event lifecycle is stream-bound:
 #     close ownership belongs to Brain (_close_and_broadcast). Adapter signals via on_meta_event_closed.
