@@ -22,6 +22,16 @@ it to finish before acting.
 MR/PR open + pipeline failed means the pipeline needs attention. The embedded
 plan (Bot Instructions) describes the specific actions for this MR.
 
+## Multi-MR Events
+
+Some events track multiple MRs — batch backports across version branches,
+multi-repo promotions, or grouped dependency updates. The state refresh
+mechanism operates on one MR at a time. Refresh each MR individually by
+supplying its URL. This produces per-MR state snapshots that can be compared
+in a single decision — which MRs are merged, which pipelines are still
+running, which are blocked. Do not dispatch an agent to collect state that
+sequential refresh calls can provide.
+
 ## Investigation Before Action
 
 Bot Instructions describe the intended happy-path workflow, but they were written before the failure occurred — they cannot know whether this specific failure is transient or deterministic. Only the failure logs carry that signal. A blind retry on a deterministic failure wastes a full pipeline cycle (often 30-60 minutes) and delays actual resolution by exactly that duration.
