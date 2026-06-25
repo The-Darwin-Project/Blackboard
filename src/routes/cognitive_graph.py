@@ -16,7 +16,6 @@ Provides endpoints for the Cortex UI to load the neural topology
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 
@@ -168,8 +167,6 @@ async def get_cortex_status(request: Request):
 # Cortex Shadow Endpoints (System 2 shadow mode interventions)
 # =============================================================================
 
-SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
-
 
 @router.get("/cortex/shadow")
 async def get_all_shadow_interventions(
@@ -181,21 +178,12 @@ async def get_all_shadow_interventions(
         blackboard = await get_blackboard()
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
-    redis = blackboard.redis
 
-    index_key = f"{SHADOW_KEY_PREFIX}_index"
-    event_ids = await redis.smembers(index_key)
+    event_ids = await blackboard.get_shadow_event_ids()
     all_entries: list[dict] = []
-    for event_id in event_ids:
-        eid = event_id if isinstance(event_id, str) else event_id.decode()
-        raw_items = await redis.lrange(f"{SHADOW_KEY_PREFIX}{eid}", -limit, -1)
-        for raw in raw_items:
-            try:
-                entry = json.loads(raw)
-                entry["event_id"] = eid
-                all_entries.append(entry)
-            except Exception:
-                pass
+    for eid in event_ids:
+        entries = await blackboard.get_shadow_interventions(eid, limit)
+        all_entries.extend(entries)
 
     all_entries.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
     return {"interventions": all_entries[:limit], "count": len(all_entries[:limit])}
@@ -212,18 +200,8 @@ async def get_event_shadow_interventions(
         blackboard = await get_blackboard()
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
-    redis = blackboard.redis
 
-    key = f"{SHADOW_KEY_PREFIX}{event_id}"
-    raw_items = await redis.lrange(key, -limit, -1)
-    entries = []
-    for raw in raw_items:
-        try:
-            entry = json.loads(raw)
-            entry["event_id"] = event_id
-            entries.append(entry)
-        except Exception:
-            pass
+    entries = await blackboard.get_shadow_interventions(event_id, limit)
     return {"interventions": entries, "count": len(entries)}
 
 
@@ -239,20 +217,10 @@ async def get_handoff_reports(limit: int = 100):
         blackboard = await get_blackboard()
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
-    redis = blackboard.redis
-    raw = await redis.lrange("darwin:cortex:handoff_reports", -limit, -1)
-    reports = []
-    for entry in raw:
-        try:
-            reports.append(json.loads(entry))
-        except (json.JSONDecodeError, TypeError):
-            continue
-    reports.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+
+    reports = await blackboard.get_handoff_reports(limit)
     return {"reports": reports, "count": len(reports)}
 
-
-PROPOSALS_KEY = "darwin:cortex:proposals"
-PROPOSALS_DISMISSED_KEY = "darwin:cortex:proposals:dismissed"
 
 
 @router.get("/cortex/proposals")
@@ -267,25 +235,8 @@ async def get_proposals(limit: int = 100, include_dismissed: bool = False):
         blackboard = await get_blackboard()
     except RuntimeError:
         raise HTTPException(503, "Blackboard not available")
-    redis = blackboard.redis
-    raw = await redis.lrange(PROPOSALS_KEY, -limit, -1)
-    dismissed: set[str] = set()
-    if not include_dismissed:
-        dismissed = {m.decode() if isinstance(m, bytes) else m
-                     for m in await redis.smembers(PROPOSALS_DISMISSED_KEY)}
-    proposals = []
-    for entry in raw:
-        try:
-            p = json.loads(entry)
-            ts_key = str(p.get("timestamp", ""))
-            if ts_key in dismissed:
-                p["status"] = "dismissed"
-                if not include_dismissed:
-                    continue
-            proposals.append(p)
-        except (json.JSONDecodeError, TypeError):
-            continue
-    proposals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+
+    proposals = await blackboard.get_proposals(limit, include_dismissed)
     return {"proposals": proposals, "count": len(proposals)}
 
 
@@ -303,7 +254,5 @@ async def dismiss_proposals(body: dict):
     timestamps = body.get("timestamps", [])
     if not timestamps:
         raise HTTPException(400, "timestamps array required")
-    redis = blackboard.redis
-    str_timestamps = [str(t) for t in timestamps]
-    await redis.sadd(PROPOSALS_DISMISSED_KEY, *str_timestamps)
-    return {"dismissed": len(str_timestamps)}
+    count = await blackboard.dismiss_proposals(timestamps)
+    return {"dismissed": count}

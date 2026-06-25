@@ -144,7 +144,7 @@ async def approve_mission(key: str):
 @router.post("/missions/{key}/reanalyze")
 async def reanalyze_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
     """Clear Redis state and post a comment requesting re-analysis."""
-    await blackboard.redis.delete(f"{_REDIS_PREFIX}{key}")
+    await blackboard.clear_jira_mission_state(key)
 
     cfg = _jira_config()
     if not cfg:
@@ -206,7 +206,7 @@ async def dismiss_mission(key: str):
 @router.post("/missions/{key}/retry")
 async def retry_mission(key: str, blackboard: BlackboardState = Depends(get_blackboard)):
     """Clear Darwin state and re-trigger processing for a Jira issue."""
-    await blackboard.redis.delete(f"{_REDIS_PREFIX}{key}")
+    await blackboard.clear_jira_mission_state(key)
 
     cfg = _jira_config()
     if cfg:

@@ -3202,3 +3202,106 @@ return 1
         pipe.expire(self.NOTEBOOK_RETRY_KEY, self.NOTEBOOK_TTL_SECONDS)
         results = await pipe.execute()
         return results[0]
+
+    # =========================================================================
+    # Recently Closed Events (facade for route bypasses)
+    # =========================================================================
+
+    async def get_recently_closed_event_ids(
+        self, limit: int = 50, since_seconds: int = 86400,
+    ) -> list[str]:
+        """Get closed event IDs within a time window (most recent first)."""
+        now = time.time()
+        return await self.redis.zrevrangebyscore(
+            self.EVENT_CLOSED,
+            max=now,
+            min=now - since_seconds,
+            start=0,
+            num=limit,
+        )
+
+    async def get_all_closed_event_ids(self) -> list[str]:
+        """Get all closed event IDs (oldest first). Used for bulk rebuild."""
+        return await self.redis.zrange(self.EVENT_CLOSED, 0, -1)
+
+    # =========================================================================
+    # Cortex Shadow / Proposals / Handoff Reports (facade for route bypasses)
+    # =========================================================================
+
+    SHADOW_PREFIX = "darwin:cortex:shadow:"
+    SHADOW_INDEX = "darwin:cortex:shadow:_index"
+    HANDOFF_REPORTS_KEY = "darwin:cortex:handoff_reports"
+    PROPOSALS_KEY = "darwin:cortex:proposals"
+    PROPOSALS_DISMISSED_KEY = "darwin:cortex:proposals:dismissed"
+
+    async def get_shadow_event_ids(self) -> list[str]:
+        """Get event IDs that have shadow intervention data."""
+        raw = await self.redis.smembers(self.SHADOW_INDEX)
+        return [m if isinstance(m, str) else m.decode() for m in raw]
+
+    async def get_shadow_interventions(self, event_id: str, limit: int = 50) -> list[dict]:
+        """Get shadow intervention entries for a specific event."""
+        raw_items = await self.redis.lrange(f"{self.SHADOW_PREFIX}{event_id}", -limit, -1)
+        entries = []
+        for raw in raw_items:
+            try:
+                entry = json.loads(raw)
+                entry["event_id"] = event_id
+                entries.append(entry)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return entries
+
+    async def get_handoff_reports(self, limit: int = 100) -> list[dict]:
+        """Get JARVIS session handoff reports."""
+        raw = await self.redis.lrange(self.HANDOFF_REPORTS_KEY, -limit, -1)
+        reports = []
+        for entry in raw:
+            try:
+                reports.append(json.loads(entry))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        reports.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+        return reports
+
+    async def get_proposals(
+        self, limit: int = 100, include_dismissed: bool = False,
+    ) -> list[dict]:
+        """Get JARVIS enhancement proposals, optionally including dismissed."""
+        raw = await self.redis.lrange(self.PROPOSALS_KEY, -limit, -1)
+        dismissed: set[str] = set()
+        if not include_dismissed:
+            dismissed = {
+                m.decode() if isinstance(m, bytes) else m
+                for m in await self.redis.smembers(self.PROPOSALS_DISMISSED_KEY)
+            }
+        proposals = []
+        for entry in raw:
+            try:
+                p = json.loads(entry)
+                ts_key = str(p.get("timestamp", ""))
+                if ts_key in dismissed:
+                    p["status"] = "dismissed"
+                    if not include_dismissed:
+                        continue
+                proposals.append(p)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        proposals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+        return proposals
+
+    async def dismiss_proposals(self, timestamps: list) -> int:
+        """Mark proposals as dismissed by timestamp."""
+        str_timestamps = [str(t) for t in timestamps]
+        await self.redis.sadd(self.PROPOSALS_DISMISSED_KEY, *str_timestamps)
+        return len(str_timestamps)
+
+    # =========================================================================
+    # Jira Mission State (facade for route bypasses)
+    # =========================================================================
+
+    JIRA_MISSION_PREFIX = "darwin:headhunter:jira:"
+
+    async def clear_jira_mission_state(self, issue_key: str) -> None:
+        """Clear cached mission analysis state for a Jira issue."""
+        await self.redis.delete(f"{self.JIRA_MISSION_PREFIX}{issue_key}")

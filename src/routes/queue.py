@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
+
 
 from typing import Optional
 
@@ -391,12 +391,8 @@ async def list_closed_events(
     blackboard: BlackboardState = Depends(get_blackboard),
 ):
     """Get recently closed events."""
-    closed_ids = await blackboard.redis.zrevrangebyscore(
-        blackboard.EVENT_CLOSED,
-        max=time.time(),
-        min=time.time() - 86400,
-        start=0,
-        num=limit,
+    closed_ids = await blackboard.get_recently_closed_event_ids(
+        limit=limit, since_seconds=86400,
     )
     events = []
     for eid in closed_ids:
@@ -432,7 +428,7 @@ async def rebuild_deep_memory(
     except RuntimeError:
         raise HTTPException(503, "Archivist not available")
 
-    closed_ids = await blackboard.redis.zrange(blackboard.EVENT_CLOSED, 0, -1)
+    closed_ids = await blackboard.get_all_closed_event_ids()
     if not closed_ids:
         return {"archived": 0, "skipped": 0, "failed": 0, "total": 0}
 

@@ -21,7 +21,7 @@ import time
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from ..state.blackboard import BlackboardState
+    from ..state.ports import ScheduleRepository
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class TimeKeeperObserver:
 
     def __init__(
         self,
-        blackboard: "BlackboardState",
+        blackboard: "ScheduleRepository",
         interval: int = TIMEKEEPER_POLL_INTERVAL,
     ):
         self.blackboard = blackboard
