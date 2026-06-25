@@ -272,12 +272,17 @@ class LiveAPIAdapter:
             self._last_pulse_time = time.time()
             return
 
-        # Suppress wait_for_user on human events -- waiting IS correct behavior.
+        # Suppress wait pulses -- waiting IS correct behavior.
         # Without this, JARVIS detects repeated waits as SPIRAL friction,
         # intervenes, and creates a positive feedback loop (JARVIS wake ->
-        # FRIDAY responds -> wait_for_user -> pulse -> JARVIS intervenes -> ...).
-        if (batch.event_source in ("chat", "slack")
-                and any(p.neuron_id == "tool:wait_for_user" for p in batch.pulses)):
+        # FRIDAY responds -> wait -> pulse -> JARVIS intervenes -> ...).
+        # wait_for_user: suppressed on human events (user sets the pace).
+        # wait_for_agent: suppressed on ALL events (agents take minutes;
+        #   JARVIS should observe the agent result pulse, not the wait).
+        suppress_neurons = {"tool:wait_for_agent"}
+        if batch.event_source in ("chat", "slack"):
+            suppress_neurons.add("tool:wait_for_user")
+        if any(p.neuron_id in suppress_neurons for p in batch.pulses):
             return
 
         if self._generating_report:
