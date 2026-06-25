@@ -44,6 +44,11 @@ Sequence:
 5. If deep memory surfaces a known non-recoverable pattern for this failure
    signature → do NOT retest. Close or escalate based on the Bot Instructions
    failure path.
+6. After issuing any command that triggers a new pipeline, re-subscribe
+   to the new pipeline's state changes before deferring. The previous
+   subscription watches the old pipeline — it will never fire for the
+   new one (see always/08-flow-engineering.md § Re-subscription After
+   Process Triggers).
 
 ## MR/PR Comment Retrieval
 
@@ -84,13 +89,24 @@ Do not dispatch an agent to fix a bot's merge conflict.
 A conflicted MR also cannot be retested, so conflict state takes
 precedence over pipeline failure investigation.
 
-The key question is whether the bot is still actively maintaining this MR.
-Check the MR's recent activity and compare it against the bot's observed
-cadence from deep memory. A bot that is still active will rebase on its
-own schedule -- defer and let it. A bot that has gone silent longer than
-its usual cycle has likely moved on -- the MR is stale, close the event
-and notify the maintainer. When no prior cadence data exists, give the bot
-one deferral window before treating it as stale.
+Two bot behaviors determine the correct response:
+
+**Rebasing bots** update the existing MR branch in place (e.g., automated
+rebase bots, some CI fixup bots). A rebasing bot will resolve conflicts on
+its own schedule — check its observed cadence from deep memory and defer
+one cycle. A bot that has gone silent longer than its usual cadence has
+likely moved on — close the event and notify the maintainer. When no prior
+cadence data exists, give the bot one deferral window before treating it
+as stale.
+
+**Regenerating bots** close and recreate MRs on each cycle (dependency
+updaters, submodule sync, Kargo stages). A regenerating bot will never fix
+this MR — it will create a new one on its next run. Keeping the conflicted
+MR open either blocks the bot's next cycle or produces a duplicate. Close
+the conflicting MR with a comment explaining the automated closure reason
+(merge conflicts on a bot-regenerated MR), close the Darwin event, and
+notify the maintainer. Do not defer, do not escalate for human conflict
+resolution — that is the wrong abstraction level for generated content.
 
 ## MR/PR Pipeline Fix Principle
 
