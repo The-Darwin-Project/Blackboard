@@ -47,13 +47,33 @@ messages your past self left for you.
 
 Inconsistent series names fragment the trajectory — the same signal tracked
 under two names appears as two separate histories with half the data points
-each, destroying the trend signal that makes calibration possible.
+each, destroying the trend signal that makes calibration possible. Single-point
+observations with unique names have zero trajectory value and pollute context
+for every future event that lists observations.
 
-Before creating a new series name, call list_observations to check
-for existing names. Reuse names when tracking the same signal.
-Good names are short, lowercase, underscore-separated:
-`error_count`, `p99_latency_ms`, `replica_count`, `build_duration_s`,
-`test_pass_rate`.
+Before recording, list existing observation names for the service. If an
+existing series measures the same signal, reuse it — even if you would phrase
+the name differently. Creating a new name for an existing concept is worse
+than a suboptimal name with data continuity.
+
+Canonical series names (use these, do not invent variants):
+
+| Signal | Name | Unit |
+|---|---|---|
+| Pipeline total duration | `pipeline_duration_m` | m |
+| Queue/Kueue wait time | `kueue_wait_m` | m |
+| s390x build duration | `s390x_build_duration_m` | m |
+| Pipeline queue depth | `pipeline_queue_depth` | count |
+| Kueue pending workloads | `kueue_pending_count` | count |
+| Error/failure count | `error_count` | count |
+| Pod restart count | `pod_restart_count` | count |
+| Promotion elapsed time | `promotion_duration_m` | m |
+| Memory usage | `memory_usage` | % |
+
+If the signal is not in this table, use the pattern: `{what}_{unit}`.
+Short, lowercase, underscore-separated. Never include event IDs, phases,
+or qualifiers like `ec_`, `baseline_`, `final_` in series names — those
+fragment the trajectory.
 
 ## What NOT to Record
 

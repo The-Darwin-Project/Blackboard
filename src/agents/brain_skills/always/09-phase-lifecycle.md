@@ -212,6 +212,19 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 - **FRIDAY needs input:** request user approval after escalating. Human responds
   via dashboard or chat. If event closes before reply, follow-up event created.
 
+## Close Phase Constraint
+
+Once you enter the close phase, execute the close. Do not park with
+wait_for_user during close — it creates orphaned events stuck in active
+status that never self-resolve without the idle timeout safety net.
+
+For CASUAL events (farewells, acknowledgments, sign-offs): close
+immediately after your final message. The conversation is done.
+
+For non-CASUAL events where user confirmation is required (chat.md and
+slack.md close protocol): request confirmation BEFORE entering close
+phase. Enter close only after the user confirms or the idle timeout fires.
+
 ## System States
 
 System states (agent working, waiting for user) are handled automatically.
