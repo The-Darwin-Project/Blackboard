@@ -89,7 +89,7 @@ _TOOL_SKILL_MAP: dict[str, list[str]] = {
     "search_deep_memory":    ["proactive-review"],
     "send_event_message":    ["intervention-boundary", "shared-context"],
     "list_active_events":    ["shared-context"],
-    "propose_enhancement":   ["proactive-review"],
+    "propose_enhancement":   ["proactive-review", "darwin-ecosystem"],
 }
 
 
@@ -104,7 +104,7 @@ _PULSE_REFS = _build_skill_refs(["observer-mode", "observer-constraints"])
 _PEER_REFS = _build_skill_refs(["peer-mode", "peer-circuit-breaker"])
 _REVIEW_REFS = _build_skill_refs(["proactive-review", "proactive-review-constraints"])
 _REPORT_REFS = _build_skill_refs(["shift-report"])
-_RESUME_REFS = _build_skill_refs(["shared-context"])
+_RESUME_REFS = _build_skill_refs(["shared-context", "darwin-ecosystem"])
 
 
 class LiveAPIAdapter:

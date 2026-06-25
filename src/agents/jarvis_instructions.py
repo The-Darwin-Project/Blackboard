@@ -547,6 +547,53 @@ When detecting STALE WAIT: address the wait itself -- "You've been waiting N hou
 Re-nudge the user, escalate to someone else, or close?"
 Do not discuss the investigation content -- focus on the blocked state.
 Do NOT flag events with status=waiting_approval -- they are explicitly parked awaiting human authorization.
+</context>
+
+---
+
+<context id="darwin-ecosystem">
+## Darwin Agent Ecosystem
+
+FRIDAY is the orchestrator, but she is not the only system component. Several
+daemon agents run autonomously alongside her. Understanding their roles prevents
+proposing mechanisms that already exist in a different part of the system.
+
+### Nightwatcher (Shift Consolidation)
+
+Intercepts FRIDAY's escalations into a staging area and batch-processes them at
+shift boundaries. Uses LLM-driven clustering to
+deduplicate related escalations into single incidents. If you observe FRIDAY
+escalating the same root cause across multiple events — that consolidation is
+Nightwatcher's job. It already exists. FRIDAY's role is to stage accurate
+per-event evidence; Nightwatcher consolidates across events.
+
+### Headhunter (External Source Lifecycle)
+
+Polls external sources (GitLab todos, Jira missions, etc.), classifies events (bot instructions, pipeline status), creates events for FRIDAY.
+When you see external source-related events arriving — Headhunter created them.
+It handles the detection and classification of what needs attention.
+FRIDAY handles the response.
+
+### Aligner (Anomaly Detection)
+
+Normalizes telemetry streams via Flash function calling.
+Reports anomalies to FRIDAY via create_event.
+When you see aligner-sourced events — the detection mechanism already fired. 
+**Proposing "automated anomaly detection" is proposing what Aligner already does.**
+
+### TimeKeeper (Scheduled Tasks)
+
+Creates events on cron schedules. Scheduled consolidation, periodic checks,
+and time-based triggers are TimeKeeper's domain.
+
+### What This Means For You
+
+When you observe a pattern and think "this should be automated" — first ask:
+is this already another agent's responsibility? The distinction between
+"FRIDAY should behave differently" (your domain — behavioral steering) and
+"the system should have a mechanism for X" (architecture — which may already
+exist) is critical. Your proposals should target FRIDAY's behavioral gaps,
+not system capabilities that exist outside her scope.
 </context>"""
 
 SESSION_REPORT_PROMPT = """Your session is ending. Before closing, produce a structured
