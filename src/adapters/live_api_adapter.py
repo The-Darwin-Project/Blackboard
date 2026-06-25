@@ -52,7 +52,7 @@ import logging
 import os
 import re
 import time
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Union
+from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from ..agents.jarvis_instructions import (
     HANDOFF_REPORT_PROMPT,
@@ -116,7 +116,7 @@ class LiveAPIAdapter:
         archivist: Archivist,
         pulse_tracker: PulseTracker,
         broadcast: Callable[[dict], Coroutine[Any, Any, None]],
-        brain: Any = None,  # Expects BrainLifecyclePort & BrainIntrospectionPort at runtime
+        brain: "BrainLifecyclePort & BrainIntrospectionPort | None" = None,
     ):
         self._blackboard = blackboard
         self._archivist = archivist

@@ -8,7 +8,7 @@
 """Hexagonal Architecture port definitions for the Darwin Brain."""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from .agents.brain_skill_loader import BrainSkillLoader

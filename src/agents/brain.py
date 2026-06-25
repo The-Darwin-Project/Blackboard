@@ -5210,7 +5210,7 @@ class Brain:
         """Event IDs currently waiting for JARVIS response."""
         return list(self._waiting_for_jarvis.keys())
 
-    def get_skill_loader(self):
+    def get_skill_loader(self) -> "BrainSkillLoader | None":
         """Access the BrainSkillLoader instance (may be None if loading failed)."""
         return self._skill_loader
 
