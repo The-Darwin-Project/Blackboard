@@ -3889,7 +3889,9 @@ class Brain:
                 stale_count += 1
                 continue
 
-            # Close events that have turns (were being processed) -- they're stale from the previous instance
+            # Close only ACTIVE events that had in-flight agent work. Deferred events
+            # survive restart — their timer will wake them naturally. Events in
+            # waiting_approval also survive — the human hasn't responded yet.
             if event.conversation:
                 # Exempt hold_watch orphans: jarvis events parked via hold_watch survive restart
                 if (
@@ -3897,6 +3899,14 @@ class Brain:
                     and event.conversation[-1].waitingFor == "hold_watch"
                 ):
                     logger.info(f"Exempting hold_watch orphan from stale cleanup: {eid}")
+                    continue
+                # Exempt deferred events: they're waiting on a timer or subscription, not stale
+                if event.status.value == "deferred":
+                    logger.info(f"Exempting deferred event from stale cleanup: {eid}")
+                    continue
+                # Exempt events waiting for user approval
+                if event.status.value == "waiting_approval":
+                    logger.info(f"Exempting waiting_approval event from stale cleanup: {eid}")
                     continue
                 self._clear_jarvis_wait(eid)
                 self._jarvis_wait_count.pop(eid, None)
