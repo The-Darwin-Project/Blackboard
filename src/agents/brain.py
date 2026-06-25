@@ -33,10 +33,10 @@
 #     clear_hold_watch(), _close_and_broadcast(). Orphan recovery in _recover_hold_watch_orphans().
 # 33. [Pattern]: _active_meta_event_id (Brain-side mirror): set in _process_event_inner for jarvis events,
 #     cleared in _close_and_broadcast. Enables defer_event notification injection without cross-component calls.
-# 28. [Debt]: defer_event handler (~2064) uses read-modify-write (get_event -> set status -> redis.set) without
-#     WATCH/MULTI/EXEC. Protected by per-event asyncio.Lock, but external concurrent writes (REST endpoints)
-#     could theoretically lose turns. Pre-existing pattern -- refactor to use transition_event_status() or
-#     a dedicated blackboard.defer_event() atomic operation when this path is next modified.
+# 28. [Pattern]: BrainToolRouter (tool_router.py + handlers_*.py). _execute_function_call is a thin
+#     dispatcher: pulse emission + HANDLER_REGISTRY lookup + ToolContext delegation. 36 handlers across
+#     4 modules (data, integration, state, dispatch). execute_tool_locked() for off-lock callers.
+#     _BrainToolContext is the concrete Protocol impl — singleton per Brain instance.
 # 35. [Pattern]: StateWatcher subscription lifecycle: cycle_id (uuid4 per _process_event_inner) tracks
 #     subscribe+defer in same cycle. defer_event cancels stale (different-cycle) subscriptions only.
 #     _close_and_broadcast, force-close, and reconcile timer-wake cancel unconditionally.
@@ -210,6 +210,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Populate tool handler registry (side-effect imports)
+import src.agents.handlers_data  # noqa: F401
+import src.agents.handlers_integration  # noqa: F401
+import src.agents.handlers_state  # noqa: F401
+import src.agents.handlers_dispatch  # noqa: F401
+
 # =============================================================================
 # Brain System Prompt - THIS IS THE DECISION ENGINE
 # =============================================================================
@@ -298,6 +304,189 @@ def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
     safe_path = _SAFE_PATH_RE.sub('_', path)
     return f'<{tag_type} id="{safe_path}">\n{body}\n</{tag_type}>'
+
+
+class _BrainToolContext:
+    """Concrete ToolContext implementation — bridges Brain private state to handler Protocol."""
+
+    __slots__ = ("_b",)
+
+    def __init__(self, brain: "Brain") -> None:
+        self._b = brain
+
+    # --- Wait states ---
+    def mark_waiting_for_user(self, eid: str) -> None:
+        self._b._waiting_for_user[eid] = time.time()
+
+    def clear_waiting_for_user(self, eid: str) -> None:
+        self._b._waiting_for_user.pop(eid, None)
+
+    def is_waiting_for_user(self, eid: str) -> bool:
+        return eid in self._b._waiting_for_user
+
+    def mark_waiting_for_agent(self, eid: str, agent: str) -> None:
+        self._b._waiting_for_agent[eid] = agent
+
+    def clear_waiting_for_agent(self, eid: str) -> None:
+        self._b._waiting_for_agent.pop(eid, None)
+
+    def is_waiting_for_agent(self, eid: str) -> bool:
+        return eid in self._b._waiting_for_agent
+
+    # --- Agent dispatch ---
+    def is_task_running(self, eid: str) -> bool:
+        return eid in self._b._active_tasks and not self._b._active_tasks[eid].done()
+
+    def get_routing_depth(self, eid: str) -> int:
+        return self._b._routing_depth.get(eid, 0)
+
+    def increment_routing_depth(self, eid: str) -> int:
+        depth = self._b._routing_depth.get(eid, 0) + 1
+        self._b._routing_depth[eid] = depth
+        return depth
+
+    def is_dispatch_locked(self) -> bool:
+        return bool(self._b._dispatch_semaphore and self._b._dispatch_semaphore.locked())
+
+    def get_active_agent_for_event(self, eid: str) -> str | None:
+        return self._b._active_agent_for_event.get(eid)
+
+    def set_active_task(self, eid: str, task: object) -> None:
+        self._b._active_tasks[eid] = task
+
+    def get_agent_class(self, name: str) -> object | None:
+        return self._b.agents.get(name)
+
+    def get_agent_instance(self, name: str) -> object | None:
+        return self._b.agents.get(name)
+
+    # --- Environment ---
+    def get_ws_mode(self) -> str:
+        return self._b._ws_mode
+
+    # --- Subscriptions ---
+    def get_state_watcher(self) -> object | None:
+        return self._b._state_watcher
+
+    def get_cycle_id(self, eid: str) -> str:
+        return self._b._cycle_id_for_event.get(eid, "")
+
+    def cancel_stale_subscriptions(self, eid: str, cycle: str) -> None:
+        if self._b._state_watcher:
+            self._b._state_watcher.cancel_if_different_cycle(eid, cycle)
+
+    # --- JARVIS ---
+    def mark_jarvis_wait(self, eid: str, timestamp: float) -> None:
+        self._b._waiting_for_jarvis[eid] = timestamp
+
+    def clear_jarvis_wait(self, eid: str) -> None:
+        self._b._clear_jarvis_wait(eid)
+
+    def has_jarvis_waiters(self) -> bool:
+        return bool(self._b._waiting_for_jarvis)
+
+    def get_active_meta_event_id(self) -> str | None:
+        return self._b._active_meta_event_id
+
+    def is_in_hold_watch(self, eid: str) -> bool:
+        return eid in self._b._hold_watch_events
+
+    def get_jarvis_wait_count(self, eid: str) -> int:
+        return self._b._jarvis_wait_count.get(eid, 0)
+
+    def increment_jarvis_wait_count(self, eid: str) -> int:
+        count = self._b._jarvis_wait_count.get(eid, 0) + 1
+        self._b._jarvis_wait_count[eid] = count
+        return count
+
+    def set_jarvis_wait_task(self, eid: str, task: object) -> None:
+        self._b._jarvis_wait_tasks[eid] = task
+
+    def set_hold_watch(self, eid: str, deferred_snapshot: frozenset) -> None:
+        self._b._hold_watch_events[eid] = deferred_snapshot
+
+    def set_hold_watch_park_time(self, eid: str) -> None:
+        self._b._hold_watch_park_time[eid] = time.time()
+
+    def get_live_adapter(self) -> object | None:
+        return self._b._live_adapter
+
+    # --- Dedup/cache ---
+    def has_incident_been_created(self, eid: str) -> bool:
+        return eid in self._b._incident_created
+
+    def mark_incident_created(self, eid: str) -> None:
+        self._b._incident_created.add(eid)
+
+    async def get_cached_journal(self, svc: str) -> list[str]:
+        return await self._b._get_journal_cached(svc)
+
+    # --- Timers ---
+    def get_idle_timeout(self) -> object:
+        return self._b._idle_timeout
+
+    def get_last_processed(self, eid: str) -> float:
+        return self._b._last_processed.get(eid, 0.0)
+
+    def update_last_processed(self, eid: str) -> None:
+        self._b._last_processed[eid] = time.time()
+
+    def get_conversation_timeout(self, event) -> int:
+        return self._b._get_conversation_timeout(event)
+
+    # --- Callbacks ---
+    async def append_and_broadcast(self, event_id, turn, event=None) -> None:
+        await self._b._append_and_broadcast(event_id, turn, event)
+
+    async def broadcast(self, message: dict) -> None:
+        await self._b._broadcast(message)
+
+    async def emit_pulse(self, event_id: str, pulses: list) -> None:
+        await self._b._emit_executive_pulse(event_id, pulses)
+
+    async def next_turn_number(self, event_id: str) -> int:
+        return await self._b._next_turn_number(event_id)
+
+    async def close_and_broadcast(self, event_id: str, summary: str, close_reason: str | None = None) -> None:
+        await self._b._close_and_broadcast(event_id, summary, close_reason=close_reason)
+
+    async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False) -> None:
+        task_coro = self._b._run_agent_task(
+            event_id, agent_name, agent, task, event_md_path,
+            routing_turn_num=routing_turn_num, mode=mode,
+        )
+        t = asyncio.create_task(task_coro)
+        if not parallel:
+            self._b._active_tasks[event_id] = t
+
+    async def dispatch_handler(self, name, event_id, args, response_parts) -> bool:
+        return await self._b._execute_function_call(event_id, name, args, response_parts)
+
+    def get_blackboard(self):
+        return self._b.blackboard
+
+    def get_slack_channel(self):
+        return self._b._get_slack_channel()
+
+    def get_smartsheet_incident_adapter(self):
+        return self._b._get_smartsheet_incident_adapter()
+
+    async def deliver_to_jarvis(self, event_id: str, message: str) -> None:
+        if self._b._live_adapter:
+            try:
+                await self._b._live_adapter.receive_brain_response(event_id, message)
+            except Exception as e:
+                logger.warning(f"Failed to deliver response to JARVIS for {event_id}: {e}")
+
+    async def stamp_event(self, event_id: str, **kwargs) -> None:
+        await self._b.blackboard.stamp_event(event_id, **kwargs)
+
+    async def record_event(self, event_type, data: dict, narrative: str = "") -> None:
+        await self._b.blackboard.record_event(event_type, data, narrative=narrative)
+
+    @property
+    def ephemeral_only_roles(self) -> frozenset:
+        return self._b.EPHEMERAL_ONLY_ROLES
 
 
 class Brain:
@@ -403,6 +592,9 @@ class Brain:
         wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
         search_status = "search=on" if self._search_enabled else "search=off"
         logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, agents={list(self.agents.keys())})")
+
+        # Initialize tool router context — singleton, methods take event_id
+        self._tool_ctx = _BrainToolContext(self)
 
     JOURNAL_CACHE_TTL = 60  # seconds
 
@@ -593,6 +785,23 @@ class Brain:
             else:
                 logger.debug(f"Skipping process_event for {event_id}: waiting for participant")
                 return
+
+        # JARVIS intermediate wake filter: prevent JARVIS turns from waking FRIDAY
+        # when an agent is actively working on a non-jarvis event. JARVIS observations
+        # are valuable but should not interrupt agent execution — they're consumed on
+        # next natural wake. Exception: CHAOTIC domain bypasses (urgency overrides).
+        if (
+            event_id in self._active_tasks
+            and not self._active_tasks[event_id].done()
+            and event.source != "jarvis"
+            and event.conversation
+            and event.conversation[-1].actor == "jarvis"
+            and _resolve_domain(getattr(event, "brain_domain", "")) != "chaotic"
+        ):
+            logger.debug(
+                "Suppressing JARVIS intermediate wake for %s (agent active)", event_id
+            )
+            return
 
         # Clear orphan re-queue count on successful recovery (event now has turns)
         if event.conversation and event_id in self._orphan_requeue_count:
@@ -2223,13 +2432,12 @@ class Brain:
         grounding_evidence: str | None = None,
     ) -> bool:
         """
-        Execute an LLM function call. Maps function names to real operations.
-        
-        Returns True if the caller should re-invoke the LLM immediately
-        (e.g., after lookup_service). Returns False for all other cases.
-        
-        Agent dispatch uses asyncio.create_task for non-blocking execution.
-        Other functions (close, approve, verify) are fast Redis writes.
+        Thin dispatcher: pulse emission + registry lookup + ToolContext delegation.
+
+        Returns True if the caller should re-invoke the LLM immediately.
+        Returns False for all other cases (close, wait, dispatch).
+        Called within per-event asyncio.Lock (primary path) or via
+        execute_tool_locked (off-lock background tasks).
         """
         if grounding_evidence:
             turn = ConversationTurn(
@@ -2243,8 +2451,6 @@ class Brain:
             await self._append_and_broadcast(event_id, turn)
             response_parts = None
 
-        # Emit tool pulse for every function call (except respond_to_jarvis —
-        # that's a direct message TO JARVIS, not an observation FOR JARVIS)
         if function_name != "respond_to_jarvis":
             await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool")])
             skill_paths = self._skill_loader.get_tool_skills(function_name) if self._skill_loader else []
@@ -2254,2079 +2460,56 @@ class Brain:
                     [(f"skill:{p}", "skill", 0.5) for p in skill_paths],
                 )
 
-        if function_name in ("select_agent", "ask_agent_for_state"):
-            agent_name = args.get("agent_name", "")
-            task = args.get("task_instruction", "") or args.get("question", "")
-            mode = args.get("mode", "")
-
-            # Duplicate task prevention
-            if event_id in self._active_tasks and not self._active_tasks[event_id].done():
-                logger.info(f"Task already active for {event_id}, skipping dispatch")
-                dup_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="An agent is already actively working on this event. "
-                             "Wait for their update before dispatching again.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, dup_turn)
-                return False
-
-            # WIP cap: try-acquire, defer if at capacity (Peak Throughput Principle)
-            if self._dispatch_semaphore and self._dispatch_semaphore.locked():
-                flow = await self.blackboard.get_flow_metrics()
-                logger.warning(
-                    f"Dispatch WIP cap reached for {event_id}, deferring "
-                    f"(queue_depth={flow['queue_depth']}, active={len(self._active_tasks)})"
-                )
-                await self._execute_function_call(
-                    event_id, "defer_event",
-                    {"delay_seconds": 30, "reason": "Dispatch WIP cap reached"},
-                    response_parts=None,
-                )
-                return False
-
-            # Recursion guard (resets on user interaction via clear_waiting)
-            depth = self._routing_depth.get(event_id, 0) + 1
-            if depth > 30:
-                logger.warning(f"Event {event_id} hit routing depth limit (30)")
-                await self._close_and_broadcast(event_id, "Agent routing loop detected. Force closed.", close_reason="force_closed")
-                return False
-            self._routing_depth[event_id] = depth
-
-            # Value stream: stamp dispatch time (overwrites on multi-agent events)
-            await self.blackboard.stamp_event(event_id, last_dispatched_at=time.time())
-
-            # Append brain routing turn + broadcast
-            action = "route" if function_name == "select_agent" else "route"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action=action,
-                waitingFor="select_agent",
-                thoughts=f"Routing to {agent_name}: {task}",
-                selectedAgents=[agent_name],
-                taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            await self._emit_executive_pulse(event_id, [(f"agent:{agent_name}", "agent")])
-            await self.blackboard.record_event(
-                EventType.BRAIN_AGENT_ROUTED,
-                {"event_id": event_id, "agent": agent_name},
-                narrative=f"Routed {event_id} to {agent_name}: {task[:80]}",
-            )
-
-            # Broadcast the event MD as attachment
-            event = await self.blackboard.get_event(event_id)
-            if event:
-                svc_meta = await self.blackboard.get_service(event.service)
-                await self._broadcast({
-                    "type": "attachment",
-                    "event_id": event_id,
-                    "actor": "brain",
-                    "filename": f"event-{event_id}.md",
-                    "content": self._event_to_markdown(event, svc_meta),
-                })
-
-            # Launch agent task (non-blocking)
-            # QE has no Python agent class -- allow reverse-WS dispatch without one
-            agent = self.agents.get(agent_name)
-            if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
-                event_md_path = f"./events/event-{event_id}.md"
-                task_coro = self._run_agent_task(
-                    event_id, agent_name, agent, task, event_md_path,
-                    routing_turn_num=turn.turn, mode=mode,
-                )
-                self._active_tasks[event_id] = asyncio.create_task(task_coro)
-            else:
-                logger.error(f"Agent '{agent_name}' not found in agents dict")
-                not_found_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="That agent is not available in this environment. "
-                             "Review which agents are available and which has "
-                             "the right expertise for this task.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, not_found_turn)
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-            return False
-
-        elif function_name == "reply_to_agent":
-            agent_id = args.get("agent_id", "")
-            message = args.get("message", "")
-            from ..dependencies import get_registry_and_bridge
-            registry, _ = get_registry_and_bridge()
-            agent_conn = None
-            if registry:
-                agent_conn = await registry.get_by_id(agent_id)
-                if not agent_conn:
-                    agent_conn = await registry.get_by_event(event_id)
-                if not agent_conn:
-                    agent_conn = await registry.get_available(agent_id)
-            if agent_conn and agent_conn.ws:
-                try:
-                    await agent_conn.ws.send_json({
-                        "type": "huddle_reply",
-                        "task_id": agent_conn.current_task_id or "",
-                        "content": message,
-                    })
-                    logger.info(f"Brain reply_to_agent -> {agent_id} ({len(message)} chars)")
-                except Exception as e:
-                    logger.warning(f"Failed to send reply_to_agent to {agent_id}: {e}")
-                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
-                    followup = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain",
-                        action="tool_result",
-                        thoughts="The message was not delivered. "
-                                 "The agent may still be working -- check for recent updates "
-                                 "from them before deciding next steps.",
-                        waitingFor="reply_to_agent",
-                        response_parts=response_parts,
-                    )
-                    await self._append_and_broadcast(event_id, followup)
-            else:
-                logger.warning(f"reply_to_agent: agent {agent_id} not found or disconnected")
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-                followup = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="The message was not delivered. "
-                             "The agent may still be working -- check for recent updates "
-                             "from them before deciding next steps.",
-                    waitingFor="reply_to_agent",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, followup)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="reply",
-                thoughts=f"Reply to {agent_id}: {message}",
-                waitingFor="reply_to_agent",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return False
-
-        elif function_name == "message_agent":
-            agent_name = args.get("agent_id", "")
-            message = args.get("message", "")
-
-            # Ephemeral-only roles have no persistent sidecar -- message_agent cannot reach them
-            if agent_name in self.EPHEMERAL_ONLY_ROLES:
-                running_agent = self._active_agent_for_event.get(event_id)
-                if running_agent != agent_name:
-                    logger.info(
-                        "message_agent: %s is ephemeral-only and not active on %s -- redirecting to select_agent",
-                        agent_name, event_id,
-                    )
-                    followup = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain",
-                        action="tool_result",
-                        thoughts=(
-                            f"{agent_name} is an ephemeral-only agent (no persistent sidecar). "
-                            f"Use select_agent to dispatch it -- this provisions an on-call pod. "
-                            f"message_agent only works for agents that are already running."
-                        ),
-                        waitingFor="message_agent",
-                        response_parts=response_parts,
-                    )
-                    await self._append_and_broadcast(event_id, followup)
-                    return True
-
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="message",
-                thoughts=f"Message to {agent_name}: {message}",
-                selectedAgents=[agent_name],
-                waitingFor="message_agent",
-            )
-            await self._append_and_broadcast(event_id, turn)
-
-            from ..dependencies import get_registry_and_bridge
-            registry, _ = get_registry_and_bridge()
-
-            running_agent = self._active_agent_for_event.get(event_id)
-            event_has_active_task = event_id in self._active_tasks and not self._active_tasks[event_id].done()
-
-            if event_has_active_task and running_agent == agent_name:
-                if registry:
-                    agent_conn = await registry.get_by_event(event_id)
-                    if not agent_conn:
-                        agent_conn = await registry.get_available(agent_name)
-                    if agent_conn and agent_conn.ws:
-                        try:
-                            await agent_conn.ws.send_json({
-                                "type": "proactive_message",
-                                "from": "brain",
-                                "content": message,
-                                "event_id": event_id,
-                            })
-                            logger.info(f"Brain message_agent -> {agent_name} (busy, inbox, event={event_id}) ({len(message)} chars)")
-                        except Exception as e:
-                            logger.warning(f"Failed to send message to {agent_name}: {e}")
-                            await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
-                            followup = ConversationTurn(
-                                turn=(await self._next_turn_number(event_id)),
-                                actor="brain",
-                                action="tool_result",
-                                thoughts="The message was not delivered. "
-                                         "The agent may still be working -- check for recent updates "
-                                         "from them before deciding next steps.",
-                                waitingFor="message_agent",
-                                response_parts=response_parts,
-                            )
-                            await self._append_and_broadcast(event_id, followup)
-                return False
-
-            agent_conn = await registry.get_available(agent_name) if registry else None
-
-            if agent_conn:
-                agent = self.agents.get(agent_name)
-                if agent or (self._ws_mode == "reverse" and agent_name not in ("_aligner", "_archivist_memory")):
-                    event_md_path = f"./events/event-{event_id}.md"
-                    task_coro = self._run_agent_task(
-                        event_id, agent_name, agent, message, event_md_path,
-                        routing_turn_num=turn.turn, mode="message",
-                        parallel=event_has_active_task,
-                    )
-                    task = asyncio.create_task(task_coro)
-                    if not event_has_active_task:
-                        self._active_tasks[event_id] = task
-                    label = "parallel" if event_has_active_task else "idle, dispatch"
-                    logger.info(f"Brain message_agent -> {agent_name} ({label}) ({len(message)} chars)")
-                else:
-                    logger.warning(f"message_agent: no agent class for role {agent_name}")
-                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-            else:
-                if registry:
-                    busy_conn = await registry.get_by_role(agent_name)
-                    if busy_conn and busy_conn.ws:
-                        try:
-                            await busy_conn.ws.send_json({
-                                "type": "proactive_message",
-                                "from": "brain",
-                                "content": message,
-                                "event_id": event_id,
-                            })
-                            logger.info(f"Brain message_agent -> {agent_name} (busy fallback, inbox, event={event_id}) ({len(message)} chars)")
-                        except Exception as e:
-                            logger.warning(f"Failed to send message to {agent_name}: {e}")
-                            await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
-                            followup = ConversationTurn(
-                                turn=(await self._next_turn_number(event_id)),
-                                actor="brain",
-                                action="tool_result",
-                                thoughts="The message was not delivered. "
-                                         "The agent may still be working -- check for recent updates "
-                                         "from them before deciding next steps.",
-                                waitingFor="message_agent",
-                                response_parts=response_parts,
-                            )
-                            await self._append_and_broadcast(event_id, followup)
-                    else:
-                        logger.warning(f"message_agent: no WS connection for {agent_name}, message dropped")
-                        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-                        followup = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor="brain",
-                            action="tool_result",
-                            thoughts="The message was not delivered. "
-                                     "The agent may still be working -- check for recent updates "
-                                     "from them before deciding next steps.",
-                            waitingFor="message_agent",
-                            response_parts=response_parts,
-                        )
-                        await self._append_and_broadcast(event_id, followup)
-            return False
-
-        elif function_name == "record_observation":
-            name = args.get("name", "")
-            value = args.get("value", 0)
-            unit = args.get("unit", "")
-            result = await self.blackboard.record_observation(event_id, name, value, unit)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts=(
-                    f"Recorded observation '{name}' = {value}"
-                    f"{(' ' + unit) if unit else ''}"
-                    f" (point #{result['count']}, event age {result['event_age_minutes']}m)"
-                ),
-                waitingFor="record_observation",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "list_observations":
-            result = await self.blackboard.list_observations()
-            if not result["observations"]:
-                summary_text = "No observations recorded yet."
-            else:
-                lines = [f"{len(result['observations'])} observation series (global, last 7 days):"]
-                for s in result["observations"]:
-                    events_in_series = {p.get("event_id", "") for p in s["points"] if p.get("event_id")}
-                    lines.append(
-                        f"  • {s['name']}: {s['count']} pts, "
-                        f"range [{s['min']}–{s['max']}] {s['unit']}, "
-                        f"latest={s['latest_value']}, trend={s['trend']}, "
-                        f"span={s['span_minutes']}m, "
-                        f"events={len(events_in_series)}"
-                    )
-                summary_text = "\n".join(lines)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts=summary_text,
-                waitingFor="list_observations",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "take_note":
-            content = args.get("content", "")
-            category = args.get("category", "convention")
-            if category not in self.blackboard.VALID_CATEGORIES:
-                category = "convention"
-            result = await self.blackboard.take_note(event_id, content, category)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts=f"Noted ({result['note_id'][:8]}): {content[:80]}",
-                waitingFor="take_note",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "review_notes":
-            notes = await self.blackboard.get_notes()
-            if not notes:
-                summary_text = "No field notes recorded yet."
-            else:
-                lines = [f"{len(notes)} field notes in notebook:"]
-                for n in notes:
-                    lines.append(
-                        f"  • [{n.get('category', '?')}] {n.get('content', '')[:120]}"
-                        f" (evt:{n.get('event_id', '?')[:8]}, {n.get('timestamp', '?')})"
-                    )
-                summary_text = "\n".join(lines)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts=summary_text,
-                waitingFor="review_notes",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "close_event":
-            summary = args.get("summary", "Event closed.")
-            await self._close_and_broadcast(event_id, summary)
-            return False
-
-        elif function_name == "request_user_approval":
-            plan_summary = args.get("plan_summary", "")
-            self._waiting_for_user[event_id] = time.time()  # Block re-processing until user responds
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="request_approval",
-                thoughts=plan_summary,
-                pendingApproval=True,
-                waitingFor="user",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            await self.blackboard.park_for_approval(event_id)
-            event = await self.blackboard.get_event(event_id)
-            if event and event.source in ("slack", "chat"):
-                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
-            return False
-
-        elif function_name == "re_trigger_aligner":
-            service = args.get("service", "")
-            condition = args.get("check_condition", "")
-            aligner = self.agents.get("_aligner")
-            if not aligner or not service:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Service health data is not available for this event. "
-                             "Consider checking the ops journal for recent entries, "
-                             "or dispatching an agent to investigate directly.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
+        from .tool_router import HANDLER_REGISTRY
+        handler = HANDLER_REGISTRY.get(function_name)
+        if handler:
             try:
-                state = await aligner.check_state(service)
+                return await handler(self._tool_ctx, event_id, args, response_parts)
             except Exception as e:
-                logger.warning(f"re_trigger_aligner check_state failed for {service}: {e}")
-                turn = ConversationTurn(
+                logger.error(f"Handler {function_name} failed for {event_id}: {e}", exc_info=True)
+                error_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="tool_result",
-                    thoughts="Service health check failed. "
-                             "Consider deferring briefly and retrying, "
-                             "or dispatching an agent to investigate directly.",
+                    thoughts=f"Internal error executing {function_name}: {str(e)[:200]}. "
+                             "Consider an alternative approach or retry.",
                     response_parts=response_parts,
                 )
-                await self._append_and_broadcast(event_id, turn)
+                await self._append_and_broadcast(event_id, error_turn)
                 return False
-            verify_turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="verify",
-                thoughts=f"Re-triggering Aligner to check: {condition}",
-                evidence=f"target_service:{service}",
-            )
-            await self._append_and_broadcast(event_id, verify_turn)
-            confirm_turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="aligner",
-                action="confirm",
-                evidence=(
-                    f"Service: {state['service']}, "
-                    f"CPU: {state.get('cpu', 0):.1f}%, "
-                    f"Memory: {state.get('memory', 0):.1f}%, "
-                    f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
-                ),
-            )
-            await self._append_and_broadcast(event_id, confirm_turn)
-            return False
-
-        elif function_name == "wait_for_verification":
-            condition = args.get("condition", "")
-            event = await self.blackboard.get_event(event_id)
-            target_service = event.service if event else ""
-            aligner = self.agents.get("_aligner")
-            if aligner and target_service:
-                state = await aligner.check_state(target_service)
-                verify_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="verify",
-                    thoughts=f"Waiting for verification: {condition}",
-                    evidence=f"target_service:{target_service}",
-                    waitingFor="wait_for_verification",
-                )
-                await self._append_and_broadcast(event_id, verify_turn)
-                confirm_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="aligner",
-                    action="confirm",
-                    evidence=(
-                        f"Service: {state['service']}, "
-                        f"CPU: {state.get('cpu', 0):.1f}%, "
-                        f"Memory: {state.get('memory', 0):.1f}%, "
-                        f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
-                    ),
-                    waitingFor="wait_for_verification",
-                )
-                await self._append_and_broadcast(event_id, confirm_turn)
-            else:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Verification data is not available for this service right now. "
-                             "Consider what other tools or participants in the conversation "
-                             "might confirm whether the situation has changed since the last check.",
-                    waitingFor="wait_for_verification",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "defer_event":
-            # Guard: never defer when waiting for user response
-            if event_id in self._waiting_for_user:
-                logger.warning(f"Ignoring defer_event for {event_id}: waiting for user response")
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="This event is currently waiting for user input and "
-                             "cannot be deferred until the user responds.",
-                    waitingFor="defer_event",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            # Defer supersedes any active wait -- FRIDAY chose to wait on a timer,
-            # not on a participant. Clear wait states to prevent post-reactivation deadlock.
-            self._waiting_for_agent.pop(event_id, None)
-            # Cancel stale subscriptions from previous cycles (preserve same-cycle: subscribe -> defer)
-            if self._state_watcher:
-                current_cycle = self._cycle_id_for_event.get(event_id, "")
-                self._state_watcher.cancel_if_different_cycle(event_id, current_cycle)
-            reason = args.get("reason", "Deferred by Brain")
-            delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))  # Clamp 30s-60min
-            defer_started_at = time.time()
-            defer_until = defer_started_at + delay
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="defer",
-                thoughts=f"Deferring event for {delay}s: {reason}",
-                waitingFor="defer_event",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            # Update event status + store defer_until timestamp
-            event = await self.blackboard.get_event(event_id)
-            if event:
-                event.status = EventStatus.DEFERRED
-                await self.blackboard.redis.set(
-                    f"{self.blackboard.EVENT_PREFIX}{event_id}",
-                    json.dumps(event.model_dump()),
-                )
-                # Store defer timestamp for the event loop to check
-                await self.blackboard.redis.set(
-                    f"{self.blackboard.EVENT_PREFIX}{event_id}:defer_until",
-                    str(defer_until),
-                    ex=delay + 60,  # Auto-expire the key after delay + buffer
-                )
-                # Defense-in-depth: turn broadcast (line ~2060) carries the conversation
-                # update; this broadcast carries the status field change so the UI can
-                # move the event to the deferred list immediately.
-                await self._broadcast({
-                    "type": "event_status_changed",
-                    "event_id": event_id,
-                    "status": EventStatus.DEFERRED.value,
-                    "defer_until": defer_until,
-                    "defer_started_at": defer_started_at,
-                })
-            await self.blackboard.record_event(
-                EventType.BRAIN_EVENT_DEFERRED,
-                {"event_id": event_id, "delay_seconds": delay},
-                narrative=f"Event {event_id} deferred for {delay}s: {reason[:80]}",
-            )
-            logger.info(f"Event {event_id} deferred for {delay}s: {reason}")
-            # Notify active meta-event: inject [SYSTEM] turn if FRIDAY is mid-processing (not parked)
-            meta_id = self._active_meta_event_id
-            if meta_id and meta_id != event_id and meta_id not in self._hold_watch_events:
-                service = event.service if event else "unknown"
-                notify_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(meta_id)),
-                    actor="system",
-                    action="notification",
-                    thoughts=f"[SYSTEM] evt-{event_id[:8]} ({service}) entered deferred state.",
-                )
-                await self._append_and_broadcast(meta_id, notify_turn)
-                logger.debug("Injected defer notification into active meta-event %s for %s", meta_id, event_id)
-            return False
-
-        elif function_name == "wait_for_user":
-            # Hard guard: wait_for_user is only for chat/slack events
-            event = await self.blackboard.get_event(event_id)
-            if event and event.source not in ("chat", "slack"):
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="wait_for_user is not available for automated events. "
-                             "Use request_user_approval to pause for human authorization, "
-                             "or defer_event to wait for external processes.",
-                    waitingFor="wait_for_user",
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            summary = args.get("summary", "")
-            self._waiting_for_user[event_id] = time.time()  # State flag (plumbing)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="wait",
-                thoughts=summary,
-                waitingFor="user",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            event = await self.blackboard.get_event(event_id)
-            if event and event.source in ("slack", "chat"):
-                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
-            return False
-
-        elif function_name == "wait_for_agent":
-            # GUARD: reject if no agent is actively running for this event
-            if event_id not in self._active_agent_for_event:
-                logger.info(
-                    "wait_for_agent rejected: no active agent for %s", event_id
-                )
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts=(
-                        "No agent is currently running for this event. "
-                        "The agent already delivered results above. To continue: "
-                        "(1) dispatch another agent with select_agent, or "
-                        "(2) defer the event with defer_event to wait for an "
-                        "external process."
-                    ),
-                    waitingFor="wait_for_agent",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            summary = args.get("summary", "")
-            agent_name = self._active_agent_for_event.get(event_id, "unknown")
-            self._waiting_for_agent[event_id] = agent_name
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="wait",
-                thoughts=summary,
-                waitingFor="agent",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return False
-
-        elif function_name == "wait_for_jarvis":
-            if event_id in self._waiting_for_jarvis:
-                return False  # Already waiting -- exit loop, nudge timer handles it
-            context = args.get("context", "")
-            event = await self.blackboard.get_event(event_id)
-            if not event:
-                return False
-            # Pre-check: find last respond_jarvis turn timestamp, look for jarvis reply after it
-            last_respond_ts = 0.0
-            for t in reversed(event.conversation):
-                if t.actor == "brain" and t.action == "respond_jarvis":
-                    last_respond_ts = t.timestamp or 0.0
-                    break
-            if last_respond_ts:
-                existing_reply = next(
-                    (t for t in event.conversation
-                     if t.actor == "jarvis" and t.action == "message"
-                     and (t.timestamp or 0.0) > last_respond_ts),
-                    None,
-                )
-                if existing_reply:
-                    result_text = "JARVIS already replied. Check his message above."
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain", action="tool_result",
-                        waitingFor="wait_for_jarvis",
-                        thoughts=result_text,
-                        response_parts=response_parts,
-                    )
-                    await self._append_and_broadcast(event_id, turn)
-                    return True
-            # Record wait state
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="wait",
-                thoughts=f"Waiting for JARVIS response: {context}",
-                waitingFor="jarvis",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            self._waiting_for_jarvis[event_id] = last_respond_ts or time.time()
-            self._jarvis_wait_count[event_id] = self._jarvis_wait_count.get(event_id, 0) + 1
-            self._last_processed[event_id] = time.time()
-            max_nudges = max(0, 3 - self._jarvis_wait_count[event_id])
-            task = asyncio.create_task(self._jarvis_nudge_loop(event_id, max_nudges))
-            self._jarvis_wait_tasks[event_id] = task
-            return False
-
-        elif function_name == "hold_watch":
-            event = await self.blackboard.get_event(event_id)
-            if not event:
-                return False
-            if event.source != "jarvis" or _resolve_phase(event.brain_phase) != "close":
-                reject_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="hold_watch is only available for jarvis-sourced events in the close phase.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, reject_turn)
-                return True
-            self._clear_jarvis_wait(event_id)
-            active_status_map = await self.blackboard.get_active_events_with_status()
-            parked_deferred = {
-                eid for eid, status in active_status_map.items()
-                if eid != event_id and status == "deferred"
-            }
-            self._hold_watch_events[event_id] = parked_deferred
-            self._hold_watch_park_time[event_id] = time.time()
-            context = args.get("context", "")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="hold_watch",
-                thoughts=f"Parking: {context}" if context else "Parking in hold_watch",
-                waitingFor="hold_watch",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            logger.info(
-                "hold_watch parked %s (deferred_snapshot=%d)",
-                event_id, len(parked_deferred),
-            )
-            return False
-
-        elif function_name == "lookup_service":
-            service_name = args.get("service_name", "")
-
-            # Guard: non-K8s subjects get actionable N/A instead of "Not found" noise
-            event_doc = await self.blackboard.get_event(event_id)
-            subject_type = getattr(event_doc, "subject_type", "service") if event_doc else "service"
-            if subject_type != "service":
-                context_label = {
-                    "kargo_stage": "kargo_context",
-                    "jira": "jira_context",
-                    "system": "system-level context",
-                }.get(subject_type, subject_type)
-                result_text = (
-                    f"## lookup_service: Not applicable\n\n"
-                    f"This event's subject is a {subject_type}, not a monitored K8s deployment.\n"
-                    f"The relevant context ({context_label}) is already in your prompt."
-                )
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    waitingFor="lookup_service",
-                    evidence=result_text,
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-
-            svc = await self.blackboard.get_service(service_name)
-            if svc:
-                rows = [f"| Version | {svc.version} |"]
-                if svc.gitops_repo:
-                    rows.append(f"| GitOps Repo | {svc.gitops_repo} |")
-                if svc.gitops_repo_url:
-                    rows.append(f"| Repo URL | {svc.gitops_repo_url} |")
-                if svc.gitops_config_path:
-                    rows.append(f"| Config Path | {svc.gitops_config_path} |")
-                if svc.replicas_ready is not None:
-                    rows.append(f"| Replicas | {svc.replicas_ready}/{svc.replicas_desired} |")
-                rows.append(f"| CPU | {svc.metrics.cpu:.1f}% |")
-                rows.append(f"| Memory | {svc.metrics.memory:.1f}% |")
-                if svc.escalation_flag:
-                    rows.append(f"| Escalation | {svc.escalation_flag} |")
-                result_text = f"## Service: {service_name}\n\n| Field | Value |\n|---|---|\n" + "\n".join(rows)
-            else:
-                known = await self.blackboard.get_services()
-                result_text = f"## Service: {service_name}\n\nNot found. Known services: {', '.join(sorted(known)) if known else 'none'}"
-
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="lookup_service",
-                evidence=result_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "consult_deep_memory":
-            query = args.get("query", "")
-            time_range = _safe_int(args.get("time_range_hours"))
-            min_dur = _safe_int(args.get("min_duration_minutes"))
-            svc = str(args.get("service") or "").strip() or None
-            conditions: list[dict] = []
-            if time_range:
-                cutoff = time.time() - (time_range * 3600)
-                conditions.append({"key": "closed_at", "range": {"gte": cutoff}})
-            if min_dur:
-                conditions.append({"key": "duration_seconds", "range": {"gte": min_dur * 60}})
-            if svc:
-                conditions.append({"key": "service", "match": {"value": svc}})
-            qdrant_filter = {"must": conditions} if conditions else None
-            if qdrant_filter:
-                logger.debug(f"Deep memory filters applied: {[f for f in ['time_range' if time_range else '', 'min_dur' if min_dur else '', 'svc' if svc else ''] if f]} for event {event_id}")
-
-            ev = await self.blackboard.get_event(event_id)
-            safe_query = query.replace('"', '\\"')
-            filter_parts: list[str] = []
-            if time_range:
-                filter_parts.append(f"time={time_range}h")
-            if min_dur:
-                filter_parts.append(f"dur>={min_dur}m")
-            if svc:
-                filter_parts.append(f"svc={svc}")
-            filter_tag = f" [{','.join(filter_parts)}]" if filter_parts else " [unfiltered]"
-            query_marker = f'Deep Memory: "{safe_query}"{filter_tag}'
-            already_consulted = any(
-                t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and query_marker in (t.evidence or "")
-                for t in (ev.conversation if ev else [])
-            )
-            if already_consulted:
-                logger.info(f"Deep memory already consulted for {event_id} query={query!r} -- returning cached results")
-                cached_evidence = next(
-                    (t.evidence for t in (ev.conversation if ev else [])
-                     if t.action in ("think", "thoughts", "intermediate", "response", "tool_result") and t.evidence and query_marker in t.evidence),
-                    "Deep memory was already consulted (no cached results).",
-                )
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    waitingFor="consult_deep_memory",
-                    evidence=f"[Already consulted] {cached_evidence}",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                if "No historical patterns" in cached_evidence or "No results" in cached_evidence or "No events match" in cached_evidence:
-                    return False
-                return True
-
-            archivist = self.agents.get("_archivist_memory")
-            has_results = False
-
-            from ..memory.pulse import PulseContext
-            ev_for_ctx = ev or await self.blackboard.get_event(event_id)
-            pulse_ctx = PulseContext(
-                event_id=event_id,
-                turn=len(ev_for_ctx.conversation) if ev_for_ctx else 0,
-                event_elapsed_s=int(time.time() - ev_for_ctx.conversation[0].timestamp) if ev_for_ctx and ev_for_ctx.conversation else 0,
-                event_source=ev_for_ctx.source if ev_for_ctx else None,
-            )
-
-            memory_text = (
-                f"# Deep Memory: \"{safe_query}\"{filter_tag}\n\n"
-            )
-
-            # Embed once, pass vector to all 3 search methods
-            query_vector = None
-            if archivist and hasattr(archivist, "embed_query"):
-                try:
-                    query_vector = await archivist.embed_query(query)
-                except Exception as e:
-                    logger.debug(f"embed_query failed, each search will embed individually: {e}")
-
-            # Search knowledge facts first (reference data)
-            if archivist and hasattr(archivist, "search_knowledge"):
-                try:
-                    knowledge = await archivist.search_knowledge(query, limit=3, context=pulse_ctx, vector=query_vector)
-                except Exception as e:
-                    logger.warning(f"Deep memory knowledge search failed: {e}")
-                    knowledge = None
-                if knowledge:
-                    has_results = True
-                    memory_text += "### Reference Facts\n"
-                    for i, r in enumerate(knowledge, 1):
-                        p = r.get("payload", {})
-                        stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
-                        fact_text = p.get("fact", "?")[:200]
-                        memory_text += (
-                            f"{i}. **{p.get('topic', '?')}** ({p.get('scope', '?')}, confidence: {p.get('confidence', '?')}){stale_tag}\n"
-                            f"   - {fact_text}\n"
-                            f"   - Source: {p.get('source', '?')}\n"
-                        )
-                    memory_text += "\n"
-
-            # Search lessons learned (classification guidance)
-            if archivist and hasattr(archivist, "search_lessons"):
-                try:
-                    lessons = await archivist.search_lessons(query, limit=3, context=pulse_ctx, vector=query_vector)
-                except Exception as e:
-                    logger.warning(f"Deep memory lesson search failed: {e}")
-                    lessons = None
-                if lessons:
-                    has_results = True
-                    memory_text += "### Lessons Learned\n"
-                    for i, r in enumerate(lessons, 1):
-                        p = r.get("payload", {})
-                        memory_text += (
-                            f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f})\n"
-                            f"   - Pattern: {p.get('pattern', '?')}\n"
-                        )
-                        if p.get("anti_pattern"):
-                            memory_text += f"   - Anti-pattern: {p['anti_pattern']}\n"
-                    memory_text += "\n"
-
-            # Search past events (pattern first, temporal data preserved)
-            if archivist and hasattr(archivist, "search"):
-                try:
-                    results = await archivist.search(query, limit=5, context=pulse_ctx, vector=query_vector, filter=qdrant_filter)
-                except Exception as e:
-                    logger.warning(f"Deep memory event search failed: {e}")
-                    results = None
-                if results:
-                    has_results = True
-                    memory_text += "### Past Events\n"
-                    for i, r in enumerate(results, 1):
-                        p = r.get("payload", {})
-                        dur = p.get("duration_seconds", 0)
-                        dur_m = f"{dur // 60}m" if dur else "?"
-                        defers = p.get("defer_patterns", [])
-                        total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
-                        defer_m = f"{total_defer // 60}m" if total_defer else "0m"
-                        timings = p.get("operational_timings", [])
-                        timing_str = ", ".join(
-                            f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
-                            for t in timings if isinstance(t, dict)
-                        ) or "none"
-                        domain_str = p.get("brain_domain", p.get("domain", "?"))
-                        corrected = " [CORRECTED]" if p.get("corrected") else ""
-                        memory_text += (
-                            f"{i}. domain: {domain_str} | score: {r.get('score', 0):.2f}{corrected}\n"
-                            f"   - Pattern: {p.get('symptom', '?')}\n"
-                            f"   - Root cause: {p.get('root_cause', '?')}\n"
-                            f"   - Fix: {p.get('fix_action', '?')}\n"
-                            f"   - Service: {p.get('service', '?')} | Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
-                        )
-
-            if not has_results:
-                if qdrant_filter:
-                    filter_desc = ", ".join(filter_parts) if filter_parts else "active filters"
-                    memory_text += (
-                        f"No events match the applied filters ({filter_desc}). "
-                        "Consider widening the time range, removing duration or service constraints, "
-                        "or searching with different keywords."
-                    )
-                else:
-                    memory_text += (
-                        "No historical patterns match this query. "
-                        "Consider whether the event classification is accurate, "
-                        "or try searching with different keywords that describe the symptom or root cause. "
-                        "The ops journal for this service may also have relevant entries."
-                    )
-
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="consult_deep_memory",
-                evidence=memory_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "lookup_journal":
-            service_name = args.get("service_name", "")
-            if service_name:
-                entries = await self._get_journal_cached(service_name)
-                if entries:
-                    header = f"## Ops Journal: {service_name}\n\n{len(entries)} entries:\n\n"
-                    journal_text = header + "\n".join(f"- {e}" for e in entries)
-                else:
-                    journal_text = f"## Ops Journal: {service_name}\n\nNo entries found."
-            else:
-                entries = await self.blackboard.get_recent_journal_entries()
-                if entries:
-                    header = f"## Ops Journal: all services\n\n{len(entries)} entries:\n\n"
-                    journal_text = header + "\n".join(f"- {e}" for e in entries)
-                else:
-                    journal_text = "## Ops Journal\n\nNo entries found across any service."
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="lookup_journal",
-                evidence=journal_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "notify_user_slack":
-            user_email = args.get("user_email", "")
-            message = args.get("message", "")
-            slack_channel = self._get_slack_channel()
-            if not slack_channel:
-                result_text = "Slack integration not available. Cannot send notification."
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-            elif not user_email or not message:
-                result_text = "Missing user_email or message parameter."
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-            else:
-                try:
-                    event_doc = await self.blackboard.get_event(event_id)
-                    slack_user_id = await self._resolve_slack_user(
-                        slack_channel, user_email, event_doc,
-                    )
-                    if not slack_user_id:
-                        result_text = f"Could not resolve Slack user for '{user_email}'. No valid maintainer found."
-                        turn = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor="brain", action="notify",
-                            thoughts=result_text, waitingFor="notify_user_slack",
-                            response_parts=response_parts,
-                        )
-                        await self._append_and_broadcast(event_id, turn)
-                        await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
-                        return True
-                    dm = await slack_channel._app.client.conversations_open(users=slack_user_id)
-                    dm_channel = dm["channel"]["id"]
-                    is_bidirectional = (
-                        event_doc
-                        and not event_doc.slack_thread_ts
-                        and event_doc.source != "chat"
-                    )
-                    dashboard_url = os.environ.get("DARWIN_DASHBOARD_URL", "")
-                    event_link = f"\n<{dashboard_url}/events/{event_id}|View in Darwin Dashboard>" if dashboard_url else ""
-                    full_dm_text = (
-                        f":bell: *Darwin Notification*\n\n"
-                        f"{message}{event_link}\n\n"
-                        f"_Reply in this thread to follow up on this event._\n\n"
-                        f"_AI-generated by Darwin Brain. Review for accuracy before acting._"
-                    )
-
-                    logger.info(f"notify_user_slack: user={slack_user_id} dm_channel={dm_channel} event={event_id} bidirectional={is_bidirectional}")
-
-                    if is_bidirectional:
-                        event_context = f"*Event:* {event_doc.event.reason[:200]}\n\n"
-                        bidir_text = f":bell: *Darwin Notification*\n\n{event_context}{message}{event_link}\n\n_Reply in this thread to follow up on this event._\n\n_AI-generated by Darwin Brain. Review for accuracy before acting._"
-                        result = await slack_channel._app.client.chat_postMessage(channel=dm_channel, text=bidir_text)
-                        msg_ts = result["ts"]
-                        await self.blackboard.set_slack_mapping(dm_channel, msg_ts, event_id)
-                        await self.blackboard.update_event_slack_context(
-                            event_id, dm_channel, msg_ts, slack_user_id,
-                        )
-                        if event_doc.conversation:
-                            from ..channels.formatter import build_event_report_md
-                            report_md = build_event_report_md(event_doc)
-                            try:
-                                await slack_channel._app.client.files_upload_v2(
-                                    channel=dm_channel,
-                                    thread_ts=msg_ts,
-                                    content=report_md,
-                                    filename=f"{event_id}-report.md",
-                                    title=f"Event {event_id} -- Conversation Report",
-                                    initial_comment="Conversation history up to this point:",
-                                )
-                            except Exception as e:
-                                logger.warning(f"Failed to upload conversation report for {event_id}: {e}")
-                        logger.info(f"Slack notification sent to {user_email} for event {event_id} (thread={msg_ts}, bidirectional)")
-                        result_text = f"Slack DM sent to {user_email}. They can reply in the thread to interact with this event."
-
-                    elif slack_channel._infra_channel:
-                        if not event_doc.slack_thread_ts:
-                            await slack_channel.open_infra_thread(event_doc, event_doc.event.reason)
-                            event_doc = await self.blackboard.get_event(event_id)
-
-                        dm_text = full_dm_text
-                        if event_doc and event_doc.slack_thread_ts:
-                            try:
-                                await slack_channel._app.client.chat_postMessage(
-                                    channel=event_doc.slack_channel_id,
-                                    thread_ts=event_doc.slack_thread_ts,
-                                    text=f":bell: *Notification for <@{slack_user_id}>*\n\n{message}",
-                                )
-                                workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                                ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                                thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
-                                dm_text = (
-                                    f":bell: *Darwin Notification*\n\n"
-                                    f"{message[:500]}\n\n"
-                                    f":point_right: <{thread_link}|Continue in #darwin-infra>\n\n"
-                                    f"_Reply here or in the thread above to interact with this event._\n\n"
-                                    f"_AI-generated by Darwin Brain. Review for accuracy before acting._"
-                                )
-                                logger.info(f"notify_user_slack: posted to infra thread {event_doc.slack_channel_id}/{event_doc.slack_thread_ts}")
-                            except Exception as e:
-                                logger.warning(f"Infra thread notification failed for {event_id}, DM-only fallback: {e}")
-
-                        dm_result = await slack_channel._app.client.chat_postMessage(channel=dm_channel, text=dm_text)
-                        await self.blackboard.set_slack_mapping(dm_channel, dm_result["ts"], event_id)
-                        result_text = f"Notification sent to {user_email} (infra thread + DM pointer)." if dm_text != full_dm_text else f"Slack DM sent to {user_email}. They can reply in the thread to follow up."
-                        logger.info(f"notify_user_slack: DM sent to {user_email} for {event_id}")
-
-                    else:
-                        dm_result = await slack_channel._app.client.chat_postMessage(channel=dm_channel, text=full_dm_text)
-                        await self.blackboard.set_slack_mapping(dm_channel, dm_result["ts"], event_id)
-                        logger.info(f"Slack notification sent to {user_email} for event {event_id} (DM-only, no infra channel)")
-                        result_text = f"Slack DM sent to {user_email}. They can reply in the thread to follow up."
-                except Exception as e:
-                    result_text = f"Failed to send Slack DM to {user_email}: {e}"
-                    logger.warning(f"Slack notification failed for {user_email}: {e}")
-                    await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.0)])
-
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="notify",
-                thoughts=result_text,
-                waitingFor="notify_user_slack",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "notify_gitlab_result":
-            event_doc = await self.blackboard.get_event(event_id)
-            gl_ctx = None
-            if event_doc and event_doc.event.evidence:
-                ev = event_doc.event.evidence
-                gl_ctx = getattr(ev, "gitlab_context", None) if hasattr(ev, "gitlab_context") else None
-            if not gl_ctx:
-                result_text = "Cannot notify GitLab: no gitlab_context in event evidence. This tool is for headhunter-sourced events only."
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-            else:
-                project_id = args.get("project_id", gl_ctx.get("project_id"))
-                mr_iid = args.get("mr_iid", gl_ctx.get("mr_iid"))
-                result_type = args.get("result", "success")
-                summary = args.get("summary", "")
-                reassign = args.get("reassign_reviewer", False)
-                result_text = (
-                    f"GitLab notification queued: {result_type} on !{mr_iid} (project {project_id}). "
-                    f"Summary: {summary[:200]}. Reassign reviewer: {reassign}. "
-                    f"Feedback will be posted by Headhunter feedback loop on event close."
-                )
-                logger.info(f"notify_gitlab_result: event={event_id} project={project_id} mr=!{mr_iid} result={result_type}")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="notify",
-                thoughts=result_text,
-                waitingFor="notify_gitlab_result",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "fetch_jira_issue":
-            issue_key = args.get("issue_key", "")
-            jira_url = os.getenv("JIRA_URL", "")
-            jira_email = os.getenv("JIRA_EMAIL", "")
-            jira_token = os.getenv("JIRA_API_TOKEN", "")
-            if not jira_url or not jira_token:
-                result_text = "Jira not configured (JIRA_URL or JIRA_API_TOKEN missing). Proceeding without Jira context."
-            else:
-                try:
-                    import base64
-                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        resp = await client.get(
-                            f"{jira_url}/rest/api/3/issue/{issue_key}",
-                            headers={"Authorization": f"Basic {auth}"},
-                            params={"fields": "summary,description,status,comment,issuelinks,subtasks,labels,fixVersions"},
-                        )
-                    if resp.status_code == 404:
-                        result_text = f"Jira issue {issue_key} not found."
-                    elif resp.status_code == 429:
-                        result_text = "Jira rate limited. Proceeding without additional context."
-                    elif resp.status_code >= 400:
-                        result_text = f"Jira fetch failed ({resp.status_code}). Proceeding without context."
-                    else:
-                        from .headhunter_jira import format_jira_for_llm
-                        result_text = format_jira_for_llm(resp.json())
-                except Exception as e:
-                    result_text = f"Jira fetch error: {e}. Proceeding without context."
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="fetch_jira_issue",
-                thoughts=result_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "comment_jira_issue":
-            issue_key = args.get("issue_key", "")
-            comment_text = args.get("comment", "")
-            mention_reporter = args.get("mention_reporter", False)
-            jira_url = os.getenv("JIRA_URL", "")
-            jira_email = os.getenv("JIRA_EMAIL", "")
-            jira_token = os.getenv("JIRA_API_TOKEN", "")
-            if not jira_url or not jira_token:
-                result_text = "Cannot comment on Jira: not configured."
-            else:
-                try:
-                    import base64
-                    from marklassian import markdown_to_adf
-                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
-                    adf_doc = markdown_to_adf(comment_text)
-                    if mention_reporter:
-                        reporter_id = await self._get_jira_reporter(issue_key, jira_url, jira_email, jira_token)
-                        if reporter_id:
-                            mention_node = {"type": "paragraph", "content": [
-                                {"type": "mention", "attrs": {"id": reporter_id, "text": "@reporter", "accessLevel": ""}},
-                                {"type": "text", "text": " "},
-                            ]}
-                            adf_doc["content"].insert(0, mention_node)
-                    adf_body = {"body": adf_doc}
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        resp = await client.post(
-                            f"{jira_url}/rest/api/3/issue/{issue_key}/comment",
-                            headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
-                            json=adf_body,
-                        )
-                    if resp.status_code < 300:
-                        result_text = f"Comment posted to {issue_key}. Jira communication complete -- proceed with next action."
-                    else:
-                        result_text = f"Failed to comment on {issue_key}: {resp.status_code}"
-                except Exception as e:
-                    result_text = f"Jira comment error: {e}"
-            logger.info(f"comment_jira_issue: event={event_id} issue={issue_key} result={result_text[:100]}")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="comment_jira_issue",
-                thoughts=result_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "transition_jira_issue":
-            issue_key = args.get("issue_key", "")
-            target_status = args.get("target_status", "")
-            jira_url = os.getenv("JIRA_URL", "")
-            jira_email = os.getenv("JIRA_EMAIL", "")
-            jira_token = os.getenv("JIRA_API_TOKEN", "")
-            if not jira_url or not jira_token:
-                result_text = "Cannot transition Jira issue: not configured."
-            else:
-                try:
-                    import base64
-                    auth = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
-                    headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        tr_resp = await client.get(
-                            f"{jira_url}/rest/api/3/issue/{issue_key}/transitions",
-                            headers=headers,
-                        )
-                    if tr_resp.status_code >= 400:
-                        result_text = f"Failed to get transitions for {issue_key}: {tr_resp.status_code}"
-                    else:
-                        transitions = tr_resp.json().get("transitions", [])
-                        match = next(
-                            (t for t in transitions if t["name"].lower() == target_status.lower()),
-                            None,
-                        )
-                        if not match:
-                            available = [t["name"] for t in transitions]
-                            result_text = f"Transition '{target_status}' not available for {issue_key}. Available: {available}"
-                        else:
-                            async with httpx.AsyncClient(timeout=15) as client:
-                                post_resp = await client.post(
-                                    f"{jira_url}/rest/api/3/issue/{issue_key}/transitions",
-                                    headers=headers,
-                                    json={"transition": {"id": match["id"]}},
-                                )
-                            if post_resp.status_code < 300:
-                                result_text = f"{issue_key} transitioned to '{target_status}'. Jira status updated -- proceed with next action."
-                            else:
-                                result_text = f"Transition failed for {issue_key}: {post_resp.status_code}"
-                except Exception as e:
-                    result_text = f"Jira transition error: {e}"
-            logger.info(f"transition_jira_issue: event={event_id} issue={issue_key} target={target_status} result={result_text[:100]}")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="transition_jira_issue",
-                thoughts=result_text,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "report_incident":
-            event_doc = await self.blackboard.get_event(event_id)
-            if not event_doc:
-                result_text = f"Event {event_id} not found. Cannot create incident."
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text,
-                    waitingFor="report_incident", response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            if event_id in self._incident_created:
-                result_text = f"Incident already created for event {event_id}. Skipping duplicate."
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text,
-                    waitingFor="report_incident", response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            prior_incident = any(
-                t.actor == "brain" and t.action == "notify"
-                and ("Incident created" in (t.thoughts or "") or "Escalation staged [nightwatcher]" in (t.thoughts or ""))
-                for t in (event_doc.conversation or [])
-            )
-            if prior_incident:
-                self._incident_created.add(event_id)
-                result_text = f"Incident already created for event {event_id} (recovered from conversation history). Skipping duplicate."
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="notify", thoughts=result_text,
-                    waitingFor="report_incident", response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            automated_sources = ("headhunter", "timekeeper", "aligner")
-            if event_doc.source not in automated_sources:
-                result_text = (
-                    f"report_incident is only available for automated events "
-                    f"(source={event_doc.source} is not eligible)."
-                )
-            elif os.environ.get("NIGHTWATCHER_ENABLED", "false").lower() == "true":
-                from ..models import StagedEscalation
-                conv_turns = [
-                    t for t in (event_doc.conversation or [])
-                    if t.actor != "user" and t.action != "phase"
-                ]
-                summary_parts = [
-                    f"[{t.actor}.{t.action}] {(t.thoughts or '')[:150]}"
-                    for t in conv_turns[-3:]
-                ]
-                conversation_summary = " | ".join(summary_parts)[:500]
-                slack_thread_url = ""
-                if event_doc.slack_thread_ts and event_doc.slack_channel_id:
-                    ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                    workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                    slack_thread_url = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
-                evidence = event_doc.event.evidence
-                staged = StagedEscalation(
-                    event_id=event_id,
-                    service=event_doc.service,
-                    source=event_doc.source,
-                    reason=event_doc.event.reason,
-                    summary=args.get("summary", "")[:200],
-                    platform=args.get("platform", ""),
-                    priority=args.get("priority", "Normal"),
-                    description=args.get("description", ""),
-                    evidence_snapshot=evidence.model_dump() if hasattr(evidence, "model_dump") else {},
-                    conversation_summary=conversation_summary,
-                    slack_thread_url=slack_thread_url,
-                )
-                try:
-                    await self.blackboard.stage_escalation(staged)
-                    self._incident_created.add(event_id)
-                    if event_doc.service:
-                        try:
-                            await self.blackboard.set_escalation_flag(
-                                event_doc.service, event_id,
-                                args.get("summary", "escalated")[:100],
-                            )
-                        except Exception as ef:
-                            logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
-                    result_text = (
-                        f"Escalation staged [nightwatcher] for consolidation "
-                        f"(event {event_id}, service {event_doc.service})"
-                    )
-                except Exception as e:
-                    result_text = f"Failed to stage escalation: {e}"
-                    logger.warning(f"stage_escalation failed for {event_id}: {e}")
-            else:
-                adapter = self._get_smartsheet_incident_adapter()
-                if not adapter:
-                    result_text = "Smartsheet incident tracking not configured (SMARTSHEET_INCIDENT_* env vars missing)."
-                else:
-                    fields = {
-                        "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
-                        "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Brain"),
-                        "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                        "Status": "New",
-                        "Issue Type": os.environ.get("SMARTSHEET_INCIDENT_ISSUE_TYPE", "Task"),
-                        "Labels": os.environ.get("SMARTSHEET_INCIDENT_LABELS", ""),
-                        "Components": os.environ.get("SMARTSHEET_INCIDENT_COMPONENTS", ""),
-                        "Platform": args.get("platform", ""),
-                        "Summary": args.get("summary", "")[:200],
-                        "Reason": args.get("description", ""),
-                        "Priority": args.get("priority", "Normal"),
-                        "Affected Versions": args.get("affected_versions", ""),
-                    }
-                    gl_ctx = None
-                    if event_doc.event and event_doc.event.evidence:
-                        gl_ctx = getattr(event_doc.event.evidence, "gitlab_context", None)
-                    if gl_ctx and isinstance(gl_ctx, dict):
-                        fields["Fix PR"] = gl_ctx.get("target_url", "") or gl_ctx.get("mr_url", "")
-                    if event_doc.slack_thread_ts and event_doc.slack_channel_id:
-                        ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                        workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                        fields["Slack Thread"] = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
-                    try:
-                        result = await adapter.create_incident(fields)
-                        self._incident_created.add(event_id)
-                        if event_doc.service:
-                            try:
-                                await self.blackboard.set_escalation_flag(
-                                    event_doc.service, event_id,
-                                    args.get("summary", "escalated")[:100],
-                                )
-                            except Exception as ef:
-                                logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
-                        verify_preceded = any(
-                            t.actor == "brain" and t.action == "phase"
-                            and (t.thoughts or "").startswith("Phase: VERIFY")
-                            for t in event_doc.conversation
-                        )
-                        logger.info(f"Incident created for {event_id}: verify_preceded={verify_preceded}")
-                        result_text = (
-                            f"Incident created in Smartsheet (row {result['row_id']}). "
-                            f"Sheet: {result['sheet_url']}"
-                        )
-                    except Exception as e:
-                        result_text = f"Failed to create incident: {e}"
-                        logger.warning(f"report_incident failed for {event_id}: {e}")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="notify",
-                thoughts=result_text,
-                waitingFor="report_incident",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "create_plan":
-            steps = args.get("steps", [])
-            reasoning = args.get("reasoning", "")
-            if not steps:
-                logger.warning(f"create_plan called with no steps for {event_id}")
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Plan creation needs at least one step with an assigned participant and objective. "
-                             "Review the conversation to identify which agents should act and on what.",
-                    waitingFor="create_plan",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            plan_lines = [f"## Plan\n\n{reasoning}\n"]
-            for s in steps:
-                plan_lines.append(f"{s.get('id', '?')}. **{s.get('agent', '?')}**: {s.get('summary', '')}")
-            plan_md = "\n".join(plan_lines)
-            step_map = [{"id": str(s.get("id", "")), "agent": s.get("agent", ""), "summary": s.get("summary", "")} for s in steps]
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="plan",
-                plan=plan_md,
-                thoughts=f"Plan created: {len(steps)} steps. {reasoning}",
-                taskForAgent={"steps": step_map, "source": "brain"},
-                waitingFor="create_plan",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Brain chalked plan for {event_id}: {len(steps)} steps")
-            return True
-
-        elif function_name == "get_plan_progress":
-            event_doc = await self.blackboard.get_event(event_id)
-            if not event_doc:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Event data is temporarily unavailable. "
-                             "Wait for the next update from the conversation.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            plan_turn = None
-            for t in reversed(event_doc.conversation):
-                if t.action == "plan" and t.taskForAgent and "steps" in t.taskForAgent:
-                    plan_turn = t
-                    break
-            if not plan_turn:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    waitingFor="get_plan_progress",
-                    evidence="## Plan Progress\n\nNo plan has been created for this event yet. "
-                             "If a plan is needed, create one first with the appropriate agents and steps.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return False
-            steps = {s["id"]: {**s, "status": "pending"} for s in plan_turn.taskForAgent["steps"]}
-            for t in event_doc.conversation:
-                if t.action == "plan_step" and t.taskForAgent and "step_id" in t.taskForAgent:
-                    sid = t.taskForAgent["step_id"]
-                    if sid in steps:
-                        steps[sid]["status"] = t.taskForAgent.get("status", "completed")
-            progress = list(steps.values())
-            done = sum(1 for s in progress if s["status"] == "completed")
-            summary = f"## Plan Progress\n\n{done}/{len(progress)} steps completed:\n\n"
-            for s in progress:
-                icon = {"completed": "- [x]", "in_progress": "- [~]", "blocked": "- [!]"}.get(s["status"], "- [ ]")
-                summary += f"{icon} Step {s['id']}: {s.get('summary', '')} ({s.get('agent', '?')}) -- {s['status']}\n"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="get_plan_progress",
-                evidence=summary.strip(),
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "classify_event":
-            domain = _resolve_domain(args.get("domain", "complicated"))
-            reasoning = args.get("reasoning", "")
-            severity = args.get("severity")
-            intent = args.get("intent")
-            if domain == "casual":
-                event_doc = await self.blackboard.get_event(event_id)
-                if not event_doc:
-                    logger.warning(f"classify_event: cannot verify source for {event_id}, rejecting casual")
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain", action="tool_result",
-                        waitingFor="classify_event",
-                        evidence=(
-                            "[GATE] casual domain rejected. State: event not found. "
-                            "Constraint: cannot verify source. Reclassify with an operational domain."
-                        ),
-                        response_parts=[],
-                    )
-                    await self._append_and_broadcast(event_id, turn)
-                    return True
-                if event_doc.source not in ("chat", "slack"):
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain", action="tool_result",
-                        waitingFor="classify_event",
-                        evidence=(
-                            "[GATE] casual domain rejected. State: source is "
-                            f"{event_doc.source}. Constraint: casual is only valid for "
-                            "chat/slack events. Reclassify with an operational domain."
-                        ),
-                        response_parts=[],
-                    )
-                    await self._append_and_broadcast(event_id, turn)
-                    return True
-            await self.blackboard.update_event_domain(event_id, domain)
-            thoughts = f"Cynefin: {domain.upper()}."
-            if severity:
-                await self.blackboard.update_event_severity(event_id, severity)
-                thoughts += f" Severity: {severity}."
-                await self._broadcast({"type": "severity_updated", "event_id": event_id, "severity": severity})
-            thoughts += f" {reasoning}"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="triage",
-                thoughts=thoughts,
-                timestamp=time.time(),
-            )
-            await self._append_and_broadcast(event_id, turn)
-            await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
-            domain_directives = {
-                "casual": "Domain locked: CASUAL. Respond to the user conversationally now. Do not reclassify unless the user's next message shifts to a task.",
-                "clear": f"Domain set: CLEAR. Known solution exists. Execute the best practice or transition phase to proceed.",
-                "complicated": f"Domain set: COMPLICATED. Classification registered. Transition phase or dispatch an agent to proceed.",
-                "complex": f"Domain set: COMPLEX. Design a safe-to-fail probe before acting.",
-                "chaotic": f"Domain set: CHAOTIC. Act immediately to stabilize, then sense.",
-            }
-            directive = domain_directives.get(domain, f"Domain set: {domain.upper()}. Classification registered. Proceed to next action.")
-            if intent and intent.strip():
-                directive += f" Your stated intent: {intent.strip()}"
-            nudge = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                evidence=directive,
-                timestamp=time.time(),
-            )
-            await self._append_and_broadcast(event_id, nudge)
-            # Reschedule idle timeout if event is currently waiting for user.
-            # No await between the second _waiting_for_user check and schedule() --
-            # asyncio single-threaded atomicity depends on this.
-            if event_id in self._waiting_for_user:
-                event_doc = await self.blackboard.get_event(event_id)
-                if event_doc and event_id in self._waiting_for_user:
-                    self._idle_timeout.schedule(
-                        event_id, warning_sec=self._get_conversation_timeout(event_doc)
-                    )
-            return True
-
-        elif function_name == "set_phase":
-            phase = _resolve_phase(args.get("phase", "triage"))
-            reasoning = args.get("reasoning", "")
-            event_doc = await self.blackboard.get_event(event_id)
-            current_phase = _resolve_phase(event_doc.brain_phase) if event_doc else None
-            if current_phase is not None and phase == current_phase:
-                logger.debug(f"set_phase: confirmed {phase} for {event_id}")
-                # Persist canonical value even on confirmation (migrates legacy stored phases)
-                if event_doc and event_doc.brain_phase != phase:
-                    await self.blackboard.update_event_phase(event_id, phase)
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="phase",
-                    thoughts=f"Phase: {phase.upper()} (confirmed). {reasoning}",
-                    waitingFor="set_phase",
-                    response_parts=response_parts,
-                    timestamp=time.time(),
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            await self.blackboard.update_event_phase(event_id, phase)
-            thoughts = f"Phase: {phase.upper()}. {reasoning}"
-            logger.info(f"Phase transition: {current_phase} -> {phase} for {event_id} ({reasoning})")
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="phase",
-                thoughts=thoughts,
-                waitingFor="set_phase",
-                response_parts=response_parts,
-                timestamp=time.time(),
-            )
-            await self._append_and_broadcast(event_id, turn)
-            await self._broadcast({
-                "type": "phase_updated",
-                "event_id": event_id,
-                "phase": phase,
-            })
-            await self._emit_executive_pulse(event_id, [(f"phase:{phase}", "phase")])
-            return True
-
-        elif function_name == "refresh_gitlab_context":
-            condition = args.get("check_condition", "")
-            headhunter = self.agents.get("_headhunter")
-            if not headhunter:
-                result_text = "Headhunter not available (GITLAB_HOST not configured). Use select_agent to check MR state manually."
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    waitingFor="refresh_gitlab_context",
-                    evidence=result_text,
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-
-            override_project_id = None
-            override_mr_iid = None
-            mr_url = (args.get("mr_url") or "").strip()
-            if mr_url:
-                parsed = headhunter.parse_mr_url(mr_url)
-                if parsed:
-                    raw_pid, override_mr_iid = parsed
-                    override_project_id = await headhunter.resolve_project_id(raw_pid)
-                    if not override_project_id:
-                        result_text = f"Could not resolve project from URL: {mr_url}"
-                        turn = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor="brain", action="tool_result",
-                            waitingFor="refresh_gitlab_context",
-                            evidence=result_text,
-                            response_parts=response_parts,
-                        )
-                        await self._append_and_broadcast(event_id, turn)
-                        return True
-                else:
-                    result_text = f"Could not parse MR URL: {mr_url}"
-                    turn = ConversationTurn(
-                        turn=(await self._next_turn_number(event_id)),
-                        actor="brain", action="tool_result",
-                        waitingFor="refresh_gitlab_context",
-                        evidence=result_text,
-                        response_parts=response_parts,
-                    )
-                    await self._append_and_broadcast(event_id, turn)
-                    return True
-
-            state = await headhunter.refresh_mr_state(
-                event_id,
-                override_project_id=override_project_id,
-                override_mr_iid=override_mr_iid,
-            )
-            mr_state = state.get("mr_state", "unknown")
-
-            if mr_url and override_project_id and override_mr_iid and "error" not in state:
-                await self.blackboard.update_event_gitlab_context(event_id, {
-                    "project_id": override_project_id,
-                    "mr_iid": override_mr_iid,
-                    "target_url": mr_url,
-                })
-            if "error" in state:
-                result_text = (
-                    f"MR State: {mr_state}\n"
-                    f"Pipeline: {state.get('pipeline_status', '?')}\n"
-                    f"Severity: {state.get('severity', '?')}\n"
-                    f"Error: {state['error']}"
-                )
-            elif mr_state in ("merged", "closed"):
-                lines = [
-                    f"MR State: {mr_state}",
-                    f"Pipeline: {state['pipeline_status']}",
-                    f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}",
-                    f"Severity: {state['severity']}",
-                ]
-                changed_at = state.get("state_changed_at", "")
-                if changed_at:
-                    try:
-                        dt = datetime.fromisoformat(changed_at.replace("Z", "+00:00"))
-                        age = int(time.time() - dt.timestamp())
-                        m, s = divmod(age, 60)
-                        lines.append(f"{mr_state.title()} {m}m {s}s ago")
-                    except (ValueError, TypeError):
-                        pass
-                result_text = "\n".join(lines)
-            else:
-                merge_status = state['merge_status']
-                merge_line = f"Merge Readiness: {merge_status}"
-                if merge_status == "need_rebase":
-                    merge_line = "Merge Blocked: needs rebase (new commits on target branch)"
-                elif merge_status == "conflict":
-                    merge_line = "Merge Blocked: merge conflicts (requires human resolution)"
-                elif merge_status in ("ci_must_pass", "ci_still_running"):
-                    merge_line = f"Merge Blocked: {merge_status} (wait for pipeline)"
-                elif merge_status == "not_approved":
-                    merge_line = "Merge Blocked: not approved (requires human approval)"
-                result_text = (
-                    f"MR State: {mr_state}\n"
-                    f"Pipeline: {state['pipeline_status']}\n"
-                    f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}\n"
-                    f"{merge_line}\n"
-                    f"Severity: {state['severity']}"
-                )
-            subscription_active = False
-            if args.get("subscribe") and self._state_watcher and "error" not in state:
-                event = await self.blackboard.get_event(event_id)
-                gl_ctx = getattr(event.event.evidence, "gitlab_context", None) if event and event.event and event.event.evidence else None
-                if gl_ctx:
-                    from ..scheduling import SubscriptionSpec, GitLabMrRef
-                    interval = max(15, min(int(args.get("poll_interval", 30)), 300))
-                    spec = SubscriptionSpec(
-                        event_id=event_id,
-                        resource_type="gitlab_mr",
-                        resource_ref=GitLabMrRef(
-                            project_id=gl_ctx.get("project_id", 0),
-                            mr_iid=gl_ctx.get("mr_iid", 0),
-                        ),
-                        poll_fn=headhunter.poll_gitlab_mr_status,
-                        interval=interval,
-                        state_key=headhunter.extract_gitlab_state_key(state),
-                        registered_at=time.time(),
-                        cycle_id=self._cycle_id_for_event.get(event_id, ""),
-                    )
-                    subscription_active = self._state_watcher.register(spec)
-
-            evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
-            if args.get("subscribe"):
-                evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="refresh_gitlab_context",
-                evidence=evidence,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "refresh_kargo_context":
-            condition = args.get("check_condition", "")
-            kargo_observer = self.agents.get("_kargo_observer")
-            if not kargo_observer:
-                result_text = (
-                    "Promotion pipeline status is not available in this environment. "
-                    "Consider checking the ops journal for this service, "
-                    "or dispatching an agent who has pipeline access."
-                )
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    waitingFor="refresh_kargo_context",
-                    evidence=result_text,
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-
-            event = await self.blackboard.get_event(event_id)
-            kc = {}
-            if event and event.event and event.event.evidence:
-                kc = getattr(event.event.evidence, "kargo_context", None) or {}
-            project = (args.get("kargo_project") or "").strip() or kc.get("project", "")
-            stage = (args.get("kargo_stage") or "").strip() or kc.get("stage", "")
-            if not project or not stage:
-                result_text = "Kargo Stage: unknown\nError: No Kargo reference available. Supply kargo_project and kargo_stage, or ensure the event has kargo_context."
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    waitingFor="refresh_kargo_context",
-                    evidence=result_text,
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-
-            if (args.get("kargo_project") or args.get("kargo_stage")) and not kc.get("project"):
-                await self.blackboard.update_event_kargo_context(event_id, {
-                    "project": project,
-                    "stage": stage,
-                })
-
-            promotion_id = (args.get("promotion_id") or "").strip()
-            state = await kargo_observer.get_stage_status(project, stage, promotion_id=promotion_id)
-            if "error" in state:
-                result_text = (
-                    f"Kargo Stage: {stage}@{project}\n"
-                    f"Error: {state['error']}"
-                )
-            else:
-                new_mr_url = state.get("mr_url", "")
-                old_mr_url = kc.get("mr_url", "")
-                if new_mr_url and new_mr_url != old_mr_url:
-                    await self.blackboard.update_event_kargo_context(
-                        event_id, {"mr_url": new_mr_url}
-                    )
-                    logger.info(f"Updated kargo_context.mr_url for {event_id}: {new_mr_url}")
-                result_text = (
-                    f"Kargo Stage: {stage}@{project}\n"
-                    f"Promotion: {state.get('promotion', '?')}\n"
-                    f"Phase: {state.get('phase', '?')}\n"
-                    f"Failed Step: {state.get('failed_step', 'N/A')}\n"
-                    f"Message: {state.get('message', '')}\n"
-                    f"MR URL: {new_mr_url or 'N/A'}"
-                )
-            subscription_active = False
-            if args.get("subscribe") and self._state_watcher and "error" not in state:
-                from ..scheduling import SubscriptionSpec, KargoStageRef
-                from ..observers.kargo import KargoObserver as _KO
-                interval = max(15, min(int(args.get("poll_interval", 30)), 300))
-                promo_status = state.get("_promo_status", {})
-                spec = SubscriptionSpec(
-                    event_id=event_id,
-                    resource_type="kargo_stage",
-                    resource_ref=KargoStageRef(project=project, stage=stage),
-                    poll_fn=kargo_observer.poll_kargo_stage_status,
-                    interval=interval,
-                    state_key=_KO.extract_kargo_state_key(promo_status) if promo_status else {
-                        "phase": state.get("phase", "unknown"),
-                        "failed_step": state.get("failed_step"),
-                    },
-                    registered_at=time.time(),
-                    cycle_id=self._cycle_id_for_event.get(event_id, ""),
-                )
-                subscription_active = self._state_watcher.register(spec)
-
-            evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
-            if args.get("subscribe"):
-                evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain", action="tool_result",
-                waitingFor="refresh_kargo_context",
-                evidence=evidence,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "respond_to_jarvis":
-            response_text = args.get("response", "").strip()
-            if len(response_text) < 20:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Response was too brief. JARVIS needs to understand your reasoning. "
-                             "Include what you observed, whether you agree or disagree, "
-                             "and what your next action will be.",
-                    waitingFor="respond_to_jarvis",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                await self._emit_executive_pulse(event_id, [(f"tool:{function_name}", "tool", 0.3)])
-                return True
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="respond_jarvis",
-                thoughts=response_text,
-                waitingFor="respond_to_jarvis",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            if self._live_adapter:
-                try:
-                    await self._live_adapter.receive_brain_response(event_id, response_text)
-                except Exception as e:
-                    logger.warning(f"Failed to deliver response to JARVIS for {event_id}: {e}")
-            logger.info(f"Responded to JARVIS for {event_id}")
-            return True
-
-        elif function_name == "inspect_event":
-            target_id = args.get("event_id", "").strip()
-            if not target_id:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Error: event_id is required.",
-                    waitingFor="inspect_event",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            target_event = await self.blackboard.get_event(target_id)
-            if not target_event:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts=f"Event {target_id} not found in active storage.",
-                    waitingFor="inspect_event",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            age_seconds = time.time() - (target_event.queued_at or target_event.processing_started_at or time.time())
-            age_h = int(age_seconds // 3600)
-            age_m = int((age_seconds % 3600) // 60)
-            age_str = f"{age_h}h {age_m}m"
-            header = (
-                f"## Event: {target_id}\n"
-                f"Phase: {_resolve_phase(target_event.brain_phase)} | "
-                f"Status: {target_event.status.value if target_event.status else 'unknown'} | "
-                f"Age: {age_str}\n"
-                f"Source: {target_event.source or 'unknown'} | "
-                f"Service: {target_event.service or '?'}\n"
-            )
-            evidence = target_event.event.evidence if target_event.event else None
-            if evidence and hasattr(evidence, 'display_text') and evidence.display_text:
-                header += f"\n## Original Request\n{evidence.display_text}\n"
-            my_turns = [t for t in target_event.conversation if t.actor == "brain"]
-            lines = [f"\n## My Actions ({len(my_turns)} turns)"]
-            for t in my_turns:
-                content = t.thoughts or t.result or ""
-                lines.append(f"[{t.action}] {content}")
-            result_text = header + "\n".join(lines)
-            result_text = result_text[:15000]
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts=result_text,
-                waitingFor="inspect_event",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            return True
-
-        elif function_name == "post_sticky_note":
-            target_id = args.get("event_id", "").strip()
-            content = args.get("content", "").strip()
-            if not target_id or not content:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Error: event_id and content are required.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            target_event = await self.blackboard.get_event(target_id)
-            if not target_event:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts=f"Event {target_id} not found — cannot post note.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            notes = list(getattr(target_event, "sticky_notes", None) or [])
-            notes.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "content": content,
-                "read": False,
-            })
-            new_unread = (getattr(target_event, "unread_notes", 0) or 0) + 1
-            await self.blackboard.update_event_sticky_notes(target_id, notes, new_unread)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="post_sticky_note",
-                thoughts=f"Sticky note sent to {target_id}.",
-                result=f"Sticky note sent to {target_id} -- proceed with next action.",
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Sticky note posted from {event_id} to {target_id}")
-            return True
-
-        elif function_name == "read_sticky_notes":
-            target_id = args.get("event_id", "").strip()
-            if not target_id:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="Error: event_id is required.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            target_event = await self.blackboard.get_event(target_id)
-            if not target_event:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts=f"Event {target_id} not found.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            notes = list(getattr(target_event, "sticky_notes", None) or [])
-            unread_notes = [n for n in notes if not n.get("read", False)]
-            if not unread_notes:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="tool_result",
-                    thoughts="No unread notes on this event.",
-                    response_parts=response_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
-            lines = [f"## {len(unread_notes)} Unread Note(s)\n"]
-            for n in unread_notes:
-                lines.append(f"**{n.get('timestamp', '?')}**: {n.get('content', '')}")
-                n["read"] = True
-            await self.blackboard.update_event_sticky_notes(target_id, notes, 0)
-            formatted = "\n".join(lines)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                waitingFor="read_sticky_notes",
-                thoughts=formatted,
-                response_parts=response_parts,
-            )
-            await self._append_and_broadcast(event_id, turn)
-            logger.info(f"Read {len(unread_notes)} sticky notes on {target_id}")
-            return True
-
         else:
-            logger.warning(f"Unknown function call: {function_name}")
+            logger.warning(f"[UNKNOWN] function call: {function_name} for {event_id}")
+            unknown_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="tool_result",
+                thoughts=f"Unknown tool '{function_name}'. Available tools are listed in your function declarations.",
+                response_parts=response_parts,
+            )
+            await self._append_and_broadcast(event_id, unknown_turn)
             return False
+
+    async def execute_tool_locked(
+        self,
+        event_id: str,
+        function_name: str,
+        args: dict,
+        response_parts: list[dict] | None = None,
+    ) -> bool:
+        """Re-acquire per-event lock before dispatch (for off-lock callers like _run_agent_task).
+
+        Bail if None — event already closed and lock cleaned up.
+        """
+        lock = self._event_locks.get(event_id)
+        if lock is None:
+            logger.warning(f"execute_tool_locked: no lock for {event_id} (event closed?)")
+            return False
+        async with lock:
+            event = await self.blackboard.get_event(event_id)
+            if not event or event.status.value == "closed":
+                logger.warning(f"execute_tool_locked: event {event_id} is closed, skipping {function_name}")
+                return False
+            return await self._execute_function_call(event_id, function_name, args, response_parts)
 
     async def _jarvis_nudge_loop(self, event_id: str, max_nudges: int) -> None:
         """Send nudges to JARVIS at 30s intervals. Auto-resolve after final window."""
@@ -4811,10 +2994,9 @@ class Brain:
                             "Ephemeral-only role %s selected but provisioner unavailable for %s -- deferring",
                             agent_name, event_id,
                         )
-                        await self._execute_function_call(
+                        await self.execute_tool_locked(
                             event_id, "defer_event",
                             {"delay_seconds": 60, "reason": f"Role {agent_name} requires ephemeral provisioner (disabled)"},
-                            response_parts=None,
                         )
                         return
 
@@ -4826,10 +3008,9 @@ class Brain:
                                     "Ephemeral-only role %s circuit breaker for %s -- deferring (no sidecar fallback)",
                                     agent_name, event_id,
                                 )
-                                await self._execute_function_call(
+                                await self.execute_tool_locked(
                                     event_id, "defer_event",
                                     {"delay_seconds": 60, "reason": f"Security analyst unavailable (ephemeral circuit breaker, no local fallback)"},
-                                    response_parts=None,
                                 )
                                 return
                             elif ephemeral_is_overflow:
@@ -4837,17 +3018,16 @@ class Brain:
                                     "Ephemeral circuit breaker + local full for %s -- deferring",
                                     event_id,
                                 )
-                                await self._execute_function_call(
+                                await self.execute_tool_locked(
                                     event_id, "defer_event",
                                     {"delay_seconds": 30, "reason": "All agents busy (local full + ephemeral circuit breaker)"},
-                                    response_parts=None,
                                 )
                                 return
                             else:
                                 logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
                         elif provision_result == INFRA_SENTINEL:
                             logger.info("Deferring %s for 60s: Tekton infrastructure unavailable", event_id)
-                            await self._execute_function_call(
+                            await self.execute_tool_locked(
                                 event_id, "defer_event",
                                 {"delay_seconds": 60, "reason": "Tekton infrastructure unavailable"},
                             )
@@ -4898,7 +3078,7 @@ class Brain:
 
             if result == RETRYABLE_SENTINEL:
                 logger.info(f"Retryable error for {event_id}, deferring event")
-                await self._execute_function_call(
+                await self.execute_tool_locked(
                     event_id, "defer_event",
                     {"reason": "Agent returned retryable error", "delay_seconds": 60},
                 )

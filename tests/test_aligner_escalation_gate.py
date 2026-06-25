@@ -76,16 +76,19 @@ def _make_blackboard_state():
 
 def _stub_brain(bb):
     """Create a minimal Brain stub with enough attributes for _execute_function_call."""
-    from src.agents.brain import Brain
+    from src.agents.brain import Brain, _BrainToolContext
     brain = Brain.__new__(Brain)
     brain.blackboard = bb
     brain._incident_created = set()
     brain._next_turn_number = AsyncMock(return_value=1)
     brain._append_and_broadcast = AsyncMock()
+    brain._emit_executive_pulse = AsyncMock()
+    brain._get_smartsheet_incident_adapter = MagicMock(return_value=None)
     brain.pulse_port = None
     brain._skill_loader = None
     brain._grounding_evidence_for_event = {}
     brain._thinking_per_event = {}
+    brain._tool_ctx = _BrainToolContext(brain)
     return brain
 
 

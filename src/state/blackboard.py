@@ -1602,6 +1602,29 @@ return 0
         logger.info(f"Event {event_id} status: {from_status} -> {to_status.value}")
         return True
 
+    async def defer_event_status(
+        self, event_id: str, defer_until: float, delay: int,
+    ) -> bool:
+        """Atomically set event status to DEFERRED and store defer_until timestamp.
+
+        Uses read-modify-write on the event document (protected by caller's per-event
+        asyncio.Lock). Also sets the defer_until key with TTL for the event loop.
+        Returns True if the event was found and updated.
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        data = await self.redis.get(key)
+        if not data:
+            return False
+        event = EventDocument(**json.loads(data))
+        event.status = EventStatus.DEFERRED
+        await self.redis.set(key, json.dumps(event.model_dump()))
+        await self.redis.set(
+            f"{key}:defer_until",
+            str(defer_until),
+            ex=delay + 60,
+        )
+        return True
+
     # NOTE: notify_agent and dequeue_agent_notification REMOVED.
     # Agent communication now uses WebSocket (Brain -> Agent direct).
     # Redis agent notification queues (darwin:agent:notify:*) are no longer used.
