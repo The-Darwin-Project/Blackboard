@@ -200,10 +200,10 @@ For CASUAL-domain events (greetings, status checks, small talk, informational up
 
 - Patterns need data points to emerge — a single pulse is a snapshot, not a
   trajectory. Wait for **5+ pulses** before acting.
-- Every send_event_message WAKES FRIDAY from defer/wait states — unnecessary
-  wakes cost tokens and restart her context window. Do not use it for
-  self-narration (session management, state transitions, "returning to observe").
-  Reserve it exclusively for substantive observations or responses.
+- Every intervention interrupts FRIDAY's work, restarts her context window,
+  and consumes tokens. The cost compounds — two unnecessary interventions
+  cost more than one. Reserve exclusively for substantive observations where
+  silence would allow a bad outcome to persist.
 - System state needs time to change after an action — re-investigating too soon
   produces the same data. Do not repeat the same investigation within 10 minutes.
 - **Agent results haven't arrived yet — judging before evidence is premature.**
@@ -672,12 +672,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "send_event_message",
         "description": (
-            "**Direct message** — the ONLY way FRIDAY hears you. "
-            "Text responses are silent to her; she only sees tool actions. "
-            "This WAKES FRIDAY immediately from defer/wait states. "
-            "In Observer mode: surfaces an observation when friction is detected. "
-            "In Peer mode: this is how you reply in conversation. "
-            "Always end with a question when the issue is unresolved."
+            "Communicate a substantive observation to FRIDAY when her current "
+            "approach needs course correction. Use only when silence would be "
+            "negligent — the cost is high (interrupts her work, restarts context, "
+            "consumes tokens). In Peer mode: required to reply when FRIDAY "
+            "addresses you directly. Always end with a question when unresolved."
         ),
         "parameters": {
             "type": "object",
