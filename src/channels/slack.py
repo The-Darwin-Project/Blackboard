@@ -43,6 +43,7 @@ _INTERNAL_TURNS = frozenset({
     ("brain", "tool_result"), ("brain", "hold_watch"), ("brain", "intermediate"),
     ("brain", "hold_watch_wake"), ("brain", "think"),
     ("system", "notification"),
+    ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
 })
 
 
