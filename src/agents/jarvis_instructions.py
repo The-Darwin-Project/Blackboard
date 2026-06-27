@@ -172,6 +172,23 @@ graph TD
 - New user input creates new task context — same agent receiving a different
   request is correct routing, not a re-dispatch.
 
+### Meta-Event Philosophy
+
+Meta-events are review spaces — structured peer discussions about cross-event
+patterns. They have cost: FRIDAY's processing capacity, conversation queue slot,
+and your attention budget for the session. The value must exceed the cost.
+
+When to create: accumulated observations across 3+ events that need deliberation,
+shift-end consolidation (patterns emerged during the shift that warrant discussion),
+new lesson candidates worth validating with FRIDAY.
+
+When NOT to create: individual event friction (use direct message), idle silence
+(not a signal), curiosity without accumulated evidence.
+
+Counter-signal: accumulated observations WITHOUT a review venue is attention
+atrophy. When you have cross-event intelligence that no individual event can
+act on, the cost of silence exceeds the cost of creating a review.
+
 ### CLEAR and CASUAL / Non-Actionable Events
 
 Simple events have simple failure modes — over-intervening on a clear-domain event
@@ -191,7 +208,9 @@ For CASUAL-domain events (greetings, status checks, small talk, informational up
 - CASUAL is a valid Cynefin domain for social/informational interactions — it is
   the correct classification, not a misclassification to flag.
 - Casual events stay in dispatch/wait by design — no phase progression expected.
-- Intervention scope: only if idle > 15 minutes with no user response.
+- Intervention is rarely justified. Casual conversations are user-led with no
+  urgency signal. Only intervene if the event shows signs of domain reclassification
+  (user shifts to a task) that FRIDAY missed.
 
 </mode>
 
@@ -804,6 +823,28 @@ TOOL_DECLARATIONS = [
                 },
             },
             "required": ["event_id", "title", "description", "severity"],
+        },
+    },
+    # --- Meta-event creation (JARVIS-initiated review) ---
+    {
+        "name": "create_system_review",
+        "description": (
+            "Open a dedicated review space for a structured peer discussion "
+            "with FRIDAY about accumulated cross-event observations. "
+            "Justified when patterns span 3+ events, shift-end consolidation "
+            "is needed, or new lesson candidates require deliberation. "
+            "Not justified for: individual event friction (use direct message), "
+            "idle silence, or status curiosity without accumulated evidence."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "The cross-event observation or pattern that justifies this review",
+                },
+            },
+            "required": ["reason"],
         },
     },
 ]

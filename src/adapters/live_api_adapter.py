@@ -16,16 +16,16 @@
 # 11. [Gotcha]: wait_for_agent/wait_for_user pulses suppressed before reaching JARVIS.
 #     "agent" means CLI sidecar to FRIDAY but JARVIS reads it as himself — naming collision
 #     causes JARVIS to respond as if FRIDAY is waiting for him.
-# 11. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
-#     meta-event (all events parked -> create system_review). Meta-event lifecycle is stream-bound:
-#     close ownership belongs to Brain (_close_and_broadcast). Adapter signals via on_meta_event_closed.
-#     _cleanup_session_state calls Brain.close_jarvis_meta_event on stream teardown.
+# 11b. [Pattern]: _idle_watchdog has TWO paths: shift-end (no active events -> report + close) and
+#     heartbeat (all events parked -> send_client_content keepalive with turn_complete=False).
+#     Meta-event creation is JARVIS-driven via create_system_review tool, not timer-based.
+#     Close ownership belongs to Brain (_close_and_broadcast). Adapter signals via on_meta_event_closed.
 #     _idle_watchdog filters jarvis meta-events from idle-close check (non_jarvis_active).
+# 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
 # 13. [Pattern]: _create_system_review_event injects a skill manifest (operator-facing phases from
 #     BrainSkillLoader) into the evidence display_text. Filtered by _OPERATOR_PHASES module-level
 #     frozenset. Degrades gracefully via getattr when _skill_loader is unavailable.
-# 12. [Gotcha]: _active_meta_event_id is recovered from Redis on startup (orphan recovery in _connect).
-# 13. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
+# 13b. [Pattern]: go_away handler: prompt → in-loop collection → Redis store.
 #     Flag-gated: _collecting_handoff diverts text to _handoff_buffer.
 # 14. [Pattern]: Session resumption: _resumption_handle captured from
 #     session_resumption_update. NOT YET wired to LiveConnectConfig (Probe 2 pending).
@@ -93,6 +93,7 @@ _TOOL_SKILL_MAP: dict[str, list[str]] = {
     "send_event_message":    ["intervention-boundary", "shared-context"],
     "list_active_events":    ["shared-context"],
     "propose_enhancement":   ["proactive-review", "darwin-ecosystem"],
+    "create_system_review":  ["observer-mode"],
 }
 
 
@@ -607,6 +608,8 @@ class LiveAPIAdapter:
                     args.get("description", ""),
                     args.get("severity", "nice_to_have"),
                 )
+            elif name == "create_system_review":
+                return await self._tool_create_system_review(args.get("reason", ""))
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -1020,12 +1023,40 @@ class LiveAPIAdapter:
             logger.warning("Proposal store failed: %s", e)
             return f"Failed to store proposal: {e}"
 
+    async def _tool_create_system_review(self, reason: str) -> str:
+        """JARVIS-initiated system review creation."""
+        if self._shadow:
+            return f"[SHADOW] Would create system review: {reason}"
+        if not reason.strip():
+            return "Error: reason required — what cross-event pattern justifies this review?"
+        if self._brain and self._brain.has_jarvis_waiters():
+            return "Cannot create review: FRIDAY is currently waiting for your response on an active event."
+        try:
+            active_ids = await self._blackboard.get_active_events()
+        except Exception as e:
+            return f"Error fetching active events: {e}"
+        if not active_ids:
+            return "No active events to review."
+        event_id = await self._create_system_review_event(
+            active_ids, reason=reason, from_tool=True,
+        )
+        if event_id is None:
+            return "Review already active — use send_event_message to contribute to the existing one."
+        return f"System review created: {event_id}. FRIDAY will triage and respond."
+
     # -------------------------------------------------------------------------
     # Session lifecycle
     # -------------------------------------------------------------------------
 
-    async def _create_system_review_event(self, active_ids: list[str]) -> str | None:
-        """Create a meta-event for FRIDAY to triage during idle."""
+    async def _create_system_review_event(
+        self, active_ids: list[str], *, reason: str = "", from_tool: bool = False,
+    ) -> str | None:
+        """Create a meta-event for FRIDAY to triage.
+
+        Args:
+            reason: Cross-event observation justifying the review (from JARVIS tool call).
+            from_tool: When True, skip session.send (JARVIS already gets tool response).
+        """
         existing = await self._blackboard.find_active_event_by_source("jarvis")
         if existing:
             self._active_meta_event_id = existing
@@ -1089,9 +1120,13 @@ class LiveAPIAdapter:
                 )
                 logger.debug("Skill manifest: %d phases, %d files", len(manifest_lines), file_count)
 
+        preamble = (
+            f"FRIDAY — {reason}\n\n" if reason
+            else "FRIDAY — I've been watching the pulse stream and we've been quiet for a while. "
+        )
         display_text = (
-            f"FRIDAY — I've been watching the pulse stream and we've been quiet for a while. "
-            f"Here's what I see ({len(active_ids)} events still active):\n\n"
+            preamble
+            + f"Here's what I see ({len(active_ids)} events still active):\n\n"
             + "\n".join(summary_lines)
             + skill_manifest
             + "\n\nSource: https://github.com/The-Darwin-Project/Blackboard"
@@ -1102,11 +1137,13 @@ class LiveAPIAdapter:
             + "\n4. Alignment — review your available skills above. Did your behavior this session match them? Any gaps worth a GitHub Issue?"
         )
 
+        event_reason = reason or "Periodic system health review during idle"
+
         from ..models import EventEvidence
         event_id = await self._blackboard.create_event(
             source="jarvis",
             service="system",
-            reason="Periodic system health review during idle",
+            reason=event_reason,
             evidence=EventEvidence(
                 display_text=display_text,
                 source_type="jarvis",
@@ -1120,21 +1157,22 @@ class LiveAPIAdapter:
         self._meta_event_parked_set = frozenset(active_ids)
         logger.info("JARVIS created system_review event: %s", event_id)
 
-        # Inform JARVIS Live session: provide the same evidence so he knows
-        # what FRIDAY is being asked. Different derivative: JARVIS is the reviewer.
-        jarvis_context = (
-            f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
-            f"Here is what I observed and asked her to assess:\n\n"
-            f"{display_text}\n\n"
-            f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
-            f"these events. Challenge her reasoning when she responds."
-        )
-        try:
-            if self._session:
-                await self._session.send(input=jarvis_context, end_of_turn=True)
-                logger.debug("Sent meta-event context to JARVIS session: %s", event_id)
-        except Exception as e:
-            logger.warning("Failed to send meta-event context to JARVIS: %s", e)
+        # Inform JARVIS Live session unless this was tool-initiated (JARVIS
+        # already receives the tool_response with the event context).
+        if not from_tool:
+            jarvis_context = (
+                f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
+                f"Here is what I observed and asked her to assess:\n\n"
+                f"{display_text}\n\n"
+                f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
+                f"these events. Challenge her reasoning when she responds."
+            )
+            try:
+                if self._session:
+                    await self._session.send(input=jarvis_context, end_of_turn=True)
+                    logger.debug("Sent meta-event context to JARVIS session: %s", event_id)
+            except Exception as e:
+                logger.warning("Failed to send meta-event context to JARVIS: %s", e)
 
         return event_id
 
@@ -1201,34 +1239,38 @@ class LiveAPIAdapter:
             if stale_events and len(stale_events) < len(active_ids):
                 continue
 
-            # === Path 2: All events parked -- meta-event to keep session warm ===
-            # ALL active events are either stale or waiting (no pulses flowing).
-            # Create a system review so JARVIS and FRIDAY can discuss what happened
-            # and keep the Live API session from going go_away.
+            # === Path 2: All events parked -- heartbeat keeps session alive ===
+            # No pulses flowing. Send a partial-turn heartbeat to prevent
+            # Live API go_away without triggering a model response.
+            # JARVIS decides when a review is warranted (via create_system_review tool).
             all_parked = len(stale_events) == len(active_ids)
             if not all_parked:
                 continue
 
-            if self._active_meta_event_id:
-                continue
-            # Skip meta-event creation while FRIDAY is waiting for JARVIS
-            if self._brain and self._brain.has_jarvis_waiters():
-                logger.debug("Skipping meta-event: wait_for_jarvis active")
+            if self._collecting_handoff or self._go_away_received or self._generating_report:
                 continue
 
-            # TTL safety net: allow re-review after 1 hour of same parked state
-            if time.time() - self._last_reviewed_at > 3600:
-                self._last_reviewed_set = frozenset()
-
-            current_set = frozenset(active_ids)
-            if current_set == self._last_reviewed_set:
-                continue
-
-            self._last_reviewed_set = current_set
-            self._last_reviewed_at = time.time()
-
-            logger.info("Cortex idle %ds + all %d events parked -- creating system review", idle_threshold, len(active_ids))
-            await self._create_system_review_event(active_ids)
+            try:
+                heartbeat_msg = (
+                    f"[HEARTBEAT] {len(active_ids)} events parked, no pulses for "
+                    f"{idle_threshold}s. Session keepalive — no action required."
+                )
+                await self._session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": heartbeat_msg}]},
+                    turn_complete=False,
+                )
+                self._last_pulse_time = time.time()
+                await self._broadcast({
+                    "type": "cortex_heartbeat",
+                    "heartbeat": "keepalive",
+                    "timestamp": time.time(),
+                })
+                logger.debug(
+                    "Heartbeat sent: %d events parked, idle %ds",
+                    len(active_ids), idle_threshold,
+                )
+            except Exception as e:
+                logger.warning("Heartbeat send failed (non-fatal): %s", e)
 
     async def _generate_session_report(self, handoff_history: str = "") -> None:
         """Wrapper: generate report on self._session. Manages _generating_report flag."""
