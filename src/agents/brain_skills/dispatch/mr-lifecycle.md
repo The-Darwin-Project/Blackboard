@@ -118,6 +118,12 @@ the conflicting MR with a comment explaining the automated closure reason
 notify the maintainer. Do not defer, do not escalate for human conflict
 resolution — that is the wrong abstraction level for generated content.
 
+**Exception — explicit tracking instructions:** If the MR description
+contains explicit instructions not to close (e.g., state-tracking MRs
+where the promotion system monitors MR existence), respect that over the
+default auto-close behavior. The MR author knows the lifecycle better
+than the default rule. Defer and let the tracking system handle it.
+
 ## Auto-Merge Invalidation on New Commits
 
 Auto-merge (merge-when-pipeline-succeeds) is invalidated by the platform when

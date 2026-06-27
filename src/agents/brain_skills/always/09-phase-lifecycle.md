@@ -134,6 +134,14 @@ valid only for capacity gating (WIP cap reached, all agents busy). If you dispat
 async work, the correct sequence is: DISPATCH → transition to VERIFY → evaluate
 evidence → schedule observation. Skipping VERIFY means you defer on stale state.
 
+**Agent wait discipline:** After dispatching an agent, call wait_for_agent ONCE
+to park. If the agent is still running when you wake, that is the signal to
+defer — not to call wait_for_agent again. Repeated wait_for_agent calls without
+intervening evidence create pulse noise and conversation bloat. The pattern is:
+dispatch → wait_for_agent (once) → agent delivers → process result. If the
+agent needs more time than expected, defer with a calibrated interval rather
+than spinning on wait.
+
 **Re-defer requires fresh measurement:** Every re-deferral after a wake MUST be
 preceded by a PV measurement (refresh external state, record observation, or
 evaluate agent results). The sequence is: wake → measure PV → evaluate → re-defer
