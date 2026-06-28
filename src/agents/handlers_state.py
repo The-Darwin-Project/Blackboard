@@ -121,9 +121,10 @@ async def handle_wait_for_agent(
         return False
     summary = args.get("summary", "")
     agent_name = ctx.get_active_agent_for_event(event_id) or "unknown"
-    ctx.mark_waiting_for_agent(event_id, agent_name)
+    wait_turn = await ctx.next_turn_number(event_id)
+    ctx.mark_waiting_for_agent(event_id, agent_name, wait_turn)
     turn = ConversationTurn(
-        turn=(await ctx.next_turn_number(event_id)),
+        turn=wait_turn,
         actor="brain",
         action="wait",
         thoughts=summary,

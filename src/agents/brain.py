@@ -20,7 +20,11 @@
 #     Brain._scan_active_for_reconcile() is the decision callback: returns list[str] of event_ids to enqueue.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
-# 15b. [Pattern]: _waiting_for_agent (dict[str,str]) blocks process_event re-entry after wait_for_agent. Set in handler, cleared when ANY participant responds (DELIVERED turn detected) OR in _release_task_state + _close_and_broadcast. Guard at top of _process_event_inner. Treats JARVIS, agents, users as equal participants.
+# 15b. [Pattern]: _waiting_for_agent (dict[str, tuple[str, int]]) blocks process_event re-entry after
+#     wait_for_agent. Value: (agent_name, wait_turn_number). Cleared when a non-brain DELIVERED turn
+#     arrives AFTER the wait was set (scoped to conversation[wait_turn:]). _process_event_inner guard
+#     uses delivered-only level-triggered check. Scan Guard 7 additionally wakes on fresh unseen (sent)
+#     non-brain turns (edge-triggered fast-path). Also cleared in _release_task_state + _close_and_broadcast.
 # 16. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
 # 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack).
 # 27. [Pattern]: event_status_changed broadcast fires after successful status transitions (new->active, active->deferred, deferred->active). Broadcasts at call sites, NOT inside transition_event_status() (Hexagonal boundary). Defer path is defense-in-depth (turn broadcast already fires via _append_and_broadcast).
@@ -145,6 +149,11 @@
 #     during thinking stream. Gate stores hits in _recall_lessons (overwrite) and returns True
 #     to re-invoke LLM with RECALL block in SI. BRAIN_MEMORY_REFLEX env var. Max 1 gate per cycle.
 #     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
+# 43. [Pattern]: User interrupt injection in LLM iteration loop. After re-fetch (iteration > 0),
+#     detect new user turns beyond turn_snapshot. If found (and not intermediate), inject PRIORITY
+#     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
+#     NOT expanded — safety net: if LLM ignores, user turn stays DELIVERED for next scan cycle.
+#     response_emitted + _response_emitted_for reset on interrupt (fresh response cycle).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -318,8 +327,8 @@ class _BrainToolContext:
     def is_waiting_for_user(self, eid: str) -> bool:
         return eid in self._b._waiting_for_user
 
-    def mark_waiting_for_agent(self, eid: str, agent: str) -> None:
-        self._b._waiting_for_agent[eid] = agent
+    def mark_waiting_for_agent(self, eid: str, agent: str, wait_turn: int) -> None:
+        self._b._waiting_for_agent[eid] = (agent, wait_turn)
 
     def clear_waiting_for_agent(self, eid: str) -> None:
         self._b._waiting_for_agent.pop(eid, None)
@@ -511,7 +520,7 @@ class Brain:
             warn_callback=self._idle_timeout_warn,
             close_callback=self._idle_timeout_close,
         )
-        self._waiting_for_agent: dict[str, str] = {}  # event_id -> agent_name
+        self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
         self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge timer task
@@ -757,14 +766,17 @@ class Brain:
         if event.source == "jarvis" and self._active_meta_event_id != event_id:
             self._active_meta_event_id = event_id
 
-        # WAITING-FOR-AGENT guard: skip processing until a participant responds.
-        # Any DELIVERED turn (from agent, JARVIS, user, aligner) clears the wait --
-        # FRIDAY doesn't need to know which participant she was waiting for.
+        # WAITING-FOR-AGENT guard: skip processing until a non-brain participant responds
+        # AFTER the wait was set (scoped to conversation[wait_turn:]).
         if event_id in self._waiting_for_agent:
-            has_response = any(t.status.value == "delivered" for t in event.conversation)
+            _, wait_turn = self._waiting_for_agent[event_id]
+            has_response = any(
+                t.status.value == "delivered" and t.actor != "brain"
+                for t in event.conversation[wait_turn:]
+            )
             if has_response:
                 self._waiting_for_agent.pop(event_id, None)
-                logger.info(f"Cleared _waiting_for_agent for {event_id}: participant responded")
+                logger.info(f"Cleared _waiting_for_agent for {event_id}: participant responded (post-wait scoped)")
             else:
                 logger.debug(f"Skipping process_event for {event_id}: waiting for participant")
                 return
@@ -838,7 +850,7 @@ class Brain:
                     if existing_mr_url and existing_mr_url == new_mr_url:
                         merge_text = self._format_merge_evidence(event)
                         turn = ConversationTurn(
-                            turn=len(existing.conversation) + 1,
+                            turn=(await self._next_turn_number(eid)),
                             actor=event.source,
                             action="evidence",
                             result=merge_text,
@@ -945,7 +957,7 @@ class Brain:
 
                         idle_min = int(inactivity // 60)
                         nudge_turn = ConversationTurn(
-                            turn=len(event.conversation) + 1,
+                            turn=(await self._next_turn_number(event_id)),
                             actor="user",
                             action="message",
                             source="automated",
@@ -966,7 +978,7 @@ class Brain:
             if not adapter:
                 # PROBE MODE fallback (no LLM available)
                 turn = ConversationTurn(
-                    turn=len(event.conversation) + 1,
+                    turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="triage",
                     thoughts=f"PROBE: Brain received event {event_id} for service {event.service}. "
@@ -1009,10 +1021,27 @@ class Brain:
                     event = await self.blackboard.get_event(event_id)
                     if not event:
                         return
+
+                # User interrupt detection: new user turns after turn_snapshot.
+                # Iteration 0 has no re-fetch — interrupts arriving during iteration 0
+                # are only detectable on iteration 1 (after re-fetch) or by the scan safety net.
+                user_interrupt_turn: int | None = None
+                if not is_intermediate:
+                    new_user_turns = [
+                        t for t in event.conversation[turn_snapshot:]
+                        if t.actor == "user" and t.status.value in ("sent", "delivered")
+                    ]
+                    if new_user_turns:
+                        user_interrupt_turn = new_user_turns[-1].turn
+                        response_emitted = False
+                        self._response_emitted_for.discard(event_id)
+                        logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
+
                 should_continue = await self._process_with_llm(
                     event_id, event, is_defer_wake=is_defer_wake,
                     iteration=iteration, is_intermediate=is_intermediate,
                     response_emitted=response_emitted,
+                    user_interrupt_turn=user_interrupt_turn,
                 )
                 # Propagate response_emitted state across iterations (RECALL continuation)
                 if event_id in self._response_emitted_for:
@@ -1069,6 +1098,7 @@ class Brain:
         iteration: int = 0,
         is_intermediate: bool = False,
         response_emitted: bool = False,
+        user_interrupt_turn: int | None = None,
     ) -> bool:
         """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
@@ -1213,6 +1243,18 @@ class Brain:
             {"role": "model", "parts": [{"text": BRAIN_PREFILL_MODEL}]},
         ] + prompt
 
+        # User interrupt injection: insert priority directive into the final user block
+        if user_interrupt_turn is not None:
+            priority_text = (
+                f"PRIORITY: User sent a new message (turn {user_interrupt_turn}) "
+                f"during your tool chain. Address their message NOW before continuing."
+            )
+            if prompt and prompt[-1]["role"] == "user":
+                parts = prompt[-1]["parts"]
+                parts.insert(-1, {"text": priority_text})
+            else:
+                logger.warning(f"User interrupt injection skipped for {event_id}: last message is not user-role")
+
         # Signal UI that Brain is processing (visible even when LLM produces no text)
         await self._broadcast({
             "type": "brain_thinking",
@@ -1324,7 +1366,7 @@ class Brain:
         if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
             self._reasoning_by_event.pop(event_id, None)
             turn = ConversationTurn(
-                turn=len(event.conversation) + 1,
+                turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="error",
                 thoughts=f"LLM call failed after {attempt + 1} attempts: {last_error}",
@@ -4222,12 +4264,17 @@ class Brain:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
-            # Guard 7: waiting_for_agent -- bypass on participant input (level-triggered)
+            # Guard 7: waiting_for_agent -- bypass on participant input
             if eid in self._waiting_for_agent:
-                has_participant_input = any(t.actor != "brain" for t in unseen) or any(
-                    t.status.value == "delivered" and t.actor != "brain"
-                    for t in event.conversation
-                )
+                _, wait_turn = self._waiting_for_agent[eid]
+                # Edge-triggered: fresh sent turns from this scan cycle
+                has_participant_input = any(t.actor != "brain" for t in unseen)
+                # Level-triggered: delivered non-brain turns AFTER wait was set
+                if not has_participant_input:
+                    has_participant_input = any(
+                        t.status.value == "delivered" and t.actor != "brain"
+                        for t in event.conversation[wait_turn:]
+                    )
                 if not has_participant_input:
                     continue
 

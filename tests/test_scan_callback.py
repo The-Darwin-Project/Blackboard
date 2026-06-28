@@ -336,6 +336,7 @@ class TestIntermediateProcessing:
             _make_turn(actor="brain", action="wait", status="evaluated"),
             _make_turn(actor="developer", action="result", status="sent"),
         ]
+        # wait_turn=1 means only turns at index 1+ are post-wait
         events = {"evt-1": _make_event("evt-1", conversation=turns)}
         result = _scan_logic(
             active_ids=["evt-1"],
@@ -345,7 +346,7 @@ class TestIntermediateProcessing:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
-            waiting_for_agent={"evt-1": "developer"},
+            waiting_for_agent={"evt-1": ("developer", 1)},
         )
         assert "evt-1" in result
 
@@ -365,7 +366,7 @@ class TestIntermediateProcessing:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
-            waiting_for_agent={"evt-1": "developer"},
+            waiting_for_agent={"evt-1": ("developer", 1)},
         )
         assert "evt-1" in result
 
@@ -385,7 +386,7 @@ class TestIntermediateProcessing:
             waiting_for_jarvis={},
             event_locks={},
             last_processed={},
-            waiting_for_agent={"evt-1": "developer"},
+            waiting_for_agent={"evt-1": ("developer", 1)},
         )
         assert "evt-1" not in result
 
@@ -528,12 +529,17 @@ def _scan_logic(
         # Guard 6: Mark SENT turns as DELIVERED (status transition only in real scan)
         unseen = [t for t in event.conversation if t.status.value == "sent"]
 
-        # Guard 7: Waiting-for-agent -- bypass on participant input (level-triggered)
+        # Guard 7: Waiting-for-agent -- bypass on participant input
         if eid in waiting_for_agent:
-            has_participant_input = any(t.actor != "brain" for t in unseen) or any(
-                t.status.value == "delivered" and t.actor != "brain"
-                for t in event.conversation
-            )
+            _, wait_turn = waiting_for_agent[eid]
+            # Edge-triggered: fresh sent turns from this scan cycle
+            has_participant_input = any(t.actor != "brain" for t in unseen)
+            # Level-triggered: delivered non-brain turns AFTER wait was set
+            if not has_participant_input:
+                has_participant_input = any(
+                    t.status.value == "delivered" and t.actor != "brain"
+                    for t in event.conversation[wait_turn:]
+                )
             if not has_participant_input:
                 continue
 
