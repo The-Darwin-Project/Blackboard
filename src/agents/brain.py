@@ -550,6 +550,7 @@ class Brain:
         self._live_adapter = None  # LiveAPIAdapter -- set by main.py when System 2 enabled
         self._memory_reflex_enabled = os.getenv("BRAIN_MEMORY_REFLEX", "false").lower() == "true"
         self._reflex_fired_for: set[str] = set()  # event IDs with gate already fired this cycle
+        self._response_emitted_for: set[str] = set()  # event IDs with response already emitted this cycle
         self._recall_lessons: dict[str, list] = {}  # event_id -> lesson hits for RECALL SI block
         self._last_embedding_warmup: float = 0.0
         # Brain skill loading (required -- monolith fallback removed)
@@ -1011,7 +1012,11 @@ class Brain:
                 should_continue = await self._process_with_llm(
                     event_id, event, is_defer_wake=is_defer_wake,
                     iteration=iteration, is_intermediate=is_intermediate,
+                    response_emitted=response_emitted,
                 )
+                # Propagate response_emitted state across iterations (RECALL continuation)
+                if event_id in self._response_emitted_for:
+                    response_emitted = True
                 if not should_continue:
                     break
                 logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
@@ -1063,6 +1068,7 @@ class Brain:
         is_defer_wake: bool = False,
         iteration: int = 0,
         is_intermediate: bool = False,
+        response_emitted: bool = False,
     ) -> bool:
         """Process event using streaming LLM call. Broadcasts thinking chunks to UI.
 
@@ -1362,7 +1368,7 @@ class Brain:
                 await self._append_and_broadcast(event_id, response_turn)
                 await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
                 self._last_processed[event_id] = time.time()
-                response_emitted = True
+                self._response_emitted_for.add(event_id)
 
             valid_tool_names = {t["name"] for t in active_tools}
             if function_call.name not in valid_tool_names:
@@ -2660,6 +2666,7 @@ class Brain:
         self._routing_turn_for_event.pop(event_id, None)
         self._waiting_for_agent.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
+        self._response_emitted_for.discard(event_id)
 
     async def handle_wake_task(self, data: dict, agent_id: str) -> None:
         """Process a self-initiated wake task (teammate message woke an idle agent).
@@ -3629,6 +3636,7 @@ class Brain:
         self._reasoning_by_event.pop(event_id, None)
         self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
+        self._response_emitted_for.discard(event_id)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
