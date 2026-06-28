@@ -171,7 +171,7 @@ def _pred_jarvis_wait(ctx: GateContext) -> bool:
 
 
 def _pred_inspect_event(ctx: GateContext) -> bool:
-    return ctx.event_source != "jarvis"
+    return ctx.event_source not in ("jarvis", "chat", "slack")
 
 
 def _pred_hold_watch(ctx: GateContext) -> bool:
@@ -389,7 +389,7 @@ def _msg_jarvis_wait(tool: str, _ctx: GateContext) -> str:
 
 
 def _msg_inspect_event(tool: str, ctx: GateContext) -> str:
-    return f"[GATE] {tool} unavailable. State: source is {ctx.event_source}. Prerequisite: jarvis source (meta-event only)."
+    return f"[GATE] {tool} unavailable. State: source is {ctx.event_source}. Prerequisite: jarvis, chat, or slack source."
 
 
 def _msg_hold_watch(tool: str, ctx: GateContext) -> str:
