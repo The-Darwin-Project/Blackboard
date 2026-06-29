@@ -1516,14 +1516,26 @@ class LiveAPIAdapter:
         logger.info("Cortex: no recent activity, staying idle until next pulse")
 
     async def _replay_pending_context(self) -> None:
-        """After reconnect, re-send active event summaries so JARVIS can resume."""
+        """After reconnect, re-send active event summaries + last handoff so JARVIS can resume."""
         if not self._session:
             return
         try:
             active_ids = await self._blackboard.get_active_events()
             if not active_ids:
                 return
-            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost. Active event summaries:"]
+
+            # Retrieve last handoff report — JARVIS's own observations from previous session
+            handoff_section = ""
+            try:
+                reports = await self._blackboard.get_handoff_reports(limit=1)
+                if reports:
+                    latest = reports[0].get("report", "")
+                    if latest:
+                        handoff_section = f"\n\nYour previous session notes:\n{latest}\n"
+            except Exception:
+                pass
+
+            lines = [f"{_RESUME_REFS}[SESSION RESUMED] Previous session lost.{handoff_section}Active event summaries:"]
             for eid in active_ids[:5]:
                 event = await self._blackboard.get_event(eid)
                 if not event:
@@ -1541,7 +1553,7 @@ class LiveAPIAdapter:
                 )
             if len(lines) > 1:
                 await self._session.send(input="\n".join(lines), end_of_turn=True)
-                logger.info("Cortex reconnect: replayed context for %d events", len(lines) - 1)
+                logger.info("Cortex reconnect: replayed context for %d events (handoff=%s)", len(lines) - 1, bool(handoff_section))
         except Exception as e:
             logger.warning("Cortex context replay failed (non-fatal): %s", e)
 
