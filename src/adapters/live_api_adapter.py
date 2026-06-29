@@ -610,6 +610,8 @@ class LiveAPIAdapter:
                 )
             elif name == "create_system_review":
                 return await self._tool_create_system_review(args.get("reason", ""))
+            elif name == "recall_handoff_notes":
+                return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -1043,6 +1045,27 @@ class LiveAPIAdapter:
         if event_id is None:
             return "Review already active — use send_event_message to contribute to the existing one."
         return f"System review created: {event_id}. FRIDAY will triage and respond."
+
+    async def _tool_recall_handoff_notes(self, last_n: int = 3) -> str:
+        """Retrieve JARVIS's own handoff notes from previous sessions."""
+        last_n = max(1, min(last_n, 10))
+        try:
+            reports = await self._blackboard.get_handoff_reports(limit=last_n)
+        except Exception as e:
+            return f"Error retrieving handoff notes: {e}"
+        if not reports:
+            return "No handoff notes found."
+        lines = [f"Your past {len(reports)} session notes (newest first):"]
+        for i, r in enumerate(reports):
+            report_text = r.get("report", "")
+            ts = r.get("timestamp", 0)
+            if ts:
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            else:
+                dt = "unknown"
+            lines.append(f"\n--- Session {i+1} ({dt}) ---\n{report_text}")
+        return "\n".join(lines)
 
     # -------------------------------------------------------------------------
     # Session lifecycle

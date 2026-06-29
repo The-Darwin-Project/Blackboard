@@ -785,6 +785,25 @@ TOOL_DECLARATIONS = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "name": "recall_handoff_notes",
+        "description": (
+            "Read your own session notes from previous session rotations. "
+            "Your handoff notes contain which events you were tracking, "
+            "friction patterns you observed, and pending questions. "
+            "Use when you need to recall what you were investigating "
+            "before the session rotated."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "last_n": {
+                    "type": "integer",
+                    "description": "Number of past session notes to retrieve (1-10, default 3)",
+                },
+            },
+        },
+    },
     # --- Enhancement proposal tool (metadata, not intervention) ---
     {
         "name": "propose_enhancement",
