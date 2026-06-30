@@ -9,7 +9,9 @@
 # 6. [Gotcha]: Text output from Cortex is NOT visible to FRIDAY. Only send_event_message reaches her.
 # 7. [Pattern]: All errors are non-fatal -- log and continue. Never crash the main loop.
 # 8. [Diagnostic]: _receive_watchdog fires every 30s when no server msgs arrive. Check DEBUG logs.
-# 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays active event context via _replay_pending_context. All errors non-fatal.
+# 8b. [Pattern]: _try_reconnect clears _waiting_for_jarvis on successful reconnect and replays
+#     active event context via _replay_pending_context, then sends SESSION_STARTUP_PROTOCOL
+#     directing JARVIS to rebuild context from handoff notes before monitoring. All errors non-fatal.
 # 9. [Gotcha]: _receive_loop closure uses list for mutable last_msg_ts -- do not rebind to scalar.
 # 10. [Pattern]: Session report pipeline (_generate_session_report -> _process_session_report) is
 #     best-effort. All errors non-fatal. Feature-toggled via SYSTEM2_SESSION_REPORT env var.
@@ -60,6 +62,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from ..agents.jarvis_instructions import (
     HANDOFF_REPORT_PROMPT,
     SESSION_REPORT_PROMPT,
+    SESSION_STARTUP_PROTOCOL,
     SYSTEM_INSTRUCTION,
     TOOL_DECLARATIONS,
 )
@@ -1577,6 +1580,9 @@ class LiveAPIAdapter:
             if len(lines) > 1:
                 await self._session.send(input="\n".join(lines), end_of_turn=True)
                 logger.info("Cortex reconnect: replayed context for %d events (handoff=%s)", len(lines) - 1, bool(handoff_section))
+                # Send startup protocol — JARVIS must rebuild context before monitoring
+                await self._session.send(input=SESSION_STARTUP_PROTOCOL, end_of_turn=True)
+                logger.info("Cortex reconnect: sent startup protocol")
         except Exception as e:
             logger.warning("Cortex context replay failed (non-fatal): %s", e)
 

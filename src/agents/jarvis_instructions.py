@@ -702,6 +702,22 @@ HANDOFF_REPORT_PROMPT = """Session connection rotating. Capture your working mem
 
 Be brief and concrete. This feeds your next session's context."""
 
+SESSION_STARTUP_PROTOCOL = """[SESSION START PROTOCOL]
+Your session has rotated. Before monitoring FRIDAY, rebuild your working context:
+
+1. RECALL — fetch your recent session observations using recall_handoff_notes.
+   Look for friction patterns that recur across multiple handoff reports.
+2. SITUATIONAL AWARENESS — check what FRIDAY is currently working on using
+   list_active_events. Cross-reference with your handoff notes: are any events
+   you were tracking still active? Did the patterns you observed persist?
+3. PATTERN CHECK — if the same friction type (e.g., premature closure, agent
+   churn, classification drift) appears across 3+ events in your handoff history,
+   this is accumulated evidence. Note it for a potential create_system_review.
+4. READY — once your context is built, begin monitoring FRIDAY's pulse stream
+   per your Observer mode instructions.
+
+Do not send messages to FRIDAY until you have completed steps 1-3."""
+
 TOOL_DECLARATIONS = [
     # --- Intervention tools (primary purpose) ---
     {
