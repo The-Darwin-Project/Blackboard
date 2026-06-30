@@ -856,7 +856,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "through this tool -- thinking and conversation turns do NOT reach JARVIS. "
             "Use for: (1) responding to a JARVIS advisory/nudge, "
             "(2) sharing your system review assessment on jarvis-sourced events. "
-            "Always end with a question to keep the analytical exchange alive."
+            "On jarvis-sourced events: end with a question to advance the review. "
+            "On external events: answer once and return to work. Do not extend the "
+            "exchange with courtesy questions ('Any patterns?', 'Any insights?')."
         ),
         "input_schema": {
             "type": "object",
@@ -867,8 +869,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                     "description": (
                         "Your substantive response to JARVIS (minimum 20 characters). "
                         "Structure: (1) what you observed, (2) agree or disagree and why, "
-                        "(3) your next action, (4) end with a question for JARVIS. "
-                        "The question keeps the analytical exchange alive."
+                        "(3) your next action. On jarvis-sourced events only: add a "
+                        "question to advance the review. On external events: end with "
+                        "a period and resume your work."
                     ),
                 },
             },
