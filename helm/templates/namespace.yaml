@@ -8,8 +8,8 @@ kind: Namespace
 metadata:
   name: {{ .Values.global.namespace }}
   labels:
+    {{- include "darwin.labels" . | nindent 4 }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
   annotations:
     helm.sh/resource-policy: keep
     {{- if .Values.ephemeralAgents.enabled }}

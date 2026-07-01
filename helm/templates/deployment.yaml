@@ -4,9 +4,7 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}-brain
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   revisionHistoryLimit: 1
@@ -14,8 +12,7 @@ spec:
     type: Recreate  # Qdrant WAL requires exclusive PVC access -- no rolling overlap
   selector:
     matchLabels:
-      app: darwin-brain
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "darwin.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -32,8 +29,7 @@ spec:
         checksum/remote-clusters: {{ include (print $.Template.BasePath "/configmap-remote-clusters.yaml") . | sha256sum }}
         {{- end }}
       labels:
-        app: darwin-brain
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "darwin.selectorLabels" . | nindent 8 }}
     spec:
       {{- if or .Values.observer.enabled .Values.slackAccess.enabled .Values.ephemeralAgents.enabled }}
       serviceAccountName: {{ .Release.Name }}-brain

@@ -4,9 +4,7 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-brain
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -15,5 +13,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.selectorLabels" . | nindent 4 }}

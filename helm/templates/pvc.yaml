@@ -5,8 +5,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-redis-data
   labels:
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 spec:
   accessModes:
@@ -25,8 +24,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-gitops-data
   labels:
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitops
 spec:
   accessModes:
@@ -45,8 +43,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ .Release.Name }}-qdrant-data
   labels:
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
     app.kubernetes.io/component: qdrant
 spec:
   accessModes:

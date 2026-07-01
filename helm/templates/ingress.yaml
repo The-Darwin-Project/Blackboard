@@ -10,9 +10,7 @@ kind: Ingress
 metadata:
   name: {{ .Release.Name }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
   {{- with .Values.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}

@@ -11,10 +11,8 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
     app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
 spec:
   params:
     - name: event_id
@@ -230,9 +228,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-prune
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 spec:
   params:
     - name: event_id
@@ -284,9 +280,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 spec:
   params:
     - name: event_id
@@ -298,9 +292,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-ephemeral-agent
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 spec:
   serviceAccountName: {{ .Release.Name }}-brain
   resources:

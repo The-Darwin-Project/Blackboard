@@ -5,9 +5,7 @@ kind: Route
 metadata:
   name: {{ .Release.Name }}-brain
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
   {{- with .Values.route.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}

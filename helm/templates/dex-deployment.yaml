@@ -9,8 +9,7 @@ metadata:
   name: {{ .Release.Name }}-dex
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
   annotations:
     serviceaccounts.openshift.io/oauth-redirecturi.darwin: >-
       https://{{ required "route.host is required when dex.enabled=true" .Values.route.host }}/dex/callback
@@ -21,8 +20,7 @@ metadata:
   name: {{ .Release.Name }}-dex-token
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
   annotations:
     kubernetes.io/service-account.name: {{ .Release.Name }}-dex
 type: kubernetes.io/service-account-token
@@ -33,8 +31,7 @@ metadata:
   name: {{ .Release.Name }}-dex-config
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 type: Opaque
 stringData:
   config.yaml: |
@@ -80,20 +77,17 @@ metadata:
   name: {{ .Release.Name }}-dex
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 spec:
   revisionHistoryLimit: 2
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Release.Name }}
-      app.kubernetes.io/component: dex
+      {{- include "darwin.dexLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: {{ .Release.Name }}
-        app.kubernetes.io/component: dex
+        {{- include "darwin.dexLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ .Release.Name }}-dex
       securityContext:
@@ -167,8 +161,7 @@ metadata:
   name: {{ .Release.Name }}-dex
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 spec:
   ports:
     - name: https
@@ -180,6 +173,5 @@ spec:
       targetPort: 5558
       protocol: TCP
   selector:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 {{- end }}

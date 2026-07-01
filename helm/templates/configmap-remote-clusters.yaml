@@ -8,9 +8,7 @@ kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-remote-clusters
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 data:
   {{- range $name, $cluster := .Values.remoteClusters }}
   {{- if $cluster.enabled }}

@@ -4,9 +4,7 @@ kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-config
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 data:
   # GCP Configuration
   GCP_PROJECT: {{ .Values.gcp.project | default "not-configured" | quote }}

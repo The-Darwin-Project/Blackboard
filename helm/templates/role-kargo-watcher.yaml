@@ -6,8 +6,7 @@ kind: ClusterRole
 metadata:
   name: darwin-kargo-watcher
   labels:
-    app.kubernetes.io/name: darwin-blackboard
-    app.kubernetes.io/component: kargo-observer
+    {{- include "darwin.kargoLabels" . | nindent 4 }}
 rules:
   - apiGroups: ["kargo.akuity.io"]
     resources: ["stages", "promotions"]
@@ -18,8 +17,7 @@ kind: ClusterRoleBinding
 metadata:
   name: darwin-kargo-watcher
   labels:
-    app.kubernetes.io/name: darwin-blackboard
-    app.kubernetes.io/component: kargo-observer
+    {{- include "darwin.kargoLabels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

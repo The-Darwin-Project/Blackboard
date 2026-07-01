@@ -9,10 +9,10 @@ metadata:
   name: tekton-pruner-namespace-spec
   namespace: {{ .Release.Namespace }}
   labels:
+    {{- include "darwin.labels" . | nindent 4 }}
     app.kubernetes.io/part-of: tekton-pruner
     pruner.tekton.dev/config-type: namespace
     app.kubernetes.io/managed-by: {{ .Release.Service }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
 data:
   ns-config: |
     taskRuns:

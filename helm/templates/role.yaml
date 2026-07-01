@@ -7,9 +7,7 @@ metadata:
   name: {{ .Release.Name }}-metrics-reader
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 rules:
   # Core resources -- read-only investigation
   - apiGroups: [""]
@@ -43,9 +41,7 @@ kind: ClusterRole
 metadata:
   name: {{ .Release.Name }}-cluster-reader
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 rules:
   # ArgoCD Applications
   - apiGroups: ["argoproj.io"]
@@ -80,9 +76,7 @@ kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-cluster-reader
   labels:
-    app: darwin-brain
-    app.kubernetes.io/name: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "darwin.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-brain
@@ -100,9 +94,7 @@ kind: ClusterRole
 metadata:
   name: {{ .Release.Name }}-slack-gate-reader
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: slack-access-gate
+    {{- include "darwin.slackGateLabels" . | nindent 4 }}
 rules:
   - apiGroups: ["user.openshift.io"]
     resources: ["groups"]
@@ -113,9 +105,7 @@ kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-slack-gate-reader
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: slack-access-gate
+    {{- include "darwin.slackGateLabels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-brain
@@ -134,9 +124,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 rules:
   - apiGroups: ["tekton.dev"]
     resources: ["taskruns"]
@@ -157,9 +145,7 @@ kind: ClusterRole
 metadata:
   name: {{ .Release.Name }}-ephemeral-agent-cluster
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 rules:
   - apiGroups: ["triggers.tekton.dev"]
     resources: ["clusterinterceptors"]
@@ -171,9 +157,7 @@ metadata:
   name: {{ .Release.Name }}-ephemeral-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-brain
@@ -188,9 +172,7 @@ kind: ClusterRoleBinding
 metadata:
   name: {{ .Release.Name }}-ephemeral-agent-cluster
   labels:
-    app: darwin-brain
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: ephemeral-agent
+    {{- include "darwin.ephemeralLabels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}-brain

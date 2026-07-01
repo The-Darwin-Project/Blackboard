@@ -5,10 +5,7 @@ metadata:
   name: {{ .Release.Name }}-qdrant
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-qdrant
-    app.kubernetes.io/name: darwin-qdrant
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: qdrant
+    {{- include "darwin.qdrantLabels" . | nindent 4 }}
 spec:
   replicas: 1
   strategy:
@@ -75,9 +72,7 @@ metadata:
   name: {{ .Release.Name }}-qdrant
   namespace: {{ .Release.Namespace }}
   labels:
-    app: darwin-qdrant
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/component: qdrant
+    {{- include "darwin.qdrantLabels" . | nindent 4 }}
 spec:
   selector:
     app: darwin-qdrant

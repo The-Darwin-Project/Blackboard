@@ -25,7 +25,7 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app: darwin-brain
+              {{- include "darwin.selectorLabels" . | nindent 14 }}
       ports:
         - protocol: TCP
           port: 8080

@@ -10,8 +10,7 @@ metadata:
   name: darwin-observer
   namespace: {{ . }}
   labels:
-    app.kubernetes.io/name: darwin-blackboard
-    app.kubernetes.io/component: observer
+    {{- include "darwin.observerLabels" $ | nindent 4 }}
 rules:
   # ArgoCD Applications
   - apiGroups: ["argoproj.io"]
@@ -44,8 +43,7 @@ metadata:
   name: darwin-observer
   namespace: {{ . }}
   labels:
-    app.kubernetes.io/name: darwin-blackboard
-    app.kubernetes.io/component: observer
+    {{- include "darwin.observerLabels" $ | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -9,8 +9,7 @@ metadata:
   name: {{ .Values.dex.tls.issuerName }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 spec:
   selfSigned: {}
 ---
@@ -20,8 +19,7 @@ metadata:
   name: {{ .Release.Name }}-dex-server
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ .Release.Name }}
-    app.kubernetes.io/component: dex
+    {{- include "darwin.dexLabels" . | nindent 4 }}
 spec:
   dnsNames:
     - {{ .Release.Name }}-dex
