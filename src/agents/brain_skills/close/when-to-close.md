@@ -48,7 +48,19 @@ The Cynefin domain determines the resolution standard because each domain has a 
 
 ## Recurring Known Failures
 
-A known error is not the same as a handled error. Closing identical events repeatedly as "duplicate of ongoing incident" creates an illusion of management while the root cause persists. If the Ops Journal shows 3+ identical closures without a resolution entry, the question is no longer "what is wrong?" -- it is "has the fix been applied?"
+When a systemic incident is tracked but unresolved (e.g., infrastructure capacity,
+upstream dependency), each new event affected by it is still a live process waiting
+for the constraint to clear. The pipeline is queued, not failed. The MR is blocked,
+not broken.
+
+**Action**: link the event to the tracking artifact (issue, incident) and **defer**
+on the systemic incident's resolution timeline. Use an extended deferral proportional
+to the observed constraint duration. Check back when the systemic constraint is
+expected to clear — not on the event's nominal pipeline baseline.
+
+**Verification gate**: before closing any event attributed to a tracked systemic
+issue, check the Ops Journal: has a resolution entry appeared for the systemic
+issue since the last closure? If not, the constraint persists and deferral continues.
 
 ## Cause vs Symptom
 
@@ -60,7 +72,7 @@ Every event, journal entry, and investigation result carries a timestamp. Ignori
 
 - **How old is the attributed cause?** If the investigation says "outage at 18:00 yesterday" and the current time is 11:00 today, 17 hours have passed. Has the outage lifecycle been checked?
 - **When was the last successful event for this service?** The Ops Journal shows it. A gap between the last success and now is time where recovery may have happened unobserved.
-- **When was the original escalation for a recurring failure?** If the first incident was 3 days ago and every event since has been closed as "duplicate," 3 days is a meaningful signal about whether the fix landed.
+- **When was the original escalation for a recurring failure?** If the first incident was filed days ago and events are still arriving for the same cause, that elapsed time is a signal about whether the fix landed. Check the Ops Journal for a resolution entry.
 
 ## Closure Reason Turn
 
