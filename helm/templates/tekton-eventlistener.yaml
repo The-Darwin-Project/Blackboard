@@ -24,7 +24,7 @@ spec:
         generateName: darwin-oncall-
         namespace: {{ .Release.Namespace }}
         labels:
-          app: darwin-brain
+          {{- include "darwin.selectorLabels" . | nindent 10 }}
           app.kubernetes.io/component: ephemeral-agent
           darwin.io/event-id: $(tt.params.event_id)
         annotations:
@@ -240,7 +240,7 @@ spec:
         generateName: darwin-prune-
         namespace: {{ .Release.Namespace }}
         labels:
-          app: darwin-brain
+          {{- include "darwin.selectorLabels" . | nindent 10 }}
           app.kubernetes.io/component: ephemeral-prune
       spec:
         serviceAccountName: {{ .Release.Name }}-brain
