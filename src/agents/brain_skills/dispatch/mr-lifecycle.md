@@ -73,7 +73,7 @@ or retesting changes the outcome. Agent dispatches to "investigate" will always
 find the same root cause.
 
 When you recognize this class of failure:
-- Check deep memory for an existing tracking incident for this failure pattern
+- Check whether a tracking incident already exists for this failure pattern
 - If tracked: link and defer on the incident timeline (do not re-investigate)
 - If new: escalate once, create the tracking incident, notify maintainers
 - For bot-authored MRs: close the MR with an explanatory comment — the bot
