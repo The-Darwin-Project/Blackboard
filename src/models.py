@@ -559,7 +559,7 @@ class RefineResponse(BaseModel):
 # =============================================================================
 
 class StagedEscalation(BaseModel):
-    """An escalation staged for Nightwatcher consolidation instead of immediate Smartsheet write."""
+    """An escalation staged for Nightwatcher consolidation instead of immediate Jira write."""
     event_id: str = Field(..., description="Source event ID (e.g., evt-09ef9c7c)")
     service: str = Field(..., description="Affected service or kargo stage")
     source: str = Field(..., description="Event source: aligner | headhunter | timekeeper")
@@ -584,15 +584,18 @@ class ShiftInvestigation(BaseModel):
 
 
 class ShiftIncident(BaseModel):
-    """A consolidated incident created by the Nightwatcher in Smartsheet."""
+    """A consolidated incident created by the Nightwatcher."""
     platform: str = Field(..., description="Affected platform")
     summary: str = Field(..., description="Consolidated root cause summary")
     description: str = Field("", description="Full consolidated description")
     priority: str = Field("Normal", description="Normal | Major | Critical")
-    status: str = Field("New", description="Smartsheet Status column value (e.g. New, Closed)")
+    status: str = Field("New", description="Incident status (e.g. New, Closed)")
     affected_events: list[str] = Field(default_factory=list, description="Event IDs consolidated into this incident")
-    smartsheet_row_id: str = Field("", description="Smartsheet row ID after creation")
-    smartsheet_url: str = Field("", description="Smartsheet permalink")
+    jira_issue_key: str = Field("", description="Jira issue key after creation")
+    jira_url: str = Field("", description="Jira issue browse URL")
+    extended: bool = Field(False, description="True if this extended an existing issue")
+    smartsheet_row_id: str = Field("", description="Deprecated -- legacy Smartsheet row ID")
+    smartsheet_url: str = Field("", description="Deprecated -- legacy Smartsheet permalink")
 
 
 class ShiftReport(BaseModel):

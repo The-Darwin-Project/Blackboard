@@ -684,6 +684,46 @@ async def handle_notify_gitlab_result(
 
 
 # ---------------------------------------------------------------------------
+# search_open_incidents
+# ---------------------------------------------------------------------------
+async def handle_search_open_incidents(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    adapter = ctx.get_incident_adapter()
+    if not adapter:
+        result_text = "Incident tracking not configured."
+    else:
+        try:
+            open_incidents = await adapter.search_open_incidents()
+            if not open_incidents:
+                result_text = "No open incidents found."
+            else:
+                lines = [f"Found {len(open_incidents)} open incident(s):\n"]
+                for inc in open_incidents[:20]:
+                    key = inc.get("key", "?")
+                    summary = inc.get("summary", "")
+                    status = inc.get("status", "")
+                    priority = inc.get("priority", "")
+                    lines.append(f"- **{key}** [{status}] (P:{priority}) {summary}")
+                result_text = "\n".join(lines)
+        except Exception as e:
+            result_text = f"Failed to search incidents: {e}"
+            logger.warning(f"search_open_incidents failed for {event_id}: {e}")
+
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain",
+        action="tool_result",
+        thoughts=result_text,
+        waitingFor="search_open_incidents",
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    await ctx.emit_pulse(event_id, [("tool:search_open_incidents", "tool", 1.0 if "Found" in result_text else 0.3)])
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 from .tool_router import HANDLER_REGISTRY
@@ -695,3 +735,4 @@ HANDLER_REGISTRY["transition_jira_issue"] = handle_transition_jira_issue
 HANDLER_REGISTRY["refresh_gitlab_context"] = handle_refresh_gitlab_context
 HANDLER_REGISTRY["refresh_kargo_context"] = handle_refresh_kargo_context
 HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result
+HANDLER_REGISTRY["search_open_incidents"] = handle_search_open_incidents

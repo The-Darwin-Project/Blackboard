@@ -36,7 +36,7 @@ def _make_observer(**overrides) -> NightwatcherObserver:
         registry=AsyncMock(),
         bridge=AsyncMock(),
         provisioner=AsyncMock(),
-        smartsheet_adapter=AsyncMock(),
+        incident_adapter=AsyncMock(),
         archivist=AsyncMock(),
         slack_notify=AsyncMock(),
     )
@@ -155,10 +155,11 @@ class TestFullSweep:
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
 
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 100, "sheet_url": "https://ss.com/100"},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-100", "issue_url": "https://jira.example.com/browse/VMER-100"},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         await obs._sweep()
 
@@ -209,10 +210,11 @@ class TestAnalysisLoop:
         mock_adapter = AsyncMock()
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 1, "sheet_url": ""},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1", "issue_url": ""},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         await obs._sweep()
 
@@ -257,10 +259,11 @@ class TestAnalysisLoop:
         mock_adapter = AsyncMock()
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 1, "sheet_url": ""},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1", "issue_url": ""},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         # Mock execute_tool for the dispatch_investigation calls
         with patch("src.observers.nightwatcher.execute_tool", new_callable=AsyncMock) as mock_exec:
@@ -320,10 +323,11 @@ class TestReportCart:
         mock_adapter = AsyncMock()
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 1, "sheet_url": ""},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1", "issue_url": ""},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         await obs._sweep()
 
@@ -380,10 +384,11 @@ class TestReportCart:
         mock_adapter = AsyncMock()
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 1, "sheet_url": ""},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1", "issue_url": ""},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         await obs._sweep()
 
@@ -430,10 +435,11 @@ class TestPhaseTransitions:
         mock_adapter = AsyncMock()
         mock_adapter.generate = AsyncMock(side_effect=analysis_calls + cart_calls)
         obs._get_adapter = AsyncMock(return_value=mock_adapter)
-        obs._smartsheet = AsyncMock()
-        obs._smartsheet.create_incident = AsyncMock(
-            return_value={"row_id": 1, "sheet_url": ""},
+        obs._incident_adapter = AsyncMock()
+        obs._incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1", "issue_url": ""},
         )
+        obs._incident_adapter.search_open_incidents = AsyncMock(return_value=[])
 
         await obs._sweep()
 

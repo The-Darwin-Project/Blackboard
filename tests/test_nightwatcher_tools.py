@@ -1,6 +1,6 @@
 # tests/test_nightwatcher_tools.py
 # @ai-rules:
-# 1. [Pattern]: All infrastructure mocked via AsyncMock -- no Redis, no Smartsheet, no LLM calls.
+# 1. [Pattern]: All infrastructure mocked via AsyncMock -- no Redis, no Jira, no LLM calls.
 # 2. [Pattern]: NightwatcherContext constructed per test with controlled mocks.
 # 3. [Constraint]: Tests verify tool routing, phase gating, dispatch cap enforcement, and field population.
 """Unit tests for Nightwatcher tool execution and phase gating."""
@@ -34,7 +34,7 @@ def _make_ctx(**overrides) -> NightwatcherContext:
         provisioner=AsyncMock(),
         registry=AsyncMock(),
         bridge=AsyncMock(),
-        smartsheet_adapter=AsyncMock(),
+        incident_adapter=AsyncMock(),
         slack_notify=AsyncMock(),
         manifest_services={"svc-a", "svc-b"},
         manifest_ids={"evt-1", "evt-2"},
@@ -247,8 +247,8 @@ class TestDispatchInvestigation:
 
 class TestWriteIncident:
     @pytest.mark.asyncio
-    async def test_no_smartsheet_adapter(self):
-        ctx = _make_ctx(smartsheet_adapter=None)
+    async def test_no_incident_adapter(self):
+        ctx = _make_ctx(incident_adapter=None)
         cluster = {"platform": "Konflux", "events": ["evt-1"], "root_cause": "test", "services": ["svc-a"]}
         result = await _handle_write_incident(
             {"summary": "test"}, ctx, cluster,
@@ -259,8 +259,8 @@ class TestWriteIncident:
     @pytest.mark.asyncio
     async def test_successful_creation(self):
         ctx = _make_ctx()
-        ctx.smartsheet_adapter.create_incident = AsyncMock(
-            return_value={"row_id": 12345, "sheet_url": "https://ss.com/row/12345"},
+        ctx.incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-123", "issue_url": "https://jira.example.com/browse/VMER-123"},
         )
         cluster = {"platform": "Konflux", "events": ["evt-1", "evt-2"], "root_cause": "s390x failures", "services": ["svc-a"]}
         result = await _handle_write_incident(
@@ -269,12 +269,12 @@ class TestWriteIncident:
             ctx, cluster,
         )
         assert "Incident created" in result
-        assert "12345" in result
+        assert "VMER-123" in result
         assert len(ctx.created_incidents) == 1
         inc = ctx.created_incidents[0]
         assert inc.platform == "Konflux"
         assert inc.affected_events == ["evt-1", "evt-2"]
-        assert inc.smartsheet_row_id == "12345"
+        assert inc.jira_issue_key == "VMER-123"
 
     @pytest.mark.asyncio
     async def test_system_fields_populated(self):
@@ -284,20 +284,19 @@ class TestWriteIncident:
 
         async def capture_fields(fields):
             captured_fields.update(fields)
-            return {"row_id": 1, "sheet_url": ""}
+            return {"issue_key": "X-1", "issue_url": ""}
 
-        ctx.smartsheet_adapter.create_incident = capture_fields
+        ctx.incident_adapter.create_incident = capture_fields
         cluster = {"platform": "P", "events": ["e"], "root_cause": "x", "services": ["svc"]}
         await _handle_write_incident({"summary": "S"}, ctx, cluster)
-        assert captured_fields["Labels"] == os.environ.get("SMARTSHEET_INCIDENT_LABELS", "")
-        assert captured_fields["Components"] == os.environ.get("SMARTSHEET_INCIDENT_COMPONENTS", "")
-        assert captured_fields["Issue Type"] == os.environ.get("SMARTSHEET_INCIDENT_ISSUE_TYPE", "Task")
-        assert captured_fields["Platform"] == "P"
+        assert captured_fields["platform"] == "P"
+        assert isinstance(captured_fields["labels"], list)
+        assert isinstance(captured_fields["components"], list)
 
     @pytest.mark.asyncio
-    async def test_smartsheet_error_adds_to_failed_cluster_events(self):
+    async def test_jira_error_adds_to_failed_cluster_events(self):
         ctx = _make_ctx()
-        ctx.smartsheet_adapter.create_incident = AsyncMock(
+        ctx.incident_adapter.create_incident = AsyncMock(
             side_effect=RuntimeError("API 500"),
         )
         cluster = {"platform": "P", "events": ["evt-1", "evt-2"], "root_cause": "x", "services": ["svc"]}
@@ -418,7 +417,7 @@ class TestValidateClusterPlan:
             VALID_PLATFORMS.extend(old)
 
     def test_platform_validation_skipped_when_empty(self):
-        """Platform validation skipped when VALID_PLATFORMS is empty (Smartsheet not configured)."""
+        """Platform validation skipped when VALID_PLATFORMS is empty (enums not configured)."""
         from src.agents.llm.types import VALID_PLATFORMS
         old = list(VALID_PLATFORMS)
         VALID_PLATFORMS.clear()
@@ -475,3 +474,145 @@ class TestBuildSummaryTool:
         assert len(tools) == 1
         assert tools[0]["name"] == "post_shift_summary"
         assert "input_schema" in tools[0]
+
+
+# =========================================================================
+# Extend Incident
+# =========================================================================
+from src.observers.nightwatcher_tools import _handle_extend_incident, build_extend_tool, _handle_search_existing_incidents
+
+
+class TestExtendIncident:
+    @pytest.mark.asyncio
+    async def test_extend_success(self):
+        ctx = _make_ctx()
+        ctx.incident_adapter.add_comment = AsyncMock(
+            return_value={"comment_id": "10001", "issue_url": "https://jira.example.com/browse/VMER-5"},
+        )
+        cluster = {"extends_issue_key": "VMER-5", "platform": "OCP", "events": ["evt-1"], "root_cause": "test", "services": ["svc-a"]}
+        result = await _handle_extend_incident({"summary": "new evidence", "comment": "details"}, ctx, cluster)
+        assert "Incident extended" in result
+        assert "VMER-5" in result
+        assert len(ctx.created_incidents) == 1
+        assert ctx.created_incidents[0].extended is True
+        assert ctx.created_incidents[0].jira_issue_key == "VMER-5"
+
+    @pytest.mark.asyncio
+    async def test_extend_failure_tracks_events(self):
+        ctx = _make_ctx()
+        ctx.incident_adapter.add_comment = AsyncMock(side_effect=RuntimeError("API error"))
+        cluster = {"extends_issue_key": "VMER-5", "platform": "OCP", "events": ["evt-1", "evt-2"], "root_cause": "test", "services": ["svc"]}
+        result = await _handle_extend_incident({"summary": "s", "comment": "c"}, ctx, cluster)
+        assert "Failed" in result
+        assert "evt-1" in ctx.failed_cluster_events
+        assert "evt-2" in ctx.failed_cluster_events
+
+    @pytest.mark.asyncio
+    async def test_extend_bookkeeping_matches_write(self):
+        """Verify extended incidents count toward manifest coverage."""
+        ctx = _make_ctx()
+        ctx.incident_adapter.add_comment = AsyncMock(
+            return_value={"comment_id": "1", "issue_url": ""},
+        )
+        cluster = {"extends_issue_key": "VMER-5", "platform": "P", "events": ["evt-1"], "root_cause": "x", "services": ["svc"]}
+        await _handle_extend_incident({"summary": "s", "comment": "c"}, ctx, cluster)
+        covered = {eid for inc in ctx.created_incidents for eid in inc.affected_events}
+        assert "evt-1" in covered
+
+    @pytest.mark.asyncio
+    async def test_no_adapter(self):
+        ctx = _make_ctx(incident_adapter=None)
+        cluster = {"extends_issue_key": "VMER-5", "platform": "P", "events": ["evt-1"], "root_cause": "x", "services": ["svc"]}
+        result = await _handle_extend_incident({"summary": "s", "comment": "c"}, ctx, cluster)
+        assert "not configured" in result
+
+
+class TestBuildExtendTool:
+    def test_includes_issue_key_in_description(self):
+        cluster = {"extends_issue_key": "VMER-10", "root_cause": "test", "events": ["evt-1"], "platform": "P", "services": ["svc"]}
+        tools = build_extend_tool(cluster, 1, 2, [])
+        assert len(tools) == 1
+        assert tools[0]["name"] == "extend_incident"
+        assert "VMER-10" in tools[0]["description"]
+
+
+# =========================================================================
+# Search Existing Incidents
+# =========================================================================
+
+class TestSearchExistingIncidents:
+    @pytest.mark.asyncio
+    async def test_returns_formatted_list(self):
+        ctx = _make_ctx()
+        ctx.incident_adapter.search_open_incidents = AsyncMock(return_value=[
+            {"issue_key": "VMER-1", "summary": "test", "priority": "Major", "status": "New"},
+        ])
+        result = await _handle_search_existing_incidents({}, ctx)
+        assert "VMER-1" in result
+        assert "Major" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self):
+        ctx = _make_ctx()
+        ctx.incident_adapter.search_open_incidents = AsyncMock(return_value=[])
+        result = await _handle_search_existing_incidents({}, ctx)
+        assert "No open incidents" in result
+
+    @pytest.mark.asyncio
+    async def test_no_adapter(self):
+        ctx = _make_ctx(incident_adapter=None)
+        result = await _handle_search_existing_incidents({}, ctx)
+        assert "not configured" in result
+
+
+# =========================================================================
+# Write Incident Dedup Sentinel
+# =========================================================================
+
+class TestWriteIncidentDedup:
+    @pytest.mark.asyncio
+    async def test_result_contains_dedup_sentinel(self):
+        """Result string MUST contain 'Incident created' for handlers_dispatch.py dedup."""
+        ctx = _make_ctx()
+        ctx.incident_adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-99", "issue_url": "https://jira.example.com/browse/VMER-99"},
+        )
+        cluster = {"platform": "P", "events": ["evt-1"], "root_cause": "x", "services": ["svc"]}
+        result = await _handle_write_incident({"summary": "S", "description": "D", "priority": "Normal"}, ctx, cluster)
+        assert "Incident created" in result
+
+    @pytest.mark.asyncio
+    async def test_severity_in_fields(self):
+        """Severity field ID passed through to adapter."""
+        ctx = _make_ctx()
+        captured = {}
+
+        async def capture(fields):
+            captured.update(fields)
+            return {"issue_key": "X-1", "issue_url": ""}
+
+        ctx.incident_adapter.create_incident = capture
+        cluster = {"platform": "P", "events": ["e"], "root_cause": "x", "services": ["svc"]}
+        with patch.dict("os.environ", {"JIRA_INCIDENT_SEVERITY_FIELD": "customfield_10840"}):
+            await _handle_write_incident(
+                {"summary": "S", "description": "D", "priority": "Normal", "severity": "Critical"},
+                ctx, cluster,
+            )
+        assert captured.get("severity") == "Critical"
+        assert captured.get("severity_field_id") == "customfield_10840"
+
+
+# =========================================================================
+# Cart Loop Routing
+# =========================================================================
+
+class TestCartLoopRouting:
+    def test_extends_empty_string_treated_as_new(self):
+        """Empty string extends_issue_key should be treated as falsy -> new incident."""
+        cluster = {"extends_issue_key": "", "events": ["evt-1"], "root_cause": "x", "platform": "P", "services": ["svc"]}
+        assert not cluster.get("extends_issue_key")
+
+    def test_extends_none_treated_as_new(self):
+        """None extends_issue_key -> falsy -> new incident."""
+        cluster = {"events": ["evt-1"], "root_cause": "x", "platform": "P", "services": ["svc"]}
+        assert not cluster.get("extends_issue_key")

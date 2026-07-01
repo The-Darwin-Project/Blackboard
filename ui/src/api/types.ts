@@ -388,8 +388,11 @@ export interface ShiftIncidentDTO {
   priority: string;
   status: string;
   affected_events: string[];
-  smartsheet_row_id: string;
-  smartsheet_url: string;
+  jira_issue_key: string;
+  jira_url: string;
+  extended: boolean;
+  smartsheet_row_id?: string;
+  smartsheet_url?: string;
 }
 
 export interface ShiftInvestigationDTO {

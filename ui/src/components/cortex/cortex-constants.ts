@@ -94,7 +94,7 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   // Communication tools
   'tool:notify_user_slack': 'Send a message to the user via Slack',
   'tool:notify_gitlab_result': 'Post results as a GitLab MR comment',
-  'tool:report_incident': 'Escalate to Smartsheet incident report',
+  'tool:report_incident': 'Escalate to Jira incident report',
   'tool:get_plan_progress': 'Check execution status of the current plan',
   'tool:comment_jira_issue': 'Post a comment on a Jira issue',
   'tool:transition_jira_issue': 'Move a Jira issue to a new status',

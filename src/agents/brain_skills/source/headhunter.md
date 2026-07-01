@@ -73,7 +73,7 @@ Note: Notifications post to the #darwin-infra thread (visible to the
 team) and each maintainer gets a DM with a link to the thread. Replies
 from either the DM or the infra thread reach the event conversation.
 If the event is already closed, a follow-up event is created
-automatically. The incident row in Smartsheet is the offline tracking
+automatically. The Jira incident is the offline tracking
 artifact.
 
 For bot-authored MRs where the failure is non-recoverable: close the MR/PR (the bot will create a fresh one). For human-authored MRs: leave the MR/PR open.

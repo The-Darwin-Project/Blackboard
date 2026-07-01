@@ -7,12 +7,14 @@
 # 5. [Constraint]: MAX_ANALYSIS_ROUNDS caps the analysis loop. Report loop bounded by N declared clusters.
 # 6. [Pattern]: Partial commit: successful events committed, failed cluster events restaged.
 # 7. [Pattern]: Cart loop hydrates cluster links via extract_full_links from escalations_by_id before each iteration.
+# 8. [Pattern]: Cart loop routes write_incident (new) vs extend_incident (existing) per cluster.extends_issue_key.
+# 9. [Constraint]: extends_issue_key validation is fail-closed (search_succeeded flag). Invalid keys convert to new incidents.
 """
 Nightwatcher Observer -- end-of-shift incident consolidation agent.
 
 Cron-triggered (default 06:00/18:00 UTC). Leases pending escalations,
 runs a phase-gated Gemini Flash tool-calling session to cluster and
-consolidate, writes deduplicated incidents to Smartsheet, posts a
+consolidate, writes deduplicated incidents to Jira, posts a
 shift summary to Slack, and persists a ShiftReport for the Shifts UI.
 """
 from __future__ import annotations
@@ -24,7 +26,7 @@ import time
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
-    from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
+    from ..adapters.jira_incident import JiraIncidentAdapter
     from ..agents.agent_registry import AgentRegistry
     from ..agents.archivist import Archivist
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
@@ -38,7 +40,7 @@ MAX_DECLARE_RETRIES = 2
 MAX_CART_RETRIES = 2
 NIGHTWATCHER_SWEEP_CRON = os.getenv("NIGHTWATCHER_SWEEP_CRON", "0 6,18 * * *")
 
-from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_summary_tool, _handle_write_incident
+from .nightwatcher_tools import NightwatcherContext, execute_tool, get_phase_tools, validate_cluster_plan, build_report_tool, build_extend_tool, build_summary_tool, _handle_write_incident, _handle_extend_incident
 from .nightwatcher_prompt import build_system_prompt, build_report_iteration_prompt, build_summary_prompt, extract_full_links
 
 
@@ -51,7 +53,7 @@ class NightwatcherObserver:
         registry: "AgentRegistry",
         bridge: "TaskBridge",
         provisioner: "Optional[EphemeralProvisioner]",
-        smartsheet_adapter: "Optional[SmartsheetIncidentAdapter]",
+        incident_adapter: "Optional[JiraIncidentAdapter]",
         archivist: "Archivist",
         slack_notify=None,
         broadcast: "Callable[[dict], Awaitable[None]] | None" = None,
@@ -60,7 +62,7 @@ class NightwatcherObserver:
         self._registry = registry
         self._bridge = bridge
         self._provisioner = provisioner
-        self._smartsheet = smartsheet_adapter
+        self._incident_adapter = incident_adapter
         self._archivist = archivist
         self._slack_notify = slack_notify
         self._broadcast: "Callable[[dict], Awaitable[None]] | None" = broadcast
@@ -202,7 +204,7 @@ class NightwatcherObserver:
         ctx = NightwatcherContext(
             blackboard=self.blackboard, archivist=self._archivist,
             provisioner=self._provisioner, registry=self._registry,
-            bridge=self._bridge, smartsheet_adapter=self._smartsheet,
+            bridge=self._bridge, incident_adapter=self._incident_adapter,
             broadcast=self._broadcast,
             slack_notify=self._slack_notify,
             manifest_services={e.service for e in escalations},
@@ -298,9 +300,30 @@ class NightwatcherObserver:
         else:
             raise RuntimeError("Nightwatcher: cluster declaration failed after max retries")
 
-        # Step 2: Code-driven report loop
+        # Step 2: Validate extends_issue_key values against open incidents (fail-closed)
+        open_keys: set[str] = set()
+        search_succeeded = False
+        if any(c.get("extends_issue_key") for c in ctx.declared_clusters):
+            try:
+                if ctx.incident_adapter:
+                    open_incidents = await ctx.incident_adapter.search_open_incidents()
+                    open_keys = {inc.get("key", "") for inc in open_incidents}
+                    search_succeeded = True
+            except Exception as e:
+                logger.warning("Nightwatcher: failed to validate extends_issue_key set: %s", e)
+
+        for cluster in ctx.declared_clusters:
+            ext_key = cluster.get("extends_issue_key")
+            if ext_key:
+                if not search_succeeded or ext_key not in open_keys:
+                    logger.warning("Nightwatcher: extends_issue_key %s invalid (search_ok=%s, in_set=%s), converting to new incident",
+                                   ext_key, search_succeeded, ext_key in open_keys if search_succeeded else "N/A")
+                    del cluster["extends_issue_key"]
+
+        # Step 3: Code-driven report loop (write or extend)
         completed_reports: list[dict] = []
         for i, cluster in enumerate(ctx.declared_clusters, 1):
+            is_extend = bool(cluster.get("extends_issue_key"))
             cluster_links: list[str] = []
             for eid in cluster.get("events", []):
                 esc = ctx.escalations_by_id.get(eid)
@@ -312,7 +335,13 @@ class NightwatcherObserver:
                 cluster, i, len(ctx.declared_clusters), completed_reports,
                 cluster_links=cluster_links or None,
             )
-            report_tools = build_report_tool(cluster, i, len(ctx.declared_clusters), completed_reports)
+
+            if is_extend:
+                report_tools = build_extend_tool(cluster, i, len(ctx.declared_clusters), completed_reports)
+                expected_tool = "extend_incident"
+            else:
+                report_tools = build_report_tool(cluster, i, len(ctx.declared_clusters), completed_reports)
+                expected_tool = "write_incident"
 
             for retry in range(MAX_CART_RETRIES + 1):
                 response = await adapter.generate(
@@ -321,8 +350,11 @@ class NightwatcherObserver:
                     tools=report_tools, temperature=temperature,
                     max_output_tokens=max_tokens, thinking_level=thinking,
                 )
-                if response.function_call and response.function_call.name == "write_incident":
-                    result = await _handle_write_incident(response.function_call.args, ctx, cluster)
+                if response.function_call and response.function_call.name == expected_tool:
+                    if is_extend:
+                        result = await _handle_extend_incident(response.function_call.args, ctx, cluster)
+                    else:
+                        result = await _handle_write_incident(response.function_call.args, ctx, cluster)
                     logger.info("Nightwatcher report %d/%d: %s", i, len(ctx.declared_clusters), result[:200])
                     report_record = {
                         "index": i,

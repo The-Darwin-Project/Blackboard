@@ -434,20 +434,18 @@ jira:
   label: "darwin"
   model: "claude-sonnet-4-6"
   skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
-# =============================================================================
-# Smartsheet Integration (Incident Tracking)
-# =============================================================================
-smartsheet:
+  # --- Jira Incident Tracking (Nightwatcher + Brain escalation) ---
   incident:
     enabled: false
-    existingSecret: "" # e.g., "darwin-smartsheet-incident" (key: api-token)
-    sheetId: "" # Incident report sheet ID
-    reporter: "" # Jira-valid email for incident reporter (e.g., team DL)
-    reporterName: "" # Must match Jira display name for the reporter email
-    labels: "" # Comma-separated labels for incidents (multi-picklist column)
-    components: "" # Comma-separated components for incidents (multi-picklist column)
-    issueType: "" # Issue type for incidents (e.g., "Task", "Bug")
-    labelFilter: "" # Label to filter on when reading incidents back (UI list endpoint)
+    projectKey: ""
+    issueType: ""
+    labels: ""
+    components: ""
+    labelFilter: ""
+    platforms: ""
+    priorities: ""
+    statuses: ""
+    severityField: ""
 # =============================================================================
 # TimeKeeper (Scheduled Task Observer -- requires dex.enabled=true)
 # =============================================================================

@@ -8,11 +8,13 @@
 # 6. [Pattern]: on_progress callback wired to ctx.broadcast for UI stream visibility of ephemeral oncall agents.
 # 7. [Pattern]: escalations_by_id: dict[str, StagedEscalation] typed lookup for cart link hydration.
 # 8. [Constraint]: build_report_tool() includes link guidance in BOTH normal and overflow description branches.
+# 9. [Pattern]: _handle_extend_incident follows same 3-param signature (args, ctx, cluster) as write. Unified bookkeeping.
+# 10. [Constraint]: write_incident result MUST contain "Incident created" substring (dedup sentinel in handlers_dispatch.py:357).
 """
 Nightwatcher tool execution router and phase-gated tool filtering.
 
 Each handler is a thin wrapper around existing infrastructure
-(blackboard, archivist, dispatch, smartsheet, slack).
+(blackboard, archivist, dispatch, Jira, slack).
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
-    from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
+    from ..adapters.jira_incident import JiraIncidentAdapter
     from ..agents.agent_registry import AgentRegistry
     from ..agents.archivist import Archivist
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
@@ -42,8 +44,8 @@ INVESTIGATION_TEMPLATE = (
 )
 
 _PHASE_TOOLS: dict[str, set[str]] = {
-    "review": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory"},
-    "investigate": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory", "dispatch_investigation"},
+    "review": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory", "search_existing_incidents"},
+    "investigate": {"set_phase", "get_event_report", "search_journal", "consult_deep_memory", "dispatch_investigation", "search_existing_incidents"},
     "report": {"declare_clusters"},
 }
 
@@ -56,7 +58,7 @@ class NightwatcherContext:
     provisioner: Any
     registry: Any
     bridge: Any
-    smartsheet_adapter: Any
+    incident_adapter: Any
     slack_notify: Any
     broadcast: Callable[[dict], Awaitable[None]] | None = None
     manifest_services: set[str] = field(default_factory=set)
@@ -187,6 +189,7 @@ async def execute_tool(name: str, args: dict, ctx: NightwatcherContext) -> str:
         "search_journal": _handle_search_journal,
         "consult_deep_memory": _handle_consult_deep_memory,
         "dispatch_investigation": _handle_dispatch_investigation,
+        "search_existing_incidents": _handle_search_existing_incidents,
         "declare_clusters": _handle_declare_clusters,
         "post_shift_summary": _handle_post_shift_summary,
     }
@@ -288,6 +291,26 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
     return result_text[:3000]
 
 
+async def _handle_search_existing_incidents(args: dict, ctx: NightwatcherContext) -> str:
+    """Search for open incidents from prior sweeps."""
+    if not ctx.incident_adapter:
+        return "Incident adapter not configured. Cannot search existing incidents."
+    try:
+        open_incidents = await ctx.incident_adapter.search_open_incidents()
+    except Exception as e:
+        logger.warning("Nightwatcher search_existing_incidents failed: %s", e)
+        return f"Failed to search existing incidents: {e}"
+    if not open_incidents:
+        return "No open incidents from prior sweeps."
+    lines = []
+    for i, inc in enumerate(open_incidents, 1):
+        lines.append(
+            f"{i}. [{inc.get('issue_key', '?')}] {inc.get('summary', '')}"
+            f" -- {inc.get('priority', '?')} -- {inc.get('status', '?')}"
+        )
+    return f"Open incidents from prior sweeps ({len(open_incidents)}):\n" + "\n".join(lines)
+
+
 async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext) -> str:
     clusters = args.get("clusters", [])
     ok, error = validate_cluster_plan(clusters, ctx.manifest_ids)
@@ -304,8 +327,8 @@ async def _handle_declare_clusters(args: dict, ctx: NightwatcherContext) -> str:
 
 async def _handle_write_incident(args: dict, ctx: NightwatcherContext, cluster: dict) -> str:
     """Write a single incident, merging LLM judgment with code-prefilled cluster fields."""
-    if not ctx.smartsheet_adapter:
-        return "Smartsheet adapter not configured. Incident not created."
+    if not ctx.incident_adapter:
+        return "Jira incident adapter not configured. Incident not created."
     platform = cluster.get("platform", "")
     affected_events = cluster.get("events", [])
     summary = args.get("summary", "")[:200]
@@ -321,20 +344,19 @@ async def _handle_write_incident(args: dict, ctx: NightwatcherContext, cluster: 
         priority = fallback_priority
     logger.info("Nightwatcher write_incident: cluster=%s, events=%d", cluster.get("root_cause", "?")[:50], len(affected_events))
     fields = {
-        "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
-        "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Nightwatcher"),
-        "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "Status": status,
-        "Issue Type": os.environ.get("SMARTSHEET_INCIDENT_ISSUE_TYPE", "Task"),
-        "Labels": os.environ.get("SMARTSHEET_INCIDENT_LABELS", ""),
-        "Components": os.environ.get("SMARTSHEET_INCIDENT_COMPONENTS", ""),
-        "Platform": platform,
-        "Summary": summary,
-        "Reason": args.get("description", ""),
-        "Priority": priority,
+        "project_key": os.getenv("JIRA_INCIDENT_PROJECT_KEY", ""),
+        "issue_type": os.getenv("JIRA_INCIDENT_ISSUE_TYPE", ""),
+        "summary": summary,
+        "description": args.get("description", ""),
+        "priority": priority,
+        "labels": [l.strip() for l in os.getenv("JIRA_INCIDENT_LABELS", "").split(",") if l.strip()],
+        "components": [c.strip() for c in os.getenv("JIRA_INCIDENT_COMPONENTS", "").split(",") if c.strip()],
+        "platform": platform,
+        "severity": args.get("severity", ""),
+        "severity_field_id": os.getenv("JIRA_INCIDENT_SEVERITY_FIELD", ""),
     }
     try:
-        result = await ctx.smartsheet_adapter.create_incident(fields)
+        result = await ctx.incident_adapter.create_incident(fields)
         incident = ShiftIncident(
             platform=platform,
             summary=summary,
@@ -342,20 +364,100 @@ async def _handle_write_incident(args: dict, ctx: NightwatcherContext, cluster: 
             priority=priority,
             status=status,
             affected_events=affected_events,
-            smartsheet_row_id=str(result.get("row_id", "")),
-            smartsheet_url=result.get("sheet_url", ""),
+            jira_issue_key=result.get("issue_key", ""),
+            jira_url=result.get("issue_url", ""),
         )
         ctx.created_incidents.append(incident)
         covered = {eid for inc in ctx.created_incidents for eid in inc.affected_events}
-        remaining = ctx.manifest_ids - covered
         return (
-            f"Incident created (row {result.get('row_id', '?')}). "
+            f"Incident created in Jira ({result.get('issue_key', '?')}). "
+            f"URL: {result.get('issue_url', '')}. "
             f"{len(affected_events)} events consolidated. "
             f"Manifest coverage: {len(covered)}/{len(ctx.manifest_ids)}."
         )
     except Exception as e:
         ctx.failed_cluster_events.extend(affected_events)
         return f"Failed to create incident: {e}. Events will be restaged for next sweep."
+
+
+async def _handle_extend_incident(args: dict, ctx: NightwatcherContext, cluster: dict) -> str:
+    """Extend an existing open incident by posting a comment with new evidence."""
+    if not ctx.incident_adapter:
+        return "Jira incident adapter not configured. Incident not extended."
+    issue_key = cluster.get("extends_issue_key", "")
+    if not issue_key:
+        return "No extends_issue_key provided. Cannot extend incident."
+    platform = cluster.get("platform", "")
+    affected_events = cluster.get("events", [])
+    summary = args.get("summary", "")[:200]
+    comment_body = args.get("comment", "")
+
+    from .nightwatcher_prompt import extract_full_links
+    link_lines: list[str] = []
+    for eid in affected_events:
+        esc = ctx.escalations_by_id.get(eid)
+        if esc:
+            lnk_text = extract_full_links(esc)
+            if lnk_text:
+                link_lines.append(f"**{eid}**:\n{lnk_text}")
+    if link_lines:
+        comment_body += "\n\n**Affected Resources:**\n" + "\n".join(link_lines)
+
+    logger.info("Nightwatcher extend_incident: %s, cluster=%s, events=%d",
+                issue_key, cluster.get("root_cause", "?")[:50], len(affected_events))
+    try:
+        result = await ctx.incident_adapter.add_comment(issue_key, comment_body)
+        incident = ShiftIncident(
+            platform=platform,
+            summary=summary,
+            description=comment_body,
+            priority="",
+            status="",
+            affected_events=affected_events,
+            jira_issue_key=issue_key,
+            jira_url=result.get("issue_url", ""),
+            extended=True,
+        )
+        ctx.created_incidents.append(incident)
+        covered = {eid for inc in ctx.created_incidents for eid in inc.affected_events}
+        return (
+            f"Incident extended ({issue_key}). "
+            f"{len(affected_events)} events added. "
+            f"Manifest coverage: {len(covered)}/{len(ctx.manifest_ids)}."
+        )
+    except Exception as e:
+        ctx.failed_cluster_events.extend(affected_events)
+        return f"Failed to extend incident {issue_key}: {e}. Events will be restaged for next sweep."
+
+
+def build_extend_tool(cluster: dict, index: int, total: int, completed_reports: list[dict]) -> list[dict]:
+    """Generate a dynamic extend_incident tool with target issue key in description."""
+    from ..agents.llm.types import NIGHTWATCHER_TOOL_SCHEMAS
+    base = next((t for t in NIGHTWATCHER_TOOL_SCHEMAS if t["name"] == "extend_incident"), None)
+    if not base:
+        return []
+
+    receipt_lines = []
+    for r in completed_reports:
+        receipt_lines.append(f"  [{r['index']}] {r['summary'][:60]} -- {len(r['affected_events'])} events")
+    receipt = "\n".join(receipt_lines) if receipt_lines else "  (none yet)"
+
+    issue_key = cluster.get("extends_issue_key", "?")
+    desc = (
+        f"Cluster {index} of {total}: EXTENDING {issue_key}\n"
+        f"Root cause: {cluster.get('root_cause', '?')}\n"
+        f"Post a comment to the existing incident with new escalation details.\n"
+    )
+    if completed_reports:
+        desc += f"\nCompleted reports:\n{receipt}\n"
+    remaining = total - index
+    if remaining > 0:
+        desc += f"\nAfter this report, {remaining} cluster(s) remain."
+    else:
+        desc += "\nThis is the final report."
+
+    patched = {**base, "description": desc}
+    return [patched]
 
 
 async def _handle_post_shift_summary(args: dict, ctx: NightwatcherContext) -> str:

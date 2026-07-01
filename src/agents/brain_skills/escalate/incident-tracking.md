@@ -2,7 +2,7 @@
 description: "Incident tracking rules for escalated automated events"
 tags: [escalation, incidents, tracking]
 tag_type: protocol
-tools: [report_incident]
+tools: [report_incident, search_open_incidents]
 ---
 
 ## Incident Tracking (Mandatory for Escalated Automated Events)
@@ -75,9 +75,21 @@ normal escalation path -- the Nightwatcher daemon clusters related
 escalations during its sweep cycle and produces a consolidated incident.
 Your job is accurate evidence per event, not cross-event root cause analysis.
 
+### Pre-Escalation Incident Check
+
+Filing an incident for a failure that already has one wastes maintainer attention
+and inflates the incident count. The Nightwatcher clusters escalations at shift
+boundaries, but within a shift, FRIDAY may reach escalation on multiple events
+sharing the same root cause.
+
+Before filing a new incident, check whether an open incident already exists for
+the same failure pattern. If one exists, link the current event to it and defer
+on the incident's resolution timeline — the failure is already tracked and
+additional escalation adds no information.
+
 ### Mandatory Triggers
 
-File an incident (after investigation) when:
+File an incident (after investigation and pre-escalation check) when:
 
 - Pipeline reaches a **terminal failure state** (not pending, not running)
 - Retest commands (/retest, /test, /ok-to-test) fail to trigger a new pipeline

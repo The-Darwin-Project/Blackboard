@@ -300,23 +300,22 @@ export async function searchReports(params: ReportSearchParams = {}): Promise<im
 }
 
 // =============================================================================
-// Incidents API (Smartsheet)
+// Incidents API (Jira)
 // =============================================================================
 
 export interface Incident {
   date: string;
   platform: string;
   summary: string;
-  reason: string;
+  description: string;
   status: string;
   priority: string;
-  affected_versions: string;
-  labels: string;
-  fix_pr: string;
-  slack_thread: string;
+  severity: string;
+  labels: string[];
+  components: string[];
   issue_key: string;
-  sheet_url: string;
-  [key: string]: string;
+  issue_url: string;
+  [key: string]: unknown;
 }
 
 export async function getIncidents(): Promise<Incident[]> {

@@ -93,6 +93,10 @@ def _pred_phase_jira_fetch(ctx: GateContext) -> bool:
     return ctx.brain_phase not in ("triage", "dispatch", "verify")
 
 
+def _pred_phase_incident_search(ctx: GateContext) -> bool:
+    return ctx.brain_phase not in ("triage", "dispatch", "verify", "escalate")
+
+
 def _pred_budget_exhausted(ctx: GateContext) -> bool:
     return ctx.refresh_budget <= 0
 
@@ -236,6 +240,10 @@ def _tools_jira_fetch(_ctx: GateContext) -> set[str]:
     return {"fetch_jira_issue"}
 
 
+def _tools_incident_search(_ctx: GateContext) -> set[str]:
+    return {"search_open_incidents"}
+
+
 def _tools_budget(_ctx: GateContext) -> set[str]:
     return {"refresh_gitlab_context", "refresh_kargo_context"}
 
@@ -340,6 +348,10 @@ def _msg_no_kargo_context(tool: str, _ctx: GateContext) -> str:
 
 def _msg_phase_jira_fetch(tool: str, ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: triage, dispatch, or verify phase."
+
+
+def _msg_phase_incident_search(tool: str, ctx: GateContext) -> str:
+    return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: triage, dispatch, verify, or escalate phase."
 
 
 def _msg_budget_exhausted(tool: str, ctx: GateContext) -> str:
@@ -481,6 +493,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_jira_fetch,
         message=_msg_phase_jira_fetch,
         hint="available in triage, dispatch, and verify states.",
+    ),
+    GateDefinition(
+        gate_id="PHASE_INCIDENT_SEARCH",
+        mode="strip",
+        predicate=_pred_phase_incident_search,
+        tools_affected=_tools_incident_search,
+        message=_msg_phase_incident_search,
+        hint="available in triage, dispatch, verify, and escalate states.",
     ),
     GateDefinition(
         gate_id="BUDGET_EXHAUSTED",

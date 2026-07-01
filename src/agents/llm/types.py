@@ -81,17 +81,14 @@ class LLMPort(Protocol):
 
 
 # =============================================================================
-# Smartsheet column options (populated at boot via set_smartsheet_options)
+# Incident enum options (populated at boot via set_incident_options)
 # =============================================================================
-# Empty defaults -- populated from Smartsheet column schema at startup.
+# Empty defaults -- populated from Helm-sourced env vars at startup.
 # When empty, validation is skipped (graceful degradation).
 
 VALID_PLATFORMS: list[str] = []
 VALID_STATUSES: list[str] = []
 VALID_PRIORITIES: list[str] = []
-VALID_ISSUE_TYPES: list[str] = []
-VALID_COMPONENTS: list[str] = []
-VALID_LABELS: list[str] = []
 
 
 # =============================================================================
@@ -691,11 +688,24 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "search_open_incidents",
+        "description": (
+            "Search for open incidents in the incident tracker. Returns issue key, "
+            "summary, priority, and status for each open incident. Helps determine "
+            "whether a failure pattern already has a tracked incident before filing "
+            "a new one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "report_incident",
         "description": (
             "Report an incident to the tracking system. When Nightwatcher is enabled, "
             "this stages the escalation for consolidated batch processing. When disabled, "
-            "it writes directly to the incident tracking sheet. "
+            "it writes directly to Jira. "
             "Use when an automated event (headhunter, timekeeper) results in a persistent "
             "failure requiring team investigation. Systemic fields (reporter, "
             "date, status, labels, issue type, components) are auto-populated. You only "
@@ -1202,7 +1212,7 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
                     "description": (
                         "review: read event reports, journals, and deep memory to understand the shift. "
                         "investigate: dispatch on-call agents for live data on unresolved issues. "
-                        "report: write consolidated incidents to the tracking sheet and post the shift summary."
+                        "report: write consolidated incidents to Jira and post the shift summary."
                     ),
                 },
                 "reasoning": {
@@ -1288,9 +1298,26 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "search_existing_incidents",
+        "description": (
+            "(review, investigate) Search for open incidents from prior sweeps that "
+            "may correlate with current escalations. Returns issue key, summary, "
+            "priority, and status for each open incident."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional keyword filter for narrowing results",
+                },
+            },
+        },
+    },
+    {
         "name": "write_incident",
         "description": (
-            "Write a consolidated incident report to the tracking sheet. "
+            "Write a consolidated incident report to Jira. "
             "Platform and affected events are pre-filled from your cluster plan. "
             "Provide your analysis: summary, root cause description, priority, and status."
         ),
@@ -1319,8 +1346,37 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
                     "enum": VALID_STATUSES,
                     "description": "New if still active at sweep time, Closed if probes confirmed recovery",
                 },
+                "severity": {
+                    "type": "string",
+                    "description": "Business impact severity",
+                    "enum": ["Critical", "Important", "Moderate", "Low", "Informational"],
+                },
             },
             "required": ["summary", "description", "priority"],
+        },
+    },
+    {
+        "name": "extend_incident",
+        "description": (
+            "Extend an existing open incident with new escalation details. "
+            "Posts a comment to the existing Jira issue with the new evidence."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "New escalation summary to add to the existing incident",
+                },
+                "comment": {
+                    "type": "string",
+                    "description": (
+                        "Detailed comment with new evidence: affected services, "
+                        "event IDs, links, and how this relates to the existing incident"
+                    ),
+                },
+            },
+            "required": ["summary", "comment"],
         },
     },
     {
@@ -1344,13 +1400,10 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
 ]
 
 
-_COLUMN_MAP = {
-    "Platform": VALID_PLATFORMS,
-    "Status": VALID_STATUSES,
-    "Priority": VALID_PRIORITIES,
-    "Issue Type": VALID_ISSUE_TYPES,
-    "Components": VALID_COMPONENTS,
-    "Labels": VALID_LABELS,
+_OPTION_MAP = {
+    "platforms": VALID_PLATFORMS,
+    "statuses": VALID_STATUSES,
+    "priorities": VALID_PRIORITIES,
 }
 
 _SCHEMA_FIELD_MAP = {
@@ -1360,28 +1413,28 @@ _SCHEMA_FIELD_MAP = {
 }
 
 
-def set_smartsheet_options(column_options: dict[str, list[str]]) -> None:
-    """Populate all Smartsheet column option lists from column schema at boot.
+def set_incident_options(options: dict[str, list[str]]) -> None:
+    """Populate incident enum lists from Helm-sourced env vars at boot.
 
-    Also patches enum fields in BRAIN_TOOL_SCHEMAS and
-    NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA so LLM tool declarations
-    reflect the live Smartsheet values.
+    Also patches enum fields in BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS,
+    and NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA so LLM tool declarations
+    reflect the configured values.
     """
     import logging
     log = logging.getLogger(__name__)
-    for col_title, target_list in _COLUMN_MAP.items():
-        opts = column_options.get(col_title, [])
+    for key, target_list in _OPTION_MAP.items():
+        opts = options.get(key, [])
         if opts:
             target_list.clear()
             target_list.extend(opts)
-            log.info("Smartsheet %s: %d options loaded", col_title, len(opts))
+            log.info("Incident %s: %d options loaded", key, len(opts))
     for schema_list in (BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS, NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA):
         for tool in schema_list:
             _patch_enum_fields(tool.get("input_schema", {}))
 
 
 def _patch_enum_fields(schema: dict) -> None:
-    """Recursively find enum fields in a JSON schema and patch from live Smartsheet values.
+    """Recursively find enum fields in a JSON schema and patch from configured values.
 
     When the live list is populated, sets the enum. When empty, removes the
     enum key so the LLM sees an unconstrained string (avoids empty enum arrays
@@ -1442,6 +1495,10 @@ NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA: list[dict] = [
                                 "items": {"type": "string"},
                                 "description": "Affected service names in this cluster",
                             },
+                            "extends_issue_key": {
+                                "type": "string",
+                                "description": "Existing Jira issue key to extend. Omit to create a new incident.",
+                            },
                         },
                         "required": ["events", "root_cause", "platform", "services"],
                     },
@@ -1453,7 +1510,7 @@ NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA: list[dict] = [
     },
 ]
 
-# Strip empty enum arrays from initial schema state (before set_smartsheet_options runs)
+# Strip empty enum arrays from initial schema state (before set_incident_options runs)
 for _schema_list in (BRAIN_TOOL_SCHEMAS, NIGHTWATCHER_TOOL_SCHEMAS, NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA):
     for _tool in _schema_list:
         _patch_enum_fields(_tool.get("input_schema", {}))

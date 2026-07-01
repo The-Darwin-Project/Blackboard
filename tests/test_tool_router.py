@@ -33,6 +33,7 @@ EXPECTED_HANDLERS = {
     "reply_to_agent",
     "report_incident",
     "request_user_approval",
+    "search_open_incidents",
     "respond_to_jarvis",
     "review_notes",
     "select_agent",
@@ -63,6 +64,6 @@ def test_handler_registry_count():
     import src.agents.brain  # noqa: F401
     from src.agents.tool_router import HANDLER_REGISTRY
 
-    assert len(HANDLER_REGISTRY) == 36, (
-        f"Expected 36 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
+    assert len(HANDLER_REGISTRY) == 37, (
+        f"Expected 37 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
     )

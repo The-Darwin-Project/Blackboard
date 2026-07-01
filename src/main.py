@@ -359,21 +359,41 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("TimeKeeperObserver disabled (TIMEKEEPER_ENABLED=false)")
         
+        # === JIRA INCIDENT ADAPTER ===
+        incident_adapter = None
+        jira_url = os.getenv("JIRA_URL", "").rstrip("/")
+        jira_email = os.getenv("JIRA_EMAIL", "")
+        jira_token = os.getenv("JIRA_API_TOKEN", "")
+        jira_project = os.getenv("JIRA_INCIDENT_PROJECT_KEY", "")
+        if jira_url and jira_email and jira_token and jira_project:
+            from .adapters.jira_incident import JiraIncidentAdapter
+            platforms_raw = os.getenv("JIRA_INCIDENT_PLATFORMS", "")
+            platforms = [p.strip() for p in platforms_raw.split(",") if p.strip()] if platforms_raw else []
+            incident_adapter = JiraIncidentAdapter(
+                base_url=jira_url, email=jira_email, api_token=jira_token,
+                project_key=jira_project, platforms=platforms,
+            )
+            logger.info("JiraIncidentAdapter initialized (project=%s)", jira_project)
+        else:
+            logger.info("JiraIncidentAdapter not configured (missing JIRA_URL/EMAIL/TOKEN/PROJECT_KEY)")
+
+        from .agents.llm.types import set_incident_options
+        incident_options: dict[str, list[str]] = {}
+        for env_key, opt_key in (
+            ("JIRA_INCIDENT_PLATFORMS", "platforms"),
+            ("JIRA_INCIDENT_PRIORITIES", "priorities"),
+            ("JIRA_INCIDENT_STATUSES", "statuses"),
+        ):
+            raw = os.getenv(env_key, "")
+            if raw:
+                incident_options[opt_key] = [v.strip() for v in raw.split(",") if v.strip()]
+        set_incident_options(incident_options)
+
+        brain._incident_adapter = incident_adapter
+        app.state.incident_adapter = incident_adapter
+
         # === NIGHTWATCHER OBSERVER ===
         nightwatcher_enabled = os.getenv("NIGHTWATCHER_ENABLED", "false").lower() == "true"
-        smartsheet_adapter = brain.get_smartsheet_incident_adapter()
-        if smartsheet_adapter:
-            try:
-                await smartsheet_adapter._ensure_columns()
-                col_opts = smartsheet_adapter.get_column_options()
-                if col_opts:
-                    from .agents.llm.types import set_smartsheet_options
-                    set_smartsheet_options(col_opts)
-                else:
-                    logger.warning("Smartsheet columns have no options -- enum validation disabled")
-            except Exception:
-                logger.warning("Failed to load Smartsheet column options, enum validation disabled")
-
         nightwatcher_observer = None
         if nightwatcher_enabled:
             from .observers.nightwatcher import NightwatcherObserver
@@ -383,7 +403,7 @@ async def lifespan(app: FastAPI):
                 registry=agent_registry,
                 bridge=task_bridge,
                 provisioner=brain.get_ephemeral_provisioner(),
-                smartsheet_adapter=smartsheet_adapter,
+                incident_adapter=incident_adapter,
                 archivist=archivist,
                 slack_notify=slack_inst.post_nightwatcher_summary if slack_inst else None,
                 broadcast=brain.broadcast,

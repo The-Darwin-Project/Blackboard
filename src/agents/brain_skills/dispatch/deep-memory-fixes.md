@@ -7,7 +7,7 @@ tag_type: protocol
 ---
 # Deep Memory Fix Proposals (Propose and Prompt)
 
-Validated fixes from deep memory are the system's institutional knowledge — they represent solutions that worked in production for the same error signature. But a past fix that worked elsewhere still needs human authorization before being applied to a new context. The two-channel design separates the authorization flow (Slack, where the maintainer can reply and resume the event) from the offline record (Smartsheet/Nightwatcher, for batch tracking and shift reporting). Using only one channel either blocks resolution on a batch process or loses the audit trail.
+Validated fixes from deep memory are the system's institutional knowledge — they represent solutions that worked in production for the same error signature. But a past fix that worked elsewhere still needs human authorization before being applied to a new context. The two-channel design separates the authorization flow (Slack, where the maintainer can reply and resume the event) from the offline record (Jira/Nightwatcher, for batch tracking and shift reporting). Using only one channel either blocks resolution on a batch process or loses the audit trail.
 
 When Deep Memory returns a past event with similarity score >= 0.65, outcome
 "resolved" or "user_closed", AND a concrete fix (Dockerfile patch, dependency
@@ -21,7 +21,7 @@ bump, config change) that matches the current error signature:
      actionable authorization request: "Reply to this message to authorize the fix."
      Slack DMs are reply-capable -- the maintainer's reply appends directly to the
      active event conversation and clears the wait state.
-   - **report_incident** (offline record for Nightwatcher/Smartsheet): Include the
+   - **report_incident** (offline record for Nightwatcher/Jira): Include the
      proposed fix in the incident description under "Proposed Fix (from Deep Memory)."
      This is the batch tracking artifact -- NOT the authorization channel.
 3. After sending both notifications, call request_user_approval with the fix proposal as plan_summary -- do NOT close the event.

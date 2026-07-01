@@ -1,11 +1,10 @@
 // BlackBoard/ui/src/components/IncidentsPage.tsx
 // @ai-rules:
-// 1. [Pattern]: Read-only table view of Smartsheet incidents created by Darwin.
-// 2. [Pattern]: 3 states: loading, empty, populated. Row click opens Smartsheet.
+// 1. [Pattern]: Read-only table view of Jira incidents created by Darwin.
+// 2. [Pattern]: 3 states: loading, empty, populated. Row click opens Jira issue.
 /**
- * Incidents page -- lists Darwin-created Smartsheet incidents.
+ * Incidents page -- lists Darwin-created Jira incidents.
  */
-import { ExternalLink } from 'lucide-react';
 import { useIncidents } from '../hooks/useIncidents';
 import { safeOpen } from '../utils/safeOpen';
 import type { Incident } from '../api/client';
@@ -25,8 +24,8 @@ const COLUMNS = [
   { key: 'summary' as keyof Incident, label: 'Summary', wrap: true, flex: true },
   { key: 'status' as keyof Incident, label: 'Status', wrap: false },
   { key: 'priority' as keyof Incident, label: 'Priority', wrap: false },
-  { key: 'affected_versions' as keyof Incident, label: 'Versions', wrap: true },
-  { key: 'fix_pr' as keyof Incident, label: 'Fix PR', wrap: false },
+  { key: 'severity' as keyof Incident, label: 'Severity', wrap: false },
+  { key: 'issue_key' as keyof Incident, label: 'Key', wrap: false },
 ] as const;
 
 export default function IncidentsPage() {
@@ -80,9 +79,9 @@ export default function IncidentsPage() {
             {incidents.map((row, i) => (
               <tr key={row.issue_key || i}
                 className="border-b border-border hover:bg-bg-tertiary cursor-pointer transition-colors"
-                onClick={() => safeOpen(row.sheet_url)}>
+                onClick={() => safeOpen(row.issue_url)}>
                 {COLUMNS.map(col => {
-                  const val = row[col.key] ?? '';
+                  const val = String(row[col.key] ?? '');
                   const td = col.wrap
                     ? "px-3 py-2 break-words text-text-secondary"
                     : "px-3 py-2 whitespace-nowrap text-text-secondary";
@@ -99,17 +98,10 @@ export default function IncidentsPage() {
                       </td>
                     );
                   }
-                  if (col.key === 'fix_pr' && val) {
-                    const mrMatch = val.match(/merge_requests\/(\d+)/);
-                    const label = mrMatch ? `!${mrMatch[1]}` : 'MR';
+                  if (col.key === 'issue_key' && val) {
                     return (
                       <td key={col.key} className={td}>
-                        <a href={val} target="_blank" rel="noopener noreferrer"
-                          className="text-accent hover:underline inline-flex items-center gap-1"
-                          title={val}
-                          onClick={e => e.stopPropagation()}>
-                          <ExternalLink size={10} className="shrink-0" />{label}
-                        </a>
+                        <span className="text-accent font-mono">{val}</span>
                       </td>
                     );
                   }

@@ -459,8 +459,8 @@ class _BrainToolContext:
     def get_slack_channel(self):
         return self._b._get_slack_channel()
 
-    def get_smartsheet_incident_adapter(self):
-        return self._b._get_smartsheet_incident_adapter()  # satisfies IncidentAdapterPort
+    def get_incident_adapter(self):
+        return self._b._incident_adapter
 
     async def deliver_to_jarvis(self, event_id: str, message: str) -> None:
         if self._b._live_adapter:
@@ -539,6 +539,7 @@ class Brain:
         self._hold_watch_park_time: dict[str, float] = {}       # meta_event_id -> epoch when parked
         # Brain-side mirror of active meta-event ID (set on creation, cleared on close)
         self._active_meta_event_id: str | None = None
+        self._incident_adapter = None
         # Journal cache: avoid LRANGE per prompt build (60s TTL, invalidated on close)
         self._journal_cache: dict[str, tuple[float, list[str]]] = {}
         # LLM config from environment
@@ -2685,18 +2686,6 @@ class Brain:
             result.append(patched)
         return result
 
-    def _get_smartsheet_incident_adapter(self):
-        """Lazy-init Smartsheet incident adapter from env vars."""
-        if not hasattr(self, '_smartsheet_incident'):
-            token = os.environ.get("SMARTSHEET_INCIDENT_TOKEN", "")
-            sheet_id = os.environ.get("SMARTSHEET_INCIDENT_SHEET_ID", "")
-            if token and sheet_id:
-                from ..adapters.smartsheet_incident import SmartsheetIncidentAdapter
-                self._smartsheet_incident = SmartsheetIncidentAdapter(token, sheet_id)
-            else:
-                self._smartsheet_incident = None
-        return self._smartsheet_incident
-
     # =========================================================================
     # Agent Task Runner (non-blocking via create_task)
     # =========================================================================
@@ -3450,9 +3439,9 @@ class Brain:
         """Set the headhunter shutdown signal."""
         self._headhunter_close_signal = signal
 
-    def get_smartsheet_incident_adapter(self):
-        """Public facade for _get_smartsheet_incident_adapter."""
-        return self._get_smartsheet_incident_adapter()
+    def get_incident_adapter(self):
+        """Return the injected incident adapter (set by main.py at boot)."""
+        return self._incident_adapter
 
     def get_staleness_guard_metrics(self) -> list[dict]:
         """Return StalenessGuard trigger metrics for /flow endpoint."""

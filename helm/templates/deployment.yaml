@@ -431,40 +431,6 @@ spec:
                   key: maintainer-emails
             {{- end }}
             {{- end }}
-            {{- if and .Values.smartsheet.incident.enabled .Values.smartsheet.incident.existingSecret }}
-            # Smartsheet Incident Tracking
-            - name: SMARTSHEET_INCIDENT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.smartsheet.incident.existingSecret }}
-                  key: api-token
-            - name: SMARTSHEET_INCIDENT_SHEET_ID
-              value: {{ .Values.smartsheet.incident.sheetId | quote }}
-            {{- if .Values.smartsheet.incident.reporter }}
-            - name: SMARTSHEET_INCIDENT_REPORTER
-              value: {{ .Values.smartsheet.incident.reporter | quote }}
-            {{- end }}
-            {{- if .Values.smartsheet.incident.reporterName }}
-            - name: SMARTSHEET_INCIDENT_REPORTER_NAME
-              value: {{ .Values.smartsheet.incident.reporterName | quote }}
-            {{- end }}
-            {{- if .Values.smartsheet.incident.labels }}
-            - name: SMARTSHEET_INCIDENT_LABELS
-              value: {{ .Values.smartsheet.incident.labels | quote }}
-            {{- end }}
-            {{- if .Values.smartsheet.incident.components }}
-            - name: SMARTSHEET_INCIDENT_COMPONENTS
-              value: {{ .Values.smartsheet.incident.components | quote }}
-            {{- end }}
-            {{- if .Values.smartsheet.incident.issueType }}
-            - name: SMARTSHEET_INCIDENT_ISSUE_TYPE
-              value: {{ .Values.smartsheet.incident.issueType | quote }}
-            {{- end }}
-            {{- if .Values.smartsheet.incident.labelFilter }}
-            - name: SMARTSHEET_INCIDENT_LABEL_FILTER
-              value: {{ .Values.smartsheet.incident.labelFilter | quote }}
-            {{- end }}
-            {{- end }}
             {{- if and .Values.jira.enabled .Values.jira.existingSecret }}
             # Jira Integration (Headhunter Jira Head)
             - name: JIRA_URL
@@ -491,6 +457,27 @@ spec:
             {{- range $label, $url := .Values.jira.skills }}
             - name: HEADHUNTER_JIRA_SKILL_{{ $label | upper }}
               value: {{ $url | quote }}
+            {{- end }}
+            {{- if .Values.jira.incident.enabled }}
+            # Jira Incident Tracking (Nightwatcher + Brain escalation)
+            - name: JIRA_INCIDENT_PROJECT_KEY
+              value: {{ .Values.jira.incident.projectKey | quote }}
+            - name: JIRA_INCIDENT_ISSUE_TYPE
+              value: {{ .Values.jira.incident.issueType | quote }}
+            - name: JIRA_INCIDENT_LABELS
+              value: {{ .Values.jira.incident.labels | quote }}
+            - name: JIRA_INCIDENT_COMPONENTS
+              value: {{ .Values.jira.incident.components | quote }}
+            - name: JIRA_INCIDENT_LABEL_FILTER
+              value: {{ .Values.jira.incident.labelFilter | quote }}
+            - name: JIRA_INCIDENT_PLATFORMS
+              value: {{ .Values.jira.incident.platforms | quote }}
+            - name: JIRA_INCIDENT_PRIORITIES
+              value: {{ .Values.jira.incident.priorities | quote }}
+            - name: JIRA_INCIDENT_STATUSES
+              value: {{ .Values.jira.incident.statuses | quote }}
+            - name: JIRA_INCIDENT_SEVERITY_FIELD
+              value: {{ .Values.jira.incident.severityField | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.gcp.existingSecret }}

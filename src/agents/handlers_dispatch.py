@@ -422,33 +422,34 @@ async def handle_report_incident(
             result_text = f"Failed to stage escalation: {e}"
             logger.warning(f"stage_escalation failed for {event_id}: {e}")
     else:
-        adapter = ctx.get_smartsheet_incident_adapter()
+        adapter = ctx.get_incident_adapter()
         if not adapter:
-            result_text = "Smartsheet incident tracking not configured (SMARTSHEET_INCIDENT_* env vars missing)."
+            result_text = "Jira incident tracking not configured (JIRA_URL or JIRA_INCIDENT_PROJECT_KEY missing)."
         else:
-            fields = {
-                "Reporter e-mail": os.environ.get("SMARTSHEET_INCIDENT_REPORTER", ""),
-                "Reporter Display Name": os.environ.get("SMARTSHEET_INCIDENT_REPORTER_NAME", "Darwin Brain"),
-                "Date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                "Status": "New",
-                "Issue Type": os.environ.get("SMARTSHEET_INCIDENT_ISSUE_TYPE", "Task"),
-                "Labels": os.environ.get("SMARTSHEET_INCIDENT_LABELS", ""),
-                "Components": os.environ.get("SMARTSHEET_INCIDENT_COMPONENTS", ""),
-                "Platform": args.get("platform", ""),
-                "Summary": args.get("summary", "")[:200],
-                "Reason": args.get("description", ""),
-                "Priority": args.get("priority", "Normal"),
-                "Affected Versions": args.get("affected_versions", ""),
-            }
+            description = args.get("description", "")
             gl_ctx = None
             if event_doc.event and event_doc.event.evidence:
                 gl_ctx = getattr(event_doc.event.evidence, "gitlab_context", None)
             if gl_ctx and isinstance(gl_ctx, dict):
-                fields["Fix PR"] = gl_ctx.get("target_url", "") or gl_ctx.get("mr_url", "")
+                fix_url = gl_ctx.get("target_url", "") or gl_ctx.get("mr_url", "")
+                if fix_url:
+                    description += f"\n\n**Fix PR:** {fix_url}"
             if event_doc.slack_thread_ts and event_doc.slack_channel_id:
                 ts_nodot = event_doc.slack_thread_ts.replace(".", "")
                 workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                fields["Slack Thread"] = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                description += f"\n\n**Slack Thread:** https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+            fields = {
+                "project_key": os.getenv("JIRA_INCIDENT_PROJECT_KEY", ""),
+                "issue_type": os.getenv("JIRA_INCIDENT_ISSUE_TYPE", ""),
+                "summary": args.get("summary", "")[:200],
+                "description": description,
+                "priority": args.get("priority", "Normal"),
+                "labels": [l.strip() for l in os.getenv("JIRA_INCIDENT_LABELS", "").split(",") if l.strip()],
+                "components": [c.strip() for c in os.getenv("JIRA_INCIDENT_COMPONENTS", "").split(",") if c.strip()],
+                "platform": args.get("platform", ""),
+                "severity": args.get("severity", ""),
+                "severity_field_id": os.getenv("JIRA_INCIDENT_SEVERITY_FIELD", ""),
+            }
             try:
                 result = await adapter.create_incident(fields)
                 ctx.mark_incident_created(event_id)
@@ -462,8 +463,8 @@ async def handle_report_incident(
                         logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
                 logger.info(f"Incident created for {event_id}")
                 result_text = (
-                    f"Incident created in Smartsheet (row {result['row_id']}). "
-                    f"Sheet: {result['sheet_url']}"
+                    f"Incident created in Jira ({result['issue_key']}). "
+                    f"URL: {result['issue_url']}"
                 )
             except Exception as e:
                 result_text = f"Failed to create incident: {e}"

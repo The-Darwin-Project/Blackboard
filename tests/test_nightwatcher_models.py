@@ -129,10 +129,18 @@ class TestShiftIncident:
         inc = ShiftIncident(platform="p", summary="s")
         assert inc.affected_events == []
 
-    def test_smartsheet_fields_default_empty(self):
+    def test_jira_fields_default_empty(self):
         inc = ShiftIncident(platform="p", summary="s")
-        assert inc.smartsheet_row_id == ""
-        assert inc.smartsheet_url == ""
+        assert inc.jira_issue_key == ""
+        assert inc.jira_url == ""
+        assert inc.extended is False
+
+    def test_smartsheet_backward_compat(self):
+        """Old persisted data with smartsheet_* fields deserializes without error."""
+        data = {"platform": "p", "summary": "s", "smartsheet_row_id": "123", "smartsheet_url": "https://old"}
+        inc = ShiftIncident(**data)
+        assert inc.smartsheet_row_id == "123"
+        assert inc.jira_issue_key == ""
 
 
 # =========================================================================
@@ -214,7 +222,7 @@ class TestNightwatcherContextNewFields:
         ctx = NightwatcherContext(
             blackboard=AsyncMock(), archivist=AsyncMock(),
             provisioner=AsyncMock(), registry=AsyncMock(),
-            bridge=AsyncMock(), smartsheet_adapter=AsyncMock(),
+            bridge=AsyncMock(), incident_adapter=AsyncMock(),
             slack_notify=AsyncMock(),
             manifest_services=set(), manifest_ids=set(),
             dispatch_count=0, dispatch_cap=3,
@@ -230,7 +238,7 @@ class TestNightwatcherContextNewFields:
         ctx = NightwatcherContext(
             blackboard=AsyncMock(), archivist=AsyncMock(),
             provisioner=AsyncMock(), registry=AsyncMock(),
-            bridge=AsyncMock(), smartsheet_adapter=AsyncMock(),
+            bridge=AsyncMock(), incident_adapter=AsyncMock(),
             slack_notify=AsyncMock(),
             manifest_services=set(), manifest_ids=set(),
             dispatch_count=0, dispatch_cap=3,

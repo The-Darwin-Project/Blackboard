@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Nightwatcher (Agent 6) -- Shift Consolidation
 
-The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Smartsheet incidents. It runs a phase-gated Gemini Flash session on a cron schedule (default 06:00/18:00 UTC).
+The Nightwatcher is an in-process Python daemon (same lifecycle as Aligner/TimeKeeper) that batch-processes Brain escalations into deduplicated Jira incidents. It runs a phase-gated Gemini Flash session on a cron schedule (default 06:00/18:00 UTC).
 
 ## Core Principle: LLM Decides Clustering. Code Drives Combining. Tools Carry Context.
 
@@ -43,7 +43,7 @@ Tools: All review tools + `dispatch_investigation` (capped at `NIGHTWATCHER_DISP
 ### Phase 3: REPORT (code-driven shopping cart)
 
 1. **Declare clusters**: LLM calls `declare_clusters` with structured JSON. Code validates manifest coverage before any writes.
-2. **Report loop** (N iterations, code drives): For each cluster, code generates a dynamic `write_incident` tool. LLM fills 4 judgment fields (summary, description, priority, status). Code combines judgment + pre-filled fields (platform, affected_events) = Smartsheet row.
+2. **Report loop** (N iterations, code drives): For each cluster, code generates a dynamic `write_incident` or `extend_incident` tool. LLM fills judgment fields (summary, description, priority, status, severity). Code combines judgment + pre-filled fields (platform, affected_events) = Jira issue. Clusters with `extends_issue_key` post a comment to the existing issue instead of creating a new one.
 3. **Coverage gate**: Code checks all manifest events covered. Failed cluster events are restaged.
 4. **Shift summary**: LLM writes summary with full receipt of completed reports.
 
@@ -69,7 +69,7 @@ pending  ->  inflight  ->  commit / requeue
 |---|---|---|
 | Brain (real-time) | `report_incident` | Redis staging area (`darwin:nightwatcher:pending`) |
 | Nightwatcher (declaration) | `declare_clusters` | In-memory `NightwatcherContext.declared_clusters` |
-| Nightwatcher (combining) | `write_incident` | Smartsheet via `SmartsheetIncidentAdapter` |
+| Nightwatcher (combining) | `write_incident` / `extend_incident` | Jira via `JiraIncidentAdapter` |
 
 Brain stages (`report_incident`). Nightwatcher writes (`write_incident`). Names are distinct to avoid collision.
 
@@ -110,13 +110,13 @@ The `write_incident` tool is generated per-iteration by `build_report_tool()`:
 
 ## Safety Invariants
 
-1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` enforces this before any Smartsheet writes.
+1. Every manifest event ID MUST be assigned to exactly one cluster via `declare_clusters`. `validate_cluster_plan()` enforces this before any Jira writes.
 2. `MAX_ANALYSIS_ROUNDS = 30` caps the analysis loop (review + investigate phases). Report phase is bounded by N declared clusters.
 3. `requeue_inflight()` on startup recovers from prior crashes -- no data loss.
 4. Phase transitions are forward-only and single-step. LLM cannot skip phases.
 5. `dispatch_investigation` is capped at `NIGHTWATCHER_DISPATCH_CAP` per sweep.
 6. Ephemeral-only dispatch: Nightwatcher uses `EphemeralProvisioner` (Tekton TaskRun), never in-pod sidecars.
-7. Partial failure: if Smartsheet write fails for a cluster, cart continues with remaining clusters. Failed cluster events are restaged via `restage_orphans()`.
+7. Partial failure: if Jira write fails for a cluster, cart continues with remaining clusters. Failed cluster events are restaged via `restage_orphans()`.
 8. Duplicates are structurally impossible: code drives exactly one `write_incident` call per declared cluster.
 
 ## Shifts API & UI

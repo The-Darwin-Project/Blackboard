@@ -223,9 +223,9 @@ function ShiftDetailPanel({ report, onClose }: { report: ShiftReportFull; onClos
                 <p className="text-text-muted">
                   {inc.affected_events.length} events: {inc.affected_events.join(', ')}
                 </p>
-                {inc.smartsheet_url && (
-                  <a href={inc.smartsheet_url} target="_blank" rel="noopener noreferrer"
-                    className="text-accent hover:underline">View in Smartsheet</a>
+                {(inc.jira_url || inc.smartsheet_url) && (
+                  <a href={inc.jira_url || inc.smartsheet_url} target="_blank" rel="noopener noreferrer"
+                    className="text-accent hover:underline">View in Jira</a>
                 )}
               </div>
             </details>

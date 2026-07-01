@@ -149,10 +149,19 @@ _CYNEFIN_AWARENESS_CONTEXT = """\
 - CHAOTIC: Active crisis. Critical priority, dispatch investigation immediately.
 </context>"""
 
+_EXTENSION_CONTEXT = """\
+<context id="extension-awareness">
+## Cross-Sweep Extension
+- Use search_existing_incidents during REVIEW to find open incidents from prior sweeps.
+- If a cluster's root cause matches an open incident, set extends_issue_key in declare_clusters.
+- Extension adds a comment to the existing issue rather than creating a duplicate.
+- Only extend issues that are genuinely the same root cause, not merely similar.
+</context>"""
+
 _REQUIRED_TAG_IDS = frozenset({
     "identity", "phase-lifecycle", "manifest",
     "consolidation-rules", "link-hierarchy", "report-format",
-    "cynefin-awareness",
+    "cynefin-awareness", "extension-awareness",
 })
 
 
@@ -182,6 +191,7 @@ def build_system_prompt(
         _LINK_HIERARCHY_RULE,
         _REPORT_FORMAT_RULE,
         _CYNEFIN_AWARENESS_CONTEXT,
+        _EXTENSION_CONTEXT,
     ]
     return "\n\n---\n\n".join(sections) + "\n"
 

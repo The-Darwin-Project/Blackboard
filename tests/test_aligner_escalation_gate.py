@@ -83,7 +83,7 @@ def _stub_brain(bb):
     brain._next_turn_number = AsyncMock(return_value=1)
     brain._append_and_broadcast = AsyncMock()
     brain._emit_executive_pulse = AsyncMock()
-    brain._get_smartsheet_incident_adapter = MagicMock(return_value=None)
+    brain._incident_adapter = None
     brain.pulse_port = None
     brain._skill_loader = None
     brain._grounding_evidence_for_event = {}
@@ -145,19 +145,19 @@ async def test_brain_sets_flag_on_staging_success():
 
 @pytest.mark.asyncio
 async def test_brain_skips_flag_when_service_none():
-    """Smartsheet branch: service=None should skip set_escalation_flag."""
+    """Jira branch: service=None should skip set_escalation_flag."""
     bb = _mock_blackboard()
     evt = _make_event(source="aligner")
     evt.service = None
     bb.get_event.return_value = evt
 
     mock_adapter = AsyncMock()
-    mock_adapter.create_incident.return_value = {"row_id": "123", "sheet_url": "https://test"}
+    mock_adapter.create_incident.return_value = {"issue_key": "VMER-123", "issue_url": "https://jira.example.com/browse/VMER-123"}
 
     brain = _stub_brain(bb)
 
     with patch.dict("os.environ", {"NIGHTWATCHER_ENABLED": "false"}), \
-         patch.object(brain, "_get_smartsheet_incident_adapter", return_value=mock_adapter):
+         patch.object(brain, "_incident_adapter", new=mock_adapter):
         await brain._execute_function_call(
             event_id="evt-1", function_name="report_incident",
             args={"summary": "test", "description": "test"},
