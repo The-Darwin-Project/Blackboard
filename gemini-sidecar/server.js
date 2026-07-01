@@ -17,7 +17,7 @@ const { setupWSServer } = require('./ws-server');
 const { startWSClient } = require('./ws-client');
 const {
   hasGitHubCredentials, hasGitLabCredentials, hasRegistryCredentials, setupArgoCDMCP,
-  setupCLILogins, setupRegistryCredentials, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
+  setupCLILogins, setupRegistryCredentials, setupRemoteK8sMCPs, GITLAB_HOST, CLI_LOGIN_INTERVAL_MS,
 } = require('./credentials');
 
 initializeCLISettings();
@@ -66,6 +66,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[${new Date().toISOString()}] Registry credentials: ${hasRegistryCredentials() ? 'available' : 'not configured'}`);
 
   setupRegistryCredentials();
+  setupRemoteK8sMCPs();
 
   setupArgoCDMCP().catch((err) => {
     console.log(`[${new Date().toISOString()}] Startup ArgoCD MCP setup failed: ${err.message}`);

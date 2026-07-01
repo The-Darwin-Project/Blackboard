@@ -489,10 +489,17 @@ function setupRemoteK8sMCPs() {
     if (meta.kubearchiveUrl) {
       let token = '';
       try {
-        const kc = fs.readFileSync(kubeconfigPath, 'utf8');
-        const match = kc.match(/token:\s*(.+)/);
-        if (match) token = match[1].trim();
-      } catch { }
+        token = execFileSync('kubectl', [
+          '--kubeconfig', kubeconfigPath,
+          'config', 'view', '--raw', '--minify',
+          '-o', 'jsonpath={.users[0].user.token}'
+        ], { encoding: 'utf8', timeout: 5000 }).trim();
+      } catch (err) {
+        console.warn(`[${new Date().toISOString()}] KubeArchive token extraction failed for ${name}: ${err.message}`);
+      }
+      if (!token) {
+        console.warn(`[${new Date().toISOString()}] KubeArchive skipped for ${name}: no static token in kubeconfig (exec-auth or empty)`);
+      }
 
       if (token) {
         const kaMcpName = `KubeArchive_${name}`;

@@ -82,10 +82,10 @@ function registerMCPsAndHooks(settings, cli) {
         env: { SIDECAR_PORT: port },
     };
 
-    const playwrightCmd = resolveCommand('npx');
+    const playwrightCmd = resolveCommand('playwright-mcp');
     const playwrightConfig = {
         command: playwrightCmd,
-        args: ['@playwright/mcp@latest', '--headless', '--no-sandbox'],
+        args: ['--headless', '--no-sandbox'],
     };
 
     if (cli === 'gemini') {
@@ -131,7 +131,7 @@ function registerMCPsAndHooks(settings, cli) {
         const hookUrl = `http://localhost:${port}`;
         settings.hooks.PreToolUse = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/pre-tool-use`, timeout: 5 }] }];
         settings.hooks.Stop = [{ hooks: [{ type: 'http', url: `${hookUrl}/hooks/stop`, timeout: 5 }] }];
-        settings.hooks.SessionStart = [{ matcher: 'compact', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
+        settings.hooks.SessionStart = [{ matcher: '', hooks: [{ type: 'http', url: `${hookUrl}/hooks/session-start`, timeout: 10 }] }];
     }
     console.log(`MCPs (TeamChat + Blackboard + Journal) + hooks registered for ${cli} (role=${role}, peer=${peerPort || 'none'})`);
 }

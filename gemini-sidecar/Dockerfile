@@ -80,11 +80,18 @@ RUN \
       -o /tmp/glab.tar.gz && mkdir -p /tmp/glab && tar -xzf /tmp/glab.tar.gz -C /tmp/glab && \
     cp /tmp/glab/bin/glab /usr/local/bin/glab && chmod +x /usr/local/bin/glab && \
     rm -rf /tmp/glab* && \
+    # flux -- Flux CD CLI (HelmReleases, Kustomizations, GitRepositories)
+    FLUX_VERSION=$(curl -sL https://api.github.com/repos/fluxcd/flux2/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v) && \
+    curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o /tmp/flux_${FLUX_VERSION}_linux_amd64.tar.gz && \
+    curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_checksums.txt" -o /tmp/flux_checksums.txt && \
+    cd /tmp && grep "flux_${FLUX_VERSION}_linux_amd64.tar.gz" flux_checksums.txt | sha256sum -c && \
+    tar -xz -C /usr/local/bin/ -f /tmp/flux_${FLUX_VERSION}_linux_amd64.tar.gz flux && \
+    rm -f /tmp/flux_${FLUX_VERSION}_linux_amd64.tar.gz /tmp/flux_checksums.txt && \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
     helm version --short && jq --version && yq --version && \
     gh --version && github-mcp-server --help | head -1 && \
-    glab --version
+    glab --version && flux --version
 
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
 # UBI9 Node.js puts global bins in /opt/app-root/src/.npm-global/bin/
@@ -116,6 +123,7 @@ RUN npm install -g kubernetes-mcp-server@latest && \
 # PLAYWRIGHT_BROWSERS_PATH: shared location so chromium installed by root is found by non-root USER 1001
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN npm install -g @playwright/mcp@latest && \
+    ln -sf "$(npm prefix -g)/bin/playwright-mcp" /usr/local/bin/playwright-mcp && \
     npx @playwright/mcp@latest --help 2>&1 | head -1 || echo "playwright-mcp installed"
 
 # Install skopeo (container image inspection -- no daemon required)
@@ -129,6 +137,16 @@ RUN \
     curl -sL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
       -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign && \
     trivy --version && grype version && syft version && cosign version
+
+# Install oras CLI (OCI artifact push/pull/discover for registry operations)
+# Downloads binary + checksums file, verifies SHA256 before moving to PATH
+RUN ORAS_VERSION=$(curl -sL https://api.github.com/repos/oras-project/oras/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v) && \
+    curl -sL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz && \
+    curl -sL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_checksums.txt" -o /tmp/oras_checksums.txt && \
+    cd /tmp && grep "oras_${ORAS_VERSION}_linux_amd64.tar.gz" oras_checksums.txt | sha256sum -c && \
+    tar -xz -C /usr/local/bin/ -f /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz oras && \
+    rm -f /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz /tmp/oras_checksums.txt && \
+    oras version
 
 # Install Python 3.12 + pip + test tools (QE agent needs pytest/httpx)
 # Also install Chromium deps for Playwright headless browser testing

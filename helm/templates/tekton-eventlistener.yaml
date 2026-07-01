@@ -148,6 +148,11 @@ spec:
                   mountPath: /secrets/registry
                   readOnly: true
                 {{- end }}
+                {{- if (.Values.github.existingSecret | trim) }}
+                - name: github-app-secret
+                  mountPath: /secrets/github
+                  readOnly: true
+                {{- end }}
                 {{- range $name, $cluster := .Values.remoteClusters }}
                 {{- if $cluster.enabled }}
                 - name: remote-cluster-{{ $name }}
@@ -190,6 +195,11 @@ spec:
             - name: registry-secret
               secret:
                 secretName: {{ .Values.registry.existingSecret | default (printf "%s-registry" .Release.Name) }}
+            {{- end }}
+            {{- if (.Values.github.existingSecret | trim) }}
+            - name: github-app-secret
+              secret:
+                secretName: {{ .Values.github.existingSecret | quote }}
             {{- end }}
             - name: gemini-rules
               configMap:
@@ -253,14 +263,19 @@ spec:
               script: |
                 #!/bin/sh
                 EVENT_ID="$(tt.params.event_id)"
+                # Validate EVENT_ID format (UUID only — prevents shell injection via crafted event_id)
+                if ! echo "${EVENT_ID}" | grep -qE '^[a-z]+-[a-f0-9]{8,}$'; then
+                  echo "ERROR: Invalid EVENT_ID format: '${EVENT_ID}'"
+                  exit 1
+                fi
                 echo "Pruning TaskRuns for event ${EVENT_ID}"
-                TASKRUNS=$(kubectl get taskrun -n {{ .Release.Namespace }} -l darwin.io/event-id=${EVENT_ID} -o name 2>/dev/null)
-                if [ -z "$TASKRUNS" ]; then
+                TASKRUNS=$(kubectl get taskrun -n {{ .Release.Namespace }} -l "darwin.io/event-id=${EVENT_ID}" -o name 2>/dev/null)
+                if [ -z "${TASKRUNS}" ]; then
                   echo "No TaskRuns found for ${EVENT_ID}"
                   exit 0
                 fi
                 echo "Found: ${TASKRUNS}"
-                kubectl delete ${TASKRUNS} -n {{ .Release.Namespace }} --force --grace-period=0 2>&1 || true
+                echo "${TASKRUNS}" | xargs -r kubectl delete -n {{ .Release.Namespace }} --force --grace-period=0 2>&1 || true
                 echo "Prune complete for ${EVENT_ID}"
 ---
 apiVersion: triggers.tekton.dev/v1beta1
@@ -308,7 +323,7 @@ spec:
             name: "cel"
           params:
             - name: "filter"
-              value: "!has(body.action) || body.action == 'spawn'"
+              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn')"
       bindings:
         - ref: {{ .Release.Name }}-ephemeral-agent
       template:
@@ -319,7 +334,7 @@ spec:
             name: "cel"
           params:
             - name: "filter"
-              value: "has(body.action) && body.action == 'cancel'"
+              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && has(body.action) && body.action == 'cancel'"
       bindings:
         - ref: {{ .Release.Name }}-ephemeral-agent
       template:

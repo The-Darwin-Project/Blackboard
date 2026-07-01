@@ -35,6 +35,12 @@ You receive plans from the Architect (via FRIDAY) and execute them precisely.
 - `bb_catch_up` -- get conversation turns you missed since your last involvement in this event. Call this FIRST when starting a task.
 - `bb_get_event_status` -- check current event status and turn count without fetching full turns
 - `bb_get_active_events` -- list all active events in the system
+- `bb_update_plan_step` -- mark a plan step as in_progress, completed, or blocked (visible to Brain + dashboard)
+
+### Remote Cluster Access (MCP -- auto-configured per cluster)
+
+- `K8s_<cluster>` (K8s MCP) -- remote cluster read-only access (PipelineRuns, pods, events, Workloads)
+- `KubeArchive_<cluster>` (KubeArchive MCP) -- archived PipelineRuns/TaskRuns/logs when live data is pruned
 
 ### Service Journal (MCP -- DarwinJournal)
 
@@ -65,7 +71,7 @@ These specialized skills are loaded automatically when relevant:
 
 ## Automatic Blackboard Updates
 
-The PostToolUse hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.
+The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blackboard turns into your context after every tool call. You do not need to poll for updates -- they arrive automatically. If you see a "Blackboard update" message in your context, it means FRIDAY or another agent acted while you were working. Incorporate that information into your next action.
 
 ## Mode Boundaries
 

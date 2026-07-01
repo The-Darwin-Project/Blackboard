@@ -23,6 +23,7 @@ const {
   setupArgoCDMCP,
   setupCLILogins,
   setupRegistryCredentials,
+  setupRemoteK8sMCPs,
   getRemoteClustersMeta,
   GITLAB_HOST,
 } = require('./credentials');
@@ -395,6 +396,7 @@ async function handleRequest(req, res) {
       await setupCLILogins();
 
       setupRegistryCredentials();
+      setupRemoteK8sMCPs();
 
       // Execute agent CLI
       const result = await executeCLI(body.prompt, {

@@ -1,0 +1,34 @@
+# helm/templates/networkpolicy-eventlistener.yaml
+# @ai-rules:
+# 1. [Constraint]: Only Brain pods may reach the EventListener. All other ingress is denied.
+# 2. [Pattern]: NetworkPolicy uses pod selector labels — must match EventListener pod labels.
+# 3. [Gotcha]: EventListener pods are created by Tekton Triggers controller with labels from
+#    the EventListener spec.resources.kubernetesResource.spec.template.metadata — not from
+#    the EventListener metadata itself.
+{{- if .Values.ephemeralAgents.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-eventlistener-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: darwin-brain
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: network-security
+spec:
+  podSelector:
+    matchLabels:
+      eventlistener: {{ .Release.Name }}-ephemeral-agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: darwin-brain
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+{{- end }}

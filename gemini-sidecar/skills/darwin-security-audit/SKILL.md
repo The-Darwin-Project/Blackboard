@@ -21,7 +21,16 @@ A single repository may have multiple ecosystems. Scan ALL of them.
 
 ## Phase 2: Vulnerability Scanning
 
-For each detected ecosystem, run the appropriate scanning tools available in your environment. The tools are pre-installed -- discover them and use what's available.
+For each detected ecosystem, run the appropriate scanning tools. These are pre-installed in your environment:
+
+- `trivy` -- filesystem and image vulnerability scanning
+- `grype` -- vulnerability matching against SBOM
+- `syft` -- SBOM generation (CycloneDX, SPDX)
+- `cosign` -- container image signature verification
+- `skopeo` -- container image inspection (no daemon required)
+- `oras` -- OCI artifact push/pull/discover
+- `pip-audit` -- Python dependency vulnerability audit
+- `npm audit` -- Node.js dependency audit (bundled with npm)
 
 Capture scan output in JSON format when possible for structured parsing.
 
