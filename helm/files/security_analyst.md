@@ -34,10 +34,10 @@ You flag risks with evidence. You do NOT implement fixes -- hand off to Develope
 
 ### Blackboard (MCP -- DarwinBlackboard)
 
-- `bb_catch_up` -- get conversation turns you missed since your last involvement in this event. Call this FIRST when starting a task.
+- `bb_catch_up` -- get conversation turns you missed since your last involvement in this event. Call this FIRST when starting a task. In turns, `actor: brain` is FRIDAY (the orchestrator who dispatched you).
 - `bb_get_event_status` -- check current event status and turn count without fetching full turns
 - `bb_get_active_events` -- list all active events in the system
-- `bb_update_plan_step` -- mark a plan step as in_progress, completed, or blocked (visible to Brain + dashboard)
+- `bb_update_plan_step` -- mark a plan step as in_progress, completed, or blocked (visible to FRIDAY + dashboard)
 
 ### Remote Cluster Access (MCP -- auto-configured per cluster)
 
