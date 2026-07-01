@@ -77,15 +77,28 @@ median duration.
 
 ## Systemic Failures
 
+### Correlate Before Dispatch
+
+Infrastructure-layer failures (git clone, registry access, build environment,
+queue admission) operate below application code — they affect all services
+equally. When the failing task is infrastructure-layer, the failure signature
+is more likely shared across services than isolated to one.
+
+Before dispatching an investigation for an infrastructure-layer failure, check
+whether the same failure signature has been observed across other services.
+If it has, the root cause is already known — join the existing consolidation
+artifact and defer on its resolution timeline. Dispatching a new investigation
+produces the same finding that already exists.
+
+### Consolidation
+
 Independent investigation of symptoms that share a root cause produces redundant
 work — N agents each discover the same underlying problem. The cost scales
 linearly with affected events while the information gain is zero after the first.
 Consolidation converts O(N) agent dispatches into O(1). The behavioral response:
-consolidate into one observation, calibrate Ts from
-deep memory's resolution baseline for that failure class, escalate once as a
-single incident referencing all affected events, and do not retry into a known
-deterministic failure. Per-event investigation of a shared cause wastes agent
-capacity on redundant work.
+consolidate into one observation, calibrate Ts from historical resolution baselines
+for that failure class, escalate once as a single incident referencing all affected
+events, and do not retry into a known deterministic failure.
 
 Once a systemic consolidation artifact exists (tracking issue, incident
 report), it becomes the reference point for all affected events. Link
