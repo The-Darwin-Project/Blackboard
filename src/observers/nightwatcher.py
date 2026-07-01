@@ -216,6 +216,7 @@ class NightwatcherObserver:
 
         temperature = float(os.getenv("LLM_TEMPERATURE_NIGHTWATCHER", "0.3"))
         max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER", "8192"))
+        analysis_max_tokens = int(os.getenv("LLM_MAX_TOKENS_NIGHTWATCHER_ANALYSIS", "16384"))
         thinking = os.getenv("LLM_THINKING_NIGHTWATCHER", "high")
         text_nudge_count = 0
 
@@ -224,7 +225,7 @@ class NightwatcherObserver:
             response = await adapter.generate(
                 system_prompt=system_prompt, contents=contents,
                 tools=tools, temperature=temperature,
-                max_output_tokens=max_tokens, thinking_level=thinking,
+                max_output_tokens=analysis_max_tokens, thinking_level=thinking,
             )
             if response.function_call:
                 name = response.function_call.name
