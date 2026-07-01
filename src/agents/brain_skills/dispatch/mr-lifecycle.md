@@ -54,6 +54,30 @@ Sequence:
 5. If deep memory surfaces a known non-recoverable pattern for this failure
    signature → do NOT retest. Close or escalate based on the Bot Instructions
    failure path.
+
+### Build Dependency Failures Requiring Upstream Intervention
+
+Hermetic, offline, and cached builds run without live network access. When a
+dependency is missing from the prefetch cache, lockfile, or vendored artifacts,
+the build fails deterministically — no retry will make the dependency appear
+because the cache state is fixed by the source manifest (lockfile, vendor dir,
+prefetch config).
+
+Recognition signals: offline install errors, cache miss errors, dependency
+resolution failures that reference a registry the build cannot reach, lockfile
+mismatch errors during hermetic or air-gapped builds.
+
+Why this matters: the fix lives upstream (regenerate lockfile, update prefetch
+config, add missing dependency to vendor). No amount of in-pipeline investigation
+or retesting changes the outcome. Agent dispatches to "investigate" will always
+find the same root cause.
+
+When you recognize this class of failure:
+- Check deep memory for an existing tracking incident for this failure pattern
+- If tracked: link and defer on the incident timeline (do not re-investigate)
+- If new: escalate once, create the tracking incident, notify maintainers
+- For bot-authored MRs: close the MR with an explanatory comment — the bot
+  will recreate when the upstream fix lands
 6. After issuing any command that triggers a new pipeline, re-subscribe
    to the new pipeline's state changes before deferring. The previous
    subscription watches the old pipeline — it will never fire for the
