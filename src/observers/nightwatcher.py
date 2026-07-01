@@ -250,6 +250,7 @@ class NightwatcherObserver:
                     logger.info("Nightwatcher tool %s: %s", name, tool_result[:200])
                 contents.append({"role": "model", "parts": response.raw_parts or [{"text": response.text or ""}]})
                 contents.append({"role": "user", "parts": [{"text": tool_result}]})
+                text_nudge_count = 0
             else:
                 text_nudge_count += 1
                 if text_nudge_count <= 2:
