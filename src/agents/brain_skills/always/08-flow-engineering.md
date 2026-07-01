@@ -80,12 +80,12 @@ median duration.
 ### Correlate Before Dispatch
 
 Infrastructure-layer failures (git clone, registry access, build environment,
-queue admission) operate below application code — they affect all services
+queue admission) operate below application code — they affect all events
 equally. When the failing task is infrastructure-layer, the failure signature
-is more likely shared across services than isolated to one.
+is more likely shared across events than isolated to one.
 
 Before dispatching an investigation for an infrastructure-layer failure, check
-whether the same failure signature has been observed across other services.
+whether the same failure signature has been observed across other events.
 If it has, the root cause is already known — join the existing consolidation
 artifact and defer on its resolution timeline. Dispatching a new investigation
 produces the same finding that already exists.
