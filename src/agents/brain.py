@@ -426,8 +426,8 @@ class _BrainToolContext:
         return self._b._get_conversation_timeout(event)
 
     # --- Callbacks ---
-    async def append_and_broadcast(self, event_id, turn, event=None) -> None:
-        await self._b._append_and_broadcast(event_id, turn, event)
+    async def append_and_broadcast(self, event_id, turn, event=None) -> int:
+        return await self._b._append_and_broadcast(event_id, turn, event)
 
     async def broadcast(self, message: dict) -> None:
         await self._b._broadcast(message)
@@ -1073,9 +1073,14 @@ class Brain:
                     await self.blackboard.mark_turns_evaluated(
                         event_id, up_to_turn=turn_snapshot + extra_brain_count
                     )
+            if event_after:
+                evaluated_scope = event_after.conversation[:turn_snapshot + extra_brain_count]
+                evaluated_turns = [t.turn for t in evaluated_scope]
+            else:
+                evaluated_turns = list(range(1, turn_snapshot + 1))
             await self._broadcast_status_update(
                 event_id, "evaluated",
-                turns=list(range(1, turn_snapshot + extra_brain_count + 1)),
+                turns=evaluated_turns,
             )
         except Exception as e:
             event_fresh = await self.blackboard.get_event(event_id)
@@ -3314,9 +3319,16 @@ class Brain:
 
     async def _append_and_broadcast(
         self, event_id: str, turn: ConversationTurn, event: "EventDocument | None" = None
-    ) -> None:
-        """Persist turn to Redis, broadcast to dashboard/Slack, push to working agent sidecar."""
-        await self.blackboard.append_turn(event_id, turn)
+    ) -> int:
+        """Persist turn to Redis, broadcast to dashboard/Slack, push to working agent sidecar.
+
+        Returns the atomically assigned turn number, or 0 if the event
+        was not found (fail-closed: broadcast is skipped).
+        """
+        assigned = await self.blackboard.append_turn(event_id, turn)
+        if assigned == 0:
+            logger.warning("append_turn failed for %s (event not found)", event_id)
+            return 0
         await self._broadcast_turn(event_id, turn)
         try:
             from ..dependencies import get_registry_and_bridge
@@ -3335,6 +3347,7 @@ class Brain:
                     })
         except Exception:
             pass
+        return assigned
 
     async def _broadcast_turn(self, event_id: str, turn: ConversationTurn) -> None:
         """Broadcast a conversation turn to all channels (WS, Slack, etc.)."""
@@ -3480,9 +3493,9 @@ class Brain:
 
     async def append_and_broadcast(
         self, event_id: str, turn: ConversationTurn, event: "EventDocument | None" = None
-    ) -> None:
+    ) -> int:
         """Public facade for _append_and_broadcast."""
-        await self._append_and_broadcast(event_id, turn, event)
+        return await self._append_and_broadcast(event_id, turn, event)
 
     async def next_turn_number(self, event_id: str) -> int:
         """Public facade for _next_turn_number."""

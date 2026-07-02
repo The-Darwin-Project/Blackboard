@@ -238,9 +238,20 @@ class TestSlackFilterRefactor:
 
     def test_backward_compat_brain_actions(self):
         from src.channels.slack import _INTERNAL_TURNS
-        for action in ["triage", "phase", "respond_jarvis", "tool_result",
+        for action in ["triage", "phase", "respond_jarvis",
                        "hold_watch", "intermediate", "hold_watch_wake", "think"]:
             assert ("brain", action) in _INTERNAL_TURNS
+
+    def test_tool_result_conditional_filter(self):
+        from src.channels.slack import _INTERNAL_TURNS, _USER_VISIBLE_TOOL_RESULTS
+        assert ("brain", "tool_result") not in _INTERNAL_TURNS
+        assert "take_note" in _USER_VISIBLE_TOOL_RESULTS
+        assert "record_observation" in _USER_VISIBLE_TOOL_RESULTS
+        assert "search_open_incidents" in _USER_VISIBLE_TOOL_RESULTS
+        assert "consult_deep_memory" in _USER_VISIBLE_TOOL_RESULTS
+        assert "review_notes" in _USER_VISIBLE_TOOL_RESULTS
+        assert "list_observations" in _USER_VISIBLE_TOOL_RESULTS
+        assert len(_USER_VISIBLE_TOOL_RESULTS) == 6
 
 
 class TestHeapqTieBreaking:

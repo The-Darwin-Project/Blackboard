@@ -10,6 +10,7 @@
 # 8. [Pattern]: _INTERNAL_TURNS (actor, action) frozenset prevents internal turns from leaking into
 #    user Slack threads. Applied in _handle_legacy_turn via tuple matching. Extensible for non-brain
 #    actors (e.g., system.notification). The is_quiet whitelist is the inverse for infra threads.
+#    tool_result is handled separately: _USER_VISIBLE_TOOL_RESULTS whitelist + slack_thread_ts gate.
 # 9. [Pattern]: SlackAccessGate (OCP Group-based) gates 8 entry points via _gate_check helper.
 #    Intentionally ungated: handle_feedback (feedback on rejection messages), on_thread_started (info only).
 #    Home tab forks to access-denied view for unauthorized users.
@@ -40,10 +41,18 @@ logger = logging.getLogger("darwin.slack")
 
 _INTERNAL_TURNS = frozenset({
     ("brain", "triage"), ("brain", "phase"), ("brain", "respond_jarvis"),
-    ("brain", "tool_result"), ("brain", "hold_watch"), ("brain", "intermediate"),
+    ("brain", "hold_watch"), ("brain", "intermediate"),
     ("brain", "hold_watch_wake"), ("brain", "think"),
     ("system", "notification"),
     ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
+})
+
+# Tools whose tool_result turns contain user-relevant confirmations/data.
+# Maintenance: add new user-facing tools here when created.
+_USER_VISIBLE_TOOL_RESULTS = frozenset({
+    "take_note", "record_observation",
+    "search_open_incidents", "consult_deep_memory",
+    "review_notes", "list_observations",
 })
 
 
@@ -843,6 +852,10 @@ class SlackChannel:
 
         if turn.actor == "brain" and turn.action == "thoughts":
             return
+
+        if turn.actor == "brain" and turn.action == "tool_result":
+            if not (event_doc.slack_thread_ts and turn.waitingFor in _USER_VISIBLE_TOOL_RESULTS):
+                return
 
         if (turn.actor, turn.action) in _INTERNAL_TURNS:
             return

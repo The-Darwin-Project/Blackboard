@@ -46,7 +46,7 @@ def _make_brain() -> Brain:
     bb.redis = MagicMock()
     bb.redis.lpush = AsyncMock()
     bb.get_event = AsyncMock()
-    bb.append_turn = AsyncMock()
+    bb.append_turn = AsyncMock(return_value=1)
     bb.close_event = AsyncMock()
     bb.persist_report = AsyncMock()
     bb.append_journal = AsyncMock()

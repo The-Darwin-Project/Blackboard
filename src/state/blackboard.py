@@ -1401,10 +1401,14 @@ return 0
         self,
         event_id: str,
         turn: ConversationTurn,
-    ) -> None:
-        """Append a conversation turn to an event document."""
+    ) -> int:
+        """Append a conversation turn to an event document.
+
+        Assigns ``turn.turn`` atomically inside WATCH/MULTI from the
+        current conversation length.  Returns the assigned turn number,
+        or 0 if the event no longer exists (fail-closed).
+        """
         key = f"{self.EVENT_PREFIX}{event_id}"
-        # Use WATCH for optimistic locking
         async with self.redis.pipeline(transaction=True) as pipe:
             while True:
                 try:
@@ -1412,8 +1416,9 @@ return 0
                     data = await pipe.get(key)
                     if not data:
                         logger.warning(f"Event {event_id} not found for append_turn")
-                        return
+                        return 0
                     event = EventDocument(**json.loads(data))
+                    turn.turn = len(event.conversation) + 1
                     event.conversation.append(turn)
                     pipe.multi()
                     pipe.set(key, json.dumps(event.model_dump()))
@@ -1422,6 +1427,7 @@ return 0
                 except WatchError:
                     continue
         logger.debug(f"Appended turn {turn.turn} ({turn.actor}.{turn.action}) to event {event_id}")
+        return turn.turn
 
     async def mark_turns_delivered(
         self,

@@ -81,7 +81,7 @@ def _stub_brain(bb):
     brain.blackboard = bb
     brain._incident_created = set()
     brain._next_turn_number = AsyncMock(return_value=1)
-    brain._append_and_broadcast = AsyncMock()
+    brain._append_and_broadcast = AsyncMock(return_value=1)
     brain._emit_executive_pulse = AsyncMock()
     brain._incident_adapter = None
     brain.pulse_port = None

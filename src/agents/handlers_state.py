@@ -104,7 +104,7 @@ async def handle_wait_for_agent(
     if not ctx.get_active_agent_for_event(event_id):
         logger.info("wait_for_agent rejected: no active agent for %s", event_id)
         turn = ConversationTurn(
-            turn=(await ctx.next_turn_number(event_id)),
+            turn=0,
             actor="brain",
             action="tool_result",
             thoughts=(
@@ -119,18 +119,19 @@ async def handle_wait_for_agent(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
-    summary = args.get("summary", "")
     agent_name = ctx.get_active_agent_for_event(event_id) or "unknown"
-    wait_turn = await ctx.next_turn_number(event_id)
-    ctx.mark_waiting_for_agent(event_id, agent_name, wait_turn)
+    summary = args.get("summary", "")
     turn = ConversationTurn(
-        turn=wait_turn,
+        turn=0,  # placeholder — overwritten atomically by append_turn
         actor="brain",
         action="wait",
         thoughts=summary,
         waitingFor=f"agent:{agent_name}",
     )
-    await ctx.append_and_broadcast(event_id, turn)
+    assigned = await ctx.append_and_broadcast(event_id, turn)
+    if assigned == 0:
+        return False
+    ctx.mark_waiting_for_agent(event_id, agent_name, assigned)
     return False
 
 
