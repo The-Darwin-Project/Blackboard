@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "2b9df87" # Updated by CI to commit SHA
+  tag: "e861775" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -411,9 +411,9 @@ ephemeralAgents:
   excludeNodes: []
   #  - hostname-to-exclude
   # Health-aware spawn polling
-  spawnDeadlineSec: 300    # Absolute ceiling for spawn wait (emergency flange)
-  pollIntervalSec: 10      # Seconds between K8s pod status polls
-  stallTimeoutSec: 60      # No-progress threshold before prune
+  spawnDeadlineSec: 300 # Absolute ceiling for spawn wait (emergency flange)
+  pollIntervalSec: 10 # Seconds between K8s pod status polls
+  stallTimeoutSec: 60 # No-progress threshold before prune
   cleanup:
     strategy: "keep" # "keep-since" (age-based) or "keep" (count-based)
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)
