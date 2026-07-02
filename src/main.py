@@ -198,13 +198,30 @@ async def lifespan(app: FastAPI):
         el_url = os.getenv("TEKTON_EVENTLISTENER_URL", "")
         if el_url:
             from .agents.ephemeral_provisioner import EphemeralProvisioner
+
+            health_port = None
+            try:
+                from .adapters.spawn_health import KubernetesSpawnHealthAdapter
+                health_port = KubernetesSpawnHealthAdapter(
+                    namespace=os.getenv("POD_NAMESPACE", "darwin"),
+                )
+            except Exception:
+                logger.warning("SpawnHealthAdapter unavailable — provisioner will use blind wait", exc_info=True)
+
             provisioner = EphemeralProvisioner(
                 registry=agent_registry,
                 event_listener_url=el_url,
+                health_port=health_port,
+                deadline_sec=float(os.getenv("EPHEMERAL_SPAWN_DEADLINE_SEC", "300")),
+                poll_interval_sec=float(os.getenv("EPHEMERAL_POLL_INTERVAL_SEC", "10")),
+                stall_timeout_sec=float(os.getenv("EPHEMERAL_STALL_TIMEOUT_SEC", "60")),
             )
             agent_registry.set_ephemeral_registered_callback(provisioner.on_ephemeral_registered)
             brain.set_ephemeral_provisioner(provisioner)
-            logger.info("EphemeralProvisioner initialized (url=%s)", el_url)
+            logger.info(
+                "EphemeralProvisioner initialized (url=%s, health_port=%s)",
+                el_url, type(health_port).__name__ if health_port else "None",
+            )
         
         # === DEX OIDC Key Adapter ===
         if DEX_ENABLED:

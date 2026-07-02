@@ -20,6 +20,8 @@ import os
 import time
 from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 
+from .k8s_constants import UNHEALTHY_STATES, PENDING_THRESHOLD_SECONDS
+
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
@@ -50,8 +52,8 @@ class KubernetesObserver:
     Maps pod names to service names using the 'app' label.
     """
     
-    # Unhealthy container states that should trigger investigation
-    UNHEALTHY_STATES = {"ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff", "OOMKilled", "Error", "CreateContainerError"}
+    # Imported from k8s_constants — single source of truth for observer + spawn adapter
+    UNHEALTHY_STATES = UNHEALTHY_STATES
     
     # K8s Event reasons that indicate pod-level issues (even when pod status is Running)
     WARNING_EVENT_REASONS = {"Unhealthy", "BackOff", "Failed", "FailedMount", "FailedScheduling"}
@@ -639,7 +641,7 @@ class KubernetesObserver:
                     )
         self._active_warnings = new_warnings
     
-    PENDING_THRESHOLD_SECONDS = 300  # 5 min -- pods stuck in Pending/Init longer than this are unhealthy
+    PENDING_THRESHOLD_SECONDS = PENDING_THRESHOLD_SECONDS
 
     def _get_unhealthy_reason(self, pod) -> Optional[str]:
         """Extract unhealthy reason from pod phase + container statuses."""
