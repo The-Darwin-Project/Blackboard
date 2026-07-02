@@ -81,7 +81,7 @@ async def handle_take_note(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
         action="tool_result",
-        thoughts=f"Noted ({result['note_id'][:8]}): {content[:80]}",
+        thoughts=f"Noted ({result['note_id'][:8]}): {content}",
         waitingFor="take_note",
         response_parts=response_parts,
     )
