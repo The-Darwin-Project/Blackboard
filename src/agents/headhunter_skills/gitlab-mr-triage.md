@@ -127,10 +127,8 @@ Always treat mergeable + pipeline running as "external process in flight, needs 
 </merge_semantics>
 
 <pipeline_rule>
-## Running Pipeline Rule
+## Running Pipeline
 
-When Pipeline status is "running":
-- Reference the pipeline ID in your step summary
-- Use language that implies verification: "Verify pipeline {id} status", not "Monitor pipeline"
-- The Brain will dispatch an agent to check, then enter VERIFY and defer with calibrated timing
+A running pipeline is an external process in flight — verification steps must
+reference the pipeline ID so the Brain can dispatch an agent to check its outcome.
 </pipeline_rule>
