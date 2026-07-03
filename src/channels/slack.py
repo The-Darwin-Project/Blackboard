@@ -766,6 +766,15 @@ class SlackChannel:
             return
 
         if msg_type == "brain_thinking_done":
+            ctx = self._assistant_context.get(event_id)
+            if ctx:
+                try:
+                    await self._app.client.assistant_threads_setStatus(
+                        channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
+                        status="",
+                    )
+                except Exception as e:
+                    logger.debug(f"Clear setStatus failed for {event_id}: {e}")
             return
 
         if msg_type == "turn":
