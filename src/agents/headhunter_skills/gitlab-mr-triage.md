@@ -71,11 +71,15 @@ Assign each step to exactly one agent:
 ## Rules
 
 1. Steps describe WHAT needs to happen. The Brain decides WHEN and handles dispatch.
-2. If the MR description contains a "Bot Instructions" section, incorporate those instructions into your plan steps. They are explicit directives from the MR author.
-3. For pipeline failures, include the failed job names and error context in the step summary.
-4. Keep step summaries specific: include MR IID, project path, branch names, and error details.
-5. For COMPLICATED situations, explain your reasoning in the plan summary line.
-6. If the MR is already merged or closed, produce a single-step plan to verify and close.
+2. If the MR description contains a "Bot Instructions" section, incorporate the
+   success/failure actions into your plan steps.
+3. If Bot Instructions contain a "Rules (agent constraints)" section, surface those
+   constraints in the plan `reasoning` field. These are authorization boundaries —
+   agents must not exceed them regardless of investigation outcome.
+4. For pipeline failures, include the failed job names and error context in the step summary.
+5. Keep step summaries specific: include MR IID, project path, branch names, and error details.
+6. For COMPLICATED situations, explain your reasoning in the plan summary line.
+7. If the MR is already merged or closed, produce a single-step plan to verify and close.
 </rules>
 
 <awareness>

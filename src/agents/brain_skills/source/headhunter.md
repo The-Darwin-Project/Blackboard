@@ -44,52 +44,25 @@ maintainer decide.
 
 ## Maintainer Notification
 
-Notifications are an interrupt. Every notification demands context-switching
-from a human -- so the signal must carry information that requires human
-judgment or action. Routine success is not that signal; it is noise that
-erodes trust in the notification channel.
-
-**When to notify:**
-- Pipeline failure after retry
-- Stuck pipeline (no progress after multiple checks)
-- Merge conflicts
-- Any outcome requiring human action
-
-**When NOT to notify:**
-- MR/PR already merged with successful pipeline — **self-resolved, close silently**
-- Routine successful merges — these create noise
-- Events where no human action is needed
-
-If the MR/PR is already merged and the pipeline passed, close the event WITHOUT
-notifying anyone. The maintainers do not need to know about routine success.
+Notifications are an interrupt — every notification demands context-switching
+from a human. The signal must carry information that requires human judgment
+or action. Routine success requires neither. Self-resolved events (MR merged,
+pipeline passed) carry no actionable signal for the maintainer.
 
 ## Close Protocol
 
-Headhunter events have no human requester in the conversation -- they are
-machine-initiated observations of GitLab state. No one is waiting for
-confirmation, so the closure decision is yours alone. However, state drifts
-during investigation: the MR/PR that was "failing" at triage time may have
-been merged by a human or self-healed by retry. Acting on stale state wastes
-agent cycles and produces false escalations.
+Headhunter events are machine-initiated — no human is waiting for confirmation.
+State drifts during investigation: the MR/PR that was "failing" at triage time
+may have been merged or self-healed. Acting on stale state produces false
+escalations. Refresh state before closing.
 
-Headhunter events are autonomous -- no user confirmation needed.
+Notifications post to the #darwin-infra thread and each maintainer gets a DM.
+Replies from either reach the event conversation. If the event is already
+closed, a follow-up event is created automatically. The Jira incident is the
+offline tracking artifact.
 
-Before closing, enter verify phase to check current MR/PR state.
-Investigation windows drift -- act on refreshed state, not triage state.
-If MR/PR merged or closed: self-resolved, close without incident.
-
-For pipeline failures where the MR/PR is still open: the failure reason
-must be known before escalating. Follow the close sequence in `close/when-to-close.md`
-and the fix proposal workflow in `dispatch/deep-memory-fixes.md`.
-
-Note: Notifications post to the #darwin-infra thread (visible to the
-team) and each maintainer gets a DM with a link to the thread. Replies
-from either the DM or the infra thread reach the event conversation.
-If the event is already closed, a follow-up event is created
-automatically. The Jira incident is the offline tracking
-artifact.
-
-For bot-authored MRs where the failure is non-recoverable: close the MR/PR (the bot will create a fresh one). For human-authored MRs: leave the MR/PR open.
+Bot-authored MRs with non-recoverable failures: close the MR/PR (the bot
+will recreate). Human-authored MRs: leave the MR/PR open.
 
 ## Temporal Reasoning
 
