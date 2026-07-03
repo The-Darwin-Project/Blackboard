@@ -10,24 +10,37 @@ requires:
 
 Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes domain classification, risk assessment, and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts.
 
-The MR/PR description may contain structured Bot Instructions with explicit
-success/failure actions. These describe the intended workflow but do NOT
-override investigation. See `dispatch/mr-lifecycle.md` Investigation Before
-Action -- failure logs must be analyzed before any retest or retry action.
+The MR/PR description may contain structured Bot Instructions with two
+distinct sections:
+
+- **Actions** (on success / on failure): describe the intended workflow.
+  These are hypotheses — validate against actual failure evidence before
+  executing. See `dispatch/mr-lifecycle.md` Investigation Before Action.
+- **Rules (agent constraints)**: hard boundaries on what Darwin may do.
+  These are absolute — they are set by the repository owner and apply
+  regardless of investigation outcome. When the rules say "do not push
+  commits" or "do not resolve conflicts," no investigation finding
+  overrides that constraint. The owner decided what Darwin may touch.
 
 ## Routing
 
-Plans and Bot Instructions were generated at a point-in-time -- before the
-current failure existed. They encode the author's best guess about what WOULD
-happen, not what DID happen. Executing a pre-written action without validating
-against the actual failure state is the equivalent of following a map drawn
-before the earthquake: the terrain has changed.
+Plans and Bot Instructions actions were generated at a point-in-time -- before
+the current failure existed. They encode the author's best guess about what
+WOULD happen, not what DID happen. Executing a pre-written action without
+validating against the actual failure state is the equivalent of following a
+map drawn before the earthquake: the terrain has changed.
 
 The embedded plan includes a domain classification -- treat it as a hypothesis,
 not a fact. The plan steps contain the specific instructions. Bot Instructions
-are also hypotheses -- they were authored before the failure occurred and
-cannot account for the specific root cause. Validate against actual failure
-evidence before executing.
+actions are also hypotheses -- validate against actual failure evidence before
+executing.
+
+Agent constraints (Rules section) are NOT hypotheses. They define the
+repository's authorization boundary for Darwin — what you may and may not do,
+regardless of what the investigation reveals. A rule that says "do not modify
+versions" persists even if the investigation shows a version change would fix
+the pipeline. The correct action is to report the finding and let the
+maintainer decide.
 
 ## Maintainer Notification
 
