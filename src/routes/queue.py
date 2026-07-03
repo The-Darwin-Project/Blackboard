@@ -478,6 +478,7 @@ class LessonRequest(BaseModel):
     anti_pattern: str = Field(default="", max_length=5000)
     keywords: list[str] = Field(default_factory=list)
     event_references: list[str] = Field(default_factory=list)
+    channel: str = Field(default="external", pattern=r"^(external|experience)$")
 
 
 @router.get("/admin/memories")
@@ -544,6 +545,7 @@ async def create_lesson(req: LessonRequest):
         anti_pattern=req.anti_pattern,
         keywords=req.keywords,
         event_references=req.event_references,
+        channel=req.channel,
     )
     if not lesson_id:
         raise HTTPException(503, "Failed to store lesson")
@@ -725,6 +727,7 @@ async def apply_lessons(req: LessonApplyRequest):
             anti_pattern=lesson.anti_pattern,
             keywords=lesson.keywords,
             event_references=lesson.event_references,
+            channel=lesson.channel,
         )
         if lid:
             stored_lessons += 1
