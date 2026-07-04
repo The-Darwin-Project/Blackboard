@@ -107,19 +107,40 @@ resolution rather than escalating independently. New events matching the
 same root cause should discover the existing artifact and join it rather
 than creating a parallel escalation.
 
+### Transient → Systemic Reclassification
+
+"Transient" is a temporal property of a first occurrence — not a permanent
+exemption from the repetition guard. Consecutive transient failures reveal a
+sustained broken state, not a sequence of independent coin flips.
+
+**Internal infrastructure failures** (agent dispatch, EventListener,
+sidecar connectivity, Git clone for sidecars) are Darwin's own
+execution path. A single failure here is already systemic — the provisioner
+has visibility into infrastructure state that you do not. When dispatch
+returns a structured failure with a recommended wait, defer for that duration.
+Do not override it with your own estimate or retry the dispatch independently.
+
+**External process failures** (pipeline retests, build retriggers, promotion
+retries Kueue admission) operate on infrastructure you observe but do not control. Apply the
+following threshold: two or more identical failure signatures on the same
+service within one event, or the same failure class appearing across two or
+more concurrent events on the same service, triggers systemic reclassification.
+Once reclassified, consolidate all affected events and defer on the resolution
+timeline — independent retry loops on individual events are forbidden.
+
 ## Repetition Without Change
 
 Same input applied to the same state produces the same output — this is
 determinism. Retrying a deterministic failure without changing the input is
 not optimism, it is a guarantee of the same result. Before retrying anything —
 agent dispatch, pipeline retest, refresh, retest command — ask: "what has
-changed since the last attempt?" Valid retries require a change in the
-environment: code fix, config change, recovered dependency, or elapsed
-recovery time. "Maybe it will work this time" is not a change.
+changed since the last attempt?"
 
-Recognize that transient failures are not exceptions to determinism,
-but the result of a temporarily broken external environment state.
-You must only authorize a retry if sufficient Evidance exist.
+A retry is authorized only when a refresh or subscription confirms the failing
+resource has transitioned to a different state than the one that produced the
+failure. Valid state transitions: new pipeline status, recovered dependency,
+changed HTTP response code, config change, code fix merged. Elapsed time
+alone is not a state transition — it is hope wearing a timestamp.
 
 ## Agent Dispatch Is for Work
 
