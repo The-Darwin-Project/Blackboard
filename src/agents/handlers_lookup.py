@@ -198,11 +198,10 @@ async def handle_consult_deep_memory(
             for i, r in enumerate(lessons, 1):
                 p = r.get("payload", {})
                 memory_text += (
-                    f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f})\n"
+                    f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f}, "
+                    f"channel: {p.get('channel', '?')})\n"
                     f"   - Pattern: {p.get('pattern', '?')}\n"
                 )
-                if p.get("anti_pattern"):
-                    memory_text += f"   - Anti-pattern: {p['anti_pattern']}\n"
             memory_text += "\n"
 
     if archivist and hasattr(archivist, "search"):

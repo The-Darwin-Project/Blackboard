@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 
 from typing import Optional
@@ -340,14 +341,14 @@ async def close_event_by_user(
         event.service,
         f"{event.event.reason} -- user force-closed. {body.reason}"
     )
-    # Archive to deep memory (same path as Brain._close_and_broadcast)
+    # Archive to deep memory (fire-and-forget, same path as Brain._close_and_broadcast)
     try:
         brain = await get_brain()
         archivist = brain.agents.get("_archivist_memory")
         if archivist and hasattr(archivist, "archive_event"):
             closed_event = await blackboard.get_event(event_id)
             if closed_event:
-                await archivist.archive_event(closed_event)
+                asyncio.create_task(archivist.archive_event(closed_event))
     except Exception as e:
         logger.warning(f"Deep memory archive failed for {event_id} (non-fatal): {e}")
     logger.info(f"User force-closed event {event_id}: {body.reason}")
@@ -589,11 +590,7 @@ async def demote_lesson(lesson_id: str):
         f"{payload.get('title', '')} {payload.get('pattern', '')} "
         f"{payload.get('anti_pattern', '')} {' '.join(payload.get('keywords', []))}"
     )
-    embed_response = await archivist._client.aio.models.embed_content(
-        model="text-embedding-005",
-        contents=embed_text,
-    )
-    vector = embed_response.embeddings[0].values
+    vector = await archivist._embed(embed_text)
 
     await archivist._vector_store.upsert(
         collection="darwin_lessons",
@@ -607,7 +604,7 @@ async def demote_lesson(lesson_id: str):
 
 @router.patch("/admin/lessons/{lesson_id}/verify")
 async def verify_lesson(lesson_id: str):
-    """Increment verification_count for a lesson.
+    """Increment verification_count for a lesson. Auto-promotes experience→external at count >= 3.
 
     Missing verification_count on legacy lessons defaults to 0.
     """
@@ -627,17 +624,21 @@ async def verify_lesson(lesson_id: str):
         raise HTTPException(404, f"Lesson {lesson_id} not found")
 
     payload = points[0].get("payload", {})
-    payload["verification_count"] = payload.get("verification_count", 0) + 1
+    new_count = payload.get("verification_count", 0) + 1
+    payload["verification_count"] = new_count
+
+    promoted = False
+    if new_count >= 3 and payload.get("channel") == "experience":
+        payload["channel"] = "external"
+        payload["promoted_at"] = time.time()
+        promoted = True
+        logger.info(f"Lesson {lesson_id} promoted: experience → external (verification_count={new_count})")
 
     embed_text = (
         f"{payload.get('title', '')} {payload.get('pattern', '')} "
         f"{payload.get('anti_pattern', '')} {' '.join(payload.get('keywords', []))}"
     )
-    embed_response = await archivist._client.aio.models.embed_content(
-        model="text-embedding-005",
-        contents=embed_text,
-    )
-    vector = embed_response.embeddings[0].values
+    vector = await archivist._embed(embed_text)
 
     await archivist._vector_store.upsert(
         collection="darwin_lessons",
@@ -645,9 +646,12 @@ async def verify_lesson(lesson_id: str):
         vector=vector,
         payload=payload,
     )
-    new_count = payload["verification_count"]
     logger.info(f"Lesson {lesson_id} verified: count={new_count}")
-    return {"status": "verified", "lesson_id": lesson_id, "verification_count": new_count}
+    result = {"status": "verified", "lesson_id": lesson_id, "verification_count": new_count}
+    if promoted:
+        result["promoted"] = True
+        result["channel"] = "external"
+    return result
 
 
 @router.delete("/admin/lessons/{lesson_id}")

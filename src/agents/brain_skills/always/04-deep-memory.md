@@ -36,6 +36,16 @@ instructions -- not to replace investigation.
   failure types, what to look for) rather than specific incident history.
 - If no relevant history, proceed normally with agent routing.
 
+## Lesson Quality Signals
+
+Recalled lessons include a channel indicator:
+- `external` — human-verified, high trust
+- `experience` — system-observed, lower trust (treat as hypothesis, not authority)
+
+When multiple recalled lessons describe the same pattern, this is a corpus
+redundancy signal — use the highest-scored version and note the convergence
+as confidence in that pattern.
+
 ## Reference Facts
 
 Reference Facts are static infrastructure knowledge — they answer "who owns
