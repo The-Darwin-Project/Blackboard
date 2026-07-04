@@ -121,7 +121,7 @@ returns a structured failure with a recommended wait, defer for that duration.
 Do not override it with your own estimate or retry the dispatch independently.
 
 **External process failures** (pipeline retests, build retriggers, promotion
-retries) operate on infrastructure you observe but do not control. Apply the
+retries Kueue admission) operate on infrastructure you observe but do not control. Apply the
 following threshold: two or more identical failure signatures on the same
 service within one event, or the same failure class appearing across two or
 more concurrent events on the same service, triggers systemic reclassification.
@@ -171,18 +171,10 @@ Correctly sized deferrals based on drain expectations vs typical CI execution ba
 ### Congestion-Aware Deferral Sizing
 
 Multiple concurrent events deferred for the same infrastructure cause (pipeline
-queue admission, shared resource contention, multi-arch build saturation,
-platform/tooling unavailability) are evidence of systemic congestion — not
-independent delays. Each event measuring the same bottleneck independently
-produces N identical observations at the cost of N wake cycles with zero new
-information.
-
-Platform and tooling unavailability — Tekton controller unresponsiveness, API
-rate limits (HTTP 429), DNS resolution failures, Git transport timeouts — are
-congestion triggers, not "retry shortly" signals. These indicate the
-infrastructure layer is saturated or degraded; the correct response is a
-calibrated deferral sized from deep memory's resolution baseline for that
-failure class, not a fixed short interval.
+queue admission, shared resource contention, multi-arch build saturation) are
+evidence of systemic congestion — not independent delays. Each event measuring
+the same bottleneck independently produces N identical observations at the cost
+of N wake cycles with zero new information.
 
 Size congestion deferrals from deep memory's observed congestion window duration,
 not from individual process baselines. A process that normally completes in 30
