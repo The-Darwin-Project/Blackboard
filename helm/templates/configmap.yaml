@@ -44,6 +44,13 @@ data:
   # Quota rate limiter
   LLM_TPM_LIMIT: "{{ .Values.gcp.tpmLimit }}"
   
+  # Archivist Lesson Quality Thresholds
+  LESSON_DEDUP_THRESHOLD: "{{ .Values.archivist.lessonDedupThreshold }}"
+  LESSON_DEDUP_SEARCH_LIMIT: "{{ .Values.archivist.lessonDedupLimit }}"
+  LESSON_RECALL_OVERFETCH: "{{ .Values.archivist.lessonRecallOverfetch }}"
+  LESSON_RECALL_SCORE_FLOOR: "{{ .Values.archivist.lessonRecallScoreFloor }}"
+  LESSON_RECALL_MAX_EXPERIENCE: "{{ .Values.archivist.lessonRecallMaxExperience }}"
+  
   # Brain Progressive Skills
   BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"
   

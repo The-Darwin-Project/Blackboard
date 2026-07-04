@@ -3655,10 +3655,7 @@ class Brain:
             # Archive to deep memory (fire-and-forget, non-blocking)
             archivist = self.agents.get("_archivist_memory")
             if archivist and hasattr(archivist, "archive_event"):
-                try:
-                    await archivist.archive_event(event)
-                except Exception as e:
-                    logger.warning(f"Deep memory archive failed (non-fatal): {e}")
+                asyncio.create_task(archivist.archive_event(event))
         # Cancel any active state watcher subscription
         if self._state_watcher:
             self._state_watcher.cancel(event_id)
@@ -3979,10 +3976,7 @@ class Brain:
                 # Archive to deep memory (same as _close_and_broadcast path)
                 archivist = self.agents.get("_archivist_memory")
                 if archivist and hasattr(archivist, "archive_event"):
-                    try:
-                        await archivist.archive_event(event)
-                    except Exception as e:
-                        logger.warning(f"Deep memory archive failed for {eid} (non-fatal): {e}")
+                    asyncio.create_task(archivist.archive_event(event))
                 stale_count += 1
             else:
                 # No turns yet -- re-queue for fresh processing

@@ -233,6 +233,15 @@ skillReconciler:
     limits:
       memory: 128Mi
 # =============================================================================
+# Archivist Quality Thresholds (lesson memory pipeline)
+# =============================================================================
+archivist:
+  lessonDedupThreshold: 0.85 # Cosine similarity above which lessons are merged (not duplicated)
+  lessonDedupLimit: 5 # Number of nearest-neighbor candidates to check for dedup
+  lessonRecallOverfetch: 20 # Internal search limit (before rerank + truncation to caller limit)
+  lessonRecallScoreFloor: 0.55 # Raw cosine floor -- results below this are dropped before weighting
+  lessonRecallMaxExperience: 1 # Max experience-channel lessons in final recall set
+# =============================================================================
 # Brain Scheduling (ReconcileScheduler)
 # =============================================================================
 brain:
