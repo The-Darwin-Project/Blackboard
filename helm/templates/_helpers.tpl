@@ -29,9 +29,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/*
 Ephemeral agent component labels.
 Used on: EventListener, TaskRuns, ephemeral RBAC.
+NOTE: app label MUST differ from darwin.selectorLabels to avoid
+      EventListener pods polluting the Brain Service endpoints.
 */}}
 {{- define "darwin.ephemeralLabels" -}}
-app: darwin-brain
+app: darwin-ephemeral-dispatcher
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: ephemeral-agent
 {{- end }}
