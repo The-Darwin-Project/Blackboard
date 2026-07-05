@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.observers.k8s_constants import SpawnStatus, SpawnPollResult
@@ -192,6 +193,7 @@ class TestCircuitBreaker:
 
         hp = AsyncMock()
         hp.poll_spawn_status = poll_fail
+        hp.clear_event = MagicMock()
         prov, registry = _make_provisioner(
             health_port=hp, deadline_sec=2, poll_interval_sec=0.05,
         )
@@ -203,6 +205,7 @@ class TestCircuitBreaker:
 
         assert result == INFRA_SENTINEL
         assert prov._infra_failures.get("evt-test001") == 1
+        assert hp.clear_event.call_count == 2
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_trips_on_third_call(self):
@@ -212,6 +215,7 @@ class TestCircuitBreaker:
 
         hp = AsyncMock()
         hp.poll_spawn_status = poll_fail
+        hp.clear_event = MagicMock()
         prov, _ = _make_provisioner(
             health_port=hp, deadline_sec=1, poll_interval_sec=0.05,
         )
@@ -273,11 +277,13 @@ class TestUnknownFlapping:
 
 
 class TestMultiplePods:
-    def test_newest_pod_selected(self):
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_newest_pod_selected(self, mock_httpx_get):
         """Adapter selects newest pod when N>1 share the same event-id label."""
         from datetime import datetime, timezone
         from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
 
+        mock_httpx_get.return_value = MagicMock(status_code=200)
         adapter = KubernetesSpawnHealthAdapter(namespace="test")
 
         old_pod = MagicMock()
@@ -286,8 +292,10 @@ class TestMultiplePods:
 
         new_pod = MagicMock()
         new_pod.metadata.name = "pod-new"
+        new_pod.metadata.uid = "uid-new"
         new_pod.metadata.creation_timestamp = datetime(2026, 7, 1, tzinfo=timezone.utc)
         new_pod.status.phase = "Running"
+        new_pod.status.pod_ip = "10.0.0.1"
         new_pod.status.container_statuses = []
         new_pod.status.init_container_statuses = []
 
@@ -303,10 +311,12 @@ class TestMultiplePods:
 
 
 class TestTaskRunFallback:
-    def test_label_miss_taskrun_hit(self):
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_label_miss_taskrun_hit(self, mock_httpx_get):
         """Label returns 0 pods → fallback to TaskRun → podName → read pod → classify."""
         from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
 
+        mock_httpx_get.return_value = MagicMock(status_code=200)
         adapter = KubernetesSpawnHealthAdapter(namespace="test")
         adapter._initialized = True
         adapter._core_api = MagicMock()
@@ -316,7 +326,9 @@ class TestTaskRunFallback:
 
         pod_mock = MagicMock()
         pod_mock.metadata.name = "darwin-oncall-abc"
+        pod_mock.metadata.uid = "uid-abc"
         pod_mock.status.phase = "Running"
+        pod_mock.status.pod_ip = "10.0.0.2"
         pod_mock.status.container_statuses = [
             MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
         ]
@@ -410,3 +422,301 @@ class TestImportFailDegradation:
             await prov._wait_for_registration("evt-test001", 0.3, 0.05, 60)
 
         assert "evt-test001" not in prov._pending
+
+
+# ===== Phase 2: Sidecar /health Probe Tests =====
+
+
+class TestHealthProbeSuccess:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_health_probe_success(self, mock_httpx_get):
+        """200 from /health → reason=sidecar_healthy, status=RUNNING."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-health"
+        pod.metadata.uid = "uid-001"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.5"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        result = adapter._poll_sync("evt-health")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_healthy"
+        mock_httpx_get.assert_called_once_with("http://10.0.0.5:9090/health", timeout=2.0)
+
+
+class TestHealthProbeNotReady:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_health_probe_not_ready(self, mock_httpx_get):
+        """Health timeout, not previously healthy → reason=sidecar_not_ready, RUNNING."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        mock_httpx_get.side_effect = httpx.TimeoutException("timeout")
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-boot"
+        pod.metadata.uid = "uid-002"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.6"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        result = adapter._poll_sync("evt-boot")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_not_ready"
+
+
+class TestHealthProbeCrashDetection:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_health_probe_crash_detection(self, mock_httpx_get):
+        """Healthy → 2 consecutive failures → FAILED sidecar_crashed."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-crash"
+        pod.metadata.uid = "uid-003"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.7"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        # First poll: healthy
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+        r1 = adapter._poll_sync("evt-crash")
+        assert r1.reason == "sidecar_healthy"
+
+        # Second poll: failure #1
+        mock_httpx_get.side_effect = ConnectionError("refused")
+        r2 = adapter._poll_sync("evt-crash")
+        assert r2.status == SpawnStatus.RUNNING
+        assert r2.reason == "sidecar_suspect"
+
+        # Third poll: failure #2 → FAILED
+        r3 = adapter._poll_sync("evt-crash")
+        assert r3.status == SpawnStatus.FAILED
+        assert "sidecar_crashed" in r3.reason
+
+
+class TestSingleMissNotFatal:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_single_miss_after_healthy_not_fatal(self, mock_httpx_get):
+        """Healthy then ONE failure → RUNNING sidecar_suspect (not FAILED)."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-flap"
+        pod.metadata.uid = "uid-004"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.8"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        # Healthy first
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+        adapter._poll_sync("evt-flap")
+
+        # Single failure
+        mock_httpx_get.side_effect = ConnectionError("blip")
+        result = adapter._poll_sync("evt-flap")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_suspect"
+
+
+class TestRetryResetsHealthState:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_retry_resets_health_state(self, mock_httpx_get):
+        """New pod UID on retry → state resets, first failure on new pod = RUNNING."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        # Old pod was healthy
+        old_pod = MagicMock()
+        old_pod.metadata.name = "pod-old"
+        old_pod.metadata.uid = "uid-old"
+        old_pod.status.phase = "Running"
+        old_pod.status.pod_ip = "10.0.0.9"
+        old_pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        old_pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[old_pod])
+
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+        adapter._poll_sync("evt-retry")
+
+        # New pod (different UID) — first probe fails
+        new_pod = MagicMock()
+        new_pod.metadata.name = "pod-new"
+        new_pod.metadata.uid = "uid-new"
+        new_pod.status.phase = "Running"
+        new_pod.status.pod_ip = "10.0.0.10"
+        new_pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        new_pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[new_pod])
+
+        mock_httpx_get.side_effect = ConnectionError("refused")
+        result = adapter._poll_sync("evt-retry")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_not_ready"
+
+
+class TestNoPodIpSkipsProbe:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_no_pod_ip_skips_probe(self, mock_httpx_get):
+        """pod_ip=None → RUNNING, no HTTP call attempted."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-noip"
+        pod.metadata.uid = "uid-noip"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = None
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        result = adapter._poll_sync("evt-noip")
+        assert result.status == SpawnStatus.RUNNING
+        mock_httpx_get.assert_not_called()
+
+
+class TestClearEventRemovesState:
+    def test_clear_event_removes_state(self):
+        """clear_event removes health state for given event."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter, _PodHealthState
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._health_state["evt-clear"] = _PodHealthState(
+            pod_uid="uid-x", was_healthy=True,
+            consecutive_misses=0, boot_first_seen=0.0,
+        )
+
+        adapter.clear_event("evt-clear")
+        assert "evt-clear" not in adapter._health_state
+
+    def test_clear_event_noop_on_missing(self):
+        """clear_event on unknown event_id is a no-op."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter.clear_event("evt-nonexistent")
+
+
+class TestBootTimeout:
+    @patch("src.adapters.spawn_health.time.monotonic")
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_boot_timeout_never_healthy(self, mock_httpx_get, mock_monotonic):
+        """Never healthy + 120s+ elapsed → FAILED sidecar_boot_timeout."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        mock_httpx_get.side_effect = ConnectionError("refused")
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        pod = MagicMock()
+        pod.metadata.name = "pod-stuck"
+        pod.metadata.uid = "uid-stuck"
+        pod.status.phase = "Running"
+        pod.status.pod_ip = "10.0.0.11"
+        pod.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod])
+
+        # First poll at t=100 — establishes boot_first_seen
+        mock_monotonic.return_value = 100.0
+        r1 = adapter._poll_sync("evt-stuck")
+        assert r1.status == SpawnStatus.RUNNING
+        assert r1.reason == "sidecar_not_ready"
+
+        # Second poll at t=221 — exceeds 120s boot timeout
+        mock_monotonic.return_value = 221.0
+        r2 = adapter._poll_sync("evt-stuck")
+        assert r2.status == SpawnStatus.FAILED
+        assert "sidecar_boot_timeout" in r2.reason
+
+
+class TestEvaluateHealthWiring:
+    @patch("src.adapters.spawn_health.httpx.get")
+    def test_evaluate_health_called_only_for_running(self, mock_httpx_get):
+        """_poll_sync calls _evaluate_health ONLY when _classify_pod returns RUNNING."""
+        from src.adapters.spawn_health import KubernetesSpawnHealthAdapter
+
+        adapter = KubernetesSpawnHealthAdapter(namespace="test")
+        adapter._initialized = True
+        adapter._core_api = MagicMock()
+
+        # FAILED pod — _evaluate_health should NOT be called
+        pod_failed = MagicMock()
+        pod_failed.metadata.name = "pod-fail"
+        pod_failed.metadata.uid = "uid-fail"
+        pod_failed.status.phase = "Failed"
+        pod_failed.status.pod_ip = "10.0.0.12"
+        pod_failed.status.container_statuses = []
+        pod_failed.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod_failed])
+
+        result = adapter._poll_sync("evt-wire-fail")
+        assert result.status == SpawnStatus.FAILED
+        mock_httpx_get.assert_not_called()
+
+        # RUNNING pod — _evaluate_health IS called
+        pod_running = MagicMock()
+        pod_running.metadata.name = "pod-run"
+        pod_running.metadata.uid = "uid-run"
+        pod_running.status.phase = "Running"
+        pod_running.status.pod_ip = "10.0.0.13"
+        pod_running.status.container_statuses = [
+            MagicMock(state=MagicMock(waiting=None, terminated=None, running=MagicMock()), started=True),
+        ]
+        pod_running.status.init_container_statuses = []
+        adapter._core_api.list_namespaced_pod.return_value = MagicMock(items=[pod_running])
+        mock_httpx_get.return_value = MagicMock(status_code=200)
+
+        result = adapter._poll_sync("evt-wire-run")
+        assert result.status == SpawnStatus.RUNNING
+        assert result.reason == "sidecar_healthy"
+        mock_httpx_get.assert_called_once()

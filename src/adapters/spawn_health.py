@@ -6,6 +6,8 @@
 # 4. [Constraint]: No Brain logic, no Redis, no LLM — pure infrastructure.
 # 5. [Gotcha]: BearerToken workaround required for kubernetes client v36+ (see kubernetes.py:169-177).
 # 6. [Gotcha]: _request_timeout=(5, 10) on all K8s API calls to prevent thread pool starvation.
+# 7. [Pattern]: Synchronous HTTP probes (httpx.get) in thread pool for sidecar health checks.
+# 8. [Gotcha]: HTTP probe runs OUTSIDE threading.Lock — never hold lock during I/O.
 """
 Kubernetes-backed spawn health adapter.
 
@@ -17,10 +19,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+
+import httpx
 
 from src.observers.k8s_constants import UNHEALTHY_STATES, SpawnStatus, SpawnPollResult
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PodHealthState:
+    """Per-pod health tracking state — keyed by event_id, identity by pod UID."""
+    pod_uid: str
+    was_healthy: bool
+    consecutive_misses: int
+    boot_first_seen: float
 
 
 class KubernetesSpawnHealthAdapter:
@@ -31,28 +48,36 @@ class KubernetesSpawnHealthAdapter:
     2. Fallback: list TaskRuns by label → read ``status.podName`` → read pod
     """
 
-    def __init__(self, namespace: str) -> None:
+    SIDECAR_BOOT_TIMEOUT_SEC = 120
+
+    def __init__(self, namespace: str, max_workers: int = 20) -> None:
         self._namespace = namespace
         self._core_api = None
         self._custom_api = None
         self._initialized = False
+        self._health_state: dict[str, _PodHealthState] = {}
+        self._state_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="spawn-health")
+
+    def clear_event(self, event_id: str) -> None:
+        """Remove health state for an event (cancel/terminate cleanup)."""
+        with self._state_lock:
+            self._health_state.pop(event_id, None)
 
     async def poll_spawn_status(self, event_id: str) -> SpawnPollResult:
         """Poll pod status for an ephemeral agent spawn."""
+        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._poll_sync, event_id)
+            return await loop.run_in_executor(self._executor, self._poll_sync, event_id)
         except Exception as exc:
             reason = f"{type(exc).__name__}: {getattr(exc, 'status', '')}"
-            self._consecutive_errors = getattr(self, "_consecutive_errors", 0) + 1
-            lvl = logging.WARNING if self._consecutive_errors >= 3 else logging.DEBUG
-            logger.log(lvl, "Spawn health poll error for %s: %s", event_id, reason)
+            logger.warning("Spawn health poll error for %s: %s", event_id, reason)
             return SpawnPollResult(status=SpawnStatus.UNKNOWN, reason=reason)
 
     def _poll_sync(self, event_id: str) -> SpawnPollResult:
-        """Synchronous poll — runs in thread pool."""
+        """Synchronous poll — runs in dedicated thread pool."""
         if not self._initialized:
             self._init_k8s_client()
-        self._consecutive_errors = 0
 
         label_err: Exception | None = None
         tr_err: Exception | None = None
@@ -75,7 +100,10 @@ class KubernetesSpawnHealthAdapter:
                 return SpawnPollResult(status=SpawnStatus.UNKNOWN, reason=reason)
             return SpawnPollResult(status=SpawnStatus.MISSING)
 
-        return self._classify_pod(pod)
+        result = self._classify_pod(pod)
+        if result.status == SpawnStatus.RUNNING:
+            return self._evaluate_health(pod, event_id, result.pod_name or "")
+        return result
 
     def _find_pod_by_label(self, event_id: str):
         """Primary lookup: pods labeled with darwin.io/event-id.
@@ -174,6 +202,71 @@ class KubernetesSpawnHealthAdapter:
             reason=f"Unclassified phase: {phase}",
             pod_name=pod_name,
         )
+
+    def _evaluate_health(self, pod, event_id: str, pod_name: str) -> SpawnPollResult:
+        """HTTP health probe + state machine for Running pods."""
+        pod_uid = pod.metadata.uid or ""
+        pod_ip = getattr(pod.status, "pod_ip", None) or ""
+        now = time.monotonic()
+
+        if not pod_ip:
+            return SpawnPollResult(status=SpawnStatus.RUNNING, pod_name=pod_name)
+
+        health_ok = self._probe_health(pod_ip)
+
+        with self._state_lock:
+            state = self._health_state.get(event_id)
+            if state is None or state.pod_uid != pod_uid:
+                state = _PodHealthState(
+                    pod_uid=pod_uid, was_healthy=False,
+                    consecutive_misses=0, boot_first_seen=now,
+                )
+
+            if health_ok:
+                state = _PodHealthState(
+                    pod_uid=pod_uid, was_healthy=True,
+                    consecutive_misses=0, boot_first_seen=state.boot_first_seen,
+                )
+                self._health_state[event_id] = state
+                return SpawnPollResult(
+                    status=SpawnStatus.RUNNING, reason="sidecar_healthy",
+                    pod_name=pod_name,
+                )
+
+            state = _PodHealthState(
+                pod_uid=pod_uid, was_healthy=state.was_healthy,
+                consecutive_misses=state.consecutive_misses + 1,
+                boot_first_seen=state.boot_first_seen,
+            )
+            self._health_state[event_id] = state
+
+            if state.was_healthy and state.consecutive_misses >= 2:
+                return SpawnPollResult(
+                    status=SpawnStatus.FAILED,
+                    reason="sidecar_crashed: health was responding, 2 consecutive failures",
+                    pod_name=pod_name,
+                )
+
+            boot_elapsed = now - state.boot_first_seen
+            if not state.was_healthy and boot_elapsed > self.SIDECAR_BOOT_TIMEOUT_SEC:
+                return SpawnPollResult(
+                    status=SpawnStatus.FAILED,
+                    reason=f"sidecar_boot_timeout: no health response after {boot_elapsed:.0f}s Running",
+                    pod_name=pod_name,
+                )
+
+            reason = "sidecar_not_ready" if not state.was_healthy else "sidecar_suspect"
+            return SpawnPollResult(
+                status=SpawnStatus.RUNNING, reason=reason, pod_name=pod_name,
+            )
+
+    def _probe_health(self, pod_ip: str) -> bool:
+        """Synchronous HTTP health check — runs in thread pool."""
+        try:
+            resp = httpx.get(f"http://{pod_ip}:9090/health", timeout=2.0)
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     def _init_k8s_client(self) -> None:
         """Lazy K8s client init with BearerToken workaround."""

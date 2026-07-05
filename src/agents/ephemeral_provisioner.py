@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 class SpawnHealthPort(Protocol):
     """Port for polling ephemeral agent pod health during spawn."""
     async def poll_spawn_status(self, event_id: str) -> SpawnPollResult: ...
+    def clear_event(self, event_id: str) -> None: ...
 
 
 class SpawnFailed(Exception):
@@ -95,12 +96,14 @@ class EphemeralProvisioner:
             )
             self._infra_failures.pop(event_id, None)
             return agent
-        except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError, SpawnFailed) as exc:
+        except (httpx.HTTPError, asyncio.TimeoutError, SpawnFailed) as exc:
             logger.warning(
                 "Ephemeral dispatch failed for %s (%d/%d): %s. Cleaning up and retrying.",
                 event_id, failures + 1, MAX_INFRA_FAILURES, exc or "handshake timeout",
             )
             await self._cancel_taskrun(event_id)
+            if self._health_port:
+                self._health_port.clear_event(event_id)
             await asyncio.sleep(5)
 
             try:
@@ -113,13 +116,15 @@ class EphemeralProvisioner:
                 self._infra_failures.pop(event_id, None)
                 logger.info("Ephemeral retry succeeded for %s after cleanup", event_id)
                 return agent
-            except (httpx.ConnectError, httpx.TimeoutException, asyncio.TimeoutError, SpawnFailed) as retry_exc:
+            except (httpx.HTTPError, asyncio.TimeoutError, SpawnFailed) as retry_exc:
                 self._infra_failures[event_id] = failures + 1
                 logger.warning(
                     "Ephemeral retry also failed for %s (%d/%d): %s.",
                     event_id, failures + 1, MAX_INFRA_FAILURES, retry_exc or "handshake timeout",
                 )
                 await self._cancel_taskrun(event_id)
+                if self._health_port:
+                    self._health_port.clear_event(event_id)
                 return INFRA_SENTINEL
 
     def on_ephemeral_registered(self, event_id: str) -> None:
@@ -138,6 +143,8 @@ class EphemeralProvisioner:
             except Exception:
                 logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
         self._infra_failures.pop(event_id, None)
+        if self._health_port:
+            self._health_port.clear_event(event_id)
 
     async def _trigger_taskrun(self, event_id: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
