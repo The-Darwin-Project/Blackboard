@@ -58,7 +58,8 @@ jobs:
           GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'us-central1' }}
           GOOGLE_APPLICATION_CREDENTIALS: "/tmp/vertex-sa.json"
           CI_MERGE_REQUEST_TARGET_BRANCH_NAME: ${{ github.base_ref }}
-          CI_MERGE_REQUEST_SOURCE_BRANCH_NAME: ${{ github.head_ref }}
+          # CI_MERGE_REQUEST_SOURCE_BRANCH_NAME intentionally omitted —
+          # disables doc auto-commits (requires contents:write which we don't grant)
           CI_MERGE_REQUEST_IID: ${{ github.event.pull_request.number }}
           CI_PROJECT_DIR: ${{ github.workspace }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
