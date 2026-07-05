@@ -329,6 +329,11 @@ export interface FlowSnapshot {
   avg_reconcile_ms: number;
   reconcile_count_delta: number;
   error_count_delta: number;
+  dispatch_total?: number;
+  dispatch_success_rate_pct?: number;
+  dispatch_infra_fails?: number;
+  dispatch_circuit_breaks?: number;
+  avg_spawn_latency_sec?: number;
 }
 
 // =============================================================================

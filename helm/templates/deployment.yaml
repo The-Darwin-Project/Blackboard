@@ -260,6 +260,8 @@ spec:
               value: {{ .Values.ephemeralAgents.pollIntervalSec | quote }}
             - name: EPHEMERAL_STALL_TIMEOUT_SEC
               value: {{ .Values.ephemeralAgents.stallTimeoutSec | quote }}
+            - name: EPHEMERAL_INFRA_DEFER_SEC
+              value: {{ .Values.ephemeralAgents.infraDeferSec | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

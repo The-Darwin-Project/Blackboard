@@ -2,8 +2,8 @@
 // @ai-rules:
 // 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
 // 2. [Pattern]: resolveStreamTarget() is a named export pure function (tested in resolveStreamTarget.test.ts).
-//    Backend `ephemeral` flag on progress messages is authoritative (no polling delay).
-//    Fallback: agent-first routing with oncall sub-check via (bound_event_id || current_event_id) AND (current_role || role).
+//    Internal agents ALWAYS route to agentStreams first (oncall sub-check for collision).
+//    Backend `ephemeral` flag is authoritative for non-internal actors only.
 // 3. [Pattern]: Turn handler uses resolveStreamTarget — only mutates agentStreams when target is 'agent'.
 //    Prevents oncall turn from deactivating the permanent agent tile.
 // 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
@@ -83,8 +83,18 @@ export function resolveStreamTarget(
 ): StreamTarget {
   const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
 
-  // Backend ephemeral flag is authoritative and instant (no polling delay).
-  // When present, it short-circuits all heuristic checks.
+  // Internal agents always route to permanent tiles — oncall sub-check
+  // prevents buffer collision when an ephemeral agent shares the same role.
+  if (isInternalAgent) {
+    const isBoundOncall = !!evtId &&
+      ephemeralAgents.some(a =>
+        (a.bound_event_id === evtId || a.current_event_id === evtId)
+        && (a.current_role || a.role) === actor
+      );
+    return isBoundOncall ? 'ephemeral' : 'agent';
+  }
+
+  // Backend ephemeral flag is authoritative for non-internal actors.
   if (ephemeralFlag && evtId) return 'ephemeral';
 
   const isEphemeralEvent = !!evtId && (
@@ -99,15 +109,6 @@ export function resolveStreamTarget(
     ))
   );
 
-  // Oncall sub-check: ephemeral agent working on this event with matching role.
-  const isBoundOncall = isInternalAgent && !!evtId &&
-    ephemeralAgents.some(a =>
-      (a.bound_event_id === evtId || a.current_event_id === evtId)
-      && (a.current_role || a.role) === actor
-    );
-
-  if (isBoundOncall) return 'ephemeral';
-  if (isInternalAgent) return 'agent';
   if (isEphemeralEvent && evtId) return 'ephemeral';
   return 'drop';
 }
@@ -365,6 +366,8 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
+    } else if (msg.type === 'subscription_changed') {
+      invalidateActive();
     } else if (msg.type === 'kargo_stages_update') {
       setKargoStages((msg.stages as KargoStageStatus[]) ?? []);
     } else if (msg.type === 'kargo_event_result') {

@@ -182,16 +182,25 @@ describe('resolveStreamTarget', () => {
   // Backend ephemeral flag (instant routing, no poll dependency)
   // ---------------------------------------------------------------------------
   describe('backend ephemeral flag', () => {
-    it('routes internal agent to ephemeral when backend flag is true', () => {
-      expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', [], undefined, true)).toBe('ephemeral');
+    it('internal agent routes to agent even when backend flag is true (agent-first)', () => {
+      expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', [], undefined, true)).toBe('agent');
+    });
+
+    it('non-internal actor routes to ephemeral when backend flag is true', () => {
+      expect(resolveStreamTarget('oncall-abc', 'evt-1', 'chat', '', [], undefined, true)).toBe('ephemeral');
     });
 
     it('does not override routing when backend flag is false', () => {
       expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', [], undefined, false)).toBe('agent');
     });
 
-    it('requires evtId with ephemeral flag', () => {
-      expect(resolveStreamTarget('sysadmin', '', 'chat', '', [], undefined, true)).toBe('agent');
+    it('requires evtId with ephemeral flag for non-internal actors', () => {
+      expect(resolveStreamTarget('oncall-abc', '', 'chat', '', [], undefined, true)).toBe('drop');
+    });
+
+    it('internal agent with oncall collision still routes to ephemeral', () => {
+      const agents = [makeAgent({ role: '', current_role: 'sysadmin', bound_event_id: 'evt-1' })];
+      expect(resolveStreamTarget('sysadmin', 'evt-1', 'chat', '', agents, undefined, true)).toBe('ephemeral');
     });
   });
 });

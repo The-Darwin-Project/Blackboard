@@ -120,7 +120,7 @@ def _pred_domain_complex(ctx: GateContext) -> bool:
         return False
     agent_rounds = sum(
         1 for t in ctx.conversation
-        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
+        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis", "dispatcher")
     )
     return agent_rounds < 4
 
@@ -376,7 +376,7 @@ def _msg_domain_clear(tool: str, _ctx: GateContext) -> str:
 def _msg_domain_complex(tool: str, ctx: GateContext) -> str:
     agent_rounds = sum(
         1 for t in ctx.conversation
-        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
+        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis", "dispatcher")
     )
     return (
         f"[GATE] {tool} unavailable. State: domain is COMPLEX, {agent_rounds} agent rounds completed. "
@@ -698,7 +698,7 @@ def build_gate_context(
     )
     agent_completions = sum(
         1 for t in conversation
-        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis")
+        if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis", "dispatcher")
         and t.action in ("execute", "plan")
     )
     budget = min(3 + agent_completions, 10) - refresh_count

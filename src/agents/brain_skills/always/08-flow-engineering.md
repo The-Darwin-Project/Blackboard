@@ -119,6 +119,9 @@ execution path. A single failure here is already systemic — the provisioner
 has visibility into infrastructure state that you do not. When dispatch
 returns a structured failure with a recommended wait, defer for that duration.
 Do not override it with your own estimate or retry the dispatch independently.
+The Dispatcher handles these deferrals autonomously via conversation turns —
+when you read `[Dispatch: paused]`, the event is already deferred with a
+calibrated wait. Do not manually defer or retry.
 
 **External process failures** (pipeline retests, build retriggers, promotion
 retries Kueue admission) operate on infrastructure you observe but do not control. Apply the

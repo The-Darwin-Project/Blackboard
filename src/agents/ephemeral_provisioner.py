@@ -40,6 +40,32 @@ INFRA_SENTINEL = "__EPHEMERAL_INFRA_FAIL__"
 MAX_INFRA_FAILURES = 2
 
 
+from dataclasses import dataclass, replace as _dc_replace
+
+
+@dataclass
+class DispatchMetrics:
+    """Counters for dispatch outcomes — exposed as immutable snapshot via property.
+
+    Safe: no await points between counter increments (asyncio single-threaded guarantee).
+    """
+    total: int = 0
+    success: int = 0
+    infra_fail: int = 0
+    circuit_break: int = 0
+    sidecar_fallback: int = 0
+    spawn_latency_sum: float = 0.0
+    spawn_latency_count: int = 0
+
+    @property
+    def avg_spawn_latency_sec(self) -> float:
+        return (self.spawn_latency_sum / self.spawn_latency_count) if self.spawn_latency_count else 0.0
+
+    @property
+    def success_rate_pct(self) -> float:
+        return (self.success / self.total * 100) if self.total else 100.0
+
+
 class EphemeralProvisioner:
     """Provisions ephemeral agents via Tekton EventListener webhook.
 
@@ -67,6 +93,29 @@ class EphemeralProvisioner:
         self._stall_timeout_sec = stall_timeout_sec
         self._pending: dict[str, asyncio.Event] = {}
         self._infra_failures: dict[str, int] = {}
+        self._dispatch_metrics = DispatchMetrics()
+
+    def record_dispatch_success(self, latency_sec: float) -> None:
+        self._dispatch_metrics.total += 1
+        self._dispatch_metrics.success += 1
+        self._dispatch_metrics.spawn_latency_sum += latency_sec
+        self._dispatch_metrics.spawn_latency_count += 1
+
+    def record_dispatch_infra_fail(self) -> None:
+        self._dispatch_metrics.total += 1
+        self._dispatch_metrics.infra_fail += 1
+
+    def record_dispatch_circuit_break(self) -> None:
+        self._dispatch_metrics.total += 1
+        self._dispatch_metrics.circuit_break += 1
+
+    def record_dispatch_sidecar_fallback(self) -> None:
+        self._dispatch_metrics.total += 1
+        self._dispatch_metrics.sidecar_fallback += 1
+
+    @property
+    def dispatch_metrics(self) -> DispatchMetrics:
+        return _dc_replace(self._dispatch_metrics)
 
     async def ensure_agent(self, event_id: str) -> "AgentConnection | str | None":
         """Ensure an ephemeral agent exists for this event. Spawn if needed.

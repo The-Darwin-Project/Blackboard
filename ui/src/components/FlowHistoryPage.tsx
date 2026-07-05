@@ -137,6 +137,12 @@ export default function FlowHistoryPage() {
         <SparkCard title="Reconcile Latency" data={snapshots} dataKey="avg_reconcile_ms" color="#ec4899" unit="ms" />
         <SparkCard title="Subscriptions" data={snapshots} dataKey="active_subscriptions" color="#64748b" />
       </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <SparkCard title="Dispatch Success %" data={snapshots} dataKey="dispatch_success_rate_pct" color="#22c55e" unit="%" />
+        <SparkCard title="Spawn Latency" data={snapshots} dataKey="avg_spawn_latency_sec" color="#64748b" unit="s" />
+        <SparkCard title="Infra Failures" data={snapshots} dataKey="dispatch_infra_fails" color="#ef4444" />
+      </div>
     </div>
   );
 }

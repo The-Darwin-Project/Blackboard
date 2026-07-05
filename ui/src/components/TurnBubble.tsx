@@ -239,6 +239,22 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
     );
   }
 
+  if (turn.actor === 'dispatcher') {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '4px 16px',
+        margin: '4px 0', borderRadius: 6,
+        background: 'rgba(100, 116, 139, 0.08)', fontSize: 12, color: '#64748b',
+      }}>
+        <span style={{ fontWeight: 600 }}>[Dispatch: {turn.action}]</span>
+        <span>{turn.thoughts}</span>
+        <span style={{ fontSize: 10, color: '#94a3b8' }}>
+          {new Date(turn.timestamp * 1000).toLocaleTimeString()}
+        </span>
+      </div>
+    );
+  }
+
   if (turn.action === 'reflex' && turn.actor === 'system') {
     const lessonCount = (turn.thoughts || '').match(/(\d+) lesson match/)?.[1] || '?';
     return (
