@@ -9,16 +9,16 @@ on:
   pull_request:
     branches: [main, master]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   ai-review:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Only run on internal PRs (fork PRs don't have secrets)
+    if: github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 20
-    continue-on-error: true
+
+    permissions:
+      contents: read
+      pull-requests: write
 
     container:
       image: quay.io/redhat-user-workloads/ocp-virt-images-tenant/gitops-ci-reviewer:latest
@@ -35,33 +35,45 @@ jobs:
         run: |
           git config --global user.email "ai-reviewer@github.com"
           git config --global user.name "AI Code Reviewer"
-          git config --global --add safe.directory '*'
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Decode Vertex AI credentials
-        run: echo "${{ secrets.VERTEX_SA_JSON }}" | base64 -d > /tmp/vertex-sa.json
+        env:
+          VERTEX_SA_JSON: ${{ secrets.VERTEX_SA_JSON }}
+        run: |
+          echo "$VERTEX_SA_JSON" | base64 -d > /tmp/vertex-sa.json
+          chmod 600 /tmp/vertex-sa.json
+          # Validate decoded JSON
+          if ! python3 -c "import json; json.load(open('/tmp/vertex-sa.json'))" 2>/dev/null; then
+            echo "::error::VERTEX_SA_JSON decode failed — check secret encoding"
+            exit 1
+          fi
 
       - name: Run AI review
         env:
-          # Platform detection (auto-set by GHA: GITHUB_ACTIONS=true)
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Vertex AI auth (project + region from repo variables, SA from secret)
           CLAUDE_CODE_USE_VERTEX: "1"
           GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
           GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'us-central1' }}
           GOOGLE_APPLICATION_CREDENTIALS: "/tmp/vertex-sa.json"
-          # Env var mapping (normalized for entrypoint compatibility)
           CI_MERGE_REQUEST_TARGET_BRANCH_NAME: ${{ github.base_ref }}
           CI_MERGE_REQUEST_SOURCE_BRANCH_NAME: ${{ github.head_ref }}
           CI_MERGE_REQUEST_IID: ${{ github.event.pull_request.number }}
           CI_PROJECT_DIR: ${{ github.workspace }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Review config (override via repo variables)
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'claude-sonnet-4-6' }}
           AI_REVIEW_EFFORT: ${{ vars.AI_REVIEW_EFFORT || 'medium' }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '15' }}
           AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '3.50' }}
           AI_REVIEW_MAX_DIFF_LINES: ${{ vars.AI_REVIEW_MAX_DIFF_LINES || '5000' }}
         run: node /app/entrypoint/dist/index.js
+
+      - name: Post failure notice
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::warning::AI review failed — check workflow logs. PR is not blocked."
 
       - name: Upload review artifacts
         if: always()
@@ -70,3 +82,4 @@ jobs:
           name: ai-review-results
           path: ci-results/
           retention-days: 7
+          if-no-files-found: ignore
