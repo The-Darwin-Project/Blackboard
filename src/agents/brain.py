@@ -3842,7 +3842,8 @@ class Brain:
             aligner = self.agents.get("_aligner")
             if aligner is None:
                 return {"status": "error", "detail": "Aligner not available"}
-            event_id = await aligner.handle_failed_promotion(**status)
+            aligner_kwargs = {k: v for k, v in status.items() if not k.startswith("_")}
+            event_id = await aligner.handle_failed_promotion(**aligner_kwargs)
             if event_id and directive:
                 user_turn = ConversationTurn(
                     turn=2,
