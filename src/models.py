@@ -319,7 +319,7 @@ class MessageStatus(str, Enum):
 class ConversationTurn(BaseModel):
     """A single turn in an event conversation."""
     turn: int = Field(..., description="Turn number in conversation")
-    actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, security_analyst, aligner, headhunter, cortex, user")
+    actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, security_analyst, aligner, headhunter, cortex, dispatcher, user")
     action: str = Field(
         ...,
         description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence, phase, error",
@@ -663,6 +663,11 @@ class FlowSnapshot(BaseModel):
     avg_reconcile_ms: float = 0.0
     reconcile_count_delta: int = 0
     error_count_delta: int = 0
+    dispatch_total: int = 0
+    dispatch_success_rate_pct: float = 100.0
+    dispatch_infra_fails: int = 0
+    dispatch_circuit_breaks: int = 0
+    avg_spawn_latency_sec: float = 0.0
 
 
 class ReportMeta(BaseModel):

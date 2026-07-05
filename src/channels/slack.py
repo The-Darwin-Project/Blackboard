@@ -45,6 +45,8 @@ _INTERNAL_TURNS = frozenset({
     ("brain", "hold_watch_wake"), ("brain", "think"),
     ("system", "notification"),
     ("jarvis", "message"), ("jarvis", "evidence"), ("jarvis", "insight"),
+    ("dispatcher", "acknowledge"), ("dispatcher", "connected"),
+    ("dispatcher", "paused"), ("dispatcher", "failed"),
 })
 
 # Tools whose tool_result turns contain user-relevant confirmations/data.

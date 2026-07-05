@@ -423,6 +423,7 @@ ephemeralAgents:
   spawnDeadlineSec: 300 # Absolute ceiling for spawn wait (emergency flange)
   pollIntervalSec: 10 # Seconds between K8s pod status polls
   stallTimeoutSec: 60 # No-progress threshold before prune
+  infraDeferSec: 120 # Seconds to defer when Tekton infra is unavailable
   cleanup:
     strategy: "keep" # "keep-since" (age-based) or "keep" (count-based)
     keepSince: 1440 # Minutes to retain completed TaskRuns (1440 = 24h)

@@ -8,6 +8,22 @@ tools: [select_agent, create_plan, get_plan_progress]
 ---
 # Decision Routing
 
+## Dispatch Infrastructure State
+
+When `select_agent` triggers a spawn, the Dispatcher reports status via
+conversation turns (`[Dispatch: ...]`). These are system-level control
+messages from Darwin's provisioning layer:
+
+- `[Dispatch: connected]` — agent is running, await their result
+- `[Dispatch: paused]` — provisioner has deferred with calibrated timing;
+  no action needed, do not investigate provisioner state
+- `[Dispatch: failed]` — hard failure with no fallback; escalate the event
+
+Dispatcher messages describe Darwin's own infrastructure, not the event's
+work domain. Do not dispatch agents to investigate provisioner failures.
+The Dispatcher handles infrastructure deferrals autonomously — you observe
+the outcome, you do not retry or override the timing.
+
 ## Agent Routing (only when self-answer is insufficient)
 
 Routing the wrong agent wastes a full dispatch cycle — the agent clones, investigates, and returns findings that don't advance the event. Matching agent capability to problem domain on the first dispatch is the highest-leverage decision in the dispatch phase.

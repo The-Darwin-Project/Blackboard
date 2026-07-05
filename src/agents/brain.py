@@ -1588,7 +1588,7 @@ class Brain:
             return "high", 0.6
 
         recent = event.conversation[-3:]
-        has_agent_result = any(t.actor not in ("brain", "user", "aligner", "headhunter") for t in recent)
+        has_agent_result = any(t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher") for t in recent)
         last_is_user = recent[-1].actor == "user"
 
         if has_agent_result:
@@ -1648,7 +1648,7 @@ class Brain:
         flags["is_intermediate"] = is_intermediate
 
         flags["has_agent_result"] = any(
-            t.actor not in ("brain", "user", "aligner", "headhunter") for t in event.conversation
+            t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher") for t in event.conversation
         )
         recent = event.conversation[-3:] if event.conversation else []
         flags["last_is_user"] = bool(recent and recent[-1].actor == "user")
@@ -1886,7 +1886,7 @@ class Brain:
             last_reason = raw_reason.split(": ", 1)[1] if ": " in raw_reason else raw_reason
             last_agent = next(
                 (t for t in reversed(event.conversation)
-                 if t.actor not in ("brain", "user", "aligner", "headhunter")),
+                 if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")),
                 None,
             )
             elapsed_str = ""
@@ -2028,7 +2028,7 @@ class Brain:
         """
         last_agent_turn = next(
             (t for t in reversed(event.conversation)
-             if t.actor not in ("brain", "user", "aligner", "headhunter")),
+             if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")),
             None,
         )
         if not last_agent_turn:
@@ -2267,6 +2267,9 @@ class Brain:
         if turn.actor == "brain" and turn.action in ("thoughts", "intermediate"):
             return []
 
+        if turn.actor == "dispatcher" and turn.action in ("acknowledge", "connected"):
+            return []
+
         if turn.actor == "brain" and turn.action == "tool_result":
             tool_name = turn.waitingFor or "tool"
             text = f"## Tool Result: {tool_name}\n\n{turn.evidence or turn.thoughts or ''}"
@@ -2303,6 +2306,8 @@ class Brain:
                 f"{turn.thoughts or turn.result or ''}\n\n"
                 f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
             )
+        elif turn.actor == "dispatcher":
+            text = f"[Dispatch: {turn.action}] {turn.thoughts or ''}"
         else:
             text = turn.result or turn.thoughts or ""
             if text and turn.actor != "user":
@@ -3029,39 +3034,101 @@ class Brain:
                         return
 
                     if use_ephemeral:
+                        try:
+                            ack_turn = ConversationTurn(
+                                turn=0,
+                                actor="dispatcher",
+                                action="acknowledge",
+                                thoughts=f"Spawning ephemeral agent for {agent_name}. Estimated ready in ~30s.",
+                            )
+                            await self._append_and_broadcast(event_id, ack_turn)
+                            await self._emit_executive_pulse(event_id, [("dispatcher:acknowledge", "system")])
+                        except Exception:
+                            logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
+                        _spawn_start = time.time()
                         provision_result = await self._ephemeral_provisioner.ensure_agent(event_id)
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:
+                                self._ephemeral_provisioner.record_dispatch_circuit_break()
                                 logger.warning(
                                     "Ephemeral-only role %s circuit breaker for %s -- deferring (no sidecar fallback)",
                                     agent_name, event_id,
                                 )
+                                cb_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="dispatcher",
+                                    action="paused",
+                                    thoughts=f"Dispatch circuit open after repeated failures. Deferred 60s — no local fallback available.",
+                                )
+                                try:
+                                    await self._append_and_broadcast(event_id, cb_turn)
+                                    await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                                except Exception:
+                                    logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                                 await self.execute_tool_locked(
                                     event_id, "defer_event",
-                                    {"delay_seconds": 60, "reason": f"Security analyst unavailable (ephemeral circuit breaker, no local fallback)"},
+                                    {"delay_seconds": 60, "reason": "Ephemeral circuit breaker, no fallback"},
                                 )
                                 return
                             elif ephemeral_is_overflow:
+                                self._ephemeral_provisioner.record_dispatch_circuit_break()
                                 logger.info(
                                     "Ephemeral circuit breaker + local full for %s -- deferring",
                                     event_id,
                                 )
+                                cb_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="dispatcher",
+                                    action="paused",
+                                    thoughts="All agents busy (local full + ephemeral circuit breaker). Deferred 30s.",
+                                )
+                                try:
+                                    await self._append_and_broadcast(event_id, cb_turn)
+                                    await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                                except Exception:
+                                    logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                                 await self.execute_tool_locked(
                                     event_id, "defer_event",
                                     {"delay_seconds": 30, "reason": "All agents busy (local full + ephemeral circuit breaker)"},
                                 )
                                 return
                             else:
+                                self._ephemeral_provisioner.record_dispatch_sidecar_fallback()
                                 logger.info("Ephemeral circuit breaker tripped for %s -- falling back to sidecar", event_id)
                         elif provision_result == INFRA_SENTINEL:
-                            logger.info("Deferring %s for 60s: Tekton infrastructure unavailable", event_id)
+                            self._ephemeral_provisioner.record_dispatch_infra_fail()
+                            infra_wait = int(os.getenv("EPHEMERAL_INFRA_DEFER_SEC", "120"))
+                            logger.info("Deferring %s for %ds: Tekton infrastructure unavailable", event_id, infra_wait)
+                            paused_turn = ConversationTurn(
+                                turn=0,
+                                actor="dispatcher",
+                                action="paused",
+                                thoughts=f"Infrastructure temporarily unavailable. Event deferred {infra_wait}s based on recovery baseline. This is not related to your event's work.",
+                            )
+                            try:
+                                await self._append_and_broadcast(event_id, paused_turn)
+                                await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                            except Exception:
+                                logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                             await self.execute_tool_locked(
                                 event_id, "defer_event",
-                                {"delay_seconds": 60, "reason": "Tekton infrastructure unavailable"},
+                                {"delay_seconds": infra_wait, "reason": "Tekton infrastructure unavailable"},
                             )
                             return
                         else:
                             agent_id_override = provision_result.agent_id
+                            self._ephemeral_provisioner.record_dispatch_success(time.time() - _spawn_start)
+                            try:
+                                conn_turn = ConversationTurn(
+                                    turn=0,
+                                    actor="dispatcher",
+                                    action="connected",
+                                    thoughts=f"Agent {agent_name} registered. Executing your task.",
+                                )
+                                await self._append_and_broadcast(event_id, conn_turn)
+                                await self._emit_executive_pulse(event_id, [("dispatcher:connected", "system")])
+                            except Exception:
+                                logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
 
                     if agent_id_override is None:
                         await self.write_event_to_volume(event_id, agent_name)
@@ -3106,9 +3173,20 @@ class Brain:
 
             if result == RETRYABLE_SENTINEL:
                 logger.info(f"Retryable error for {event_id}, deferring event")
+                try:
+                    retry_turn = ConversationTurn(
+                        turn=0,
+                        actor="dispatcher",
+                        action="paused",
+                        thoughts="Agent disconnected (retryable). Event deferred 30s for reconnection.",
+                    )
+                    await self._append_and_broadcast(event_id, retry_turn)
+                    await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
+                except Exception:
+                    logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                 await self.execute_tool_locked(
                     event_id, "defer_event",
-                    {"reason": "Agent returned retryable error", "delay_seconds": 60},
+                    {"reason": "Agent returned retryable error", "delay_seconds": 30},
                 )
                 return
 
@@ -4061,6 +4139,7 @@ class Brain:
             blackboard=self.blackboard,
             registry=registry,
             headhunter=hh,
+            provisioner=self._ephemeral_provisioner,
             interval=60.0,
         )
         await self._flow_collector.start()

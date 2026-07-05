@@ -522,6 +522,8 @@ async def handle_refresh_gitlab_context(
                 cycle_id=ctx.get_cycle_id(event_id),
             )
             subscription_active = state_watcher.register(spec)
+            if subscription_active:
+                await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
 
     evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
     if args.get("subscribe"):
@@ -629,6 +631,8 @@ async def handle_refresh_kargo_context(
             cycle_id=ctx.get_cycle_id(event_id),
         )
         subscription_active = state_watcher.register(spec)
+        if subscription_active:
+            await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
 
     evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
     if args.get("subscribe"):

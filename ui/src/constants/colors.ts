@@ -16,6 +16,7 @@ export const ACTOR_COLORS: Record<string, string> = {
   flash: '#06b6d4',
   aligner: '#6b7280',
   jarvis: '#14b8a6',   // Teal -- JARVIS meta-cognitive observer
+  dispatcher: '#64748b', // Slate gray -- infrastructure/system feel
   user: '#ec4899',
 };
 
@@ -23,6 +24,7 @@ export const ACTOR_COLORS: Record<string, string> = {
 export const ACTOR_LABELS: Record<string, string> = {
   brain: 'FRIDAY',
   jarvis: 'JARVIS',
+  dispatcher: 'Dispatcher',
 };
 
 export const DOMAIN_COLORS = {

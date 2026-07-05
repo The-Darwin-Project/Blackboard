@@ -113,6 +113,8 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
     ])
     prev_ts = event.conversation[0].timestamp if event.conversation else 0
     for turn in event.conversation:
+        if turn.actor == "dispatcher" and turn.action in ("acknowledge", "connected"):
+            continue
         ts_str = datetime.fromtimestamp(turn.timestamp, tz=timezone.utc).strftime('%H:%M:%S')
         delta = int(turn.timestamp - prev_ts)
         delta_label = f"+{delta // 60}m {delta % 60}s" if delta > 0 else "+0s"

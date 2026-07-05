@@ -1789,6 +1789,11 @@ return 0
                 avg_reconcile_ms=sum(s.avg_reconcile_ms for s in group) / n,
                 reconcile_count_delta=sum(s.reconcile_count_delta for s in group),
                 error_count_delta=sum(s.error_count_delta for s in group),
+                dispatch_total=max(s.dispatch_total for s in group),
+                dispatch_success_rate_pct=sum(s.dispatch_success_rate_pct for s in group) / n,
+                dispatch_infra_fails=max(s.dispatch_infra_fails for s in group),
+                dispatch_circuit_breaks=max(s.dispatch_circuit_breaks for s in group),
+                avg_spawn_latency_sec=sum(s.avg_spawn_latency_sec for s in group) / n,
             ))
         return result
 

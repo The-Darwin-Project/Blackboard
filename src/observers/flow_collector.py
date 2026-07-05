@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..agents.agent_registry import AgentRegistry
+    from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
@@ -34,12 +35,14 @@ class FlowCollector:
         blackboard: "BlackboardState",
         registry: "AgentRegistry | None" = None,
         headhunter: "Headhunter | None" = None,
+        provisioner: "EphemeralProvisioner | None" = None,
         interval: float = 60.0,
     ):
         self._scheduler = scheduler
         self._blackboard = blackboard
         self._registry = registry
         self._headhunter = headhunter
+        self._provisioner = provisioner
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._running = False
@@ -138,6 +141,22 @@ class FlowCollector:
         except Exception:
             pass
 
+        dispatch_total = 0
+        dispatch_success_rate_pct = 100.0
+        dispatch_infra_fails = 0
+        dispatch_circuit_breaks = 0
+        avg_spawn_latency_sec = 0.0
+        try:
+            if self._provisioner:
+                dm = self._provisioner.dispatch_metrics
+                dispatch_total = dm.total
+                dispatch_success_rate_pct = dm.success_rate_pct
+                dispatch_infra_fails = dm.infra_fail
+                dispatch_circuit_breaks = dm.circuit_break
+                avg_spawn_latency_sec = dm.avg_spawn_latency_sec
+        except Exception:
+            pass
+
         return FlowSnapshot(
             timestamp=now,
             queue_depth=flow["queue_depth"],
@@ -156,4 +175,9 @@ class FlowCollector:
             avg_reconcile_ms=metrics.get("avg_reconcile_ms", 0.0),
             reconcile_count_delta=reconcile_delta,
             error_count_delta=error_delta,
+            dispatch_total=dispatch_total,
+            dispatch_success_rate_pct=dispatch_success_rate_pct,
+            dispatch_infra_fails=dispatch_infra_fails,
+            dispatch_circuit_breaks=dispatch_circuit_breaks,
+            avg_spawn_latency_sec=avg_spawn_latency_sec,
         )
