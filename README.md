@@ -8,6 +8,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Build and Push Image](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/build-push.yaml/badge.svg)](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/build-push.yaml)
+[![AI Code Review](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/ai-review.yaml/badge.svg)](https://github.com/The-Darwin-Project/Blackboard/actions/workflows/ai-review.yaml)
 
 The central nervous system of Darwin -- an autonomous closed-loop cloud operations system.
 
@@ -154,6 +155,15 @@ helm install darwin-brain oci://ghcr.io/the-darwin-project/charts/darwin-brain \
 
 > **Full deployment guide:** [docs/deployment.md](docs/deployment.md) -- all environment variables, CI/CD, passive discovery
 
+## CI/CD
+
+Every pull request targeting `main` or `master` triggers the **AI Code Review** workflow
+(`.github/workflows/ai-review.yaml`). The reviewer posts findings as PR comments and uploads
+structured results as a workflow artifact retained for 7 days. The check is advisory —
+`continue-on-error: true` means a reviewer failure will not block merging.
+
+> **Setup and tuning:** [docs/ai-review.md](docs/ai-review.md) -- required secrets, optional variables, operational notes
+
 ## Documentation
 
 | Document | Content |
@@ -163,6 +173,7 @@ helm install darwin-brain oci://ghcr.io/the-darwin-project/charts/darwin-brain \
 | [docs/api-reference.md](docs/api-reference.md) | All REST and WebSocket API endpoints |
 | [docs/deployment.md](docs/deployment.md) | Environment variables, Helm deployment, CI/CD, service discovery |
 | [docs/brain-skills.md](docs/brain-skills.md) | Progressive skill system, phases, tool gating |
+| [docs/ai-review.md](docs/ai-review.md) | AI code review workflow: setup, secrets, tuning variables |
 | [helm/README.md](helm/README.md) | Helm chart installation, values, integrations |
 | [ui/README.md](ui/README.md) | Dashboard pages, components, development |
 | [docs/README.md](docs/README.md) | External service access (ArgoCD, Kargo) |
