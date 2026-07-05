@@ -12,7 +12,7 @@ import FlowHealthWidget from './FlowHealthWidget';
 import WaitingBell from '../WaitingBell';
 import { useConfig } from '../../hooks/useConfig';
 import { useTopology } from '../../hooks';
-import { useOpsState } from '../../contexts/OpsStateContext';
+import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useAuth } from '../../contexts/AuthContext';
 
 const MIN_HEIGHT = 32;
@@ -22,7 +22,7 @@ const MAX_HEIGHT = 350;
 export default function ActivityPanel() {
   const { data: config } = useConfig();
   const { isError, isFetching } = useTopology();
-  const { connected, send, autoHotspot, toggleAutoHotspot } = useOpsState();
+  const { connected, send, autoHotspot, toggleAutoHotspot } = useOpsControl();
   const { user, isAuthenticated, logout } = useAuth();
   const userName = user?.profile?.preferred_username || user?.profile?.name || user?.profile?.email || '';
 

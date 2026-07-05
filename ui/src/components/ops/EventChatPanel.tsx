@@ -7,7 +7,7 @@
 // 5. [Constraint]: ConversationFeed gets onOpenContentTile from OpsStateContext for grid content tiles.
 import { X } from 'lucide-react';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
-import { useOpsState } from '../../contexts/OpsStateContext';
+import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useEventDocument, useActiveEvents, useQueueInvalidation } from '../../hooks/useQueue';
 import { STATUS_COLORS } from '../../constants/colors';
 import { MOCK_EVENTS, MOCK_EVENT_DOC } from './mockData';
@@ -22,8 +22,8 @@ import type { ConversationTurn } from '../../api/types';
 
 const DEV_MODE = import.meta.env.DEV;
 const MIN_WIDTH = 350;
-const DEFAULT_WIDTH = 450;
-const MAX_WIDTH = 600;
+const DEFAULT_WIDTH = 500;
+const MAX_WIDTH = 900;
 
 interface EventChatPanelProps {
   eventId: string;
@@ -31,7 +31,7 @@ interface EventChatPanelProps {
 }
 
 export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps) {
-  const { connected, send, openContentTile } = useOpsState();
+  const { connected, send, openContentTile } = useOpsControl();
   const { data: eventDoc, isLoading: docLoading, isError: docError } = useEventDocument(eventId);
   const { data: activeEvents } = useActiveEvents();
   const { hasPlan, steps: planSteps } = usePlanState(eventDoc?.conversation || []);

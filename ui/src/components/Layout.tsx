@@ -14,7 +14,8 @@
 import { useEffect, useMemo } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Activity } from 'lucide-react';
-import { OpsStateProvider, useOpsState } from '../contexts/OpsStateContext';
+import { OpsControlProvider, useOpsControl } from '../contexts/OpsStateContext';
+import { ActiveStreamsProvider } from '../contexts/ActiveStreamsContext';
 import { useConfig } from '../hooks/useConfig';
 import EventSidebar from './ops/EventSidebar';
 import EventChatPanel from './ops/EventChatPanel';
@@ -37,7 +38,7 @@ const BASE_TABS = [
 function LayoutInner() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { selectEvent, selectedEventId, deselectEvent } = useOpsState();
+  const { selectEvent, selectedEventId, deselectEvent } = useOpsControl();
   const { data: config } = useConfig();
 
   const TABS = useMemo(() => {
@@ -146,8 +147,10 @@ function LayoutInner() {
 
 export default function Layout() {
   return (
-    <OpsStateProvider>
-      <LayoutInner />
-    </OpsStateProvider>
+    <OpsControlProvider>
+      <ActiveStreamsProvider>
+        <LayoutInner />
+      </ActiveStreamsProvider>
+    </OpsControlProvider>
   );
 }

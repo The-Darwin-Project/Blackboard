@@ -8,14 +8,14 @@
  */
 import { useMemo, useState } from 'react';
 import { Globe, BarChart3, Archive, Filter } from 'lucide-react';
-import { useOpsState } from '../contexts/OpsStateContext';
+import { useOpsControl } from '../contexts/OpsStateContext';
 import { useObservations } from '../hooks/useObservations';
 import { useGlobalObservations } from '../hooks/useObservations';
 import { useActiveEvents } from '../hooks/useQueue';
 import ObservationCard from './ObservationCard';
 
 export default function InsightsPage() {
-  const { selectedEventId } = useOpsState();
+  const { selectedEventId } = useOpsControl();
   const { data: activeEvents } = useActiveEvents();
   const [serviceFilter, setServiceFilter] = useState<string>('');
 

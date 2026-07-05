@@ -1,19 +1,12 @@
 // BlackBoard/ui/src/contexts/OpsStateContext.tsx
 // @ai-rules:
-// 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
-// 2. [Pattern]: Unified activeStreams model — no persistent/ephemeral split. Every work stream keyed
-//    by `${actor}:${eventId}`. Eliminates the routing bug class (ephemeral flag races, oncall sub-check
-//    timing, registry polling lag, stream leaking between tiles).
-// 3. [Pattern]: Progress with actor + event_id → upsert into activeStreams. Turn → mark inactive.
-//    event_closed → delete all streams for that event. No resolveStreamTarget routing needed.
-// 4. [Pattern]: event_closed adds to recentlyClosedRef (FIFO cap 50). Late progress discarded.
-//    Auto-deselects selectedEventId if closed event matches.
-// 5. [Pattern]: Mark-and-sweep GC (60s interval, staleCandidatesRef): prune streams whose eventId
-//    is no longer in active events for two consecutive cycles (120s grace).
-// 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
-// 7. [Pattern]: Inline ref assignment for external-data refs (render phase sync, React 19).
-//    Local-state refs sync in the callback that sets the state.
-// 8. [Pattern]: ephemeralAgents derived via useMemo([registeredAgents, activeEvents]) for sidebar.
+// 1. [Pattern]: OpsControl context — user-interaction frequency state only.
+// 2. [Pattern]: selectedEventId with full sessionStorage lifecycle (hydrate/set/clear).
+// 3. [Pattern]: Agent registry 10s poll with cleanup. ephemeralAgents derived via useMemo.
+// 4. [Pattern]: WS: event_created (auto-select), event_closed (deselect + optimistic), event_status_changed, subscription_changed, kargo_*.
+// 5. [Pattern]: useWSReconnect invalidates all queries + kargo + headhunter.
+// 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
+// 7. [Pattern]: Inline ref assignment for selectedEventIdRef (render phase sync for WS handlers).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
@@ -22,14 +15,6 @@ import { getAgents } from '../api/client';
 import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
-const MAX_BUFFER = 100;
-
-export interface ActiveStream {
-  messages: string[];
-  actor: string;
-  eventId: string;
-  isActive: boolean;
-}
 
 export interface ContentTile {
   id: string;
@@ -42,11 +27,10 @@ export interface KargoEventResult {
   detail: string;
 }
 
-export interface OpsState {
+export interface OpsControl {
   selectedEventId: string | null;
   selectEvent: (id: string) => void;
   deselectEvent: () => void;
-  activeStreams: Record<string, ActiveStream>;
   ephemeralAgents: AgentRegistryEntry[];
   registeredAgents: AgentRegistryEntry[];
   kargoStages: KargoStageStatus[];
@@ -62,15 +46,15 @@ export interface OpsState {
   send: (data: Record<string, unknown>) => void;
 }
 
-const OpsStateContext = createContext<OpsState | null>(null);
+const OpsControlContext = createContext<OpsControl | null>(null);
 
-export function useOpsState(): OpsState {
-  const ctx = useContext(OpsStateContext);
-  if (!ctx) throw new Error('useOpsState must be used within OpsStateProvider');
+export function useOpsControl(): OpsControl {
+  const ctx = useContext(OpsControlContext);
+  if (!ctx) throw new Error('useOpsControl must be used within OpsControlProvider');
   return ctx;
 }
 
-export function OpsStateProvider({ children }: { children: ReactNode }) {
+export function OpsControlProvider({ children }: { children: ReactNode }) {
   const [selectedEventId, setSelectedEventId] = useState<string | null>(
     () => sessionStorage.getItem('darwin:selectedEventId'),
   );
@@ -87,8 +71,6 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     setSelectedEventId(null);
     sessionStorage.removeItem('darwin:selectedEventId');
   }, []);
-
-  const [activeStreams, setActiveStreams] = useState<Record<string, ActiveStream>>({});
 
   const [registeredAgents, setRegisteredAgents] = useState<AgentRegistryEntry[]>([]);
 
@@ -154,68 +136,12 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     );
   }, [registeredAgents, activeEvents]);
 
-  const activeEventsRef = useRef(activeEvents);
-  activeEventsRef.current = activeEvents;
   selectedEventIdRef.current = selectedEventId;
-  const recentlyClosedRef = useRef<Set<string>>(new Set());
-  const staleCandidatesRef = useRef<Set<string>>(new Set());
-  const activeStreamsRef = useRef(activeStreams);
-  activeStreamsRef.current = activeStreams;
 
   useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
 
-  // GC: prune streams whose event is no longer active (mark-and-sweep, 120s grace)
-  useEffect(() => {
-    const gc = setInterval(() => {
-      const activeIds = new Set(
-        (activeEventsRef.current ?? []).map(e => e.id)
-      );
-
-      const currentKeys = Object.keys(activeStreamsRef.current);
-      const nowStale = currentKeys.filter(k => {
-        const stream = activeStreamsRef.current[k];
-        return stream && !activeIds.has(stream.eventId);
-      });
-
-      const toDelete = nowStale.filter(k => staleCandidatesRef.current.has(k));
-      staleCandidatesRef.current = new Set(nowStale);
-
-      if (toDelete.length > 0) {
-        setActiveStreams((prev) => {
-          const next = { ...prev };
-          for (const k of toDelete) delete next[k];
-          return next;
-        });
-      }
-    }, 60_000);
-    return () => clearInterval(gc);
-  }, []);
-
   useWSMessage((msg) => {
-    if (msg.type === 'progress' && msg.actor && msg.event_id) {
-      const actor = msg.actor as string;
-      const evtId = msg.event_id as string;
-      if (recentlyClosedRef.current.has(evtId)) return;
-      const key = `${actor}:${evtId}`;
-      setActiveStreams((prev) => {
-        const current = prev[key];
-        const messages = [...(current?.messages || []), msg.message as string].slice(-MAX_BUFFER);
-        return { ...prev, [key]: { messages, actor, eventId: evtId, isActive: true } };
-      });
-    } else if (msg.type === 'turn') {
-      const turn = msg.turn as Record<string, unknown>;
-      const actor = turn?.actor as string;
-      const evtId = (msg.event_id ?? '') as string;
-      if (actor && evtId) {
-        const key = `${actor}:${evtId}`;
-        setActiveStreams((prev) => {
-          if (!prev[key]) return { ...prev, [key]: { messages: [], actor, eventId: evtId, isActive: false } };
-          return { ...prev, [key]: { ...prev[key], isActive: false } };
-        });
-      }
-      invalidateActive();
-      if (msg.event_id) invalidateEvent(msg.event_id as string);
-    } else if (msg.type === 'event_created' && msg.event_id) {
+    if (msg.type === 'event_created' && msg.event_id) {
       if (!selectedEventIdRef.current) {
         selectEvent(msg.event_id as string);
       }
@@ -228,25 +154,6 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateActive();
         invalidateClosed();
         invalidateHeadhunter();
-
-        setActiveStreams((prev) => {
-          const next = { ...prev };
-          let changed = false;
-          for (const k of Object.keys(next)) {
-            if (next[k].eventId === closedId) {
-              delete next[k];
-              changed = true;
-            }
-          }
-          return changed ? next : prev;
-        });
-
-        recentlyClosedRef.current.add(closedId);
-        if (recentlyClosedRef.current.size > 50) {
-          const oldest = recentlyClosedRef.current.values().next().value as string | undefined;
-          if (oldest !== undefined) recentlyClosedRef.current.delete(oldest);
-        }
-
         if (closedId === selectedEventIdRef.current) {
           selectedEventIdRef.current = null;
           setSelectedEventId(null);
@@ -272,11 +179,10 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     }
   });
 
-  const value = useMemo<OpsState>(() => ({
+  const value = useMemo<OpsControl>(() => ({
     selectedEventId,
     selectEvent,
     deselectEvent,
-    activeStreams,
     ephemeralAgents,
     registeredAgents,
     kargoStages,
@@ -292,15 +198,15 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     send,
   }), [
     selectedEventId, selectEvent, deselectEvent,
-    activeStreams, ephemeralAgents, registeredAgents,
+    ephemeralAgents, registeredAgents,
     kargoStages, kargoEventResult,
     contentTiles, hotspotTileId, setHotspot, openContentTile, closeContentTile,
     autoHotspot, toggleAutoHotspot, connected, send,
   ]);
 
   return (
-    <OpsStateContext.Provider value={value}>
+    <OpsControlContext.Provider value={value}>
       {children}
-    </OpsStateContext.Provider>
+    </OpsControlContext.Provider>
   );
 }

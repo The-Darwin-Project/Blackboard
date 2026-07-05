@@ -10,8 +10,11 @@
 import { useEffect, useCallback, useState, useRef, useMemo } from 'react';
 import { Activity, Cpu, Layers, Radio } from 'lucide-react';
 import GridTile from './GridTile';
-import { useOpsState } from '../../contexts/OpsStateContext';
+import { useOpsControl } from '../../contexts/OpsStateContext';
+import { useActiveStreams } from '../../contexts/ActiveStreamsContext';
 import { useFlowMetrics } from '../../hooks/useFlowMetrics';
+import { computeGridCols } from '../../utils/streamReducers';
+import type { ActiveStream } from '../../utils/streamReducers';
 
 type LayoutMode = 'grid' | 'top-bottom' | 'side-by-side';
 const SIDE_BY_SIDE_THRESHOLD = 4;
@@ -23,15 +26,9 @@ interface TileDescriptor {
   eventId?: string;
 }
 
-function computeGridCols(count: number): number {
-  if (count <= 1) return 1;
-  if (count <= 2) return 2;
-  return Math.ceil(Math.sqrt(count));
-}
-
 function EmptyState() {
   const { data } = useFlowMetrics();
-  const { registeredAgents } = useOpsState();
+  const { registeredAgents } = useOpsControl();
   const connectedCount = registeredAgents.length;
   const busyCount = registeredAgents.filter(a => a.busy).length;
 
@@ -74,10 +71,11 @@ function EmptyState() {
 }
 
 export default function StreamGrid() {
+  const { activeStreams } = useActiveStreams();
   const {
-    activeStreams, contentTiles, closeContentTile,
+    contentTiles, closeContentTile,
     hotspotTileId, setHotspot, autoHotspot,
-  } = useOpsState();
+  } = useOpsControl();
 
   const tiles = useMemo(() => {
     const result: TileDescriptor[] = [];
@@ -152,7 +150,7 @@ export default function StreamGrid() {
 
   const renderTile = (tile: TileDescriptor) => {
     const ct = contentTiles.find(c => c.id === tile.id);
-    const stream = tile.type === 'stream' ? activeStreams[tile.id] : undefined;
+    const stream: ActiveStream | undefined = tile.type === 'stream' ? activeStreams[tile.id] : undefined;
     return (
       <GridTile
         key={tile.id}
@@ -161,11 +159,7 @@ export default function StreamGrid() {
         isHotspot={hotspotTileId === tile.id}
         onTileClick={handleTileClick}
         agentName={tile.actor}
-        agentState={stream ? {
-          messages: stream.messages,
-          eventId: stream.eventId,
-          isActive: stream.isActive,
-        } : undefined}
+        agentState={stream}
         contentTile={ct}
         onCloseContent={closeContentTile}
       />

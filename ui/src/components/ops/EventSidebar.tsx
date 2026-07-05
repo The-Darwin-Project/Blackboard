@@ -11,7 +11,7 @@ import { Link } from 'react-router-dom';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
-import { useOpsState, AGENTS } from '../../contexts/OpsStateContext';
+import { useOpsControl, AGENTS } from '../../contexts/OpsStateContext';
 import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS } from '../../constants/colors';
@@ -34,7 +34,7 @@ const EXPANDED_MIN_WIDTH = 250;
 const MAX_WIDTH = 800;
 
 export default function EventSidebar() {
-  const { selectedEventId, selectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsState();
+  const { selectedEventId, selectEvent, setHotspot, connected, send, openContentTile, registeredAgents, kargoStages } = useOpsControl();
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {

@@ -4,18 +4,15 @@
 // 2. [Pattern]: Click handler on tile border triggers hotspot focus (not on inner content).
 // 3. [Pattern]: content-viewer renders InlineMarkdownViewer with close button.
 // 4. [Pattern]: Agent tile color from ACTOR_COLORS (fallback #4ade80). Content-viewer infers from title regex.
+// 5. [Pattern]: React.memo wraps export — parent passes ActiveStream object directly (no inline copy).
+import { memo } from 'react';
 import AgentStreamCard from '../AgentStreamCard';
 import InlineMarkdownViewer from './InlineMarkdownViewer';
 import { ACTOR_COLORS } from '../../constants/colors';
 import type { ContentTile } from '../../contexts/OpsStateContext';
+import type { ActiveStream } from '../../utils/streamReducers';
 
 export type TileType = 'agent-stream' | 'content-viewer';
-
-interface AgentState {
-  messages: string[];
-  eventId: string | null;
-  isActive: boolean;
-}
 
 interface GridTileProps {
   type: TileType;
@@ -23,12 +20,12 @@ interface GridTileProps {
   isHotspot: boolean;
   onTileClick: (id: string) => void;
   agentName?: string;
-  agentState?: AgentState;
+  agentState?: ActiveStream;
   contentTile?: ContentTile;
   onCloseContent?: (id: string) => void;
 }
 
-export default function GridTile({
+function GridTile({
   type, tileId, isHotspot, onTileClick,
   agentName, agentState,
   contentTile, onCloseContent,
@@ -89,3 +86,5 @@ export default function GridTile({
     </div>
   );
 }
+
+export default memo(GridTile);

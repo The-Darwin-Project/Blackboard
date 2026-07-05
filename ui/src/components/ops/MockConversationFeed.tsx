@@ -6,10 +6,10 @@
 import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 import { MOCK_EVENT_DOC } from './mockData';
-import { useOpsState } from '../../contexts/OpsStateContext';
+import { useOpsControl } from '../../contexts/OpsStateContext';
 
 export default function MockConversationFeed() {
-  const { openContentTile } = useOpsState();
+  const { openContentTile } = useOpsControl();
   const evt = MOCK_EVENT_DOC;
   const sc = STATUS_COLORS[evt.status] || STATUS_COLORS.active;
 
