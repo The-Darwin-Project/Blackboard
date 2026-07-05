@@ -40,6 +40,7 @@ logger = logging.getLogger("skill_reconciler")
 from src.skill_reconciler.constants import (
     REDIS_KEY_CORPUS, REDIS_KEY_PHASE_CONFIG, REDIS_KEY_SYNC_STATE, REDIS_KEY_VERSION,
 )
+from src.skill_reconciler.generate_map import CORPUS_KEY as _GENERATED_MAP_KEY, generate_phase_tool_map
 
 POLL_INTERVAL = int(os.getenv("SKILL_RECONCILER_POLL_INTERVAL", "60"))
 GIT_PROVIDER = os.getenv("SKILL_RECONCILER_GIT_PROVIDER", "github")
@@ -197,6 +198,24 @@ def _reconcile(rdb: redis.Redis, http: httpx.Client, last_sha: str | None) -> st
         else:
             body, meta = _parse_frontmatter(content)
             corpus[rel_path] = json.dumps({"body": body, "frontmatter": meta, "blob_sha": blob_sha}, default=str)
+
+    try:
+        gen_key, gen_value = generate_phase_tool_map()
+        corpus[gen_key] = gen_value
+        logger.info("Generated %s from GATE_REGISTRY", gen_key)
+    except Exception as e:
+        try:
+            existing = rdb.hget(REDIS_KEY_CORPUS, _GENERATED_MAP_KEY)
+        except Exception:
+            existing = None
+        if existing:
+            corpus[_GENERATED_MAP_KEY] = existing
+            logger.warning("Phase-tool-map generation failed, preserved previous value: %s", e)
+        else:
+            logger.error(
+                "Phase-tool-map generation failed with NO previous Redis value -- "
+                "navigation skill will be ABSENT from corpus this cycle: %s", e,
+            )
 
     # Atomic write via MULTI/EXEC pipeline
     existing_corpus_keys = set(rdb.hkeys(REDIS_KEY_CORPUS))
