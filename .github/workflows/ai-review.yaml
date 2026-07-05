@@ -1,0 +1,72 @@
+# .github/workflows/ai-review.yaml
+# AI Code Review workflow — runs gitops-ci-reviewer container on PRs.
+# Required secrets: VERTEX_SA_JSON (base64-encoded: `cat sa.json | jq -c '.' | base64 -w0`)
+# Required variables: GOOGLE_CLOUD_PROJECT
+
+name: AI Code Review
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 20
+    continue-on-error: true
+
+    container:
+      image: quay.io/redhat-user-workloads/ocp-virt-images-tenant/gitops-ci-reviewer:latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ai-reviewer@github.com"
+          git config --global user.name "AI Code Reviewer"
+          git config --global --add safe.directory '*'
+
+      - name: Decode Vertex AI credentials
+        run: echo "${{ secrets.VERTEX_SA_JSON }}" | base64 -d > /tmp/vertex-sa.json
+
+      - name: Run AI review
+        env:
+          # Platform detection (auto-set by GHA: GITHUB_ACTIONS=true)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Vertex AI auth (project + region from repo variables, SA from secret)
+          CLAUDE_CODE_USE_VERTEX: "1"
+          GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+          GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'us-central1' }}
+          GOOGLE_APPLICATION_CREDENTIALS: "/tmp/vertex-sa.json"
+          # Env var mapping (normalized for entrypoint compatibility)
+          CI_MERGE_REQUEST_TARGET_BRANCH_NAME: ${{ github.base_ref }}
+          CI_MERGE_REQUEST_SOURCE_BRANCH_NAME: ${{ github.head_ref }}
+          CI_MERGE_REQUEST_IID: ${{ github.event.pull_request.number }}
+          CI_PROJECT_DIR: ${{ github.workspace }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Review config (override via repo variables)
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'claude-sonnet-4-6' }}
+          AI_REVIEW_EFFORT: ${{ vars.AI_REVIEW_EFFORT || 'medium' }}
+          AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '15' }}
+          AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '3.50' }}
+          AI_REVIEW_MAX_DIFF_LINES: ${{ vars.AI_REVIEW_MAX_DIFF_LINES || '5000' }}
+        run: node /app/entrypoint/dist/index.js
+
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-results
+          path: ci-results/
+          retention-days: 7
