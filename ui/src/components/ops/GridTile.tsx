@@ -1,15 +1,21 @@
 // BlackBoard/ui/src/components/ops/GridTile.tsx
 // @ai-rules:
-// 1. [Pattern]: Generic tile wrapper -- 4 modes: agent-stream, oncall-stream, content-viewer, empty.
-// 2. [Pattern]: Click handler on tile border triggers hotspot focus (not on inner content to avoid conflicts).
+// 1. [Pattern]: Generic tile wrapper — 2 modes: agent-stream, content-viewer.
+// 2. [Pattern]: Click handler on tile border triggers hotspot focus (not on inner content).
 // 3. [Pattern]: content-viewer renders InlineMarkdownViewer with close button.
-// 4. [Pattern]: Tile border color driven by agent color (ACTOR_COLORS) and isActive state.
+// 4. [Pattern]: Agent tile color from ACTOR_COLORS (fallback #4ade80). Content-viewer infers from title regex.
 import AgentStreamCard from '../AgentStreamCard';
 import InlineMarkdownViewer from './InlineMarkdownViewer';
 import { ACTOR_COLORS } from '../../constants/colors';
-import type { AgentStreamState, ContentTile } from '../../contexts/OpsStateContext';
+import type { ContentTile } from '../../contexts/OpsStateContext';
 
-export type TileType = 'agent-stream' | 'oncall-stream' | 'content-viewer' | 'empty';
+export type TileType = 'agent-stream' | 'content-viewer';
+
+interface AgentState {
+  messages: string[];
+  eventId: string | null;
+  isActive: boolean;
+}
 
 interface GridTileProps {
   type: TileType;
@@ -17,28 +23,16 @@ interface GridTileProps {
   isHotspot: boolean;
   onTileClick: (id: string) => void;
   agentName?: string;
-  agentState?: AgentStreamState;
+  agentState?: AgentState;
   contentTile?: ContentTile;
   onCloseContent?: (id: string) => void;
-  ephemeralMessages?: string[];
-  ephemeralActive?: boolean;
 }
 
 export default function GridTile({
   type, tileId, isHotspot, onTileClick,
   agentName, agentState,
   contentTile, onCloseContent,
-  ephemeralMessages, ephemeralActive,
 }: GridTileProps) {
-  if (type === 'empty') {
-    return (
-      <div className="h-full rounded-lg border border-dashed border-border/50 flex items-center justify-center"
-        style={{ opacity: 0.3 }}>
-        <span className="text-[12px] text-text-muted select-none">empty</span>
-      </div>
-    );
-  }
-
   if (type === 'content-viewer' && contentTile) {
     const actorMatch = contentTile.title.match(/^(brain|architect|sysadmin|developer|qe|security_analyst|aligner|user)\b/i);
     const actorName = actorMatch ? actorMatch[1].toLowerCase() : null;
@@ -67,10 +61,9 @@ export default function GridTile({
     );
   }
 
-  const isEphemeral = type === 'oncall-stream';
   const name = agentName || tileId;
-  const color = isEphemeral ? '#4ade80' : (ACTOR_COLORS[name] || '#6b7280');
-  const isActive = isEphemeral ? (ephemeralActive || false) : (agentState?.isActive || false);
+  const color = ACTOR_COLORS[name] || '#4ade80';
+  const isActive = agentState?.isActive || false;
 
   return (
     <div className="relative h-full flex flex-col min-w-0 overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent/50 focus-visible:outline-offset-[-2px]"
@@ -88,8 +81,8 @@ export default function GridTile({
       <div className="flex-1 min-h-0 min-w-0 flex">
         <AgentStreamCard
           agentName={name}
-          eventId={isEphemeral ? tileId : (agentState?.eventId || null)}
-          messages={isEphemeral ? (ephemeralMessages || []) : (agentState?.messages || [])}
+          eventId={agentState?.eventId || null}
+          messages={agentState?.messages || []}
           isActive={isActive}
         />
       </div>

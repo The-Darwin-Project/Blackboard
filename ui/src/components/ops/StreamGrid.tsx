@@ -1,67 +1,106 @@
 // BlackBoard/ui/src/components/ops/StreamGrid.tsx
 // @ai-rules:
-// 1. [Pattern]: Adaptive CSS Grid. Column count computed from tile count. Fills remaining slots with empty tiles.
-// 2. [Pattern]: Hotspot mode adapts by strip count: 1-3 tiles = top/bottom, 4+ tiles = side-by-side with sub-grid.
-// 3. [Pattern]: Grid never scrolls. Tiles shrink to fit. Each tile handles its own internal scroll.
-// 4. [Constraint]: Esc exits hotspot. Click hotspot tile exits. Click other tile swaps hotspot.
-// 5. [Pattern]: Stale hotspot cleanup via useEffect (never setState during render).
-// 6. [Pattern]: Auto-hotspot: when enabled and an agent becomes isActive, it auto-promotes to hotspot.
-// 7. [Pattern]: Layout mode transitions use a 150ms opacity fade to prevent jarring snaps.
-import { useEffect, useCallback, useState, useRef } from 'react';
+// 1. [Pattern]: CCTV-style adaptive grid. Column count = ceil(sqrt(tileCount)).
+//    0 tiles → empty state (flow summary). 1 → full width. 2 → side-by-side. 3-4 → 2x2. etc.
+// 2. [Pattern]: Tiles sourced from unified activeStreams + contentTiles. No persistent/ephemeral split.
+// 3. [Pattern]: Grid never scrolls. Tiles shrink to fit. Each tile handles internal scroll.
+// 4. [Pattern]: Hotspot mode: click tile to focus. Esc exits. Side-by-side when 4+ non-hotspot tiles.
+// 5. [Pattern]: Auto-hotspot: when enabled, newly active streams auto-promote.
+// 6. [Pattern]: Layout transitions use 150ms opacity fade.
+import { useEffect, useCallback, useState, useRef, useMemo } from 'react';
+import { Activity, Cpu, Layers, Radio } from 'lucide-react';
 import GridTile from './GridTile';
 import { useOpsState } from '../../contexts/OpsStateContext';
+import { useFlowMetrics } from '../../hooks/useFlowMetrics';
 
 type LayoutMode = 'grid' | 'top-bottom' | 'side-by-side';
 const SIDE_BY_SIDE_THRESHOLD = 4;
 
 interface TileDescriptor {
   id: string;
-  type: 'agent-stream' | 'oncall-stream' | 'content-viewer' | 'empty';
-  agentName?: string;
+  type: 'stream' | 'content-viewer';
+  actor?: string;
+  eventId?: string;
 }
 
 function computeGridCols(count: number): number {
   if (count <= 1) return 1;
   if (count <= 2) return 2;
-  if (count <= 4) return 2;
-  if (count <= 6) return 3;
-  if (count <= 8) return 4;
-  return 4;
+  return Math.ceil(Math.sqrt(count));
 }
 
+function EmptyState() {
+  const { data } = useFlowMetrics();
+  const { registeredAgents } = useOpsState();
+  const connectedCount = registeredAgents.length;
+  const busyCount = registeredAgents.filter(a => a.busy).length;
+
+  return (
+    <div className="h-full flex flex-col items-center justify-center gap-6 text-text-muted select-none">
+      <div className="flex items-center gap-3 opacity-40">
+        <Activity size={28} className="text-accent" />
+        <span className="text-lg font-semibold text-text-secondary">Darwin Operations Center</span>
+      </div>
+
+      <div className="flex gap-8 text-center">
+        <div className="flex flex-col items-center gap-1">
+          <Cpu size={18} className={connectedCount > 0 ? 'text-green-400/70' : 'text-text-muted'} />
+          <span className="text-[13px] font-medium text-text-secondary">
+            {busyCount > 0 ? `${busyCount} busy` : `${connectedCount} agents`}
+          </span>
+          <span className="text-[10px] text-text-muted">connected</span>
+        </div>
+        {data && (
+          <>
+            <div className="flex flex-col items-center gap-1">
+              <Radio size={18} className={data.active_events > 0 ? 'text-blue-400' : 'text-text-muted'} />
+              <span className="text-[13px] font-medium text-text-secondary">{data.active_events}</span>
+              <span className="text-[10px] text-text-muted">events</span>
+            </div>
+            <div className="flex flex-col items-center gap-1">
+              <Layers size={18} className={data.queue_depth > 0 ? 'text-amber-400' : 'text-text-muted'} />
+              <span className="text-[13px] font-medium text-text-secondary">{data.queue_depth}</span>
+              <span className="text-[10px] text-text-muted">queued</span>
+            </div>
+          </>
+        )}
+      </div>
+
+      <span className="text-[11px] text-text-muted/60">
+        Agent streams appear here when work begins
+      </span>
+    </div>
+  );
+}
 
 export default function StreamGrid() {
   const {
-    agents, agentStreams, ephemeralAgents, ephemeralStream,
-    contentTiles, closeContentTile,
+    activeStreams, contentTiles, closeContentTile,
     hotspotTileId, setHotspot, autoHotspot,
   } = useOpsState();
 
-  const tiles: TileDescriptor[] = [];
-
-  for (const a of agents) {
-    tiles.push({ id: a, type: 'agent-stream', agentName: a });
-  }
-  const seenBoundEvents = new Set<string>();
-  for (const ea of ephemeralAgents) {
-    const key = ea.bound_event_id || ea.agent_id;
-    if (seenBoundEvents.has(key)) continue;
-    seenBoundEvents.add(key);
-    tiles.push({ id: key, type: 'oncall-stream', agentName: ea.current_role || 'oncall' });
-  }
-  for (const ct of contentTiles) {
-    tiles.push({ id: ct.id, type: 'content-viewer' });
-  }
+  const tiles = useMemo(() => {
+    const result: TileDescriptor[] = [];
+    for (const [key, stream] of Object.entries(activeStreams)) {
+      if (stream.messages.length === 0) continue;
+      result.push({
+        id: key,
+        type: 'stream',
+        actor: stream.actor,
+        eventId: stream.eventId,
+      });
+    }
+    for (const ct of contentTiles) {
+      result.push({ id: ct.id, type: 'content-viewer' });
+    }
+    return result;
+  }, [activeStreams, contentTiles]);
 
   const cols = computeGridCols(tiles.length);
   const rows = Math.ceil(tiles.length / cols);
-  const totalSlots = cols * rows;
-  while (tiles.length < totalSlots) {
-    tiles.push({ id: `empty-${tiles.length}`, type: 'empty' });
-  }
 
   const stripCount = hotspotTileId
-    ? tiles.filter(t => t.id !== hotspotTileId && t.type !== 'empty').length
+    ? tiles.filter(t => t.id !== hotspotTileId).length
     : 0;
   const currentMode: LayoutMode = !hotspotTileId
     ? 'grid'
@@ -103,31 +142,32 @@ export default function StreamGrid() {
 
   useEffect(() => {
     if (!autoHotspot) return;
-    const activeAgent = agents.find(a => agentStreams[a]?.isActive);
-    if (activeAgent && hotspotTileId !== activeAgent) {
-      setHotspot(activeAgent);
-    } else if (!activeAgent && hotspotTileId) {
-      const isContentOrEphemeral = hotspotTileId.startsWith('content-') || ephemeralAgents.some(e => (e.bound_event_id || e.agent_id) === hotspotTileId);
-      if (!isContentOrEphemeral) setHotspot(null);
+    const activeStream = Object.entries(activeStreams).find(([, s]) => s.isActive);
+    if (activeStream && hotspotTileId !== activeStream[0]) {
+      setHotspot(activeStream[0]);
+    } else if (!activeStream && hotspotTileId && !hotspotTileId.startsWith('content-')) {
+      setHotspot(null);
     }
-  }, [autoHotspot, agents, agentStreams, hotspotTileId, setHotspot, ephemeralAgents]);
+  }, [autoHotspot, activeStreams, hotspotTileId, setHotspot]);
 
   const renderTile = (tile: TileDescriptor) => {
     const ct = contentTiles.find(c => c.id === tile.id);
-    const ea = ephemeralAgents.find(e => (e.bound_event_id || e.agent_id) === tile.id);
+    const stream = tile.type === 'stream' ? activeStreams[tile.id] : undefined;
     return (
       <GridTile
         key={tile.id}
-        type={tile.type}
+        type={tile.type === 'stream' ? 'agent-stream' : 'content-viewer'}
         tileId={tile.id}
         isHotspot={hotspotTileId === tile.id}
         onTileClick={handleTileClick}
-        agentName={tile.agentName}
-        agentState={tile.type === 'agent-stream' ? agentStreams[tile.agentName!] : undefined}
+        agentName={tile.actor}
+        agentState={stream ? {
+          messages: stream.messages,
+          eventId: stream.eventId,
+          isActive: stream.isActive,
+        } : undefined}
         contentTile={ct}
         onCloseContent={closeContentTile}
-        ephemeralMessages={ea ? ephemeralStream[ea.bound_event_id || ''] : undefined}
-        ephemeralActive={ea?.busy}
       />
     );
   };
@@ -138,9 +178,13 @@ export default function StreamGrid() {
     }
   }, [hotspotTileId, tiles, setHotspot]);
 
+  if (tiles.length === 0) {
+    return <EmptyState />;
+  }
+
   if (hotspotTileId) {
     const hotspotTile = tiles.find(t => t.id === hotspotTileId);
-    const stripTiles = tiles.filter(t => t.id !== hotspotTileId && t.type !== 'empty');
+    const stripTiles = tiles.filter(t => t.id !== hotspotTileId);
 
     if (!hotspotTile) return null;
 

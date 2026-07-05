@@ -1,39 +1,33 @@
 // BlackBoard/ui/src/contexts/OpsStateContext.tsx
 // @ai-rules:
 // 1. [Pattern]: Single owner of shared operational state. WS: progress, turn, event_created, event_closed.
-// 2. [Pattern]: resolveStreamTarget() is a named export pure function (tested in resolveStreamTarget.test.ts).
-//    Internal agents ALWAYS route to agentStreams first (oncall sub-check for collision).
-//    Backend `ephemeral` flag is authoritative for non-internal actors only.
-// 3. [Pattern]: Turn handler uses resolveStreamTarget — only mutates agentStreams when target is 'agent'.
-//    Prevents oncall turn from deactivating the permanent agent tile.
-// 4. [Pattern]: event_closed deletes ephemeralStream entry + adds to recentlyClosedRef (FIFO cap 50).
-//    Late progress after close is discarded via recentlyClosedRef guard.
-//    Auto-deselects selectedEventId if the closed event matches (clears sessionStorage).
-// 5. [Pattern]: Mark-and-sweep GC (60s interval, staleCandidatesRef): prune on second consecutive miss
-//    (120s grace). Stale computation + ref mutation outside setState (React Strict Mode safe).
-// 6. [Constraint]: agentStreams NOT cleared on close or reconnect — memory-bounded, preserves review context.
-// 7. [Gotcha]: Auto-hotspot: only internal agents with isActive in agentStreams auto-promote.
-// 8. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
-// 9. [Pattern]: Inline ref assignment (lines 214-223) is intentional per React 19 docs
-//    for non-layout refs. useEffect alternative introduces timing gap that breaks WS
-//    callback stale-closure fix. React Strict Mode double-invoke is safe (idempotent).
-// 10. [Pattern]: ephemeralAgents derived via useMemo([registeredAgents, activeEvents]),
-//     not useState. Reactive to React Query cache changes — no 10s poll coupling.
-//     Cold-start guard: if (!activeEvents) return all ephemeral (React Query undefined before first fetch).
-//     ephemeralAgentsRef render-phase sync stays for WS handlers and GC.
+// 2. [Pattern]: Unified activeStreams model — no persistent/ephemeral split. Every work stream keyed
+//    by `${actor}:${eventId}`. Eliminates the routing bug class (ephemeral flag races, oncall sub-check
+//    timing, registry polling lag, stream leaking between tiles).
+// 3. [Pattern]: Progress with actor + event_id → upsert into activeStreams. Turn → mark inactive.
+//    event_closed → delete all streams for that event. No resolveStreamTarget routing needed.
+// 4. [Pattern]: event_closed adds to recentlyClosedRef (FIFO cap 50). Late progress discarded.
+//    Auto-deselects selectedEventId if closed event matches.
+// 5. [Pattern]: Mark-and-sweep GC (60s interval, staleCandidatesRef): prune streams whose eventId
+//    is no longer in active events for two consecutive cycles (120s grace).
+// 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection).
+// 7. [Pattern]: Inline ref assignment for external-data refs (render phase sync, React 19).
+//    Local-state refs sync in the callback that sets the state.
+// 8. [Pattern]: ephemeralAgents derived via useMemo([registeredAgents, activeEvents]) for sidebar.
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useWSMessage, useWSConnection, useWSReconnect } from './WebSocketContext';
 import { useQueueInvalidation, useActiveEvents } from '../hooks/useQueue';
 import { useKargoStages, useKargoStagesInvalidation } from '../hooks/useKargo';
 import { getAgents } from '../api/client';
-import type { ActiveEvent, AgentRegistryEntry, KargoStageStatus } from '../api/types';
+import type { AgentRegistryEntry, KargoStageStatus } from '../api/types';
 
 export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe'] as const;
 const MAX_BUFFER = 100;
 
-export interface AgentStreamState {
+export interface ActiveStream {
   messages: string[];
-  eventId: string | null;
+  actor: string;
+  eventId: string;
   isActive: boolean;
 }
 
@@ -52,9 +46,7 @@ export interface OpsState {
   selectedEventId: string | null;
   selectEvent: (id: string) => void;
   deselectEvent: () => void;
-  agents: readonly string[];
-  agentStreams: Record<string, AgentStreamState>;
-  ephemeralStream: Record<string, string[]>;
+  activeStreams: Record<string, ActiveStream>;
   ephemeralAgents: AgentRegistryEntry[];
   registeredAgents: AgentRegistryEntry[];
   kargoStages: KargoStageStatus[];
@@ -68,49 +60,6 @@ export interface OpsState {
   toggleAutoHotspot: () => void;
   connected: boolean;
   send: (data: Record<string, unknown>) => void;
-}
-
-export type StreamTarget = 'agent' | 'ephemeral' | 'drop';
-
-export function resolveStreamTarget(
-  actor: string,
-  evtId: string,
-  eventSource: string,
-  subjectType: string = '',
-  ephemeralAgents: AgentRegistryEntry[] = [],
-  activeEvents: ActiveEvent[] | undefined = undefined,
-  ephemeralFlag: boolean = false,
-): StreamTarget {
-  const isInternalAgent = AGENTS.includes(actor as typeof AGENTS[number]);
-
-  // Internal agents always route to permanent tiles — oncall sub-check
-  // prevents buffer collision when an ephemeral agent shares the same role.
-  if (isInternalAgent) {
-    const isBoundOncall = !!evtId &&
-      ephemeralAgents.some(a =>
-        (a.bound_event_id === evtId || a.current_event_id === evtId)
-        && (a.current_role || a.role) === actor
-      );
-    return isBoundOncall ? 'ephemeral' : 'agent';
-  }
-
-  // Backend ephemeral flag is authoritative for non-internal actors.
-  if (ephemeralFlag && evtId) return 'ephemeral';
-
-  const isEphemeralEvent = !!evtId && (
-    eventSource === 'headhunter'
-    || eventSource === 'timekeeper'
-    || eventSource === 'nightwatcher'
-    || evtId.startsWith('nw-sweep-')
-    || subjectType === 'kargo_stage'
-    || ephemeralAgents.some((a) => a.bound_event_id === evtId)
-    || activeEvents?.some((e) => e.id === evtId && (
-      e.source === 'headhunter' || e.source === 'timekeeper' || e.subject_type === 'kargo_stage'
-    ))
-  );
-
-  if (isEphemeralEvent && evtId) return 'ephemeral';
-  return 'drop';
 }
 
 const OpsStateContext = createContext<OpsState | null>(null);
@@ -139,13 +88,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     sessionStorage.removeItem('darwin:selectedEventId');
   }, []);
 
-  const [agentStreams, setAgentStreams] = useState<Record<string, AgentStreamState>>(() => {
-    const init: Record<string, AgentStreamState> = {};
-    for (const a of AGENTS) init[a] = { messages: [], eventId: null, isActive: false };
-    return init;
-  });
-
-  const [ephemeralStream, setEphemeralStream] = useState<Record<string, string[]>>({});
+  const [activeStreams, setActiveStreams] = useState<Record<string, ActiveStream>>({});
 
   const [registeredAgents, setRegisteredAgents] = useState<AgentRegistryEntry[]>([]);
 
@@ -154,18 +97,6 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       try {
         const agents = await getAgents();
         setRegisteredAgents(agents);
-        setAgentStreams(prev => {
-          const next = { ...prev };
-          let changed = false;
-          for (const a of AGENTS) {
-            const reg = agents.find((r: AgentRegistryEntry) => r.role === a && !r.ephemeral);
-            if (next[a]?.isActive && (!reg || !reg.busy)) {
-              next[a] = { ...next[a], isActive: false };
-              changed = true;
-            }
-          }
-          return changed ? next : prev;
-        });
       } catch { /* fire-and-forget */ }
     };
     fetchAgents();
@@ -223,39 +154,34 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     );
   }, [registeredAgents, activeEvents]);
 
-  const ephemeralAgentsRef = useRef(ephemeralAgents);
-  ephemeralAgentsRef.current = ephemeralAgents;
   const activeEventsRef = useRef(activeEvents);
   activeEventsRef.current = activeEvents;
   selectedEventIdRef.current = selectedEventId;
   const recentlyClosedRef = useRef<Set<string>>(new Set());
   const staleCandidatesRef = useRef<Set<string>>(new Set());
-  const ephemeralStreamRef = useRef(ephemeralStream);
-  ephemeralStreamRef.current = ephemeralStream;
+  const activeStreamsRef = useRef(activeStreams);
+  activeStreamsRef.current = activeStreams;
 
   useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
 
+  // GC: prune streams whose event is no longer active (mark-and-sweep, 120s grace)
   useEffect(() => {
     const gc = setInterval(() => {
       const activeIds = new Set(
         (activeEventsRef.current ?? []).map(e => e.id)
       );
-      const boundIds = new Set(
-        ephemeralAgentsRef.current
-          .map(a => a.bound_event_id)
-          .filter((id): id is string => !!id)
-      );
 
-      const currentKeys = Object.keys(ephemeralStreamRef.current);
-      const nowStale = currentKeys.filter(
-        k => !activeIds.has(k) && !boundIds.has(k) && !k.startsWith('nw-sweep-')
-      );
+      const currentKeys = Object.keys(activeStreamsRef.current);
+      const nowStale = currentKeys.filter(k => {
+        const stream = activeStreamsRef.current[k];
+        return stream && !activeIds.has(stream.eventId);
+      });
 
       const toDelete = nowStale.filter(k => staleCandidatesRef.current.has(k));
       staleCandidatesRef.current = new Set(nowStale);
 
       if (toDelete.length > 0) {
-        setEphemeralStream((prev) => {
+        setActiveStreams((prev) => {
           const next = { ...prev };
           for (const k of toDelete) delete next[k];
           return next;
@@ -263,51 +189,29 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
       }
     }, 60_000);
     return () => clearInterval(gc);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- refs and setter are stable
+  }, []);
 
   useWSMessage((msg) => {
-    if (msg.type === 'progress' && msg.actor) {
+    if (msg.type === 'progress' && msg.actor && msg.event_id) {
       const actor = msg.actor as string;
       const evtId = msg.event_id as string;
-      if (evtId && recentlyClosedRef.current.has(evtId)) return;
-      const target = resolveStreamTarget(
-        actor, evtId,
-        (msg.event_source ?? '') as string,
-        ((msg as Record<string, unknown>).subject_type ?? '') as string,
-        ephemeralAgentsRef.current,
-        activeEventsRef.current,
-        !!(msg as Record<string, unknown>).ephemeral,
-      );
-      if (target === 'agent') {
-        setAgentStreams((prev) => {
-          const current = prev[actor] || { messages: [], eventId: null, isActive: false };
-          const messages = [...current.messages, msg.message as string].slice(-MAX_BUFFER);
-          return { ...prev, [actor]: { ...current, messages, eventId: evtId || current.eventId, isActive: true } };
-        });
-      } else if (target === 'ephemeral') {
-        setEphemeralStream((prev) => ({
-          ...prev,
-          [evtId]: [...(prev[evtId] || []), msg.message as string].slice(-MAX_BUFFER),
-        }));
-      } else {
-        console.warn('[OPS] Dropped progress:', actor, evtId, msg.event_source);
-      }
+      if (recentlyClosedRef.current.has(evtId)) return;
+      const key = `${actor}:${evtId}`;
+      setActiveStreams((prev) => {
+        const current = prev[key];
+        const messages = [...(current?.messages || []), msg.message as string].slice(-MAX_BUFFER);
+        return { ...prev, [key]: { messages, actor, eventId: evtId, isActive: true } };
+      });
     } else if (msg.type === 'turn') {
       const turn = msg.turn as Record<string, unknown>;
       const actor = turn?.actor as string;
-      if (actor) {
-        const turnTarget = resolveStreamTarget(
-          actor, (msg.event_id ?? '') as string,
-          '', '',
-          ephemeralAgentsRef.current,
-          activeEventsRef.current,
-        );
-        if (turnTarget === 'agent') {
-          setAgentStreams((prev) => ({
-            ...prev,
-            [actor]: { ...prev[actor], isActive: false },
-          }));
-        }
+      const evtId = (msg.event_id ?? '') as string;
+      if (actor && evtId) {
+        const key = `${actor}:${evtId}`;
+        setActiveStreams((prev) => {
+          if (!prev[key]) return { ...prev, [key]: { messages: [], actor, eventId: evtId, isActive: false } };
+          return { ...prev, [key]: { ...prev[key], isActive: false } };
+        });
       }
       invalidateActive();
       if (msg.event_id) invalidateEvent(msg.event_id as string);
@@ -325,23 +229,16 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
         invalidateClosed();
         invalidateHeadhunter();
 
-        setAgentStreams((prev) => {
+        setActiveStreams((prev) => {
           const next = { ...prev };
           let changed = false;
-          for (const a of AGENTS) {
-            if (next[a]?.eventId === closedId) {
-              next[a] = { messages: [], eventId: null, isActive: false };
+          for (const k of Object.keys(next)) {
+            if (next[k].eventId === closedId) {
+              delete next[k];
               changed = true;
             }
           }
           return changed ? next : prev;
-        });
-
-        setEphemeralStream((prev) => {
-          if (!prev[closedId]) return prev;
-          const next = { ...prev };
-          delete next[closedId];
-          return next;
         });
 
         recentlyClosedRef.current.add(closedId);
@@ -379,9 +276,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     selectedEventId,
     selectEvent,
     deselectEvent,
-    agents: AGENTS,
-    agentStreams,
-    ephemeralStream,
+    activeStreams,
     ephemeralAgents,
     registeredAgents,
     kargoStages,
@@ -397,7 +292,7 @@ export function OpsStateProvider({ children }: { children: ReactNode }) {
     send,
   }), [
     selectedEventId, selectEvent, deselectEvent,
-    agentStreams, ephemeralStream, ephemeralAgents, registeredAgents,
+    activeStreams, ephemeralAgents, registeredAgents,
     kargoStages, kargoEventResult,
     contentTiles, hotspotTileId, setHotspot, openContentTile, closeContentTile,
     autoHotspot, toggleAutoHotspot, connected, send,
