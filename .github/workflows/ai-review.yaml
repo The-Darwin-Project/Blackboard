@@ -50,6 +50,7 @@ jobs:
           fi
 
       - name: Run AI review
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLAUDE_CODE_USE_VERTEX: "1"
