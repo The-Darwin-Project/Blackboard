@@ -3,11 +3,22 @@
 // 1. [Pattern]: Reusable tree UI primitives for the EventSidebar. Stateless where possible.
 // 2. [Constraint]: Pure presentational. No data fetching, no context access.
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
+// 4. [Pattern]: EventNode is 2-row: service+domain+agent (row 1), display_text+age+icons (row 2).
+// 5. [Gotcha]: display_text may be long — truncate to single line with CSS.
 import { useState, type ReactNode } from 'react';
 import { ChevronRight, Bot, Radio, Radar, Bell, StickyNote } from 'lucide-react';
-import { ACTOR_COLORS, STATUS_COLORS } from '../../constants/colors';
+import { ACTOR_COLORS, STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colors';
 import SourceIcon from '../SourceIcon';
 import DeferCountdownBar from '../DeferCountdownBar';
+
+function relativeAge(isoDate: string | undefined): string {
+  if (!isoDate) return '';
+  const ms = Date.now() - new Date(isoDate).getTime();
+  if (ms < 60_000) return '<1m';
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`;
+  return `${Math.floor(ms / 86_400_000)}d`;
+}
 
 export function TreeGroup({ icon, label, count, countColor, children, nested, forceCollapsed }: {
   icon: ReactNode; label: string; count: number; countColor?: string; children: ReactNode; nested?: boolean; forceCollapsed?: boolean;
@@ -57,21 +68,30 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
     current_agent?: string | null; unread_notes?: number;
     defer_until?: number; defer_started_at?: number;
     subscription_active?: boolean;
+    reason?: string;
+    evidence?: { display_text?: string; domain?: string; severity?: string };
+    created?: string;
   };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const sc = STATUS_COLORS[evt.status];
   const isWaiting = evt.status === 'waiting_approval';
   const isDeferred = evt.status === 'deferred';
+  const domain = evt.evidence?.domain;
+  const dc = domain ? DOMAIN_COLORS[domain as keyof typeof DOMAIN_COLORS] : undefined;
+  const summary = evt.evidence?.display_text || evt.reason || '';
+  const age = relativeAge(evt.created);
+
   return (
     <div
-      className={`rounded text-[14px] cursor-pointer transition-colors ${
+      className={`rounded cursor-pointer transition-colors ${
         isSelected ? 'bg-accent/15 border border-accent/30'
           : isWaiting ? 'border border-amber-500/25 hover:border-amber-500/40'
           : isDeferred ? 'border border-violet-500/20 hover:border-violet-500/35'
           : 'hover:bg-bg-tertiary border border-transparent'
       }`}
       role="button" tabIndex={0}
+      title={evt.id}
       style={
         isWaiting && !isSelected ? { background: '#f59e0b08' }
           : isDeferred && !isSelected ? { background: `${sc?.border || '#8b5cf6'}08` }
@@ -79,28 +99,41 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
       }
       onClick={onClick} onContextMenu={onContextMenu}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}>
-      <div className="flex items-center gap-2 px-3 py-1">
-        <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
+      {/* Row 1: status + source + service name + domain pill + agent badge */}
+      <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 min-w-0">
+        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
           style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
-        <SourceIcon source={evt.source} subjectType={evt.subject_type} size={18} />
-        <span className={`truncate ${isWaiting ? 'text-amber-300' : isDeferred ? 'text-violet-200' : 'text-text-secondary'}`}>
-          {evt.id.slice(4, 12)}
+        <SourceIcon source={evt.source} subjectType={evt.subject_type} size={15} />
+        <span className={`text-[13px] font-medium truncate min-w-0 flex-1 ${isWaiting ? 'text-amber-300' : isDeferred ? 'text-violet-200' : 'text-text-secondary'}`}>
+          {evt.service || evt.id.slice(4, 12)}
         </span>
-        {isWaiting && (
-          <Bell size={14} className="text-amber-400 flex-shrink-0 animate-pulse" />
-        )}
-        {!isWaiting && (evt.unread_notes ?? 0) > 0 && (
-          <StickyNote size={14} className="text-yellow-400 flex-shrink-0" />
-        )}
-        {evt.subscription_active && (
-          <span className="flex-shrink-0" title="Background state subscription active">
-            <Radar size={14} className="text-cyan-400 animate-pulse" />
+        {dc && (
+          <span className="text-[10px] px-1.5 py-0 rounded-full flex-shrink-0 font-medium leading-[18px]"
+            style={{ background: dc.bg, color: dc.text, border: `1px solid ${dc.border}30` }}>
+            {domain}
           </span>
         )}
         {evt.current_agent && (
-          <span className="ml-auto text-[12px] px-1 rounded flex-shrink-0"
+          <span className="text-[11px] px-1 rounded flex-shrink-0"
             style={{ color: ACTOR_COLORS[evt.current_agent] || '#64748b', background: `${ACTOR_COLORS[evt.current_agent] || '#64748b'}15` }}>
             {evt.current_agent}
+          </span>
+        )}
+      </div>
+      {/* Row 2: summary text + age + indicator icons */}
+      <div className="flex items-center gap-1.5 px-3 pb-1.5 min-w-0">
+        <span className="w-2 flex-shrink-0" />
+        {summary ? (
+          <span className="text-[11px] text-text-muted truncate flex-1 min-w-0">{summary}</span>
+        ) : (
+          <span className="text-[11px] text-text-muted/50 truncate flex-1 min-w-0 italic">{evt.id.slice(4, 12)}</span>
+        )}
+        {age && <span className="text-[10px] text-text-muted/60 flex-shrink-0">{age}</span>}
+        {isWaiting && <Bell size={12} className="text-amber-400 flex-shrink-0 animate-pulse" />}
+        {!isWaiting && (evt.unread_notes ?? 0) > 0 && <StickyNote size={12} className="text-yellow-400 flex-shrink-0" />}
+        {evt.subscription_active && (
+          <span className="flex-shrink-0" title="Background state subscription active">
+            <Radar size={12} className="text-cyan-400 animate-pulse" />
           </span>
         )}
       </div>
