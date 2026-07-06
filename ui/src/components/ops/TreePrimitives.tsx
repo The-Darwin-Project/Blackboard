@@ -5,6 +5,7 @@
 // 3. [Pattern]: TreeGroup is the only stateful primitive (open/close toggle).
 // 4. [Pattern]: EventNode is 2-row: service+domain+agent (row 1), display_text+age+icons (row 2).
 // 5. [Gotcha]: display_text may be long — truncate to single line with CSS.
+// 6. [Gotcha]: New Cynefin domains require a matching entry in DOMAIN_COLORS (../../constants/colors).
 import { useState, type ReactNode } from 'react';
 import { ChevronRight, Bot, Radio, Radar, Bell, StickyNote } from 'lucide-react';
 import { ACTOR_COLORS, STATUS_COLORS, DOMAIN_COLORS } from '../../constants/colors';
@@ -14,6 +15,7 @@ import DeferCountdownBar from '../DeferCountdownBar';
 function relativeAge(isoDate: string | undefined): string {
   if (!isoDate) return '';
   const ms = Date.now() - new Date(isoDate).getTime();
+  if (isNaN(ms) || ms < 0) return '';
   if (ms < 60_000) return '<1m';
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`;
