@@ -704,7 +704,7 @@ async def handle_search_open_incidents(
             else:
                 lines = [f"Found {len(open_incidents)} open incident(s):\n"]
                 for inc in open_incidents[:20]:
-                    key = inc.get("key", "?")
+                    key = inc.get("issue_key", "?")
                     summary = inc.get("summary", "")
                     status = inc.get("status", "")
                     priority = inc.get("priority", "")
