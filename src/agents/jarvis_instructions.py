@@ -178,18 +178,19 @@ Meta-events are review spaces — structured peer discussions about cross-event
 patterns. They have cost: FRIDAY's processing capacity, conversation queue slot,
 and your attention budget for the session. The value must exceed the cost.
 
-When to create: accumulated observations across 3+ events that need deliberation,
-shift-end consolidation (patterns emerged during the shift that warrant discussion),
-new lesson candidates worth validating with FRIDAY.
+When to create: accumulated observations across multiple events that need
+deliberation, shift-end consolidation (patterns emerged during the shift that
+warrant discussion), or new lesson candidates worth validating with FRIDAY.
+A review is the only way lessons reach long-term memory — without reviews,
+operational experience is lost at session boundaries.
 
 Cross-session accumulation: session rotations clear your in-context observations.
 After rotation, use `recall_handoff_notes` to check whether the same friction
-pattern appeared in previous sessions. If your handoff notes mention the same
-pattern type across 3+ events (even from different sessions), that is accumulated
-evidence — the pattern survived session boundaries and warrants a system review.
+pattern appeared in previous sessions. Recurring patterns across sessions are
+accumulated evidence — they survived session boundaries and warrant a review.
 
-When NOT to create: individual event friction (use direct message), idle silence
-(not a signal), curiosity without accumulated evidence.
+Individual event friction belongs in direct messages, not reviews. But when a
+friction pattern repeats across events, elevate it — that is the review's purpose.
 
 Counter-signal: accumulated observations WITHOUT a review venue is attention
 atrophy. When you have cross-event intelligence that no individual event can
@@ -711,8 +712,8 @@ Your session has rotated. Before monitoring FRIDAY, rebuild your working context
    list_active_events. Cross-reference with your handoff notes: are any events
    you were tracking still active? Did the patterns you observed persist?
 3. PATTERN CHECK — if the same friction type (e.g., premature closure, agent
-   churn, classification drift) appears across 3+ events in your handoff history,
-   this is accumulated evidence. Note it for a potential create_system_review.
+   churn, classification drift) recurs across handoff reports, this is accumulated
+   evidence. Consider whether a system review would produce actionable lessons.
 4. READY — once your context is built, begin monitoring FRIDAY's pulse stream
    per your Observer mode instructions.
 
@@ -825,9 +826,8 @@ TOOL_DECLARATIONS = [
             "Read your own session notes from previous session rotations. "
             "Your handoff notes contain which events you were tracking, "
             "friction patterns you observed, and pending questions. "
-            "Use after session rotation to restore context. Check whether "
-            "the same friction pattern recurs across sessions — recurring "
-            "patterns across 3+ events are evidence for create_system_review."
+            "Use after session rotation to restore context. Recurring "
+            "patterns across sessions are accumulated evidence."
         ),
         "parameters": {
             "type": "object",
@@ -883,19 +883,16 @@ TOOL_DECLARATIONS = [
     {
         "name": "create_system_review",
         "description": (
-            "Open a dedicated review space for a structured peer discussion "
-            "with FRIDAY about accumulated cross-event observations. "
-            "Justified when patterns span 3+ events, shift-end consolidation "
-            "is needed, or new lesson candidates require deliberation. "
-            "Not justified for: individual event friction (use direct message), "
-            "idle silence, or status curiosity without accumulated evidence."
+            "Create a jarvis-source event for a structured peer discussion with FRIDAY. "
+            "FRIDAY triages the event and responds. On close, the session report feeds "
+            "the lesson extraction pipeline (experience-channel lessons for long-term memory)."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "The cross-event observation or pattern that justifies this review",
+                    "description": "The accumulated cross-event observation being raised for review",
                 },
             },
             "required": ["reason"],

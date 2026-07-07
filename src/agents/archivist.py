@@ -610,6 +610,7 @@ class Archivist:
         title: str,
         pattern: str,
         anti_pattern: str = "",
+        fix_action: str = "",
         keywords: list[str] | None = None,
         event_references: list[str] | None = None,
         channel: str = "external",
@@ -634,7 +635,7 @@ class Archivist:
 
             kw = keywords or []
             refs = event_references or []
-            embed_text = f"{title} {pattern} {anti_pattern} {' '.join(kw)}"
+            embed_text = f"{title} {pattern} {anti_pattern} {fix_action} {' '.join(kw)}"
             vector = await self._embed(embed_text)
 
             dedup_threshold = float(os.environ.get("LESSON_DEDUP_THRESHOLD", "0.85"))
@@ -690,6 +691,7 @@ class Archivist:
                 "title": title,
                 "pattern": pattern,
                 "anti_pattern": anti_pattern,
+                "fix_action": fix_action,
                 "keywords": kw,
                 "event_references": refs,
                 "channel": channel,
@@ -1217,6 +1219,10 @@ class Archivist:
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "5-7 heat-map words for vector retrieval.",
+                            },
+                            "fix_action": {
+                                "type": "string",
+                                "description": "Autonomous remediation (defer, retest, classify, close). 'none' if no autonomous fix was possible. Distinguish from actions requiring human approval.",
                             },
                             "event_references": {"type": "array", "items": {"type": "string"}},
                             "action": {

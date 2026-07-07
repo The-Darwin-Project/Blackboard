@@ -1384,6 +1384,7 @@ class LiveAPIAdapter:
                         title=lesson.get("title", ""),
                         pattern=lesson.get("pattern", ""),
                         anti_pattern=lesson.get("anti_pattern", ""),
+                        fix_action=lesson.get("fix_action", ""),
                         keywords=lesson.get("keywords", []),
                         event_references=lesson.get("event_references", []),
                         channel="experience",
