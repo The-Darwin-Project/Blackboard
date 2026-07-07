@@ -85,7 +85,7 @@ class Headhunter:
     # LLM Analysis (platform-agnostic)
     # =========================================================================
 
-    async def analyze_and_plan(self, context: dict, system_instruction: str) -> tuple[str, str]:
+    async def analyze_and_plan(self, context: dict, system_instruction: str = "") -> tuple[str, str]:
         """LLM-based triage with full context.
 
         All work items pass through Flash LLM analysis for consistent evidence quality.
@@ -348,4 +348,6 @@ class Headhunter:
 
     async def poll_cycle(self) -> list[dict]:
         """Delegate to GitLab adapter. Exposed for backward compatibility."""
-        return await self._gitlab.poll_work_items()
+        result = await self._gitlab.poll_work_items()
+        self._last_poll_pending = len(result)
+        return result

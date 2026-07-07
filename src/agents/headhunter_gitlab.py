@@ -287,7 +287,7 @@ class GitLabPlatform:
                             if allowed_authors and note_author not in allowed_authors:
                                 logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
                                 continue
-                            context["mention_comment"] = body
+                            context["mention_comment"] = body[:2000]
                             context["mention_author"] = note_author
                     if note_author == darwin_bot:
                         continue
@@ -675,8 +675,9 @@ class GitLabPlatform:
         try:
             async with httpx.AsyncClient(verify=False, timeout=10) as client:
                 resp = await client.get(
-                    self._api_url(f"/users?username={username}"),
+                    self._api_url("/users"),
                     headers=self._headers(),
+                    params={"username": username},
                 )
                 if resp.is_success:
                     users = resp.json()
