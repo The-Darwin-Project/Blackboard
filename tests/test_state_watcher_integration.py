@@ -325,9 +325,11 @@ class TestPollGitlabHttpErrors:
         async def mock_get(*args, **kwargs):
             return mock_response
 
+        from src.agents.headhunter_gitlab import GitLabPlatform
         hh = Headhunter.__new__(Headhunter)
-        hh._gitlab_host = "https://gitlab.example.com"
-        hh._gitlab_token = "test-token"
+        hh._gitlab = GitLabPlatform.__new__(GitLabPlatform)
+        hh._gitlab._gitlab_host = "gitlab.example.com"
+        hh._gitlab._gitlab_token = "test-token"
 
         with patch("httpx.AsyncClient") as mock_client_cls:
             client_instance = AsyncMock()
