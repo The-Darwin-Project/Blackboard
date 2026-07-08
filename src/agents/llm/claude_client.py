@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from .types import FunctionCall, LLMChunk, LLMResponse
+from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,26 @@ class ClaudeAdapter:
         )
         self._model_name = model_name
         logger.info(f"ClaudeAdapter initialized: {model_name} (region={location})")
+
+    # -----------------------------------------------------------------
+    # Token usage extraction
+    # -----------------------------------------------------------------
+
+    def _extract_usage(self, message) -> TokenUsage | None:
+        """Extract TokenUsage from Anthropic message.usage."""
+        usage = getattr(message, "usage", None)
+        if usage is None:
+            return None
+        input_t = getattr(usage, "input_tokens", None) or 0
+        output_t = getattr(usage, "output_tokens", None) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", None) or 0
+        return TokenUsage(
+            input_tokens=input_t + cache_read,
+            output_tokens=output_t,
+            cached_tokens=cache_read,
+            total_tokens=input_t + cache_read + output_t,
+            model_version=self._model_name,
+        )
 
     # -----------------------------------------------------------------
     # Shared helpers
@@ -210,6 +230,7 @@ class ClaudeAdapter:
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
 
         message = await self._client.messages.create(**kwargs)
+        token_usage = self._extract_usage(message)
 
         tool_uses = [b for b in message.content if b.type == "tool_use"]
         text_blocks = [b.text for b in message.content if b.type == "text"]
@@ -219,8 +240,9 @@ class ClaudeAdapter:
             return LLMResponse(
                 function_call=FunctionCall(name=tc.name, args=tc.input or {}),
                 text="\n".join(text_blocks) if text_blocks else None,
+                usage=token_usage,
             )
-        return LLMResponse(text="\n".join(text_blocks) if text_blocks else None)
+        return LLMResponse(text="\n".join(text_blocks) if text_blocks else None, usage=token_usage)
 
     # -----------------------------------------------------------------
     # LLMPort: generate_stream (async iterator)
@@ -244,12 +266,14 @@ class ClaudeAdapter:
                 yield LLMChunk(text=text)
 
             message = await stream.get_final_message()
+            token_usage = self._extract_usage(message)
             tool_uses = [b for b in message.content if b.type == "tool_use"]
             if tool_uses:
                 tc = tool_uses[0]
                 yield LLMChunk(
                     function_call=FunctionCall(name=tc.name, args=tc.input or {}),
                     done=True,
+                    usage=token_usage,
                 )
             else:
-                yield LLMChunk(done=True)
+                yield LLMChunk(done=True, usage=token_usage)

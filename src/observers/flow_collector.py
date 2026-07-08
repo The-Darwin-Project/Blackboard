@@ -4,7 +4,7 @@
 # 2. [Pattern]: External observer — reads scheduler.metrics (pull-only public API) + blackboard state.
 # 3. [Gotcha]: Must survive Redis errors — try/except per cycle, log + continue.
 # 4. [Pattern]: Maintains _prev_* counters for delta computation across snapshots.
-# 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence.
+# 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence. TokenMeter via DI is permitted (counter, not LLM code).
 """FlowCollector: periodic snapshot of system flow health, persisted to Redis."""
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..agents.agent_registry import AgentRegistry
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
+    from ..agents.llm.token_meter import TokenMeter
     from ..scheduling.reconciler import ReconcileScheduler
     from ..state.blackboard import BlackboardState
 
@@ -36,6 +37,7 @@ class FlowCollector:
         registry: "AgentRegistry | None" = None,
         headhunter: "Headhunter | None" = None,
         provisioner: "EphemeralProvisioner | None" = None,
+        token_meter: "TokenMeter | None" = None,
         interval: float = 60.0,
     ):
         self._scheduler = scheduler
@@ -43,6 +45,7 @@ class FlowCollector:
         self._registry = registry
         self._headhunter = headhunter
         self._provisioner = provisioner
+        self._token_meter = token_meter
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._running = False
@@ -157,6 +160,10 @@ class FlowCollector:
         except Exception:
             pass
 
+        # Token meter: snapshot() returns interval deltas, get_platform_totals() returns cumulative
+        token_snap = self._token_meter.snapshot() if self._token_meter else {}
+        platform_totals = self._token_meter.get_platform_totals() if self._token_meter else {}
+
         return FlowSnapshot(
             timestamp=now,
             queue_depth=flow["queue_depth"],
@@ -180,4 +187,12 @@ class FlowCollector:
             dispatch_infra_fails=dispatch_infra_fails,
             dispatch_circuit_breaks=dispatch_circuit_breaks,
             avg_spawn_latency_sec=avg_spawn_latency_sec,
+            token_input_delta=token_snap.get("input_tokens", 0),
+            token_output_delta=token_snap.get("output_tokens", 0),
+            token_thinking_delta=token_snap.get("thinking_tokens", 0),
+            token_cached_delta=token_snap.get("cached_tokens", 0),
+            token_tool_use_delta=token_snap.get("tool_use_tokens", 0),
+            token_total_delta=token_snap.get("total_tokens", 0),
+            token_calls_delta=token_snap.get("calls", 0),
+            token_total_cumulative=platform_totals.get("total_tokens", 0),
         )

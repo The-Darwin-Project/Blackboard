@@ -56,6 +56,7 @@ class MockResponse:
         self.function_call = function_call
         self.text = text or ""
         self.raw_parts = raw_parts
+        self.usage = None
 
 
 # =========================================================================

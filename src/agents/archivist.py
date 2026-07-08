@@ -300,6 +300,8 @@ class Archivist:
                 logger.warning(f"Claude archive timed out after {claude_timeout}s for {event.id}, falling back to Gemini")
                 await self._archive_event_fallback(event, conversation_text, duration)
                 return
+            from .llm import record_token_usage
+            record_token_usage("archivist", response.usage)
 
             if response.function_call and response.function_call.args is not None:
                 summary = response.function_call.args
@@ -381,6 +383,8 @@ class Archivist:
             max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST", "4096")),
             thinking_level=os.getenv("LLM_THINKING_ARCHIVIST", "high"),
         )
+        from .llm import record_token_usage
+        record_token_usage("archivist", response.usage)
 
         summary_text = (response.text or "").strip()
         if summary_text.startswith("```"):

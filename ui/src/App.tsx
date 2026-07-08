@@ -29,6 +29,7 @@ import CortexPage from './components/cortex/CortexPage';
 import { lazy, Suspense, Component, type ReactNode } from 'react';
 const CortexDevPage = lazy(() => import('./components/cortex/CortexDevPage'));
 import FlowHistoryPage from './components/FlowHistoryPage';
+import TokenUtilizationPage from './components/TokenUtilizationPage';
 
 class WipErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean}> {
   state = { hasError: false };
@@ -84,6 +85,11 @@ function AuthGate() {
           <Route path="wip" element={
             <WipErrorBoundary>
               <FlowHistoryPage />
+            </WipErrorBoundary>
+          } />
+          <Route path="flow/tokens" element={
+            <WipErrorBoundary>
+              <TokenUtilizationPage />
             </WipErrorBoundary>
           } />
           <Route path="guide" element={<GuidePage />} />

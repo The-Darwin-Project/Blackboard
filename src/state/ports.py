@@ -412,6 +412,7 @@ class EventRepository(Protocol):
 
     async def close_event(
         self, event_id: str, summary: str, close_reason: str = "resolved",
+        token_usage: dict | None = None,
     ) -> None: ...
 
     async def stamp_event(self, event_id: str, **fields: object) -> None: ...

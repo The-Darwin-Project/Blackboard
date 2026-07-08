@@ -232,6 +232,8 @@ class Aligner:
                 system_prompt="", contents=prompt, max_output_tokens=1024,
                 thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
             )
+            from .llm import record_token_usage
+            record_token_usage("aligner", response.usage)
             
             import json
             if not response.text:
@@ -499,6 +501,8 @@ class Aligner:
                     max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ALIGNER", "4096")),
                     thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
                 )
+                from .llm import record_token_usage
+                record_token_usage("aligner", response.usage)
 
                 # Handle function calls from Flash
                 if response.function_call:

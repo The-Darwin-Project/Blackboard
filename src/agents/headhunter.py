@@ -111,6 +111,8 @@ class Headhunter:
                 max_output_tokens=10000,
                 thinking_level=self._thinking_level,
             )
+            from .llm import record_token_usage
+            record_token_usage("headhunter", response.usage)
             plan_text = response.text.strip()
             domain = self._extract_domain(plan_text)
             logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))} -> {domain}")

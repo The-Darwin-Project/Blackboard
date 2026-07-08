@@ -496,6 +496,8 @@ class HeadhunterJira:
         ):
             if chunk.text:
                 chunks.append(chunk.text)
+            from .llm import record_token_usage
+            record_token_usage("headhunter_jira", chunk.usage)
         return "".join(chunks)
 
     async def _run_brain_plan(self, jira_content: str, analysis: str) -> str:
@@ -520,6 +522,8 @@ class HeadhunterJira:
                 text_chunks.append(chunk.text)
             if chunk.function_call:
                 function_call = chunk.function_call
+            from .llm import record_token_usage
+            record_token_usage("headhunter_jira", chunk.usage)
 
         if function_call and function_call.name == "produce_execution_plan":
             return self._plan_args_to_yaml(function_call.args)

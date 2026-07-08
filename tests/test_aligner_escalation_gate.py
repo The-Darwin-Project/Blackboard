@@ -195,6 +195,7 @@ async def test_recovery_clears_flag():
         function_call = MockFunctionCall()
         text = ""
         raw_parts = None
+        usage = None
 
     mock_adapter = AsyncMock()
     mock_adapter.generate.return_value = MockResponse()
@@ -327,6 +328,7 @@ async def test_flash_prompt_includes_escalation_context():
         function_call = None
         text = "normal"
         raw_parts = None
+        usage = None
 
     async def capture_generate(**kwargs):
         nonlocal captured_prompt

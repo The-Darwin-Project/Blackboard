@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from .types import FunctionCall, LLMChunk, LLMResponse
+from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +66,39 @@ class GeminiAdapter:
         """Rough pre-request token estimate (char count / 4)."""
         return max(1, len(str(contents)) // 4)
 
-    def _record_usage(self, usage_metadata, estimate: int) -> None:
-        """Record actual token usage from usage_metadata, correcting the estimate."""
-        if not self._tracker or usage_metadata is None:
-            return
-        actual = getattr(usage_metadata, "total_token_count", None)
-        if actual is None:
-            return
-        self._tracker.record(actual, estimate)
-        stats = self._tracker.get_stats()
-        logger.debug(
-            f"LLM usage: {actual} tokens (est={estimate}), "
-            f"bucket={stats['utilization_pct']}%"
+    def _record_usage(self, usage_metadata, estimate: int) -> TokenUsage | None:
+        """Extract full TokenUsage from usage_metadata and record with QuotaTracker."""
+        if usage_metadata is None:
+            return None
+
+        total = getattr(usage_metadata, "total_token_count", None) or 0
+        input_t = getattr(usage_metadata, "prompt_token_count", None) or 0
+        candidates_t = getattr(usage_metadata, "candidates_token_count", None)
+        thinking_t = getattr(usage_metadata, "thoughts_token_count", None) or 0
+        cached_t = getattr(usage_metadata, "cached_content_token_count", None) or 0
+        tool_use_t = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
+
+        # Streaming: candidates_token_count is None on final chunk (@ai-shebang Rule 10)
+        if candidates_t is None and total > 0:
+            candidates_t = max(0, total - input_t - thinking_t - cached_t - tool_use_t)
+        output_t = candidates_t or 0
+
+        if self._tracker and total:
+            self._tracker.record(total, estimate)
+            stats = self._tracker.get_stats()
+            logger.debug(
+                f"LLM usage: {total} tokens (est={estimate}), "
+                f"bucket={stats['utilization_pct']}%"
+            )
+
+        return TokenUsage(
+            input_tokens=input_t,
+            output_tokens=output_t,
+            thinking_tokens=thinking_t,
+            cached_tokens=cached_t,
+            tool_use_tokens=tool_use_t,
+            total_tokens=total,
+            model_version=self._model_name,
         )
 
     # -----------------------------------------------------------------
@@ -228,7 +249,7 @@ class GeminiAdapter:
             config=config,
         )
 
-        self._record_usage(getattr(response, "usage_metadata", None), estimate)
+        token_usage = self._record_usage(getattr(response, "usage_metadata", None), estimate)
 
         raw_parts = None
         if response.candidates:
@@ -242,8 +263,9 @@ class GeminiAdapter:
                 function_call=FunctionCall(name=fc.name, args=fc.args or {}),
                 text=response.text,
                 raw_parts=raw_parts,
+                usage=token_usage,
             )
-        return LLMResponse(text=response.text, raw_parts=raw_parts)
+        return LLMResponse(text=response.text, raw_parts=raw_parts, usage=token_usage)
 
     # -----------------------------------------------------------------
     # LLMPort: generate_stream (async iterator)
@@ -308,7 +330,7 @@ class GeminiAdapter:
 
             if chunk.function_calls:
                 fc = chunk.function_calls[0]
-                self._record_usage(last_usage, estimate)
+                token_usage = self._record_usage(last_usage, estimate)
                 output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
                 all_parts = thought_parts + output_parts
                 yield LLMChunk(
@@ -316,12 +338,13 @@ class GeminiAdapter:
                     done=True,
                     raw_parts=all_parts,
                     grounding_metadata=last_grounding,
+                    usage=token_usage,
                 )
                 return
 
-        self._record_usage(last_usage, estimate)
+        token_usage = self._record_usage(last_usage, estimate)
         if last_grounding:
             logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
         output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
         all_parts = thought_parts + output_parts
-        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding)
+        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding, usage=token_usage)

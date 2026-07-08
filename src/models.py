@@ -428,6 +428,7 @@ class EventDocument(BaseModel):
     # Sticky notes (FRIDAY-to-FRIDAY via JARVIS close phase)
     sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
     unread_notes: int = Field(0, description="Count of unread sticky notes")
+    token_usage: Optional[dict[str, int]] = Field(None, description="Token usage totals stamped at event close")
 
 
 # =============================================================================
@@ -648,6 +649,8 @@ class FlowMetricsResponse(BaseModel):
     wip_utilization_pct: float = 0.0
     wip_available: int = 0
     avg_reconcile_ms: float = 0.0
+    token_total_60s: int = 0
+    token_calls_60s: int = 0
     snapshot_timestamp: float | None = None
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
@@ -677,6 +680,14 @@ class FlowSnapshot(BaseModel):
     dispatch_infra_fails: int = 0
     dispatch_circuit_breaks: int = 0
     avg_spawn_latency_sec: float = 0.0
+    token_input_delta: int = 0
+    token_output_delta: int = 0
+    token_thinking_delta: int = 0
+    token_cached_delta: int = 0
+    token_tool_use_delta: int = 0
+    token_total_delta: int = 0
+    token_calls_delta: int = 0
+    token_total_cumulative: int = 0
 
 
 class ReportMeta(BaseModel):
