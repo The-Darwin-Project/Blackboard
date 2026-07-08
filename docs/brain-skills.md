@@ -23,7 +23,7 @@ The Brain loads phase-specific skills (Markdown files) based on event state, rep
 1. **Startup:** `BrainSkillLoader` scans `src/agents/brain_skills/` for `.md` files organized by phase directory (filesystem cold start).
 2. **Per-event version check:** Brain reads `darwin:skills:version` from Redis. On change, acquires `_skills_reload_lock` and calls `reload_from_redis()`.
 3. **Atomic corpus swap:** All caches live in a frozen `_SkillCorpus` dataclass. Reload builds a new corpus, then swaps `self._corpus = new_corpus` in a single reference assignment (GIL-safe). No window of partial state.
-4. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), `tags`, and `tools` (canonical Brain function names for replay-time skill pointer injection).
+4. **Frontmatter parsing:** Each skill has optional YAML frontmatter with `description`, `requires` (dependency list), `tags`, `tag_type` (override for semantic XML wrapping), and `tools` (canonical Brain function names for replay-time skill pointer injection via `build_skill_refs()`).
 5. **Dependency resolution:** BFS with cycle detection ensures skills load in dependency order.
 6. **Template substitution:** Skills can reference variables like `{event_id}`, `{service}`, etc.
 7. **Phase exclusions:** Conflicting phases are never loaded simultaneously (e.g., `post-agent` excludes `triage` and `dispatch`).
@@ -81,14 +81,16 @@ src/agents/brain_skills/
   post-agent/       # Plan activation, recommendations, when-to-close (after agent returns)
   waiting/          # Wait-for-user protocol (when paused for human input)
   context/          # Cross-event awareness, architecture diagram, aligner observations
-  source/           # Source-specific rules (slack, chat, aligner, headhunter, timekeeper)
+  source/           # Source-specific rules (slack, chat, aligner, headhunter, timekeeper, jarvis)
+  gated/            # Turn-conditional skills (injected via find_paths_by_tag, never auto-loaded)
+  escalate/         # Incident tracking and escalation gates
   multi-user/       # Multi-participant conversation protocol
   coordination/     # Dev/QE quality gates, PR workflow
   defer-wake/       # Post-defer verification, assumption re-check
   intermediate/     # Active dispatch awareness, user messages during agent work
 ```
 
-Note: Triage/Cynefin classification skills are in `always/` (loaded every call) rather than a separate `triage/` directory. The `set_phase` tool gating table below uses "triage" as a phase name, which controls tool availability -- not a filesystem directory.
+Note: Triage/Cynefin classification skills are in `always/` (loaded every call) rather than a separate `triage/` directory. Domain-specific behavior is in `domain/` (loaded after `classify_event`). The `set_phase` tool gating table below uses "triage" as a phase name, which controls tool availability -- not a filesystem directory.
 
 ## Phase Details
 
@@ -105,9 +107,11 @@ Loaded on every Brain invocation. Contains the core identity and decision framew
 | `04-deep-memory.md` | When to consult memory, fix proposals |
 | `05-cynefin.md` | Domain classification (CLEAR–CHAOTIC), correlation before classify |
 | `06-decision-guidelines.md` | Self-answer vs dispatch, routing matrix, investigation questions |
-| `07-incident-tracking.md` | `report_incident` gates, evidence requirements |
 | `08-flow-engineering.md` | Congestion, WIP caps, batching (Reinertsen) |
 | `09-phase-lifecycle.md` | `set_phase` tool gating for the event lifecycle |
+| `10-observations.md` | Observation series naming, trajectory data, deferral outlier boundary |
+| `11-subject-semantics.md` | Subject line semantics for event titles |
+| `12-actor-responses.md` | Actor response conventions and formatting |
 
 ### `source/` (Priority 90)
 
@@ -157,10 +161,31 @@ Loaded after an agent returns results. Excludes `triage` and `dispatch`.
 | `post-execution.md` | Verify via pipeline, metrics, or SysAdmin |
 | `when-to-close.md` | Source-aware close logic |
 
+### `escalate/` (Priority 15, High Thinking)
+
+Loaded during the escalate phase.
+
+| Skill | Purpose |
+| --- | --- |
+| `incident-tracking.md` | `report_incident` gates, evidence requirements, post-escalation behavior |
+
+### `gated/` (Turn-Conditional, No Auto-Load)
+
+Files in `gated/` are auto-discovered by `BrainSkillLoader` but NEVER auto-loaded via `_match_phases()`. Injected exclusively via `find_paths_by_tag()` with explicit flag conditions in `brain.py`. Prevents double-load bugs.
+
+| Skill | Trigger |
+| --- | --- |
+| `kargo-environment.md` | `kargo` tag injection when Kargo context present |
+| `github-environment.md` | `github` tag injection when GitHub context present |
+| `operational-posture.md` | Operational posture adjustment |
+| `user-energy.md` | User energy level adaptation |
+
 ### Other Phases
 
 | Phase | Priority | Purpose |
 | --- | --- | --- |
+| `domain/` | 85 | Domain-specific behavior (casual, clear, complicated, complex, chaotic) |
+| `close/` | 20 | Close-phase rules (when-to-close, source-aware closure logic) |
 | `coordination/` | 25 | Dev/QE quality gates, PR workflow, escalation after 2 rounds |
 | `waiting/` | 10 | `wait_for_user` vs defer, post-defer resume |
 | `defer-wake/` | 25 | Post-defer verification, assumption re-check |

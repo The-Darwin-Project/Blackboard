@@ -20,7 +20,7 @@ graph TD
         Nightwatcher["Nightwatcher - In-process + Flash"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
-        Headhunter["Headhunter - GitLab Poller"]
+        Headhunter["Headhunter - GitLab + GitHub"]
         HeadhunterJira["Headhunter Jira - QE Missions"]
 
         Architect["Architect :9091 - CLI Sidecar"]
@@ -64,7 +64,7 @@ graph TD
     K8sObs -->|anomalies| Aligner
     KargoObs -->|failures| Brain
     TimeKeeper -->|schedules| Brain
-    Headhunter -->|MR events| Brain
+    Headhunter -->|MR/PR events| Brain
     HeadhunterJira -->|Jira missions| Brain
 
     Dashboard <-->|WebSocket| Brain
@@ -79,7 +79,7 @@ All agents communicate via **shared event documents** in Redis. Agents NEVER com
 
 **Event lifecycle:** `new` → `active` → `waiting_approval` → `resolved` → `closed`
 
-**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo), Headhunter Jira (QE mission), TimeKeeper (scheduled task), Kargo (promotion failure)
+**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo, GitHub PR), Headhunter Jira (QE mission), TimeKeeper (scheduled task), Kargo (promotion failure)
 
 ## Reversed WebSocket Architecture
 
@@ -195,7 +195,9 @@ The Brain and in-process daemons use `google-genai` Python SDK. Sidecar agents u
 | --- | --- | --- |
 | Brain | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
 | Aligner | `google-genai` Python SDK | `gemini-3.5-flash` |
-| Archivist | `google-genai` Python SDK | `gemini-3.1-pro-preview` |
+| Archivist | `google-genai` + `AnthropicVertex` | Gemini (digest) + Claude (archive/extraction) |
+| Headhunter (GitLab) | `google-genai` Python SDK | `gemini-3.5-flash` |
+| Headhunter (GitHub) | `google-genai` Python SDK | `gemini-3.5-flash` |
 | Architect sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |
 | SysAdmin sidecar | Claude Code CLI (via Vertex AI) | `claude-sonnet-4-6` |
 | Developer sidecar | Claude Code CLI (via Vertex AI) | `claude-opus-4-6` |

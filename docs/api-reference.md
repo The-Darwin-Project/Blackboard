@@ -128,7 +128,7 @@ Ratings stored in Qdrant for quality tracking.
 ## Incidents
 
 ```text
-GET /incidents/list                   # Smartsheet incidents (via adapter)
+GET /incidents/list                   # Jira incidents (via JiraIncidentAdapter)
 ```
 
 ## Topology and Metrics
@@ -169,12 +169,14 @@ GET /api/cortex/shadow                # Shadow-mode intervention log (when SYSTE
 GET /api/cortex/shadow/{event_id}     # Shadow interventions for a single event
 GET /api/cortex/handoff-reports       # Session handoff reports from Redis
 GET /api/cortex/proposals             # Cortex proposals awaiting Brain action
+POST /api/cortex/proposals/dismiss    # Dismiss proposals by timestamps {timestamps: [...]}
 ```
 
 ## Flow Observability
 
 ```text
-GET /flow                             # Queue depth, active events, agent utilization by role
+GET /flow                             # Queue depth, active events, agent utilization, token totals
+GET /flow/history                     # FlowSnapshot time-series (60s intervals, Redis sorted set)
 GET /flow/{event_id}                  # Value stream breakdown (queue_wait, routing, execution, total_lead_time)
 ```
 
@@ -202,6 +204,43 @@ GET /api/journal/{service_name}       # Ops journal filtered by service
 
 ```text
 GET /api/kargo/stages                 # Kargo stage status (from KargoObserver)
+```
+
+## Field Notes Notebook
+
+CRUD for FRIDAY's qualitative knowledge capture. Mutations require Dex auth.
+
+```text
+GET    /api/notebook                  # All field notes sorted by timestamp
+PATCH  /api/notebook/{note_id}        # Update note content/category (auth required)
+DELETE /api/notebook/{note_id}        # Delete a field note (auth required)
+```
+
+## Observations
+
+FRIDAY's numeric observation series (trajectory data for deferral decisions).
+
+```text
+GET /api/observations                 # Global observation series (?name=, ?service=)
+GET /api/queue/{event_id}/observations  # Observation series for a specific event
+```
+
+## Knowledge Admin
+
+Static infrastructure facts (conventions, ownership, relationships). Admin CRUD only -- no auto-extract.
+
+```text
+POST   /queue/admin/knowledge         # Create a knowledge fact
+GET    /queue/admin/knowledge         # List all knowledge facts
+GET    /queue/admin/knowledge/{id}    # Get a single knowledge fact
+PATCH  /queue/admin/knowledge/{id}    # Update a knowledge fact (topic/scope immutable)
+DELETE /queue/admin/knowledge/{id}    # Delete a knowledge fact
+```
+
+## Diagnostics
+
+```text
+GET /skills/version                   # Skill reconciler sync metadata (version SHA, file count, last sync)
 ```
 
 ## Telemetry

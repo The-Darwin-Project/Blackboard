@@ -122,7 +122,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `TIMEKEEPER_MAX_TOTAL` | Max schedules system-wide | `50` |
 | `LLM_MODEL_TIMEKEEPER` | TimeKeeper refiner model | `gemini-3.5-flash` |
 
-### Headhunter
+### Headhunter (GitLab)
 
 | Variable | Description | Default |
 | --- | --- | --- |
@@ -130,6 +130,22 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 | `HEADHUNTER_POLL_INTERVAL` | Todo poll interval (seconds) | (see code) |
 | `GITLAB_HOST` | GitLab instance hostname | (required if enabled) |
 | `LLM_MODEL_HEADHUNTER` | Headhunter Flash model | (see code) |
+
+### Headhunter (GitHub)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `HEADHUNTER_GITHUB_ENABLED` | Enable GitHub PR polling | `false` |
+| `HEADHUNTER_GITHUB_POLL_INTERVAL` | PR poll interval (seconds) | (see code) |
+| `HEADHUNTER_GITHUB_REPOS` | Comma-separated `owner/repo` list (empty = auto-discover from installation) | (empty) |
+| `HEADHUNTER_GITHUB_TRIGGER_REASONS` | Comma-separated trigger reasons | `review_requested` |
+| `HEADHUNTER_GITHUB_LABEL` | Label-based trigger (alternative to review requests) | `darwin-review` |
+| `GITHUB_APP_ID` | GitHub App ID (via K8s Secret) | (required if enabled) |
+| `GITHUB_INSTALLATION_ID` | GitHub App Installation ID (via K8s Secret) | (required if enabled) |
+| `GITHUB_APP_SLUG` | GitHub App slug for bot detection | `darwin-project-ai` |
+| `HEADHUNTER_MAINTAINERS` | Comma-separated maintainer usernames for notifications | (empty) |
+
+Helm block: `headhunter.github.enabled`, `headhunter.github.pollInterval`, `headhunter.github.repos`, `headhunter.github.triggerReasons`. GitHub App credentials via `github.existingSecret`.
 
 ### Headhunter Jira (QE Missions)
 
@@ -200,11 +216,30 @@ Helm block: `cortex.pulseTracking`, `cortex.system2.*`.
 | `SLACK_BOT_TOKEN` | Slack bot OAuth token | (optional) |
 | `SLACK_APP_TOKEN` | Slack app-level token (Socket Mode) | (optional) |
 
+### Jira Incidents (Nightwatcher)
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `JIRA_INCIDENT_PROJECT_KEY` | Jira project key for incidents | (required if Jira incidents enabled) |
+| `JIRA_INCIDENT_SEVERITY_FIELD` | Jira custom field ID for severity | (empty) |
+| `JIRA_INCIDENT_PLATFORMS` | Comma-separated platform labels | (empty) |
+| `JIRA_INCIDENT_PRIORITIES` | Comma-separated priority names | (empty) |
+| `JIRA_INCIDENT_STATUSES` | Comma-separated valid statuses | `New,Closed` |
+| `JIRA_INCIDENT_LABEL_FILTER` | Label filter for listing incidents | (empty) |
+
+Uses the same `JIRA_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` credentials as Headhunter Jira. Helm block: `jira.incident.enabled` (nested under `jira.enabled`).
+
 ### Ephemeral Agents
 
 | Variable | Description | Default |
 | --- | --- | --- |
 | `TEKTON_EVENTLISTENER_URL` | Tekton EventListener URL for spawning | (required if enabled) |
+| `EPHEMERAL_SPAWN_DEADLINE_SEC` | Absolute ceiling for spawn wait | `300` |
+| `EPHEMERAL_POLL_INTERVAL_SEC` | Seconds between K8s pod status polls | `10` |
+| `EPHEMERAL_STALL_TIMEOUT_SEC` | No-progress threshold before prune | `60` |
+| `EPHEMERAL_INFRA_DEFER_SEC` | Seconds to defer when Tekton infra is unavailable | `120` |
+
+Helm block: `ephemeralAgents.spawnDeadlineSec`, `ephemeralAgents.pollIntervalSec`, `ephemeralAgents.stallTimeoutSec`, `ephemeralAgents.infraDeferSec`.
 
 ## Passive Service Discovery
 
@@ -232,5 +267,6 @@ GitHub Actions workflows handle the build pipeline:
 | `build-gemini-sidecar.yaml` | Push to `main` (gemini-sidecar/) | Sidecar image → GHCR (SHA tag + latest) |
 | `ci.yaml` | All pushes/PRs | pytest + UI build + helm lint |
 | `helm-chart.yaml` | Push to `main` (helm/) | Helm chart → OCI registry (semver) |
+| `ai-review.yaml` | PRs targeting `main`/`master` | AI code review comments + artifact (advisory, non-blocking) |
 
 After image builds, the workflow auto-commits the new SHA tag to `helm/values.yaml` (with `[skip ci]`), which ArgoCD detects and syncs.

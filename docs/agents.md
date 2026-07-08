@@ -19,9 +19,9 @@ Darwin uses 9 specialized agents plus the Brain orchestrator, communicating via 
 | **SysAdmin** | Execution | CLI sidecar (gemini/claude) | GitOps changes, kubectl/oc investigation, ArgoCD/Kargo management |
 | **Developer** | Implementation | CLI sidecar (gemini/claude) | Source code changes, feature implementation, execute actions (merge, comment, retest) |
 | **QE** | Verification | CLI sidecar (gemini/claude) | Test writing, test execution, verification of Developer changes |
-| **Headhunter** | MR Lifecycle | In-process Python + Flash Lite | GitLab todo polling, LLM-based MR triage and plan generation, event creation |
+| **Headhunter** | MR/PR Lifecycle | In-process Python + Flash Lite | Multi-platform VCS polling (GitLab todos + GitHub PRs), LLM-based triage and plan generation |
 | **Headhunter Jira** | QE Missions | In-process Python + Claude | Jira issue polling, BA analysis comments, approved missions → Brain events |
-| **Nightwatcher** | Shift Consolidation | In-process Python + Flash | Phase-gated escalation review, batch clustering, Smartsheet incidents, Slack shift summaries |
+| **Nightwatcher** | Shift Consolidation | In-process Python + Flash | Phase-gated escalation review, batch clustering, Jira incidents, Slack shift summaries |
 
 ## Agent Dispatch
 
@@ -40,7 +40,14 @@ Developer and QE are **separate first-class agents** dispatched independently. B
 
 ### Ephemeral Agents
 
-On-demand Tekton TaskRun agents handle Headhunter and TimeKeeper events. A circuit breaker falls back to in-pod sidecars after 2 infrastructure failures. The same EventListener handles prune triggers for stuck TaskRuns.
+On-demand Tekton TaskRun agents handle Headhunter and TimeKeeper events. The `SpawnHealthPort` Protocol (`src/adapters/spawn_health.py`) provides health-aware provisioning:
+
+- **Pod Status Polling:** K8s pod phase checked every 10s (configurable) instead of blind timeout.
+- **Terminal State Detection:** ImagePullBackOff, CrashLoopBackOff, OOMKilled trigger immediate cancel+retry.
+- **Sidecar Health Probe:** HTTP health endpoint checks detect crash-after-startup scenarios.
+- **Circuit Breaker:** Falls back to in-pod sidecars after 2 infrastructure failures.
+
+The same EventListener handles prune triggers for stuck TaskRuns.
 
 ## Deep Memory (Archivist)
 
@@ -53,9 +60,12 @@ The Archivist archives closed events into a Qdrant vector store for institutiona
 
 ### Memory Tab and Lessons
 
-The Dashboard Memory tab provides two views:
+The Dashboard Memory tab provides five views:
 - **Memories** -- Browse the vector store entries from deep memory
 - **Lessons** -- Extracted lessons learned from past events with an LLM-powered Extract wizard (multi-select event picker, Claude-powered extraction)
+- **Facts** -- Reference knowledge facts (conventions, ownership, relationships) with admin CRUD
+- **Field Notes** -- FRIDAY's qualitative knowledge capture (env quirks, corrections, conventions) with inline edit/dismiss
+- **Extract** -- LLM-powered lesson extraction wizard
 
 The `VectorStore` class (`src/memory/vector_store.py`) is a lightweight async Qdrant REST wrapper (no SDK dependency).
 
@@ -83,12 +93,27 @@ The Brain reads the `steps:` array, batches same-agent steps, and dispatches wit
 
 ## Headhunter (Agent 5)
 
-The Headhunter polls GitLab `/todos` for the Darwin bot account and classifies incoming MRs:
+The Headhunter is a multi-platform VCS automation agent that polls both GitLab and GitHub for incoming work. The platform boundary is defined by the `VcsPlatformPort` Protocol (`src/agents/headhunter_port.py`), with separate adapters for each platform.
 
-- **LLM Analysis:** All MRs pass through Flash Lite with the system instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()`. The SI defines YAML frontmatter output format, domain classification (CLEAR/COMPLICATED/COMPLEX), agent assignment, risk assessment, and downstream Brain awareness (merge semantics, pipeline verification rules). Bot Instructions in MR descriptions are included as prompt context for the LLM.
-- **Emergency Fallback:** When LLM is unavailable or the skill file cannot be loaded, `_EMERGENCY_SI` provides a minimal schema-only fallback and `_emergency_plan()` produces a COMPLICATED/developer plan.
+### GitLab Platform (`headhunter_gitlab.py`)
+
+Polls GitLab `/todos` for the Darwin bot account and classifies incoming MRs:
+
+- **LLM Analysis:** All MRs pass through Flash Lite with the system instruction loaded from `headhunter_skills/gitlab-mr-triage.md`. The SI defines YAML frontmatter output format, domain classification (CLEAR/COMPLICATED/COMPLEX), agent assignment, risk assessment, and downstream Brain awareness.
+- **Emergency Fallback:** When LLM is unavailable, `_emergency_plan()` produces a COMPLICATED/developer plan.
 - Creates events with `source=headhunter` and GitLab context (MR URL, pipeline status, description).
-- Brain routes the event like any other -- Headhunter creates events, Brain handles routing.
+
+### GitHub Platform (`headhunter_github.py`)
+
+Polls GitHub PRs via GitHub App authentication with two discovery modes:
+
+- **Installation Discovery (default):** Discovers all repositories accessible to the GitHub App installation. No explicit repo list needed.
+- **Explicit Repo List:** Configurable via `HEADHUNTER_GITHUB_REPOS` for targeted polling.
+- **Trigger Modes:** Review-requested notifications (default) or label-based (`darwin-review` label).
+- **LLM Analysis:** PRs pass through Flash Lite with `headhunter_skills/github-pr-triage.md`.
+- Creates events with `source=headhunter` and GitHub context (PR URL, check status, description).
+
+Brain routes all Headhunter events identically regardless of platform origin.
 
 ## Headhunter Jira (QE Missions)
 
@@ -113,7 +138,9 @@ End-of-shift agent that batch-processes Brain escalations:
 
 1. **Review phase:** Clusters pending escalations by root cause via Flash LLM
 2. **Investigate phase:** Dispatches ephemeral agents for on-call investigations (up to `NIGHTWATCHER_DISPATCH_CAP`)
-3. **Report phase:** Writes deduplicated Smartsheet incidents and Slack shift summaries
+3. **Report phase:** Writes deduplicated Jira incidents and Slack shift summaries
+
+Incidents are created via the `JiraIncidentAdapter` (`src/adapters/jira_incident.py`), which implements the `IncidentAdapterPort`. Cross-sweep extension links related escalations to existing open incidents via `extends_issue_key`. Platform stored as Jira labels; severity via custom field.
 
 Two sweeps per day (configurable via `NIGHTWATCHER_SWEEP_CRON`, default 06:00/18:00 UTC). Lease pattern (pending → inflight → commit/requeue) for crash safety. Orphan re-injection ensures no event is silently dropped.
 

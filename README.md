@@ -26,7 +26,7 @@ graph TD
         Aligner["Aligner - In-process + Flash Lite"]
         Archivist["Archivist - Deep Memory"]
         Nightwatcher["Nightwatcher - In-process + Flash"]
-        Headhunter["Headhunter - GitLab Poller"]
+        Headhunter["Headhunter - GitLab + GitHub"]
         HeadhunterJira["Headhunter Jira - QE Missions"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
@@ -69,7 +69,7 @@ graph TD
     K8sObs -->|anomalies| Aligner
     KargoObs -->|failures| Brain
     TimeKeeper -->|schedules| Brain
-    Headhunter -->|MR events| Brain
+    Headhunter -->|MR/PR events| Brain
     HeadhunterJira -->|Jira missions| Brain
 
     Dashboard <-->|WebSocket| Brain
@@ -91,9 +91,9 @@ graph TD
 | **SysAdmin** | Execution | CLI sidecar, GitOps changes, kubectl/oc investigation |
 | **Developer** | Implementation | CLI sidecar, source code changes, MR management |
 | **QE** | Verification | CLI sidecar, independent test verification |
-| **Headhunter** | MR Lifecycle | In-process Python + Flash Lite, GitLab todo automation |
+| **Headhunter** | MR/PR Lifecycle | In-process Python + Flash Lite, GitLab + GitHub PR automation via VcsPlatformPort |
 | **Headhunter Jira** | QE Missions | In-process Python + Claude, Jira Planning→To Do→Brain event flow |
-| **Nightwatcher** | Shift Consolidation | In-process Python + Flash, batch escalation review |
+| **Nightwatcher** | Shift Consolidation | In-process Python + Flash, batch escalation review, Jira incident tracking |
 
 > **Agent details:** [docs/agents.md](docs/agents.md) -- dispatch modes, sidecar CLIs, MCP servers, skills
 
@@ -111,12 +111,15 @@ graph TD
 
 - **GitOps-Only Mutations** -- All changes go through git; kubectl is read-only
 - **ArgoCD/Kargo Integration** -- Sync status, promotion pipelines, failure detection (KargoObserver)
-- **Ephemeral Agents** -- On-demand Tekton TaskRun agents with circuit breaker fallback
-- **Nightwatcher Shifts** -- End-of-shift batch processing of escalations into deduplicated incidents
+- **Multi-Platform VCS** -- Headhunter polls GitLab todos and GitHub PRs via hexagonal VcsPlatformPort adapter
+- **Ephemeral Agents** -- On-demand Tekton TaskRun agents with health-aware provisioning and circuit breaker fallback
+- **Nightwatcher Shifts** -- End-of-shift batch processing of escalations into deduplicated Jira incidents
+- **LLM Token Utilization** -- Per-model, per-caller token tracking with FlowSnapshot time-series and dashboard UI
 - **Google Search Grounding** -- Web search during triage/investigate for upstream outage verification
 - **Event History** -- Persisted reports with compound cursor pagination, facet filters, TanStack Table UI
 - **Cortex / JARVIS** -- Meta-cognitive observer on Brain pulse stream; shadow mode, handoff reports, cognitive graph UI
-- **Jira QE Missions** -- Headhunter Jira head polls labeled issues, posts analysis, creates Brain events on approval
+- **Jira QE Missions** -- Headhunter Jira polls labeled issues, posts analysis, creates Brain events on approval
+- **Field Notes Notebook** -- FRIDAY captures qualitative knowledge (env quirks, corrections, conventions) during events
 
 ### Integration and UX
 
@@ -183,15 +186,18 @@ structured results as a workflow artifact retained for 7 days. The check is advi
 ```text
 BlackBoard/
   src/
-    agents/              # Brain, Aligner, Archivist, Headhunter, sidecars, dispatch
-      brain_skills/      # Phase-organized Markdown skills (always, triage, dispatch, etc.)
-      llm/               # Gemini + Claude adapters, tool schemas, quota tracking
+    agents/              # Brain, Aligner, Archivist, Headhunter (GitLab + GitHub), sidecars, dispatch
+      brain_skills/      # Phase-organized Markdown skills (always, dispatch, source, gated, etc.)
+      headhunter_skills/ # Triage skills for GitLab MR and GitHub PR analysis
+      llm/               # Gemini + Claude adapters, tool schemas, quota tracking, token meter
     channels/            # Slack Socket Mode integration
     memory/              # Qdrant vector store (async REST wrapper)
-    state/               # Redis state management (events, metrics, topology)
-    routes/              # REST API routers
-    observers/           # K8s, Kargo, TimeKeeper, Nightwatcher observers
-    adapters/            # Dashboard WS, Smartsheet, OIDC, Cortex Live API
+    state/               # Redis state management, domain Protocols (ports.py)
+    scheduling/          # ReconcileScheduler, StateWatcher, FairQueue
+    routes/              # REST API routers (queue, notebook, observations, etc.)
+    observers/           # K8s, Kargo, TimeKeeper, Nightwatcher, FlowCollector
+    adapters/            # Dashboard WS, Jira Incidents, OIDC, Cortex Live API, Spawn Health
+    skill_reconciler/    # Git-to-Redis skill hot-reload sidecar
     models.py            # Pydantic domain models
     auth.py              # Dex OIDC + trusted-proxy auth
     main.py              # FastAPI app entry point

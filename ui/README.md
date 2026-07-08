@@ -12,24 +12,30 @@ React + TypeScript + Vite application serving as the primary web UI for the Darw
 
 | Page | Description |
 |------|-------------|
-| **Dashboard (Ops Center)** | XProtect-inspired adaptive layout with service tiles, conversation feed, agent streaming cards. Side-by-side layout activates with 4+ tiles. |
+| **Dashboard (Ops Center)** | CCTV-style adaptive grid with agent streaming cards, conversation feed, event chat panel. `cols = ceil(sqrt(N))` layout. |
 | **Event History** | TanStack Table with card grid toggle, server pagination, compound cursor pagination. Facet filters: service, source, domain, severity, time range, text search. |
-| **Memory** | Two views: Memories (vector store entries) and Lessons (extracted lessons learned). Includes LLM-powered Extract wizard with multi-select event picker. |
-| **Cortex** | Cognitive graph visualization — Qdrant neurons with heat counters, live pulse feed, Cortex status. |
-| **JARVIS Memory** | Session handoff reports, shadow-mode interventions, and Cortex proposals. |
+| **Memory** | Five sub-tabs: Memories, Lessons, Facts (knowledge admin), Field Notes (notebook), Extract wizard. |
+| **Cortex** | Cognitive graph visualization (Sigma.js v3 + ForceAtlas2) — four rings (executive, skills, knowledge, events) with live pulse feed. |
+| **JARVIS Memory** | Session handoff reports, shadow-mode interventions, and Cortex proposals with dismiss. |
 | **Shifts** | Nightwatcher shift reports (morning/evening). Conditional nav tab, visible only when Nightwatcher is enabled. |
 | **TimeKeeper** | Schedule management UI (create, edit, toggle, delete). Requires Dex auth. |
 | **Topology** | Service dependency graph rendered with Cytoscape.js. |
+| **Flow History** | Flow metrics time-series (WIP, queue depth, agent utilization) with SparkCard charts. |
+| **Token Utilization** | LLM token tracking: per-model and per-caller breakdowns from FlowSnapshot data. |
 | **User Guide** | AI transparency page. |
-| **Incidents** | Smartsheet incident tracker view. |
+| **Incidents** | Jira incident tracker view (via JiraIncidentAdapter). |
 
 ## Key Components
 
 - **ConversationFeed** — Append-only event conversation renderer.
-- **AgentStreamCard** — Real-time Gemini CLI stdout in dedicated cards with floating windows.
+- **EventChatPanel** — Layout-level event chat panel (extracted from EventSidebar).
+- **AgentStreamCard** — Real-time CLI stdout in dedicated cards with floating windows.
+- **GridTile** — Per-agent streaming tile in the CCTV adaptive grid.
 - **ServiceTile** — Per-service health and metrics tile.
 - **PlanViewer** — Floating viewer for plan and approval turns.
 - **PhaseIndicator** — Brain phase badge with transition markers.
+- **TokenUtilizationPage** — Per-model, per-caller LLM token breakdown.
+- **NotebookPanel** — Field notes inline edit/dismiss UI.
 
 ## Tech Stack
 
@@ -44,10 +50,12 @@ React + TypeScript + Vite application serving as the primary web UI for the Darw
 ```
 ui/
   src/
-    components/     # 25+ React components
-    contexts/       # WebSocketContext provider
-    hooks/          # TanStack Query hooks (useQueue, useChat, useWebSocket, etc.)
+    components/     # 35+ React components (ops/, cortex/, memory/, notebook/, timekeeper/)
+    contexts/       # ActiveStreamsContext (40Hz WS), OpsStateContext (user-freq), WebSocketContext, AuthContext
+    hooks/          # TanStack Query hooks + useResizablePanel
     api/            # API client + TypeScript types
+    utils/          # Stream reducers, token formatters, safeOpen
+    __tests__/      # Unit tests (activeStreams, streamReducers)
   public/           # Static assets including lessons-learned template
 ```
 
