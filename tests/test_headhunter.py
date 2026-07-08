@@ -329,7 +329,7 @@ class TestAnalysisFallback:
         assert "agent: developer" in plan
         assert "domain: COMPLICATED" in plan
         assert "reasoning:" in plan
-        assert "#42" in plan
+        assert "!42" in plan
 
     def test_extract_domain_from_plan(self):
         plan = "---\nplan: test\ndomain: CLEAR\n---"

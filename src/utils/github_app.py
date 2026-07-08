@@ -1,17 +1,26 @@
 # BlackBoard/src/utils/github_app.py
+# @ai-rules:
+# 1. [Constraint]: GitHubAppAuth.get_token() is thread-safe (threading.Lock).
+# 2. [Pattern]: AsyncGitHubClient wraps blocking token refresh via asyncio.to_thread().
+# 3. [Gotcha]: httpx is an optional dep — only imported by AsyncGitHubClient (not at module top).
+# 4. [Pattern]: Rate-limit warning at 100 remaining (GitHub soft-gate is at 0).
 """
 GitHub App Authentication for GitOps operations.
 
 Generates installation access tokens from GitHub App credentials
-for authenticated git operations (clone, push).
+for authenticated git operations (clone, push). Also provides an
+async HTTP client for GitHub REST API calls.
 """
+import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import jwt
 import requests
 
@@ -56,6 +65,7 @@ class GitHubAppAuth:
         
         self._token: Optional[str] = None
         self._token_expires_at: float = 0
+        self._lock = threading.Lock()
         
         # Validate configuration
         if not self.app_id:
@@ -118,28 +128,26 @@ class GitHubAppAuth:
         Get a valid installation access token.
         
         Returns cached token if still valid, otherwise requests a new one.
+        Thread-safe: concurrent callers share one refresh cycle.
         """
-        now = time.time()
-        
-        # Check if we have a valid cached token
-        if self._token and now < (self._token_expires_at - self.TOKEN_REFRESH_BUFFER_SECONDS):
-            logger.debug("Using cached installation token")
+        with self._lock:
+            now = time.time()
+            
+            if self._token and now < (self._token_expires_at - self.TOKEN_REFRESH_BUFFER_SECONDS):
+                logger.debug("Using cached installation token")
+                return self._token
+            
+            logger.info("Requesting new GitHub installation token")
+            token_response = self._request_installation_token()
+            
+            self._token = token_response["token"]
+            expires_at_str = token_response["expires_at"]
+            from datetime import datetime
+            expires_at_dt = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            self._token_expires_at = expires_at_dt.timestamp()
+            
+            logger.info(f"Got new token, expires at {expires_at_str}")
             return self._token
-        
-        # Request new token
-        logger.info("Requesting new GitHub installation token")
-        token_response = self._request_installation_token()
-        
-        self._token = token_response["token"]
-        # Parse ISO timestamp to epoch
-        expires_at_str = token_response["expires_at"]
-        # Format: 2024-01-15T12:00:00Z
-        from datetime import datetime
-        expires_at_dt = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
-        self._token_expires_at = expires_at_dt.timestamp()
-        
-        logger.info(f"Got new token, expires at {expires_at_str}")
-        return self._token
     
     def get_clone_url(self, repo: str) -> str:
         """
@@ -213,3 +221,49 @@ def get_github_auth() -> GitHubAppAuth:
     if _github_auth is None:
         _github_auth = GitHubAppAuth()
     return _github_auth
+
+
+class AsyncGitHubClient:
+    """Async wrapper for GitHub App REST API calls via httpx.
+
+    Token refresh runs in a thread (blocking JWT + HTTP) to avoid
+    event loop starvation. Each request creates a short-lived client
+    to avoid connection pool issues across token rotations.
+    """
+
+    def __init__(self, auth: GitHubAppAuth):
+        self._auth = auth
+
+    async def get_token(self) -> str:
+        return await asyncio.to_thread(self._auth.get_token)
+
+    async def get(self, path: str, params: dict | None = None) -> httpx.Response:
+        token = await self.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://api.github.com{path}", headers=headers, params=params,
+            )
+            remaining = resp.headers.get("X-RateLimit-Remaining")
+            if remaining and int(remaining) < 100:
+                logger.warning(f"GitHub rate limit low: {remaining} remaining")
+            resp.raise_for_status()
+            return resp
+
+    async def post(self, path: str, json: dict | None = None) -> httpx.Response:
+        token = await self.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"https://api.github.com{path}", headers=headers, json=json,
+            )
+            resp.raise_for_status()
+            return resp
