@@ -19,7 +19,7 @@
 #     N workers process events concurrently. FairQueue provides per-key dedup (no spin monopoly).
 #     Brain._scan_active_for_reconcile() is the decision callback: returns list[str] of event_ids to enqueue.
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
-# 15. [Pattern]: _active_agent_for_event tracks which agent is running per event. Populated in _run_agent_task, cleaned in finally + cancel + close.
+# 15. [Pattern]: _active_tasks + _active_agent_for_event track which agent is running per event. Populated in _run_agent_task, cleaned immediately after turn delivery (via _release_task_state) to prevent TOCTOU race with is_intermediate gate evaluation. Ordering invariant: _release_task_state MUST run before any await after turn delivery. Also cleaned in finally + cancel + close.
 # 15b. [Pattern]: _waiting_for_agent (dict[str, tuple[str, int]]) blocks process_event re-entry after
 #     wait_for_agent. Value: (agent_name, wait_turn_number). Cleared when a non-brain DELIVERED turn
 #     arrives AFTER the wait was set (scoped to conversation[wait_turn:]). _process_event_inner guard
@@ -1635,7 +1635,7 @@ class Brain:
 
         Returns flags dict with cached raw data for _build_contents to reuse,
         avoiding double Redis calls for active_events, mermaid, and recent_closed.
-        is_intermediate is passed from the caller (single evaluation at L769)
+        is_intermediate is passed from the caller (single evaluation at L1016)
         to avoid TOCTOU with _active_tasks between await boundaries.
         """
         flags: ContextFlags = {
@@ -2843,10 +2843,10 @@ class Brain:
                 result=result_str[:15000],
             )
             await self._append_and_broadcast(event_id, turn)
+            self._release_task_state(event_id)
             logger.info("Wake task completed: %s for %s", role, event_id)
 
             await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
-            self._release_task_state(event_id)
             self._last_processed[event_id] = time.time()
 
             if not await self._is_event_closed(event_id) and event_id not in self._waiting_for_user:
@@ -3271,6 +3271,9 @@ class Brain:
                         f"Message-mode task completed: {agent_name} for {event_id} "
                         f"(no deliverable, content delivered via progress)"
                     )
+                    if not parallel:
+                        self._release_task_state(event_id)
+                    self._last_processed[event_id] = time.time()
                     if routing_turn_num:
                         await self.blackboard.mark_turn_status(
                             event_id, routing_turn_num, MessageStatus.EVALUATED
@@ -3279,9 +3282,6 @@ class Brain:
                             event_id, "evaluated", turns=[routing_turn_num],
                         )
                     await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
-                    if not parallel:
-                        self._release_task_state(event_id)
-                    self._last_processed[event_id] = time.time()
                     return
                 # Has deliverable -- fall through to write result turn below
                 logger.info(
@@ -3329,6 +3329,7 @@ class Brain:
                 taskForAgent=task_for_agent,
             )
             await self._append_and_broadcast(event_id, turn)
+            self._release_task_state(event_id)
             logger.info(
                 f"Agent task {'cancelled' if is_cancel else 'plan' if has_structured_plan else 'completed'}: "
                 f"{agent_name} for {event_id}"
@@ -3336,7 +3337,6 @@ class Brain:
             )
 
             if is_cancel:
-                self._release_task_state(event_id)
                 return
 
             # Mark routing turn as EVALUATED (agent completed its work)
@@ -3351,7 +3351,6 @@ class Brain:
             # Value stream: stamp agent completion time
             await self.blackboard.stamp_event(event_id, last_completed_at=time.time())
 
-            self._release_task_state(event_id)
             self._last_processed[event_id] = time.time()
 
             # Trigger next Brain decision (skip if event was closed while agent ran)
@@ -3369,11 +3368,11 @@ class Brain:
                 thoughts=f"Agent execution failed: {str(e)}",
             )
             await self._append_and_broadcast(event_id, turn)
+            self._release_task_state(event_id)
             if routing_turn_num:
                 await self.blackboard.mark_turn_status(
                     event_id, routing_turn_num, MessageStatus.EVALUATED
                 )
-            self._release_task_state(event_id)
             self._last_processed[event_id] = time.time()
 
             # Re-evaluate (skip if event was closed concurrently)
