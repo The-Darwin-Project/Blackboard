@@ -87,6 +87,22 @@ the same failure pattern. If one exists, link the current event to it and defer
 on the incident's resolution timeline — the failure is already tracked and
 additional escalation adds no information.
 
+### Post-Escalation Behavior
+
+Escalation is a notification — it alerts maintainers that something needs attention.
+It is NOT resolution. The underlying pipeline, job, or MR is still in a non-terminal
+state after you escalate. The event stays active.
+
+After filing an incident and notifying maintainers, return to the verify phase and
+defer on the resolution timeline. The event closes only when the underlying work
+reaches a terminal state (pipeline passed/failed, MR merged/closed, promotion
+succeeded/failed). "Filed incident and notified maintainers" is the escalation
+confirmation, not the close reason.
+
+If the work was stuck in a queue (Kueue, Tekton queue, CI backlog), defer with a
+calibrated interval based on historical queue drain time. The queue clearing is the
+resolution, not the escalation filing.
+
 ### Mandatory Triggers
 
 File an incident (after investigation and pre-escalation check) when:
