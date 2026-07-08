@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .event_types import EventSource
 
@@ -286,9 +286,18 @@ class EventEvidence(BaseModel):
     jira_context: Optional[dict] = Field(
         None, description="Jira issue context: issue_key, issue_url, summary, status, priority, components, labels"
     )
+    github_context: Optional[dict] = Field(
+        None, description="GitHub PR context: owner, repo, pr_number, pr_title, pr_state, action, check_status, head_sha, pr_url, maintainer"
+    )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
+
+    @model_validator(mode='after')
+    def _validate_vcs_context_exclusivity(self) -> 'EventEvidence':
+        if self.gitlab_context and self.github_context:
+            raise ValueError("EventEvidence cannot have both gitlab_context and github_context (one-of invariant)")
+        return self
 
 
 class EventInput(BaseModel):

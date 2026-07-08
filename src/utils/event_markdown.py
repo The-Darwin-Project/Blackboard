@@ -24,7 +24,7 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
     subject_type = getattr(event, "subject_type", "service")
     if subject_type != "service":
         subj_label = _MD_SUBJECT_LABEL.get(subject_type, "Service")
-    elif isinstance(evidence, EventEvidence) and evidence.gitlab_context:
+    elif isinstance(evidence, EventEvidence) and (evidence.gitlab_context or evidence.github_context):
         subj_label = "Component"
     elif event.service in ("general", "system", ""):
         subj_label = "Topic"
@@ -79,6 +79,30 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
                 lines.append(f"- **MR URL:** {kc['mr_url']}")
             lines.append(f"- **Started:** {kc.get('started_at', '')}")
             lines.append(f"- **Finished:** {kc.get('finished_at', '')}")
+        if evidence.github_context:
+            gc = evidence.github_context
+            lines.append("")
+            lines.append("## GitHub Context")
+            lines.append(f"- **Repo:** {gc.get('owner', '')}/{gc.get('repo', '')}")
+            lines.append(f"- **PR:** #{gc.get('pr_number', '')} - {gc.get('pr_title', '')}")
+            lines.append(f"- **PR URL:** {gc.get('pr_url', '')}")
+            lines.append(f"- **Action:** {gc.get('action', '')}")
+            lines.append(f"- **Checks:** {gc.get('check_status', 'unknown')}")
+            lines.append(f"- **State:** {gc.get('pr_state', '')}")
+            if gc.get("head_branch"):
+                lines.append(f"- **Head Branch:** {gc['head_branch']}")
+            if gc.get("base_branch"):
+                lines.append(f"- **Base Branch:** {gc['base_branch']}")
+            lines.append(f"- **Author:** {gc.get('author', '')}")
+            if gc.get("head_sha"):
+                lines.append(f"- **Head SHA:** {gc['head_sha'][:12]}")
+            if gc.get("check_run_url"):
+                lines.append(f"- **Check Run:** {gc['check_run_url']}")
+            maintainer = gc.get("maintainer", {})
+            if maintainer:
+                emails = maintainer.get("emails", [])
+                lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
+                lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
     else:
         lines.append(f"- **Evidence:** {evidence}")
     lines.append(f"- **Time:** {event.event.timeDate}")
