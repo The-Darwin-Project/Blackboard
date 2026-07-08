@@ -1,139 +1,50 @@
 # BlackBoard/src/agents/headhunter.py
 # @ai-rules:
-# 1. [Pattern]: Follows Aligner pattern -- in-process daemon, lazy-loaded LLM adapter via _get_adapter().
-# 2. [Constraint]: AIR GAP: No kubernetes imports. GitLab API via httpx only.
-# 3. [Pattern]: Dedup by (project_id, mr_iid) NOT todo.id. Priority-based action selection for multi-todo MRs.
-# 4. [Pattern]: Single-tier LLM analysis via _load_gitlab_si() from headhunter_skills/gitlab-mr-triage.md. Bot Instructions flow as MR description context in prompt. _EMERGENCY_SI fallback when skill file missing; _emergency_plan() when LLM unavailable.
-# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count includes NEW (prevents single-cycle flooding). No _waiting_for_user subtraction (no Brain reference).
-# 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable, Brain continues.
-# 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up. Brain calls
-#     process_event_feedback directly on close (no signal). Phase 2 only.
+# 1. [Pattern]: Orchestrator — platform-agnostic loop + LLM analysis + circuit breaker.
+# 2. [Pattern]: Delegates platform calls to self._gitlab (GitLabPlatform adapter).
+# 3. [Constraint]: Brain-facing methods (refresh_mr_state, poll_gitlab_mr_status, etc.)
+#    remain on this class as thin delegates for backward compatibility.
+# 4. [Pattern]: HeadhunterJira secondary head mounted in main loop (own error boundary).
+# 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count.
+# 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable.
+# 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
-# 9. [Pattern]: mr_description passed to gitlab_context for Brain visibility of Bot Instructions.
-# 10. [Pattern]: _classify_severity(action, pipeline) maps MR context to event severity. build_failed/unmergeable/pipeline failed -> warning; routine -> info.
-# 11. [Pattern]: fetch_context enumerates ALL failed jobs (names + count) for pipeline failures, not just the first. Log tail is still from first failed job -- LLM prompt includes full job list for proper triage.
-# 12. [Pattern]: create_headhunter_event receives context dict from fetch_context for real pipeline_status and severity classification.
-# 13. [Pattern]: refresh_mr_state(event_id, override_project_id, override_mr_iid) re-fetches MR+pipeline state from GitLab. Overrides allow chat/slack events to supply MR refs from agent completion reports. parse_mr_url() + resolve_project_id() handle URL-to-ID conversion.
-# 14. [Pattern]: poll_gitlab_mr_status(project_id, mr_iid) is a side-effect-free read-only poll for StateWatcher. Returns state_key fields only.
-# 15. [Policy]: duplicate/stale closes dismiss GitLab todos via mark_as_done only (no MR note).
-#     Normal closes: mark_feedback_sent always runs after MR comment post, regardless of dismiss outcome.
 """
-Headhunter: GitLab todo poller that analyzes assigned MRs/pipelines.
+Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
-Single-tier LLM analysis: all MRs pass through Flash Lite with a comprehensive
-system instruction. Bot Instructions in MR descriptions are included as prompt
-context for the LLM. Pushes structured events to the Brain queue.
+Orchestrator pattern — delegates platform-specific operations to adapters:
+- GitLabPlatform: GitLab todo polling (primary head)
+- HeadhunterJira: Jira issue polling (secondary head)
+- GitHubPlatform: GitHub PR polling (future)
+
+LLM analysis (Flash triage) and event lifecycle are platform-agnostic.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import time
-from typing import TYPE_CHECKING, Optional
-
-import httpx
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from .headhunter_gitlab import (
+    ACTION_PRIORITY,
+    GitLabPlatform,
+    V1_ACTIONABLE,
+)
 from .headhunter_jira import HeadhunterJira
 
 logger = logging.getLogger(__name__)
 
-V1_ACTIONABLE = {"assigned", "build_failed", "approval_required", "review_requested", "unmergeable", "directly_addressed"}
-
-ACTION_PRIORITY = {
-    "build_failed": 0,
-    "unmergeable": 1,
-    "assigned": 2,
-    "approval_required": 3,
-    "review_requested": 3,
-    "directly_addressed": 4,
-    "mentioned": 5,
-}
-
-MAX_CHANGED_FILES = 20
-FAILED_LOG_TAIL = 50
-MAX_CI_NOTES = 10
-
-_SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
-
-_EMERGENCY_SI = """\
-You are a triage agent for GitLab MRs. Read the MR context and produce ONLY
-a YAML frontmatter plan wrapped in --- delimiters. Nothing else.
-
-```yaml
----
-plan: "[Action verb] [target] in [repository]"
-service: [component name]
-repository: [GitLab project path]
-domain: [CLEAR|COMPLICATED|COMPLEX]
-risk: [low|medium|high]
-reasoning: "[One sentence]"
-steps:
-  - id: "1"
-    agent: [sysadmin|developer|qe|architect]
-    summary: "[What this step accomplishes -- include MR IID, branch, error details]"
----
-```
-
-Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review).
-Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
-"""
-
-
-def _load_gitlab_si() -> str:
-    """Load GitLab MR triage system instruction from skills directory."""
-    skill_path = _SKILLS_DIR / "gitlab-mr-triage.md"
-    try:
-        content = skill_path.read_text(encoding="utf-8")
-        if content.strip():
-            return content
-        logger.warning("GitLab MR triage skill file is empty, using emergency fallback")
-        return _EMERGENCY_SI
-    except OSError as e:
-        logger.warning(f"GitLab MR triage skill not loadable ({e}), using emergency fallback")
-        return _EMERGENCY_SI
-
-def _get_static_maintainer_emails() -> list[str]:
-    """Read maintainer CSV from env at call time (not import time). Picks up ConfigMap changes on pod restart."""
-    return [e.strip() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()]
-
-
-def _get_allowed_mention_authors() -> set[str]:
-    """Build a set of GitLab usernames allowed to instruct Darwin via @mentions.
-
-    Sources (merged):
-    1. HEADHUNTER_MAINTAINERS emails -> local part before @
-    2. HEADHUNTER_ALLOWED_AUTHORS -> explicit GitLab usernames (CSV)
-
-    Never returns empty -- if nothing is configured, returns {"_nobody_"} to block all
-    mentions. Use HEADHUNTER_ALLOWED_AUTHORS=* to allow everyone (not recommended).
-    """
-    authors: set[str] = set()
-    emails = _get_static_maintainer_emails()
-    for e in emails:
-        if "@" in e:
-            authors.add(e.split("@")[0])
-    explicit = os.getenv("HEADHUNTER_ALLOWED_AUTHORS", "")
-    if explicit.strip() == "*":
-        return set()
-    for name in explicit.split(","):
-        name = name.strip()
-        if name:
-            authors.add(name)
-    return authors or {"_nobody_"}
-
 
 class Headhunter:
-    """GitLab todo poller -- observes MR/pipeline assignments and creates Darwin events."""
+    """VCS todo poller orchestrator — platform-agnostic loop with pluggable adapters."""
 
     def __init__(
         self,
-        blackboard: BlackboardState,
+        blackboard: "BlackboardState",
         close_signal: asyncio.Event | None = None,
     ):
         self.blackboard = blackboard
@@ -141,17 +52,15 @@ class Headhunter:
         self._close_signal = close_signal
         self._poll_interval = int(os.getenv("HEADHUNTER_POLL_INTERVAL", "300"))
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
-        # _processed_todos removed: dedup now checks active events, not in-memory set
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
-        self._gitlab_host = os.getenv("GITLAB_HOST", "")
-        self._gitlab_token: str | None = None
-        self._maintainer_source = os.getenv("HEADHUNTER_MAINTAINER_SOURCE", "static")
-        self._smartsheet_cache = None  # lazy-loaded only when source=smartsheet
-        self._jira = HeadhunterJira(blackboard)
         self._last_poll_pending: int = 0
+
+        # Platform adapters
+        self._gitlab = GitLabPlatform(blackboard)
+        self._jira = HeadhunterJira(blackboard)
 
     # =========================================================================
     # LLM Adapter (lazy-loaded, same pattern as Aligner._get_adapter)
@@ -173,233 +82,24 @@ class Headhunter:
         return self._adapter
 
     # =========================================================================
-    # GitLab API Client
+    # LLM Analysis (platform-agnostic)
     # =========================================================================
 
-    def _get_token(self) -> str:
-        """Read GitLab token (cached after first read)."""
-        if self._gitlab_token:
-            return self._gitlab_token
-        from ..utils.gitlab_token import get_gitlab_auth
-        auth = get_gitlab_auth()
-        if not auth:
-            raise RuntimeError("GitLab auth not configured (GITLAB_HOST or token missing)")
-        self._gitlab_token = auth.get_token()
-        return self._gitlab_token
+    async def analyze_and_plan(self, context: dict, system_instruction: str = "") -> tuple[str, str]:
+        """LLM-based triage with full context.
 
-    def _headers(self) -> dict[str, str]:
-        return {"PRIVATE-TOKEN": self._get_token()}
-
-    def _api_url(self, path: str) -> str:
-        return f"https://{self._gitlab_host}/api/v4{path}"
-
-    async def poll_cycle(self) -> list[dict]:
-        """Fetch ALL pending todos (paginated, oldest first), filter actionable, group by MR.
-
-        Dedup: skip MRs that already have an active/deferred headhunter event.
-        The GitLab todo list is the queue -- items stay until FRIDAY resolves them.
-        """
-        all_todos: list[dict] = []
-        page = 1
-        per_page = 100
-        max_pages = 20
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            while page <= max_pages:
-                resp = await client.get(
-                    self._api_url("/todos"),
-                    headers=self._headers(),
-                    params={
-                        "state": "pending", "type": "MergeRequest",
-                        "sort": "asc", "page": str(page), "per_page": str(per_page),
-                    },
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-                all_todos.extend(batch)
-                if len(batch) < per_page:
-                    break
-                page += 1
-            else:
-                logger.warning(f"Headhunter: hit max_pages ({max_pages}), {len(all_todos)} todos fetched")
-
-        actionable = [t for t in all_todos if t.get("action_name") in V1_ACTIONABLE]
-        if not actionable:
-            return []
-        actionable.sort(key=lambda t: t.get("created_at", ""))
-
-        # Dedup: find MRs that already have an active headhunter event
-        active_mr_keys = await self._get_active_mr_keys()
-
-        grouped = self._group_by_mr(actionable)
-        result = []
-        skipped_terminal = 0
-        for key, group in grouped.items():
-            if key in active_mr_keys:
-                continue
-            best = min(group, key=lambda t: ACTION_PRIORITY.get(t["action_name"], 99))
-            mr_state = best.get("target", {}).get("state", "")
-            if mr_state in ("merged", "closed"):
-                skipped_terminal += 1
-                logger.debug(f"Headhunter: skipping terminal MR {key} (state={mr_state})")
-                continue
-            result.append(best)
-        result.sort(key=lambda t: t.get("created_at", ""))
-        self._last_poll_pending = len(result)
-        logger.info(f"Headhunter poll: {len(all_todos)} total todos, {len(actionable)} actionable, {len(active_mr_keys)} already active, {skipped_terminal} terminal, {len(result)} new")
-        return result
-
-    async def _get_active_mr_keys(self) -> set[tuple[int, int]]:
-        """Get (project_id, mr_iid) for all active/deferred headhunter events."""
-        active_ids = await self.blackboard.get_active_events()
-        keys: set[tuple[int, int]] = set()
-        for eid in active_ids:
-            event = await self.blackboard.get_event(eid)
-            if not event or event.source != "headhunter":
-                continue
-            if event.status.value not in ("new", "active", "deferred"):
-                continue
-            ctx = getattr(event.event.evidence, "gitlab_context", None) if event.event and event.event.evidence else None
-            if ctx:
-                pid = ctx.get("project_id", 0) if isinstance(ctx, dict) else getattr(ctx, "project_id", 0)
-                iid = ctx.get("mr_iid", 0) if isinstance(ctx, dict) else getattr(ctx, "mr_iid", 0)
-                if pid and iid:
-                    keys.add((pid, iid))
-        return keys
-
-    @staticmethod
-    def _group_by_mr(todos: list[dict]) -> dict[tuple[int, int], list[dict]]:
-        """Group todos by (project_id, mr_iid). Multiple todos for the same MR are collapsed."""
-        grouped: dict[tuple[int, int], list[dict]] = {}
-        for todo in todos:
-            target = todo.get("target", {})
-            key = (todo.get("project", {}).get("id", 0), target.get("iid", 0))
-            grouped.setdefault(key, []).append(todo)
-        return grouped
-
-    async def fetch_context(self, todo: dict) -> dict:
-        """Enrich todo with MR diff summary, pipeline status, and failed job log."""
-        target = todo.get("target", {})
-        project_id = todo["project"]["id"]
-        mr_iid = target["iid"]
-        action = todo["action_name"]
-
-        context: dict = {
-            "action_name": action,
-            "mr_iid": target.get("iid"),
-            "mr_title": target.get("title", ""),
-            "mr_description": (target.get("description") or "")[:2000],
-            "mr_state": target.get("state", ""),
-            "merge_status": target.get("detailed_merge_status") or target.get("merge_status", ""),
-            "source_branch": target.get("source_branch", ""),
-            "target_branch": target.get("target_branch", ""),
-            "author": target.get("author", {}).get("username", ""),
-            "labels": target.get("labels", []),
-            "milestone": (target.get("milestone") or {}).get("title"),
-            "project_path": todo["project"].get("path_with_namespace", ""),
-            "target_url": todo.get("target_url", "").split("#")[0],
-        }
-
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            headers = self._headers()
-            changes_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/changes"),
-                headers=headers,
-            )
-            if changes_resp.is_success:
-                changes = changes_resp.json().get("changes", [])
-                context["changed_files"] = [c.get("new_path", "") for c in changes[:MAX_CHANGED_FILES]]
-            else:
-                context["changed_files"] = []
-
-            pipe_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/pipelines"),
-                headers=headers,
-                params={"ref": target.get("source_branch", ""), "order_by": "updated_at", "per_page": "1"},
-            )
-            pipeline_status = "unknown"
-            failed_job_log = ""
-            if pipe_resp.is_success:
-                pipelines = pipe_resp.json()
-                if pipelines:
-                    pipeline_status = pipelines[0].get("status", "unknown")
-                    context["pipeline_id"] = pipelines[0].get("id")
-                    if action == "build_failed" and pipeline_status == "failed":
-                        pipe_id = context.get("pipeline_id")
-                        if pipe_id:
-                            jobs_resp = await client.get(
-                                self._api_url(f"/projects/{project_id}/pipelines/{pipe_id}/jobs"),
-                                headers=headers,
-                            )
-                            if jobs_resp.is_success:
-                                all_jobs = jobs_resp.json()
-                                failed_jobs = [j for j in all_jobs if j.get("status") == "failed"]
-                                context["failed_job_count"] = len(failed_jobs)
-                                context["total_job_count"] = len(all_jobs)
-                                if failed_jobs:
-                                    context["failed_job_names"] = [j.get("name", "unknown") for j in failed_jobs]
-                                    trace_resp = await client.get(
-                                        self._api_url(f"/projects/{project_id}/jobs/{failed_jobs[0]['id']}/trace"),
-                                        headers=headers,
-                                    )
-                                    if trace_resp.is_success:
-                                        lines = trace_resp.text.splitlines()
-                                        failed_job_log = "\n".join(lines[-FAILED_LOG_TAIL:])
-
-            context["pipeline_status"] = pipeline_status
-            context["failed_job_log"] = failed_job_log
-
-            darwin_bot = os.getenv("GITLAB_BOT_USERNAME", "darwin-bot")
-            notes_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
-                headers=headers,
-                params={"sort": "desc", "per_page": "25"},
-            )
-            if notes_resp.is_success:
-                all_notes = notes_resp.json()
-                ci_notes = []
-                for note in all_notes:
-                    if note.get("system"):
-                        continue
-                    body = note.get("body", "")
-                    note_author = note.get("author", {}).get("username", "")
-                    if action in ("directly_addressed", "mentioned"):
-                        if f"@{darwin_bot}" in body:
-                            allowed_authors = _get_allowed_mention_authors()
-                            if allowed_authors and note_author not in allowed_authors:
-                                logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
-                                continue
-                            context["mention_comment"] = body
-                            context["mention_author"] = note_author
-                    if note_author == darwin_bot:
-                        continue
-                    if len(ci_notes) < MAX_CI_NOTES:
-                        ci_notes.append(f"[{note_author}]: {body[:500]}")
-                if ci_notes:
-                    context["recent_notes"] = ci_notes
-
-        return context
-
-    # =========================================================================
-    # LLM Analysis
-    # =========================================================================
-
-    async def analyze_and_plan(self, context: dict) -> tuple[str, str]:
-        """LLM-based MR triage with full context including CI notes.
-
-        All MRs pass through Flash LLM analysis for consistent evidence quality.
-        Bot Instructions in the MR description are included in the LLM prompt
-        as context — the LLM incorporates them into plan steps.
+        All work items pass through Flash LLM analysis for consistent evidence quality.
         Emergency inline fallback when LLM is unavailable.
         """
         adapter = await self._get_adapter()
         if not adapter:
-            logger.warning(f"Emergency fallback plan for !{context.get('mr_title', '?')}")
+            logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
             return self._emergency_plan(context), "complicated"
 
         prompt = self._build_analysis_prompt(context)
         try:
             response = await adapter.generate(
-                system_prompt=_load_gitlab_si(),
+                system_prompt=system_instruction,
                 contents=prompt,
                 temperature=self._temperature,
                 max_output_tokens=10000,
@@ -407,7 +107,7 @@ class Headhunter:
             )
             plan_text = response.text.strip()
             domain = self._extract_domain(plan_text)
-            logger.info(f"LLM analysis for !{context.get('mr_title', '?')} -> {domain}")
+            logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))} -> {domain}")
             return plan_text, domain
         except Exception as e:
             logger.warning(f"LLM analysis failed, using emergency fallback: {e}")
@@ -415,11 +115,11 @@ class Headhunter:
 
     @staticmethod
     def _emergency_plan(context: dict) -> str:
-        """Minimal YAML plan when LLM is unavailable. Assigns developer/investigate."""
+        """Minimal YAML plan when LLM is unavailable."""
         action = context.get("action_name", "unknown")
-        title = context.get("mr_title", "unknown MR")
-        project = context.get("project_path", "unknown")
-        iid = context.get("mr_iid", "?")
+        title = context.get("mr_title", context.get("pr_title", "unknown"))
+        project = context.get("project_path", context.get("repo", "unknown"))
+        iid = context.get("mr_iid", context.get("pr_number", "?"))
         return (
             f"---\nplan: Investigate {action} on {title}\n"
             f"service: {project.rsplit('/', 1)[-1]}\n"
@@ -427,25 +127,27 @@ class Headhunter:
             f"domain: COMPLICATED\nrisk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
             f"steps:\n  - id: \"1\"\n    agent: developer\n"
-            f"    summary: \"Investigate {action} on !{iid} "
-            f"in {project}. LLM triage failed -- review MR manually.\"\n---"
+            f"    summary: \"Investigate {action} on #{iid} "
+            f"in {project}. LLM triage failed -- review manually.\"\n---"
         )
 
     def _build_analysis_prompt(self, context: dict) -> str:
-        """Build structured prompt with full MR context for LLM analysis."""
+        """Build structured prompt with full context for LLM analysis."""
         parts = [
             f"Action: {context.get('action_name', 'unknown')}",
-            f"MR: {context.get('mr_title', 'unknown')}",
-            f"State: {context.get('mr_state', 'unknown')} | Merge status: {context.get('merge_status', 'unknown')}",
-            f"Branch: {context.get('source_branch', '?')} -> {context.get('target_branch', '?')}",
+            f"MR: {context.get('mr_title', context.get('pr_title', 'unknown'))}",
+            f"State: {context.get('mr_state', context.get('pr_state', 'unknown'))} | "
+            f"Merge status: {context.get('merge_status', context.get('mergeable', 'unknown'))}",
+            f"Branch: {context.get('source_branch', context.get('head_branch', '?'))} -> "
+            f"{context.get('target_branch', context.get('base_branch', '?'))}",
             f"Author: {context.get('author', 'unknown')}",
-            f"Pipeline: {context.get('pipeline_status', 'unknown')}",
+            f"Pipeline: {context.get('pipeline_status', context.get('check_status', 'unknown'))}",
         ]
         if context.get("pipeline_id"):
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
-        parts.append(f"Project: {context['project_path']}")
-        if context.get("mr_description"):
-            parts.append(f"MR Description:\n{context['mr_description']}")
+        parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
+        if context.get("mr_description") or context.get("pr_body"):
+            parts.append(f"Description:\n{context.get('mr_description', context.get('pr_body', ''))}")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
         if context.get("labels"):
@@ -453,13 +155,14 @@ class Headhunter:
         if context.get("failed_job_names"):
             parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
-            parts.append(f"First failed job log (last {FAILED_LOG_TAIL} lines):\n{context['failed_job_log']}")
-        if context.get("recent_notes"):
-            parts.append(f"Recent MR comments (newest first):\n" + "\n".join(context["recent_notes"]))
+            parts.append(f"First failed job log (last lines):\n{context['failed_job_log']}")
+        if context.get("recent_notes") or context.get("recent_comments"):
+            notes = context.get("recent_notes", context.get("recent_comments", []))
+            parts.append(f"Recent comments (newest first):\n" + "\n".join(notes))
         if context.get("mention_comment"):
             parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
 
-        parts.append("\nProduce a YAML frontmatter work plan for this MR.")
+        parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
 
     @staticmethod
@@ -471,358 +174,17 @@ class Headhunter:
                     return val
         return "complicated"
 
-    @staticmethod
-    def _classify_severity(action_name: str, pipeline_status: str) -> str:
-        """Map MR action + pipeline status to event severity.
-
-        build_failed / unmergeable -> warning (operational concern).
-        Any action with a failed pipeline -> warning.
-        Routine requests (review, approval, assigned) -> info.
-        """
-        if action_name == "build_failed":
-            return "warning"
-        if action_name == "unmergeable":
-            return "warning"
-        if pipeline_status == "failed":
-            return "warning"
-        return "info"
-
     # =========================================================================
-    # Event Creation
-    # =========================================================================
-
-    async def create_headhunter_event(self, todo: dict, plan_text: str, domain: str, context: dict) -> str:
-        """Push event to Brain queue with embedded plan and classified evidence."""
-        from ..models import EventEvidence
-
-        target = todo["target"]
-        project = todo["project"]
-        project_path = project.get("path_with_namespace", "")
-        action_name = todo["action_name"]
-        pipeline_status = context.get("pipeline_status", "unknown")
-        severity = self._classify_severity(action_name, pipeline_status)
-        maintainer = await self.resolve_maintainer(project_path, todo)
-        logger.info(f"Headhunter severity: {severity} for {action_name}/{pipeline_status}")
-        evidence = EventEvidence(
-            display_text=f"GitLab: {action_name} on !{target['iid']} in {project_path}",
-            source_type="headhunter",
-            triggered_by="gitlab-bot",
-            domain=domain,
-            domain_confidence="assessed",
-            severity=severity,
-            gitlab_context={
-                "todo_id": todo["id"],
-                "action_name": action_name,
-                "project_id": project["id"],
-                "project_path": project_path,
-                "mr_iid": target["iid"],
-                "mr_title": target["title"],
-                "mr_state": target.get("state", ""),
-                "merge_status": context.get("merge_status", ""),
-                "source_branch": target.get("source_branch", ""),
-                "target_branch": target.get("target_branch", ""),
-                "author": target.get("author", {}).get("username", ""),
-                "target_url": todo.get("target_url", "").split("#")[0],
-                "pipeline_status": pipeline_status,
-                "pipeline_id": context.get("pipeline_id"),
-                "todo_created_at": todo.get("created_at", ""),
-                "mr_description": (target.get("description") or "")[:2000],
-                "maintainer": maintainer,
-            },
-        )
-        resolved_service = await self._resolve_service(project_path)
-        clean_plan = plan_text.strip()
-        if clean_plan.startswith("```"):
-            clean_plan = clean_plan.split("\n", 1)[1] if "\n" in clean_plan else clean_plan
-        if clean_plan.endswith("```"):
-            clean_plan = clean_plan[:-3].rstrip()
-        event_id = await self.blackboard.create_event(
-            source="headhunter",
-            service=resolved_service,
-            reason=clean_plan,
-            evidence=evidence,
-        )
-        logger.info(f"Headhunter event created: {event_id} for {todo['action_name']} on !{target['iid']}")
-        return event_id
-
-    @staticmethod
-    def parse_mr_url(url: str) -> tuple[int | str, int] | None:
-        """Extract (project_id, mr_iid) from a GitLab MR URL.
-
-        Supports both numeric project IDs and URL-encoded namespace paths.
-        Returns None if the URL doesn't match the expected pattern.
-        """
-        import re
-        from urllib.parse import unquote
-        # API-style URL: /projects/12345/merge_requests/29
-        m = re.search(r"/projects/(\d+)/merge_requests/(\d+)", url)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        # Web UI URL: https://host/group/subgroup/project/-/merge_requests/29
-        sep = "/-/merge_requests/"
-        if sep in url:
-            left, right = url.split(sep, 1)
-            mr_iid_str = right.split("/")[0].split("?")[0].split("#")[0]
-            if mr_iid_str.isdigit():
-                without_proto = left.split("://", 1)[-1]
-                project_path = without_proto.split("/", 1)[-1]
-                if project_path:
-                    return unquote(project_path), int(mr_iid_str)
-        return None
-
-    async def resolve_project_id(self, path_or_id) -> int | None:
-        """Resolve a namespace/project path to a numeric project ID via GitLab API."""
-        if isinstance(path_or_id, int):
-            return path_or_id
-        try:
-            pid = int(path_or_id)
-            return pid
-        except (ValueError, TypeError):
-            pass
-        from urllib.parse import quote
-        encoded = quote(str(path_or_id), safe="")
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=15) as client:
-                resp = await client.get(
-                    self._api_url(f"/projects/{encoded}"),
-                    headers=self._headers(),
-                )
-                if resp.is_success:
-                    return resp.json().get("id")
-        except Exception as e:
-            logger.warning(f"resolve_project_id failed for {path_or_id}: {e}")
-        return None
-
-    async def refresh_mr_state(self, event_id: str, *,
-                               override_project_id: int | None = None,
-                               override_mr_iid: int | None = None) -> dict:
-        """Re-fetch current MR/pipeline state from GitLab and update event evidence.
-
-        Called by Brain's refresh_gitlab_context tool. Returns a summary dict
-        for the Brain conversation turn. On error, returns {error: str} and
-        leaves evidence unchanged.
-
-        When override_project_id/override_mr_iid are provided (e.g., parsed
-        from an MR URL on a chat/slack event), they take precedence over
-        event evidence. The caller is responsible for hydrating gitlab_context
-        on the event after a successful fetch.
-        """
-        event = await self.blackboard.get_event(event_id)
-        if not event:
-            return {"error": f"Event {event_id} not found"}
-
-        gl_ctx = None
-        if event.event.evidence and hasattr(event.event.evidence, "gitlab_context"):
-            gl_ctx = event.event.evidence.gitlab_context
-
-        project_id = override_project_id or (gl_ctx.get("project_id") if gl_ctx else None)
-        mr_iid = override_mr_iid or (gl_ctx.get("mr_iid") if gl_ctx else None)
-        source_branch = (gl_ctx.get("source_branch", "") if gl_ctx else "")
-        if not project_id or not mr_iid:
-            return {"error": "No MR reference available. Supply mr_url or ensure the event has gitlab_context."}
-
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                headers = self._headers()
-
-                mr_resp = await client.get(
-                    self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
-                    headers=headers,
-                )
-                if mr_resp.status_code == 404:
-                    logger.info(f"refresh_mr_state: MR !{mr_iid} not found (deleted?)")
-                    return {"error": "MR not found (deleted?)", "pipeline_status": "unknown",
-                            "mr_state": "closed", "merge_status": "unknown", "severity": "info"}
-                if mr_resp.status_code == 429:
-                    logger.warning("refresh_mr_state: GitLab rate limited")
-                    _fallback = gl_ctx or {}
-                    return {"error": "GitLab rate limited", "pipeline_status": _fallback.get("pipeline_status", "unknown"),
-                            "mr_state": _fallback.get("mr_state", "unknown"), "merge_status": _fallback.get("merge_status", "unknown"),
-                            "severity": event.event.evidence.severity if event.event.evidence else "warning"}
-
-                mr_state = "unknown"
-                merge_status = "unknown"
-                if mr_resp.is_success:
-                    mr_data = mr_resp.json()
-                    mr_state = mr_data.get("state", "unknown")
-                    merge_status = mr_data.get("detailed_merge_status") or mr_data.get("merge_status", "unknown")
-                    if not source_branch:
-                        source_branch = mr_data.get("source_branch", "")
-                    if mr_state in ("merged", "closed"):
-                        state_changed_at = mr_data.get("merged_at") or mr_data.get("closed_at") or ""
-                else:
-                    logger.warning(f"refresh_mr_state: MR fetch HTTP {mr_resp.status_code} for {event_id}")
-                    _fallback = gl_ctx or {}
-                    return {
-                        "error": f"MR fetch failed: HTTP {mr_resp.status_code}",
-                        "pipeline_status": _fallback.get("pipeline_status", "unknown"),
-                        "mr_state": _fallback.get("mr_state", "unknown"),
-                        "merge_status": _fallback.get("merge_status", "unknown"),
-                        "severity": event.event.evidence.severity if event.event.evidence else "warning",
-                    }
-
-                pipeline_id = (gl_ctx or {}).get("pipeline_id")
-                pipe_resp = await client.get(
-                    self._api_url(f"/projects/{project_id}/pipelines"),
-                    headers=headers,
-                    params={"ref": source_branch, "order_by": "updated_at", "per_page": "1"},
-                )
-                pipeline_status = "unknown"
-                if pipe_resp.is_success:
-                    pipelines = pipe_resp.json()
-                    if pipelines:
-                        pipeline_status = pipelines[0].get("status", "unknown")
-                        pipeline_id = pipelines[0].get("id")
-
-        except Exception as e:
-            logger.warning(f"refresh_mr_state: GitLab API error for {event_id}: {e}")
-            return {"error": f"GitLab API unavailable: {e}", "pipeline_status": "unknown",
-                    "mr_state": "unknown", "merge_status": "unknown", "severity": "warning"}
-
-        action_name = (gl_ctx or {}).get("action_name", "assigned")
-        severity = self._classify_severity(action_name, pipeline_status)
-        result = {
-            "pipeline_status": pipeline_status,
-            "pipeline_id": pipeline_id,
-            "mr_state": mr_state,
-            "merge_status": merge_status,
-            "severity": severity,
-        }
-        if mr_state in ("merged", "closed"):
-            result["merge_status"] = mr_state
-            if state_changed_at:
-                result["state_changed_at"] = state_changed_at
-
-        await self.blackboard.update_event_gitlab_context(event_id, result)
-        logger.info(f"Refreshed MR state for {event_id}: pipeline={pipeline_status}, mr={mr_state}, severity={severity}")
-        return result
-
-    async def poll_gitlab_mr_status(self, project_id: int, mr_iid: int) -> dict:
-        """Lightweight read-only poll. Returns only state_key fields.
-        Does NOT update event evidence. Used by StateWatcher.
-        Raises on HTTP errors so StateWatcher backoff engages."""
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            mr_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}"),
-                headers=self._headers(),
-            )
-            mr_resp.raise_for_status()
-            pipe_resp = await client.get(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/pipelines"),
-                headers=self._headers(),
-            )
-            pipe_resp.raise_for_status()
-        mr = mr_resp.json()
-        pipelines = pipe_resp.json()
-        latest_pipeline = pipelines[0] if isinstance(pipelines, list) and pipelines else {}
-        return {
-            "mr_state": mr.get("state", "unknown"),
-            "pipeline_status": latest_pipeline.get("status", "unknown"),
-        }
-
-    @staticmethod
-    def extract_gitlab_state_key(state: dict) -> dict:
-        """Canonical state_key builder for GitLab MR subscriptions.
-        Single source of truth -- used by both Brain (register) and poll adapter.
-        merge_status excluded: it flaps between ci_still_running/can_be_merged
-        during active pipelines, producing spurious wakes without new signal."""
-        return {
-            "mr_state": state.get("mr_state", "unknown"),
-            "pipeline_status": state.get("pipeline_status", "unknown"),
-        }
-
-    async def _resolve_service(self, project_path: str) -> str:
-        """Map GitLab project path to a Darwin service name via service registry.
-
-        Fallback: extract the last path segment as a meaningful component name
-        (e.g., 'org/group/subgroup/project' -> 'project').
-        """
-        try:
-            services = await self.blackboard.get_services()
-            for svc in services.values():
-                repo_url = getattr(svc, "source_repo_url", "") or ""
-                gitops_url = getattr(svc, "gitops_repo_url", "") or ""
-                if project_path in repo_url or project_path in gitops_url:
-                    return svc.name
-        except Exception:
-            pass
-        return project_path.rsplit("/", 1)[-1] if "/" in project_path else project_path or "general"
-
-    async def resolve_maintainer(self, project_path: str, todo: dict) -> dict:
-        """Resolve maintainer for escalation. Source controlled by HEADHUNTER_MAINTAINER_SOURCE.
-
-        Returns {source, email, slack_id, name}.
-        Chain: configured source -> MR metadata -> static.
-        """
-        if self._maintainer_source == "smartsheet":
-            maintainer = await self._resolve_from_smartsheet(project_path)
-            if maintainer:
-                return {**maintainer, "source": "smartsheet"}
-
-        static_emails = _get_static_maintainer_emails()
-        if static_emails:
-            return {"source": "static", "emails": static_emails}
-
-        target = todo.get("target", {})
-        assignee = target.get("assignee") or target.get("author", {})
-        if assignee and assignee.get("username"):
-            email = await self._resolve_email_from_gitlab(assignee["username"])
-            emails = [email] if email else []
-            return {"source": "mr_metadata", "emails": emails, "name": assignee["username"]}
-
-        return {"source": "static", "emails": []}
-
-    async def _resolve_email_from_gitlab(self, username: str) -> str | None:
-        """Lookup a GitLab user's email by username. Returns email or None."""
-        try:
-            async with httpx.AsyncClient(verify=False, timeout=10) as client:
-                resp = await client.get(
-                    self._api_url(f"/users?username={username}"),
-                    headers=self._headers(),
-                )
-                if resp.is_success:
-                    users = resp.json()
-                    if users and users[0].get("public_email"):
-                        return users[0]["public_email"]
-                    if users and users[0].get("email"):
-                        return users[0]["email"]
-        except Exception as e:
-            logger.debug(f"GitLab email lookup failed for {username}: {e}")
-        return None
-
-    async def _resolve_from_smartsheet(self, project_path: str) -> dict | None:
-        """Resolve from Smartsheet API (lazy-loaded). Only active when source=smartsheet."""
-        if not self._smartsheet_cache:
-            try:
-                from .headhunter_smartsheet import SmartsheetMaintainerCache
-                token = os.getenv("SMARTSHEET_API_TOKEN", "")
-                sheet_id = os.getenv("SMARTSHEET_SHEET_ID", "")
-                if not token or not sheet_id:
-                    logger.warning("Smartsheet credentials not configured, falling back")
-                    return None
-                self._smartsheet_cache = SmartsheetMaintainerCache(token, sheet_id)
-            except ImportError:
-                logger.warning("headhunter_smartsheet module not found, falling back")
-                return None
-        component = project_path.rsplit("/", 1)[-1] if "/" in project_path else project_path
-        return await self._smartsheet_cache.get_maintainer(component)
-
-    # =========================================================================
-    # Flow Gate
+    # Flow Gate (platform-agnostic)
     # =========================================================================
 
     @property
     def pending_count(self) -> int:
-        """Pending todos from last poll cycle (not yet converted to events)."""
+        """Pending items from last poll cycle (not yet converted to events)."""
         return self._last_poll_pending
 
     async def check_flow_gate(self) -> bool:
-        """Back off when system is at global WIP capacity (conservative count).
-
-        Counts NEW+ACTIVE+DEFERRED to prevent single-cycle flooding (HH creates
-        events as NEW in a loop). No _waiting_for_user subtraction — HH doesn't
-        have Brain reference. Conservative estimate is intentional.
-        """
+        """Back off when system is at global WIP capacity."""
         status_map = await self.blackboard.get_active_events_with_status()
         wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
         return wip_used < self._wip_cap
@@ -833,7 +195,7 @@ class Headhunter:
 
     async def run(self) -> None:
         """Main loop: poll -> analyze -> create events. Circuit breaker after 3 failures."""
-        if not self._gitlab_host:
+        if not self._gitlab.enabled():
             logger.warning("Headhunter disabled: GITLAB_HOST not set")
             return
 
@@ -861,13 +223,11 @@ class Headhunter:
                 if failures >= max_failures:
                     logger.critical("Headhunter disabled after 3 consecutive failures")
                     return
-            # Jira head has its own error boundary -- failures here don't kill GitLab head
             if self._jira.enabled():
                 try:
                     await self._jira.poll_and_process()
                 except Exception as e:
                     logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
-            # Wake early if an event closes (slot opens) -- otherwise sleep full interval
             if self._close_signal:
                 try:
                     await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
@@ -879,35 +239,33 @@ class Headhunter:
                 await asyncio.sleep(self._poll_interval)
 
     async def _poll_and_process(self) -> None:
-        """Single poll cycle: check gate, fetch todos, analyze, create events."""
+        """Single poll cycle: check gate, fetch items, analyze, create events."""
         if not await self.check_flow_gate():
             logger.debug("Headhunter flow gate closed -- skipping cycle")
             return
 
-        todos = await self.poll_cycle()
+        todos = await self._gitlab.poll_work_items()
+        self._last_poll_pending = len(todos)
         if not todos:
-            logger.debug("Headhunter: no actionable todos")
+            logger.debug("Headhunter: no actionable items")
             return
 
-        logger.info(f"Headhunter: {len(todos)} actionable todo(s)")
+        logger.info(f"Headhunter: {len(todos)} actionable item(s)")
+        si = self._gitlab.load_triage_instruction()
         for todo in todos:
             if not await self.check_flow_gate():
                 logger.info("Headhunter flow gate closed mid-cycle -- stopping")
                 break
-            context = await self.fetch_context(todo)
-            plan_text, domain = await self.analyze_and_plan(context)
-            await self.create_headhunter_event(todo, plan_text, domain, context)
+            context = await self._gitlab.fetch_context(todo)
+            plan_text, domain = await self.analyze_and_plan(context, si)
+            await self._gitlab.create_platform_event(todo, plan_text, domain, context)
 
     # =========================================================================
-    # Feedback Loop (Signal + Poll Hybrid -- Phase 2)
+    # Feedback Loop (Signal + Poll Hybrid)
     # =========================================================================
 
     async def _feedback_loop(self) -> None:
-        """Process GitLab feedback for closed headhunter events.
-
-        Poll-interval safety net for cross-pod catch-up. Brain calls
-        process_event_feedback directly for current-pod closes.
-        """
+        """Process platform feedback for closed headhunter events."""
         while True:
             try:
                 await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
@@ -920,141 +278,76 @@ class Headhunter:
                 logger.warning(f"Headhunter feedback loop error (will retry): {e}")
 
     async def process_event_feedback(self, event_id: str) -> None:
-        """Process feedback for a single closed headhunter event (direct call from Brain).
-
-        Called inline during _close_and_broadcast for immediate todo dismissal.
-        Also called by the scan loop for catch-up on events closed during previous pod lifecycle.
-        """
+        """Process feedback for a single closed headhunter event (called by Brain)."""
         if await self.blackboard.is_feedback_sent(event_id):
             return
         event = await self.blackboard.get_event(event_id)
         if not event:
             return
-        await self._post_feedback_for_event(event)
+        await self._gitlab.post_feedback(event)
 
     async def _process_closed_events(self) -> None:
-        """Scan closed headhunter events and post GitLab feedback.
-
-        Uses 24h window to catch events closed during previous pod lifecycle
-        or overnight. The is_feedback_sent guard prevents double-processing.
-        """
+        """Scan closed headhunter events and post platform feedback."""
         closed_events = await self.blackboard.get_recent_closed_by_source("headhunter", minutes=1440)
         if not closed_events:
             return
-
         for event in closed_events:
             if await self.blackboard.is_feedback_sent(event.id):
                 continue
-            await self._post_feedback_for_event(event)
+            await self._gitlab.post_feedback(event)
 
-    async def _post_feedback_for_event(self, event) -> None:
-        """Post GitLab feedback (comment + mark_as_done) for a single event."""
-        gl_ctx = None
-        if event.event.evidence and hasattr(event.event.evidence, "gitlab_context"):
-            gl_ctx = event.event.evidence.gitlab_context
-        if not gl_ctx:
-            return
+    # =========================================================================
+    # Brain-Facing Delegates (backward-compatible API)
+    # =========================================================================
 
-        todo_id = gl_ctx.get("todo_id")
-        project_id = gl_ctx.get("project_id")
-        mr_iid = gl_ctx.get("mr_iid")
-        if not project_id or not mr_iid:
-            return
+    async def refresh_mr_state(self, event_id: str, *,
+                               override_project_id: int | None = None,
+                               override_mr_iid: int | None = None) -> dict:
+        """Delegate to GitLab adapter. Called by handlers_integration.py."""
+        return await self._gitlab.refresh_mr_state(
+            event_id,
+            override_project_id=override_project_id,
+            override_mr_iid=override_mr_iid,
+        )
 
-        close_turn = event.conversation[-1] if event.conversation else None
-        close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
-
-        if close_reason in ("stale", "duplicate"):
-            if not todo_id:
-                await self.blackboard.mark_feedback_sent(event.id)
-                logger.info(
-                    f"Headhunter duplicate/stale: no todo_id for {event.id} ({close_reason}) on !{mr_iid} — MR note skipped"
-                )
-                return
-            async with httpx.AsyncClient(verify=False, timeout=30) as client:
-                headers = self._headers()
-                dismiss = await client.post(
-                    self._api_url(f"/todos/{todo_id}/mark_as_done"),
-                    headers=headers,
-                )
-                if dismiss.status_code == 429:
-                    logger.warning("GitLab rate limited during feedback for %s", event.id)
-                    return
-                if dismiss.status_code == 404:
-                    logger.info(
-                        f"Headhunter duplicate/stale: todo {todo_id} not found for {event.id} ({close_reason}) on !{mr_iid}"
-                    )
-                elif not dismiss.is_success:
-                    logger.warning(
-                        f"Headhunter duplicate/stale: mark_as_done failed ({dismiss.status_code}) for {event.id}: "
-                        f"{dismiss.text[:200]}"
-                    )
-                    return
-                await self.blackboard.mark_feedback_sent(event.id)
-                logger.info(
-                    f"Headhunter duplicate/stale todo dismissed without MR note for {event.id}: {close_reason} on !{mr_iid}"
-                )
-            return
-
-        outcome = self._build_feedback_comment(event, close_reason)
-
-        async with httpx.AsyncClient(verify=False, timeout=30) as client:
-            headers = self._headers()
-
-            resp = await client.post(
-                self._api_url(f"/projects/{project_id}/merge_requests/{mr_iid}/notes"),
-                headers=headers,
-                json={"body": outcome},
-            )
-            if resp.status_code == 404:
-                logger.info(f"Feedback skip: MR !{mr_iid} not found (deleted?)")
-            elif resp.status_code == 429:
-                logger.warning("GitLab rate limited during feedback for %s", event.id)
-                return
-            elif not resp.is_success:
-                logger.warning(f"MR comment failed ({resp.status_code}): {resp.text[:200]}")
-
-            if todo_id:
-                done_resp = await client.post(
-                    self._api_url(f"/todos/{todo_id}/mark_as_done"),
-                    headers=headers,
-                )
-                if done_resp.status_code == 429:
-                    logger.warning("GitLab rate limited during feedback for %s", event.id)
-                    return
-                if done_resp.status_code == 404:
-                    logger.info(f"Headhunter feedback: todo {todo_id} not found for {event.id}")
-                elif not done_resp.is_success:
-                    logger.warning(
-                        f"Headhunter feedback: mark_as_done failed ({done_resp.status_code}) for {event.id}: "
-                        f"{done_resp.text[:200]}"
-                    )
-
-            await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"Headhunter normal feedback posted for {event.id}: {close_reason} on !{mr_iid}")
+    async def poll_gitlab_mr_status(self, project_id: int, mr_iid: int) -> dict:
+        """Delegate to GitLab adapter. Registered as StateWatcher poll fn."""
+        return await self._gitlab.poll_gitlab_mr_status(project_id, mr_iid)
 
     @staticmethod
-    def _build_feedback_comment(event: "EventDocument", close_reason: str) -> str:
-        """Build a structured GitLab MR comment from event outcome."""
-        actions = []
-        for t in event.conversation:
-            if t.actor in ("user", "brain"):
-                continue
-            if t.action == "execute" and t.result:
-                ts = time.strftime("%H:%M", time.gmtime(t.timestamp)) if t.timestamp else ""
-                first_line = t.result.strip().split("\n")[0].replace("#", "").strip()
-                actions.append(f"- `{ts}` {first_line[:150]}")
+    def extract_gitlab_state_key(state: dict) -> dict:
+        """Delegate to GitLab adapter. Used by StateWatcher."""
+        return GitLabPlatform.extract_gitlab_state_key(state)
 
-        close_turn = event.conversation[-1] if event.conversation else None
-        close_summary = (close_turn.thoughts or "") if close_turn else ""
+    @staticmethod
+    def parse_mr_url(url: str) -> tuple[int | str, int] | None:
+        """Delegate to GitLab adapter. Called by handlers_integration.py."""
+        return GitLabPlatform.parse_mr_url(url)
 
-        turns = len(event.conversation)
-        lines = [f"**Darwin** ({turns} turns)"]
-        if close_summary:
-            lines.append(f"\n{close_summary}")
-        if actions:
-            lines.append("\n**Trace (UTC):**")
-            lines.extend(actions[:5])
+    async def resolve_project_id(self, path_or_id) -> int | None:
+        """Delegate to GitLab adapter. Called by handlers_integration.py."""
+        return await self._gitlab.resolve_project_id(path_or_id)
 
-        return "\n".join(lines)
+    @staticmethod
+    def _group_by_mr(todos: list[dict]) -> dict[tuple[int, int], list[dict]]:
+        """Delegate to GitLab adapter. Exposed for backward compatibility."""
+        return GitLabPlatform._group_by_mr(todos)
 
+    @staticmethod
+    def _classify_severity(action_name: str, pipeline_status: str) -> str:
+        """Delegate to GitLab adapter. Exposed for backward compatibility."""
+        return GitLabPlatform.classify_severity(action_name, pipeline_status)
+
+    async def _resolve_service(self, project_path: str) -> str:
+        """Delegate to GitLab adapter. Exposed for backward compatibility."""
+        return await self._gitlab._resolve_service(project_path)
+
+    async def create_headhunter_event(self, todo: dict, plan_text: str, domain: str, context: dict) -> str:
+        """Delegate to GitLab adapter. Called by tests and legacy code paths."""
+        return await self._gitlab.create_platform_event(todo, plan_text, domain, context)
+
+    async def poll_cycle(self) -> list[dict]:
+        """Delegate to GitLab adapter. Exposed for backward compatibility."""
+        result = await self._gitlab.poll_work_items()
+        self._last_poll_pending = len(result)
+        return result

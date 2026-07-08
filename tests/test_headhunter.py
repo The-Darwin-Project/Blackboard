@@ -109,7 +109,7 @@ def _make_headhunter(blackboard=None, **env_overrides) -> Headhunter:
     defaults.update(env_overrides)
     with patch.dict(os.environ, defaults):
         hh = Headhunter(blackboard or StubBlackboard())
-        hh._gitlab_token = "test-token"
+        hh._gitlab._gitlab_token = "test-token"
     return hh
 
 
@@ -155,7 +155,7 @@ class TestPollCycle:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
             # Mock active-event dedup: MR (100, 42) already has an active event
-            hh._get_active_mr_keys = AsyncMock(return_value={(100, 42)})
+            hh._gitlab.get_active_keys = AsyncMock(return_value={(100, 42)})
 
             result = await hh.poll_cycle()
             assert len(result) == 0
@@ -322,14 +322,14 @@ class TestAnalysisFallback:
             "mr_title": "Fix CI",
             "project_path": "group/repo",
         }
-        plan, domain = await hh.analyze_and_plan(context)
+        plan, domain = await hh.analyze_and_plan(context, "test instruction")
         assert plan.startswith("---")
         assert plan.endswith("---")
         assert domain == "complicated"
         assert "agent: developer" in plan
         assert "domain: COMPLICATED" in plan
         assert "reasoning:" in plan
-        assert "!42" in plan
+        assert "#42" in plan
 
     def test_extract_domain_from_plan(self):
         plan = "---\nplan: test\ndomain: CLEAR\n---"
