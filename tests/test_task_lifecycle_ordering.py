@@ -83,14 +83,14 @@ def _instrument(brain: Brain) -> list[str]:
 
 
 def _assert_release_before_bookkeeping(call_log: list[str]) -> None:
-    """Assert _release_task_state precedes every bookkeeping call."""
+    """Assert _release_task_state precedes ALL bookkeeping calls (not just first occurrence)."""
     assert "release_task_state" in call_log, f"release_task_state missing: {call_log}"
     release_idx = call_log.index("release_task_state")
-    for method in ("mark_turn_status", "broadcast_status_update", "stamp_event"):
-        if method in call_log:
-            assert release_idx < call_log.index(method), (
+    for i, entry in enumerate(call_log):
+        if entry in ("mark_turn_status", "broadcast_status_update", "stamp_event"):
+            assert release_idx < i, (
                 f"release_task_state (idx={release_idx}) must precede "
-                f"{method} (idx={call_log.index(method)}), got: {call_log}"
+                f"{entry} (idx={i}), got: {call_log}"
             )
 
 
@@ -180,12 +180,16 @@ class TestTaskLifecycleOrdering:
 
     @pytest.mark.asyncio
     async def test_message_mode_no_deliverable(self):
-        """Message-mode early return: release before mark_turn_status + stamp_event."""
+        """Message-mode early return: release before mark_turn_status + stamp_event.
+
+        brain.py gates no-deliverable on: len(result_str) <= 100 AND not
+        result_str.startswith("---"). "short" (5 chars) hits the no-deliverable path.
+        """
         brain = _make_brain()
         call_log = _instrument(brain)
 
         mock_agent = MagicMock()
-        mock_agent.process = AsyncMock(return_value=("ok", None))
+        mock_agent.process = AsyncMock(return_value=("short", None))
 
         brain._active_tasks["evt-test"] = asyncio.current_task()
         brain._active_agent_for_event["evt-test"] = "developer"
