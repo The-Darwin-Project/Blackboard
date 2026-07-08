@@ -251,6 +251,16 @@ spec:
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
+            {{- if .Values.headhunter.github.enabled }}
+            - name: HEADHUNTER_GITHUB_ENABLED
+              value: "true"
+            - name: HEADHUNTER_GITHUB_POLL_INTERVAL
+              value: "{{ .Values.headhunter.github.pollInterval }}"
+            - name: HEADHUNTER_GITHUB_REPOS
+              value: "{{ .Values.headhunter.github.repos }}"
+            - name: HEADHUNTER_GITHUB_TRIGGER_REASONS
+              value: "{{ .Values.headhunter.github.triggerReasons }}"
+            {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
             - name: TEKTON_EVENTLISTENER_URL
               value: "http://el-{{ .Release.Name }}-ephemeral-agent:8080"

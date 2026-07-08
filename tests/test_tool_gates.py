@@ -54,6 +54,7 @@ def _ctx(**overrides) -> GateContext:
         is_defer_wake=False,
         iteration=0,
         has_kargo_context=True,
+        has_github_context=False,
         unread_notes=0,
         refresh_budget=3,
         refresh_count=0,
@@ -70,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_24_gates(self):
-        assert len(GATE_REGISTRY) == 24
+    def test_registry_has_25_gates(self):
+        assert len(GATE_REGISTRY) == 25
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -82,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twenty_strip_mode_gates(self):
+    def test_twentyone_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 20
+        assert len(strip_gates) == 21
 
 
 # ---------------------------------------------------------------------------

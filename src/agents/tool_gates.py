@@ -34,6 +34,7 @@ class GateContext:
     is_defer_wake: bool
     iteration: int
     has_kargo_context: bool
+    has_github_context: bool
     unread_notes: int
     refresh_budget: int = 0
     refresh_count: int = 0
@@ -87,6 +88,10 @@ def _pred_phase_jira_comment(ctx: GateContext) -> bool:
 
 def _pred_no_kargo_context(ctx: GateContext) -> bool:
     return not ctx.has_kargo_context
+
+
+def _pred_no_github_context(ctx: GateContext) -> bool:
+    return not ctx.has_github_context
 
 
 def _pred_phase_jira_fetch(ctx: GateContext) -> bool:
@@ -236,6 +241,10 @@ def _tools_kargo(_ctx: GateContext) -> set[str]:
     return {"refresh_kargo_context"}
 
 
+def _tools_github(_ctx: GateContext) -> set[str]:
+    return {"refresh_github_context"}
+
+
 def _tools_jira_fetch(_ctx: GateContext) -> set[str]:
     return {"fetch_jira_issue"}
 
@@ -245,7 +254,7 @@ def _tools_incident_search(_ctx: GateContext) -> set[str]:
 
 
 def _tools_budget(_ctx: GateContext) -> set[str]:
-    return {"refresh_gitlab_context", "refresh_kargo_context"}
+    return {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"}
 
 
 def _tools_pre_classification(ctx: GateContext) -> set[str]:
@@ -344,6 +353,10 @@ def _msg_phase_jira_comment(tool: str, ctx: GateContext) -> str:
 
 def _msg_no_kargo_context(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: event has no Kargo context. Constraint: only available for Kargo-related events."
+
+
+def _msg_no_github_context(tool: str, _ctx: GateContext) -> str:
+    return f"[GATE] {tool} unavailable. State: event has no GitHub context. Supply pr_url to hydrate context."
 
 
 def _msg_phase_jira_fetch(tool: str, ctx: GateContext) -> str:
@@ -485,6 +498,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_kargo,
         message=_msg_no_kargo_context,
         hint="agent-based exploration can discover Kargo stage and freight state.",
+    ),
+    GateDefinition(
+        gate_id="NO_GITHUB_CONTEXT",
+        mode="strip",
+        predicate=_pred_no_github_context,
+        tools_affected=_tools_github,
+        message=_msg_no_github_context,
+        hint="supply pr_url parameter to hydrate GitHub context on any event.",
     ),
     GateDefinition(
         gate_id="PHASE_JIRA_FETCH",
@@ -688,10 +709,16 @@ def build_gate_context(
         and hasattr(event.event.evidence, "kargo_context")
         and event.event.evidence.kargo_context
     )
+    has_github = bool(
+        event.event
+        and event.event.evidence
+        and hasattr(event.event.evidence, "github_context")
+        and event.event.evidence.github_context
+    )
     unread = getattr(event, "unread_notes", 0) or 0
 
     # Budget computation (refresh tools)
-    refresh_tools_budgeted = {"refresh_gitlab_context", "refresh_kargo_context"}
+    refresh_tools_budgeted = {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"}
     refresh_count = sum(
         1 for t in conversation
         if t.actor == "brain" and t.waitingFor in refresh_tools_budgeted
@@ -711,6 +738,7 @@ def build_gate_context(
         is_defer_wake=is_defer_wake,
         iteration=iteration,
         has_kargo_context=has_kargo,
+        has_github_context=has_github,
         unread_notes=unread,
         refresh_budget=budget,
         refresh_count=refresh_count,

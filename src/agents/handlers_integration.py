@@ -35,6 +35,11 @@ def _resolve_maintainer_enum(event) -> list[str]:
         if isinstance(gl, dict):
             maintainer = gl.get("maintainer", {})
             emails.extend(maintainer.get("emails", []))
+        if not emails:
+            gh = getattr(evidence, "github_context", None) or {}
+            if isinstance(gh, dict):
+                maintainer = gh.get("maintainer", {})
+                emails.extend(maintainer.get("emails", []))
     if not emails:
         static = os.getenv("HEADHUNTER_MAINTAINERS", "")
         emails = [e.strip() for e in static.split(",") if e.strip()]
@@ -396,6 +401,20 @@ async def handle_transition_jira_issue(
 async def handle_refresh_gitlab_context(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
+    bb = ctx.get_blackboard()
+    event_check = await bb.get_event(event_id)
+    if event_check and event_check.event and event_check.event.evidence:
+        if getattr(event_check.event.evidence, "github_context", None):
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence="This event has GitHub context, not GitLab. Use refresh_github_context instead.",
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+
     condition = args.get("check_condition", "")
     headhunter = ctx.get_agent_instance("_headhunter")
     bb = ctx.get_blackboard()
@@ -728,6 +747,136 @@ async def handle_search_open_incidents(
 
 
 # ---------------------------------------------------------------------------
+# refresh_github_context
+# ---------------------------------------------------------------------------
+async def handle_refresh_github_context(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    bb = ctx.get_blackboard()
+    event_check = await bb.get_event(event_id)
+    if event_check and event_check.event and event_check.event.evidence:
+        if getattr(event_check.event.evidence, "gitlab_context", None):
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_github_context",
+                evidence="This event has GitLab context, not GitHub. Use refresh_gitlab_context instead.",
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+
+    condition = args.get("check_condition", "")
+    headhunter = ctx.get_agent_instance("_headhunter")
+    gh_platform = getattr(headhunter, "_github", None) if headhunter else None
+    if not gh_platform:
+        result_text = "GitHub integration not available. Use select_agent to check PR state manually."
+        turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain", action="tool_result",
+            waitingFor="refresh_github_context",
+            evidence=result_text,
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    override_owner = None
+    override_repo = None
+    override_pr_number = None
+    pr_url = (args.get("pr_url") or "").strip()
+    if pr_url:
+        parsed = gh_platform.parse_pr_url(pr_url)
+        if parsed:
+            override_owner, override_repo, override_pr_number = parsed
+        else:
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_github_context",
+                evidence=f"Could not parse PR URL: {pr_url}",
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+
+    state = await gh_platform.refresh_pr_state(
+        event_id,
+        override_owner=override_owner,
+        override_repo=override_repo,
+        override_pr_number=override_pr_number,
+    )
+
+    if pr_url and override_owner and override_pr_number and "error" not in state:
+        await bb.update_event_github_context(event_id, {
+            "owner": override_owner,
+            "repo": override_repo,
+            "pr_number": override_pr_number,
+            "pr_url": pr_url,
+        })
+
+    pr_state = state.get("pr_state", "unknown")
+    if "error" in state:
+        result_text = (
+            f"PR State: {pr_state}\n"
+            f"Checks: {state.get('check_status', '?')}\n"
+            f"Severity: {state.get('severity', '?')}\n"
+            f"Error: {state['error']}"
+        )
+    elif pr_state in ("closed",):
+        result_text = (
+            f"PR State: {pr_state}\n"
+            f"Checks: {state.get('check_status', '?')}\n"
+            f"Severity: {state.get('severity', '?')}"
+        )
+    else:
+        result_text = (
+            f"PR State: {pr_state}\n"
+            f"Checks: {state['check_status']}\n"
+            f"Severity: {state['severity']}"
+        )
+
+    subscription_active = False
+    state_watcher = ctx.get_state_watcher()
+    if args.get("subscribe") and state_watcher and "error" not in state:
+        event = await bb.get_event(event_id)
+        gh_ctx = getattr(event.event.evidence, "github_context", None) if event and event.event and event.event.evidence else None
+        if gh_ctx:
+            from ..scheduling import SubscriptionSpec, GitHubPrRef
+            interval = max(15, min(int(args.get("poll_interval", 30)), 300))
+            owner = gh_ctx.get("owner", "") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "owner", "")
+            repo = gh_ctx.get("repo", "") if isinstance(gh_ctx, dict) else getattr(gh_ctx, "repo", "")
+            pr_num = gh_ctx.get("pr_number", 0) if isinstance(gh_ctx, dict) else getattr(gh_ctx, "pr_number", 0)
+            if owner and repo and pr_num:
+                spec = SubscriptionSpec(
+                    event_id=event_id,
+                    resource_type="github_pr",
+                    resource_ref=GitHubPrRef(owner=owner, repo=repo, pr_number=pr_num),
+                    poll_fn=gh_platform.poll_github_pr_status,
+                    interval=interval,
+                    state_key=gh_platform.extract_github_state_key(state),
+                    registered_at=time.time(),
+                    cycle_id=ctx.get_cycle_id(event_id),
+                )
+                subscription_active = state_watcher.register(spec)
+                if subscription_active:
+                    await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
+
+    evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
+    if args.get("subscribe"):
+        evidence += f"\nsubscription_active: {str(subscription_active).lower()}"
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain", action="tool_result",
+        waitingFor="refresh_github_context",
+        evidence=evidence,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 from .tool_router import HANDLER_REGISTRY
@@ -738,5 +887,6 @@ HANDLER_REGISTRY["comment_jira_issue"] = handle_comment_jira_issue
 HANDLER_REGISTRY["transition_jira_issue"] = handle_transition_jira_issue
 HANDLER_REGISTRY["refresh_gitlab_context"] = handle_refresh_gitlab_context
 HANDLER_REGISTRY["refresh_kargo_context"] = handle_refresh_kargo_context
+HANDLER_REGISTRY["refresh_github_context"] = handle_refresh_github_context
 HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result
 HANDLER_REGISTRY["search_open_incidents"] = handle_search_open_incidents

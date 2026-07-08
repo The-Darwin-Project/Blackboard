@@ -9,7 +9,7 @@ from .reconciler import ReconcileScheduler, FairQueue
 from .triggers import QueueTrigger, ResyncTrigger, StalenessGuard
 from .idle_timeout import IdleTimeoutManager
 from .state_watcher import (
-    StateWatcher, SubscriptionSpec, GitLabMrRef, KargoStageRef, PollFn,
+    StateWatcher, SubscriptionSpec, GitLabMrRef, KargoStageRef, GitHubPrRef, PollFn,
 )
 
 __all__ = [
@@ -23,5 +23,6 @@ __all__ = [
     "SubscriptionSpec",
     "GitLabMrRef",
     "KargoStageRef",
+    "GitHubPrRef",
     "PollFn",
 ]

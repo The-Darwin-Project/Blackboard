@@ -236,8 +236,13 @@ async def lifespan(app: FastAPI):
         # (start_event_loop awaits _cleanup_stale_events first; Slack startup below may yield before Headhunter wiring).
         headhunter_enabled = os.getenv("HEADHUNTER_ENABLED", "false").lower() == "true"
         gitlab_host = os.getenv("GITLAB_HOST", "")
+        github_configured = (
+            os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
+            and bool(os.getenv("GITHUB_APP_ID"))
+            and bool(os.getenv("GITHUB_INSTALLATION_ID"))
+        )
         headhunter_close_signal: asyncio.Event | None = None
-        if headhunter_enabled and gitlab_host:
+        if headhunter_enabled and (gitlab_host or github_configured):
             headhunter_close_signal = asyncio.Event()
             brain.set_headhunter_close_signal(headhunter_close_signal)
 
@@ -291,17 +296,22 @@ async def lifespan(app: FastAPI):
         
         # === HEADHUNTER (GitLab Todo Poller) ===
         headhunter_task = None
-        if headhunter_enabled and gitlab_host:
+        if headhunter_enabled and (gitlab_host or github_configured):
             from .agents.headhunter import Headhunter
             if headhunter_close_signal is None:
                 raise RuntimeError("headhunter_close_signal not initialized — startup ordering bug")
             headhunter = Headhunter(blackboard, close_signal=headhunter_close_signal)
             brain.agents["_headhunter"] = headhunter
             headhunter_task = asyncio.create_task(headhunter.run())
-            logger.info("Headhunter started (GitLab todo poller)")
+            platforms = []
+            if gitlab_host:
+                platforms.append("GitLab")
+            if github_configured:
+                platforms.append("GitHub")
+            logger.info(f"Headhunter started ({', '.join(platforms)})")
         else:
-            if headhunter_enabled and not gitlab_host:
-                logger.warning("HEADHUNTER_ENABLED=true but GITLAB_HOST not set -- Headhunter disabled")
+            if headhunter_enabled and not gitlab_host and not github_configured:
+                logger.warning("HEADHUNTER_ENABLED=true but no VCS platform configured -- Headhunter disabled")
             else:
                 logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false)")
         

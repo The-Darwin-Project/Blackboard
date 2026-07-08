@@ -2227,6 +2227,9 @@ return 0
                         return
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
+                        if event.event.evidence.github_context is not None:
+                            logger.warning(f"Rejecting gitlab_context update on event {event_id}: github_context already set")
+                            return
                         gl = event.event.evidence.gitlab_context or {}
                         gl.update(updates)
                         event.event.evidence.gitlab_context = gl
@@ -2239,6 +2242,40 @@ return 0
                 except WatchError:
                     continue
         logger.debug(f"GitLab context updated on event {event_id}: {list(updates.keys())}")
+
+    async def update_event_github_context(self, event_id: str, updates: dict) -> None:
+        """Patch github_context fields on an active event's evidence (WATCH/MULTI).
+
+        Merges `updates` into the existing github_context dict. Also updates
+        evidence.severity if 'severity' key is present in updates.
+        Rejects if gitlab_context already exists (one-of invariant).
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for github_context update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    if isinstance(event.event.evidence, EventEvidence):
+                        if event.event.evidence.gitlab_context is not None:
+                            logger.warning(f"Rejecting github_context update on event {event_id}: gitlab_context already set")
+                            return
+                        gc = event.event.evidence.github_context or {}
+                        gc.update(updates)
+                        event.event.evidence.github_context = gc
+                        if "severity" in updates:
+                            event.event.evidence.severity = updates["severity"]
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.debug(f"GitHub context updated on event {event_id}: {list(updates.keys())}")
 
     async def update_event_kargo_context(self, event_id: str, updates: dict) -> None:
         """Patch kargo_context fields on an active event's evidence (WATCH/MULTI).

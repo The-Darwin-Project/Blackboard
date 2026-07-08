@@ -1,21 +1,22 @@
 # BlackBoard/src/agents/headhunter.py
 # @ai-rules:
 # 1. [Pattern]: Orchestrator — platform-agnostic loop + LLM analysis + circuit breaker.
-# 2. [Pattern]: Delegates platform calls to self._gitlab (GitLabPlatform adapter).
+# 2. [Pattern]: Delegates platform calls to self._gitlab and self._github adapters.
 # 3. [Constraint]: Brain-facing methods (refresh_mr_state, poll_gitlab_mr_status, etc.)
 #    remain on this class as thin delegates for backward compatibility.
 # 4. [Pattern]: HeadhunterJira secondary head mounted in main loop (own error boundary).
 # 5. [Pattern]: Flow gate uses global WIP cap (MAX_ACTIVE_EVENTS). Conservative count.
-# 6. [Pattern]: Circuit breaker: 3 consecutive poll failures -> self-disable.
+# 6. [Pattern]: Circuit breaker per-head: 3 consecutive failures -> latch disable that head.
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
+# 9. [Pattern]: process_event_feedback routes by evidence context (github_context vs gitlab_context).
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
 Orchestrator pattern — delegates platform-specific operations to adapters:
 - GitLabPlatform: GitLab todo polling (primary head)
-- HeadhunterJira: Jira issue polling (secondary head)
-- GitHubPlatform: GitHub PR polling (future)
+- GitHubPlatform: GitHub PR polling (secondary head)
+- HeadhunterJira: Jira issue polling (tertiary head)
 
 LLM analysis (Flash triage) and event lifecycle are platform-agnostic.
 """
@@ -26,9 +27,12 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+import httpx
+
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from .headhunter_github import GitHubPlatform
 from .headhunter_gitlab import (
     ACTION_PRIORITY,
     GitLabPlatform,
@@ -56,10 +60,12 @@ class Headhunter:
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
-        self._last_poll_pending: int = 0
+        self._gitlab_pending: int = 0
+        self._github_pending: int = 0
 
         # Platform adapters
         self._gitlab = GitLabPlatform(blackboard)
+        self._github = GitHubPlatform(blackboard)
         self._jira = HeadhunterJira(blackboard)
 
     # =========================================================================
@@ -119,7 +125,8 @@ class Headhunter:
         action = context.get("action_name", "unknown")
         title = context.get("mr_title", context.get("pr_title", "unknown"))
         project = context.get("project_path", context.get("repo", "unknown"))
-        iid = context.get("mr_iid", context.get("pr_number", "?"))
+        raw_iid = context.get("mr_iid", context.get("pr_number", "?"))
+        iid = f"!{raw_iid}" if context.get("mr_iid") else f"#{raw_iid}"
         return (
             f"---\nplan: Investigate {action} on {title}\n"
             f"service: {project.rsplit('/', 1)[-1]}\n"
@@ -127,7 +134,7 @@ class Headhunter:
             f"domain: COMPLICATED\nrisk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
             f"steps:\n  - id: \"1\"\n    agent: developer\n"
-            f"    summary: \"Investigate {action} on #{iid} "
+            f"    summary: \"Investigate {action} on {iid} "
             f"in {project}. LLM triage failed -- review manually.\"\n---"
         )
 
@@ -147,7 +154,8 @@ class Headhunter:
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
         parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
         if context.get("mr_description") or context.get("pr_body"):
-            parts.append(f"Description:\n{context.get('mr_description', context.get('pr_body', ''))}")
+            desc = context.get('mr_description', context.get('pr_body', ''))
+            parts.append(f"<description>\n{desc}\n</description>")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
         if context.get("labels"):
@@ -155,12 +163,13 @@ class Headhunter:
         if context.get("failed_job_names"):
             parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
-            parts.append(f"First failed job log (last lines):\n{context['failed_job_log']}")
+            parts.append(f"<job_log>\n{context['failed_job_log']}\n</job_log>")
         if context.get("recent_notes") or context.get("recent_comments"):
             notes = context.get("recent_notes", context.get("recent_comments", []))
-            parts.append(f"Recent comments (newest first):\n" + "\n".join(notes))
+            joined = "\n".join(notes)[:2000]
+            parts.append(f"<comments>\n{joined}\n</comments>")
         if context.get("mention_comment"):
-            parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
+            parts.append(f"<mention_request author=\"{context.get('mention_author', 'unknown')}\">\n{context['mention_comment']}\n</mention_request>")
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
@@ -181,7 +190,7 @@ class Headhunter:
     @property
     def pending_count(self) -> int:
         """Pending items from last poll cycle (not yet converted to events)."""
-        return self._last_poll_pending
+        return self._gitlab_pending + self._github_pending
 
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""
@@ -194,15 +203,21 @@ class Headhunter:
     # =========================================================================
 
     async def run(self) -> None:
-        """Main loop: poll -> analyze -> create events. Circuit breaker after 3 failures."""
-        if not self._gitlab.enabled():
-            logger.warning("Headhunter disabled: GITLAB_HOST not set")
+        """Main loop: poll -> analyze -> create events. Per-head circuit breaker."""
+        if not self._gitlab.enabled() and not self._github.enabled():
+            logger.warning("Headhunter disabled: neither GITLAB_HOST nor GITHUB set")
             return
 
         startup_delay = int(os.getenv("HEADHUNTER_STARTUP_DELAY", "180"))
+        heads = []
+        if self._gitlab.enabled():
+            heads.append("gitlab")
+        if self._github.enabled():
+            heads.append("github")
         logger.info(
             f"Headhunter waiting {startup_delay}s for sidecars to connect before first poll "
-            f"(poll={self._poll_interval}s, cap={self._wip_cap}, model={self._model_name})"
+            f"(poll={self._poll_interval}s, cap={self._wip_cap}, model={self._model_name}, "
+            f"heads={heads})"
         )
         await asyncio.sleep(startup_delay)
         logger.info("Headhunter started")
@@ -211,23 +226,62 @@ class Headhunter:
             asyncio.create_task(self._feedback_loop())
             logger.info("Headhunter feedback loop started (Signal + Poll hybrid)")
 
-        failures = 0
+        gitlab_failures = 0
+        github_failures = 0
         max_failures = 3
+        _gitlab_disabled = False
+        _github_disabled = False
+
         while True:
-            try:
-                await self._poll_and_process()
-                failures = 0
-            except Exception as e:
-                failures += 1
-                logger.error(f"Headhunter poll failed ({failures}/{max_failures}): {e}")
-                if failures >= max_failures:
-                    logger.critical("Headhunter disabled after 3 consecutive failures")
-                    return
+            # GitLab head
+            if self._gitlab.enabled() and not _gitlab_disabled:
+                try:
+                    await self._poll_and_process()
+                    gitlab_failures = 0
+                except Exception as e:
+                    gitlab_failures += 1
+                    logger.error(f"Headhunter GitLab poll failed ({gitlab_failures}/{max_failures}): {e}")
+                    if gitlab_failures >= max_failures:
+                        logger.critical("Headhunter GitLab head disabled after 3 consecutive failures")
+                        _gitlab_disabled = True
+
+            # GitHub head
+            if self._github.enabled() and not _github_disabled:
+                try:
+                    await self._github_poll_and_process()
+                    github_failures = 0
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (401, 403):
+                        logger.error(f"Headhunter GitHub auth error ({e.response.status_code}) — not counting toward circuit breaker")
+                    else:
+                        github_failures += 1
+                        logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
+                        if github_failures >= max_failures:
+                            logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
+                            _github_disabled = True
+                except Exception as e:
+                    github_failures += 1
+                    logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
+                    if github_failures >= max_failures:
+                        logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
+                        _github_disabled = True
+
+            # Both heads latched off → exit
+            gitlab_dead = not self._gitlab.enabled() or _gitlab_disabled
+            github_dead = not self._github.enabled() or _github_disabled
+            if gitlab_dead and github_dead:
+                logger.critical("Headhunter: all VCS heads disabled, shutting down")
+                await self._github.close()
+                return
+
+            # Jira head (independent error boundary)
             if self._jira.enabled():
                 try:
                     await self._jira.poll_and_process()
                 except Exception as e:
                     logger.warning(f"Headhunter Jira poll failed (non-fatal): {e}")
+
+            # Sleep or wait for close signal
             if self._close_signal:
                 try:
                     await asyncio.wait_for(self._close_signal.wait(), timeout=self._poll_interval)
@@ -239,18 +293,18 @@ class Headhunter:
                 await asyncio.sleep(self._poll_interval)
 
     async def _poll_and_process(self) -> None:
-        """Single poll cycle: check gate, fetch items, analyze, create events."""
+        """Single GitLab poll cycle: check gate, fetch items, analyze, create events."""
         if not await self.check_flow_gate():
-            logger.debug("Headhunter flow gate closed -- skipping cycle")
+            logger.debug("Headhunter flow gate closed -- skipping GitLab cycle")
             return
 
         todos = await self._gitlab.poll_work_items()
-        self._last_poll_pending = len(todos)
+        self._gitlab_pending = len(todos)
         if not todos:
-            logger.debug("Headhunter: no actionable items")
+            logger.debug("Headhunter GitLab: no actionable items")
             return
 
-        logger.info(f"Headhunter: {len(todos)} actionable item(s)")
+        logger.info(f"Headhunter GitLab: {len(todos)} actionable item(s)")
         si = self._gitlab.load_triage_instruction()
         for todo in todos:
             if not await self.check_flow_gate():
@@ -259,6 +313,28 @@ class Headhunter:
             context = await self._gitlab.fetch_context(todo)
             plan_text, domain = await self.analyze_and_plan(context, si)
             await self._gitlab.create_platform_event(todo, plan_text, domain, context)
+
+    async def _github_poll_and_process(self) -> None:
+        """Single GitHub poll cycle: check gate, fetch PRs, analyze, create events."""
+        if not await self.check_flow_gate():
+            logger.debug("Headhunter flow gate closed -- skipping GitHub cycle")
+            return
+
+        prs = await self._github.poll_work_items()
+        self._github_pending = len(prs)
+        if not prs:
+            logger.debug("Headhunter GitHub: no actionable PRs")
+            return
+
+        logger.info(f"Headhunter GitHub: {len(prs)} actionable PR(s)")
+        si = self._github.load_triage_instruction()
+        for pr in prs:
+            if not await self.check_flow_gate():
+                logger.info("Headhunter flow gate closed mid-cycle -- stopping")
+                break
+            context = await self._github.fetch_context(pr)
+            plan_text, domain = await self.analyze_and_plan(context, si)
+            await self._github.create_platform_event(pr, plan_text, domain, context)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)
@@ -284,7 +360,13 @@ class Headhunter:
         event = await self.blackboard.get_event(event_id)
         if not event:
             return
-        await self._gitlab.post_feedback(event)
+        evidence = event.event.evidence if event.event else None
+        if evidence and evidence.github_context:
+            await self._github.post_feedback(event)
+        elif evidence and evidence.gitlab_context:
+            await self._gitlab.post_feedback(event)
+        else:
+            await self._gitlab.post_feedback(event)
 
     async def _process_closed_events(self) -> None:
         """Scan closed headhunter events and post platform feedback."""
@@ -294,7 +376,11 @@ class Headhunter:
         for event in closed_events:
             if await self.blackboard.is_feedback_sent(event.id):
                 continue
-            await self._gitlab.post_feedback(event)
+            evidence = event.event.evidence if event.event else None
+            if evidence and evidence.github_context:
+                await self._github.post_feedback(event)
+            else:
+                await self._gitlab.post_feedback(event)
 
     # =========================================================================
     # Brain-Facing Delegates (backward-compatible API)
@@ -349,5 +435,35 @@ class Headhunter:
     async def poll_cycle(self) -> list[dict]:
         """Delegate to GitLab adapter. Exposed for backward compatibility."""
         result = await self._gitlab.poll_work_items()
-        self._last_poll_pending = len(result)
+        self._gitlab_pending = len(result)
         return result
+
+    # =========================================================================
+    # GitHub Brain-Facing Delegates
+    # =========================================================================
+
+    async def refresh_pr_state(self, event_id: str, *,
+                               override_owner: str | None = None,
+                               override_repo: str | None = None,
+                               override_pr_number: int | None = None) -> dict:
+        """Delegate to GitHub adapter. Called by handlers_integration.py."""
+        return await self._github.refresh_pr_state(
+            event_id,
+            override_owner=override_owner,
+            override_repo=override_repo,
+            override_pr_number=override_pr_number,
+        )
+
+    async def poll_github_pr_status(self, owner: str, repo: str, pr_number: int) -> dict:
+        """Delegate to GitHub adapter. Registered as StateWatcher poll fn."""
+        return await self._github.poll_github_pr_status(owner, repo, pr_number)
+
+    @staticmethod
+    def extract_github_state_key(state: dict) -> dict:
+        """Delegate to GitHub adapter. Used by StateWatcher."""
+        return GitHubPlatform.extract_github_state_key(state)
+
+    @staticmethod
+    def parse_pr_url(url: str) -> tuple[str, str, int] | None:
+        """Delegate to GitHub adapter. Called by handlers_integration.py."""
+        return GitHubPlatform.parse_pr_url(url)

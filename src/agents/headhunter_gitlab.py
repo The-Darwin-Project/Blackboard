@@ -289,6 +289,7 @@ class GitLabPlatform:
                                 continue
                             context["mention_comment"] = body[:2000]
                             context["mention_author"] = note_author
+                            break
                     if note_author == darwin_bot:
                         continue
                     if len(ci_notes) < MAX_CI_NOTES:

@@ -653,7 +653,7 @@ class Brain:
 
     @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
-        """Extract normalized MR URL from gitlab_context or kargo_context.
+        """Extract normalized MR/PR URL from gitlab_context, kargo_context, or github_context.
 
         Returns None safely for legacy string evidence (pre-EventEvidence data).
         """
@@ -668,6 +668,10 @@ class Brain:
             kc = getattr(ev, "kargo_context", None)
             if isinstance(kc, dict) and kc.get("mr_url"):
                 url = kc["mr_url"]
+        if not url:
+            gh = getattr(ev, "github_context", None)
+            if isinstance(gh, dict) and gh.get("pr_url"):
+                url = gh["pr_url"]
         if url:
             return url.split("#")[0].rstrip("/")
         return None
@@ -1214,9 +1218,9 @@ class Brain:
         # Reorder tools: always-available first, then phase-relevant, then rest.
         _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
         _phase_tool_priority: dict[str, set[str]] = {
-            "triage":    {"refresh_gitlab_context", "refresh_kargo_context"},
+            "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
             "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
-            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "get_plan_progress", "defer_event"},
+            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context", "get_plan_progress", "defer_event"},
             "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
             "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
         }
@@ -1850,6 +1854,18 @@ class Brain:
                     resolved_contents.append(_wrap_section(kpath, kbody, self._skill_loader.get_tag_type(kpath)))
                 else:
                     logger.debug(f"Kargo tag '{kpath}' resolved to None in path_index")
+
+        # Evidence-driven context: inject GitHub skills when github_context is present
+        if (event.event and event.event.evidence
+                and hasattr(event.event.evidence, "github_context")
+                and event.event.evidence.github_context):
+            for gpath in self._skill_loader.find_paths_by_tag("github"):
+                result = self._skill_loader.get_with_meta(gpath)
+                if result:
+                    gbody, _ = result
+                    resolved_contents.append(_wrap_section(gpath, gbody, self._skill_loader.get_tag_type(gpath)))
+                else:
+                    logger.debug(f"GitHub tag '{gpath}' resolved to None in path_index")
 
         # Gated posture skills for chat/slack events (mutually exclusive)
         if context_flags and context_flags.get("is_first_human_turn"):
@@ -2660,7 +2676,8 @@ class Brain:
         """Extract valid maintainer emails from event evidence + static config.
 
         Returns a deduplicated list the LLM must pick from (enum constraint).
-        Sources: evidence.gitlab_context.maintainer.emails, then HEADHUNTER_MAINTAINERS env.
+        Sources: evidence.gitlab_context.maintainer.emails, github_context.maintainer.emails,
+        then HEADHUNTER_MAINTAINERS env.
         """
         emails: list[str] = []
         evidence = getattr(getattr(event, "event", None), "evidence", None)
@@ -2669,6 +2686,11 @@ class Brain:
             if isinstance(gl, dict):
                 maintainer = gl.get("maintainer", {})
                 emails.extend(maintainer.get("emails", []))
+            if not emails:
+                gh = getattr(evidence, "github_context", None) or {}
+                if isinstance(gh, dict):
+                    maintainer = gh.get("maintainer", {})
+                    emails.extend(maintainer.get("emails", []))
         if not emails:
             static = os.getenv("HEADHUNTER_MAINTAINERS", "")
             emails = [e.strip() for e in static.split(",") if e.strip()]

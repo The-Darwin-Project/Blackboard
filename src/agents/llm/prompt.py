@@ -134,6 +134,25 @@ def _build_subject_block(
             if emails:
                 lines.append(f"  Maintainer Emails: {', '.join(emails)}")
 
+    elif ev and ev.github_context:
+        gc = ev.github_context
+        lines.append(f"Component: {event.service}")
+        lines.append(f"  Repo: {gc.get('owner', '')}/{gc.get('repo', '')}")
+        lines.append(f"  PR: #{gc.get('pr_number', '')} - {gc.get('pr_title', '')}")
+        lines.append(f"  PR URL: {gc.get('pr_url', '')}")
+        lines.append(f"  Checks: {gc.get('check_status', 'unknown')}")
+        lines.append(f"  State: {gc.get('pr_state', '')}")
+        if gc.get("head_branch"):
+            lines.append(f"  Head Branch: {gc['head_branch']}")
+        if gc.get("base_branch"):
+            lines.append(f"  Base Branch: {gc['base_branch']}")
+        lines.append(f"  Author: {gc.get('author', '')}")
+        maintainer = gc.get("maintainer", {})
+        if maintainer:
+            emails = maintainer.get("emails", [])
+            if emails:
+                lines.append(f"  Maintainer Emails: {', '.join(emails)}")
+
     elif service_meta:
         lines.append(f"Service: {service_meta.name} (K8s Deployment)")
         lines.append(f"  Version: {service_meta.version}")

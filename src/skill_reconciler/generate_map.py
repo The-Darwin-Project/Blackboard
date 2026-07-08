@@ -41,6 +41,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "PHASE_OBSERVATION": "phase is close",
     "PHASE_JIRA_COMMENT": "phase not in dispatch/verify/escalate/close",
     "NO_KARGO_CONTEXT": "no Kargo evidence on event",
+    "NO_GITHUB_CONTEXT": "no GitHub evidence on event",
     "PHASE_JIRA_FETCH": "phase not in triage/dispatch/verify",
     "PHASE_INCIDENT_SEARCH": "phase not in triage/dispatch/verify/escalate",
     "BUDGET_EXHAUSTED": "refresh count exceeds budget",
@@ -173,12 +174,12 @@ def _enumerate_gates(registry: list, gate_context_cls: type) -> list[_GateInfo]:
     neutral = gate_context_cls(
         brain_phase="dispatch", event_source="aligner",
         context_flags={}, conversation=[], is_defer_wake=False,
-        iteration=0, has_kargo_context=False, unread_notes=0,
+        iteration=0, has_kargo_context=False, has_github_context=False, unread_notes=0,
     )
     chat = gate_context_cls(
         brain_phase="dispatch", event_source="chat",
         context_flags={}, conversation=[], is_defer_wake=False,
-        iteration=0, has_kargo_context=False, unread_notes=0,
+        iteration=0, has_kargo_context=False, has_github_context=False, unread_notes=0,
     )
     gates: list[_GateInfo] = []
     for gate in registry:

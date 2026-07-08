@@ -28,13 +28,19 @@ def extract_event_links(e: "StagedEscalation") -> str:
     parts: list[str] = []
     snap = e.evidence_snapshot or {}
     gl = snap.get("gitlab_context") or {}
+    gc = snap.get("github_context") or {}
     kc = snap.get("kargo_context") or {}
     jc = snap.get("jira_context") or {}
     if gl.get("target_url"):
         iid = gl.get("mr_iid") or "?"
         parts.append(f"MR !{iid}")
+    if gc.get("pr_url"):
+        pr_num = gc.get("pr_number") or "?"
+        parts.append(f"PR #{pr_num}")
     if gl.get("pipeline_id"):
         parts.append(f"Pipe #{gl['pipeline_id']}")
+    if gc.get("check_run_url"):
+        parts.append("Checks")
     if kc.get("mr_url"):
         parts.append("Kargo MR")
     if jc.get("issue_url"):
@@ -49,10 +55,13 @@ def extract_full_links(e: "StagedEscalation") -> str:
     lines: list[str] = []
     snap = e.evidence_snapshot or {}
     gl = snap.get("gitlab_context") or {}
+    gc = snap.get("github_context") or {}
     kc = snap.get("kargo_context") or {}
     jc = snap.get("jira_context") or {}
     if gl.get("target_url"):
         lines.append(f"- MR: {gl['target_url']}")
+    if gc.get("pr_url"):
+        lines.append(f"- PR: {gc['pr_url']}")
     if gl.get("pipeline_id"):
         raw_host = os.getenv("GITLAB_HOST", "")
         gitlab_host = _normalize_gitlab_host(raw_host)
@@ -60,6 +69,8 @@ def extract_full_links(e: "StagedEscalation") -> str:
             lines.append(f"- Pipeline: https://{gitlab_host}/{gl['project_path']}/-/pipelines/{gl['pipeline_id']}")
         else:
             lines.append(f"- Pipeline ID: {gl['pipeline_id']}")
+    if gc.get("check_run_url"):
+        lines.append(f"- Check Run: {gc['check_run_url']}")
     if kc.get("mr_url"):
         lines.append(f"- Kargo MR: {kc['mr_url']}")
     if jc.get("issue_url"):
