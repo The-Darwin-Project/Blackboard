@@ -7,6 +7,7 @@
 interface SourceIconProps {
   source: string;
   subjectType?: string;
+  evidence?: Record<string, unknown>;
   size?: number;
 }
 
@@ -123,8 +124,12 @@ const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   jira: JiraIcon,
 };
 
-export default function SourceIcon({ source, subjectType, size = 16 }: SourceIconProps) {
-  const Icon = (subjectType && SUBJECT_ICON_MAP[subjectType]) || ICON_MAP[source.toLowerCase()] || FallbackIcon;
+export default function SourceIcon({ source, subjectType, evidence, size = 16 }: SourceIconProps) {
+  let resolvedSource = source.toLowerCase();
+  if (resolvedSource === 'headhunter' && evidence?.github_context) {
+    resolvedSource = 'github';
+  }
+  const Icon = (subjectType && SUBJECT_ICON_MAP[subjectType]) || ICON_MAP[resolvedSource] || FallbackIcon;
 
   return (
     <span title={source} style={{ display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle' }}>

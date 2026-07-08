@@ -105,7 +105,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
       <div className="flex items-center gap-1.5 px-3 pt-1.5 pb-0.5 min-w-0">
         <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isWaiting ? 'animate-pulse' : ''}`}
           style={{ background: sc?.border || '#64748b', boxShadow: isWaiting ? `0 0 6px ${sc?.border}80` : 'none' }} />
-        <SourceIcon source={evt.source} subjectType={evt.subject_type} size={15} />
+        <SourceIcon source={evt.source} subjectType={evt.subject_type} evidence={evt.evidence as Record<string, unknown> | undefined} size={15} />
         <span className={`text-[13px] font-medium truncate min-w-0 flex-1 ${isWaiting ? 'text-amber-300' : isDeferred ? 'text-violet-200' : 'text-text-secondary'}`}>
           {evt.service || evt.id.slice(4, 12)}
         </span>
