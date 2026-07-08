@@ -54,6 +54,7 @@ def _ctx(**overrides) -> GateContext:
         is_defer_wake=False,
         iteration=0,
         has_kargo_context=True,
+        has_github_context=False,
         unread_notes=0,
         refresh_budget=3,
         refresh_count=0,

@@ -7,7 +7,9 @@
 #    are NOT part of VcsPlatformPort — they're GitHub-specific, accessed via Headhunter delegates.
 # 5. [Pattern]: _load_github_si() loads from headhunter_skills/github-pr-triage.md with emergency fallback.
 # 6. [Gotcha]: mergeable excluded from state_key (flaps during CI runs).
-# 7. [Pattern]: Lazy-init auth — never raises in constructor (env may not be set).
+# 7. [Pattern]: Lazy-init auth via get_github_auth() singleton — never raises in constructor.
+# 8. [Gotcha]: _list_from_repos only includes PRs where the bot IS in requested_reviewers. No empty-reviewer fallback.
+# 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -96,9 +98,8 @@ class GitHubPlatform:
         """Lazy-init AsyncGitHubClient. Returns None if auth is unavailable."""
         if self._client is None:
             try:
-                from ..utils.github_app import AsyncGitHubClient, GitHubAppAuth
-                auth = GitHubAppAuth()
-                self._client = AsyncGitHubClient(auth)
+                from ..utils.github_app import get_github_auth, AsyncGitHubClient
+                self._client = AsyncGitHubClient(get_github_auth())
             except Exception as e:
                 logger.warning(f"GitHub client init failed: {e}")
                 return None
@@ -161,12 +162,8 @@ class GitHubPlatform:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 logger.warning("GitHub search returned 422 — app slug may not be indexed yet")
-            else:
-                logger.warning(f"GitHub search failed: {e}")
-            return []
-        except Exception as e:
-            logger.warning(f"GitHub search error: {e}")
-            return []
+                return []
+            raise
 
     async def _list_from_repos(self, client) -> list[dict]:
         """Fallback: list open PRs from configured repos."""
@@ -179,10 +176,13 @@ class GitHubPlatform:
                 )
                 for pr_data in resp.json():
                     requested = [r.get("login", "") for r in pr_data.get("requested_reviewers", [])]
-                    if f"{_APP_SLUG}[bot]" in requested or not requested:
+                    if f"{_APP_SLUG}[bot]" in requested:
                         prs.append(self._normalize_pr_data(repo_full, pr_data))
-            except Exception as e:
-                logger.warning(f"GitHub repo list failed for {repo_full}: {e}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 422:
+                    logger.warning(f"GitHub repo list 422 for {repo_full}")
+                    continue
+                raise
         return prs
 
     @staticmethod
@@ -262,20 +262,24 @@ class GitHubPlatform:
         except Exception as e:
             logger.warning(f"GitHub PR detail fetch failed for {owner}/{repo}#{number}: {e}")
 
-        try:
-            check_resp = await client.get(
-                f"/repos/{owner}/{repo}/commits/{context.get('head_sha', 'HEAD')}/check-runs",
-                params={"per_page": "50"},
-            )
-            check_data = check_resp.json()
-            check_runs = check_data.get("check_runs", [])
-            failed = [cr for cr in check_runs if cr.get("conclusion") == "failure"]
-            context["check_status"] = self._aggregate_check_status(check_runs)
-            if failed:
-                context["check_run_url"] = failed[0].get("html_url", "")
-                context["failed_checks"] = [cr.get("name", "") for cr in failed[:5]]
-        except Exception as e:
-            logger.debug(f"GitHub check-runs fetch failed: {e}")
+        head_sha = context.get("head_sha")
+        if head_sha:
+            try:
+                check_resp = await client.get(
+                    f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+                    params={"per_page": "50"},
+                )
+                check_data = check_resp.json()
+                check_runs = check_data.get("check_runs", [])
+                failed = [cr for cr in check_runs if cr.get("conclusion") == "failure"]
+                context["check_status"] = self._aggregate_check_status(check_runs)
+                if failed:
+                    context["check_run_url"] = failed[0].get("html_url", "")
+                    context["failed_checks"] = [cr.get("name", "") for cr in failed[:5]]
+            except Exception as e:
+                logger.debug(f"GitHub check-runs fetch failed: {e}")
+                context["check_status"] = "unknown"
+        else:
             context["check_status"] = "unknown"
 
         try:
@@ -321,7 +325,7 @@ class GitHubPlatform:
             return "unknown"
         conclusions = [cr.get("conclusion") for cr in check_runs if cr.get("conclusion")]
         statuses = [cr.get("status") for cr in check_runs]
-        if any(c == "failure" for c in conclusions):
+        if any(c in ("failure", "cancelled", "timed_out", "action_required") for c in conclusions):
             return "failure"
         if any(s == "in_progress" for s in statuses):
             return "pending"
@@ -500,7 +504,9 @@ class GitHubPlatform:
             check_status = self._aggregate_check_status(check_runs)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
-                return {"error": "PR not found", "pr_state": "closed", "check_status": "unknown", "severity": "info"}
+                result = {"error": "PR not found", "pr_state": "closed", "check_status": "unknown", "severity": "info"}
+                await self.blackboard.update_event_github_context(event_id, result)
+                return result
             return {"error": f"GitHub API error: {e.response.status_code}", "pr_state": "unknown",
                     "check_status": "unknown", "severity": "warning"}
         except Exception as e:

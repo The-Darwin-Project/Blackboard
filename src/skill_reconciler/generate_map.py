@@ -173,12 +173,12 @@ def _enumerate_gates(registry: list, gate_context_cls: type) -> list[_GateInfo]:
     neutral = gate_context_cls(
         brain_phase="dispatch", event_source="aligner",
         context_flags={}, conversation=[], is_defer_wake=False,
-        iteration=0, has_kargo_context=False, unread_notes=0,
+        iteration=0, has_kargo_context=False, has_github_context=False, unread_notes=0,
     )
     chat = gate_context_cls(
         brain_phase="dispatch", event_source="chat",
         context_flags={}, conversation=[], is_defer_wake=False,
-        iteration=0, has_kargo_context=False, unread_notes=0,
+        iteration=0, has_kargo_context=False, has_github_context=False, unread_notes=0,
     )
     gates: list[_GateInfo] = []
     for gate in registry:

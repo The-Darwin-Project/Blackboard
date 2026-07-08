@@ -450,6 +450,19 @@ SOURCE_EMOJI: dict[str, str] = {
     "headhunter": ":gitlab:",
 }
 
+
+def resolve_source_emoji(event_dict: dict) -> str:
+    """Resolve source emoji with context-awareness for headhunter events.
+
+    GitHub-sourced headhunter events use :github: instead of :gitlab:.
+    """
+    source = event_dict.get("source", "")
+    if source == "headhunter":
+        evidence = event_dict.get("evidence", {})
+        if isinstance(evidence, dict) and evidence.get("github_context"):
+            return ":github:"
+    return SOURCE_EMOJI.get(source, ":gear:")
+
 STATUS_EMOJI: dict[str, str] = {
     "new": ":new:",
     "active": ":zap:",
@@ -520,7 +533,7 @@ def build_home_tab_view(
             subj_type = evt.get("subject_type", "service")
             if subj_type == "service" and "@kargo-" in evt.get("service", ""):
                 subj_type = "kargo_stage"
-            src_icon = SUBJECT_EMOJI.get(subj_type) or SOURCE_EMOJI.get(evt.get("source", ""), ":gear:")
+            src_icon = SUBJECT_EMOJI.get(subj_type) or resolve_source_emoji(evt)
             status_icon = STATUS_EMOJI.get(evt.get("status", ""), ":gear:")
             reason = _truncate(evt.get("reason", ""), 120)
             evt_id = evt.get("id", "?")

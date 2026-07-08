@@ -438,6 +438,12 @@ headhunter:
   startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
+  # --- GitHub Platform (GitHub App-based PR polling) ---
+  github:
+    enabled: false # Set to true + configure github.existingSecret to activate
+    pollInterval: "300" # seconds between GitHub poll cycles
+    repos: "" # CSV of owner/repo pairs to poll (e.g., "The-Darwin-Project/BlackBoard,org/repo2")
+    triggerReasons: "review_requested" # CSV of PR event reasons that create events
 # =============================================================================
 # Jira Integration (QE Mission Polling -- Headhunter Jira Head)
 # =============================================================================

@@ -858,6 +858,53 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["check_condition"],
         },
     },
+    {
+        "name": "refresh_github_context",
+        "description": (
+            "Quick-check: re-fetch current PR and check-run state from GitHub "
+            "WITHOUT dispatching an agent. Returns a snapshot of the current state. "
+            "Works for any event source -- headhunter events carry PR context "
+            "automatically; for chat/slack events where an agent created a PR, "
+            "supply the PR URL from the agent's completion report. "
+            "Can optionally subscribe to background state monitoring -- the system "
+            "watches for PR/check-run state changes (merged, checks completed, "
+            "failed) and injects a notification turn when something changes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "check_condition": {
+                    "type": "string",
+                    "description": "What to verify (e.g., 'checks passed after push', 'PR merged', 'checks completed after defer')",
+                },
+                "pr_url": {
+                    "type": "string",
+                    "description": (
+                        "Full GitHub PR URL. Required when the event has no "
+                        "github_context (e.g., chat/slack events where an agent "
+                        "created a PR). The system extracts owner, repo, and PR "
+                        "number from the URL and hydrates the event context."
+                    ),
+                },
+                "subscribe": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable background state monitoring. The system watches for "
+                        "changes and injects a notification turn when the state "
+                        "changes, waking the event early."
+                    ),
+                },
+                "poll_interval": {
+                    "type": "integer",
+                    "description": (
+                        "Seconds between background state checks when subscribe is "
+                        "enabled. The system enforces minimum and maximum bounds."
+                    ),
+                },
+            },
+            "required": ["check_condition"],
+        },
+    },
     # --- JARVIS response (gated: when unanswered jarvis.message or jarvis.insight exists) ---
     {
         "name": "respond_to_jarvis",

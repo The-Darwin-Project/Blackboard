@@ -2,8 +2,9 @@
 # @ai-rules:
 # 1. [Constraint]: GitHubAppAuth.get_token() is thread-safe (threading.Lock).
 # 2. [Pattern]: AsyncGitHubClient wraps blocking token refresh via asyncio.to_thread().
-# 3. [Gotcha]: httpx is an optional dep — only imported by AsyncGitHubClient (not at module top).
+# 3. [Pattern]: AsyncGitHubClient uses persistent httpx.AsyncClient; call close() on shutdown.
 # 4. [Pattern]: Rate-limit warning at 100 remaining (GitHub soft-gate is at 0).
+# 5. [Pattern]: get_github_auth() is the singleton accessor — all consumers use it, not GitHubAppAuth() directly.
 """
 GitHub App Authentication for GitOps operations.
 
@@ -227,12 +228,17 @@ class AsyncGitHubClient:
     """Async wrapper for GitHub App REST API calls via httpx.
 
     Token refresh runs in a thread (blocking JWT + HTTP) to avoid
-    event loop starvation. Each request creates a short-lived client
-    to avoid connection pool issues across token rotations.
+    event loop starvation. Uses a persistent httpx.AsyncClient to
+    reuse TCP connections across requests.
     """
 
     def __init__(self, auth: GitHubAppAuth):
         self._auth = auth
+        self._client = httpx.AsyncClient(timeout=30)
+
+    async def close(self) -> None:
+        """Shut down the persistent HTTP client."""
+        await self._client.aclose()
 
     async def get_token(self) -> str:
         return await asyncio.to_thread(self._auth.get_token)
@@ -244,15 +250,14 @@ class AsyncGitHubClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"https://api.github.com{path}", headers=headers, params=params,
-            )
-            remaining = resp.headers.get("X-RateLimit-Remaining")
-            if remaining and int(remaining) < 100:
-                logger.warning(f"GitHub rate limit low: {remaining} remaining")
-            resp.raise_for_status()
-            return resp
+        resp = await self._client.get(
+            f"https://api.github.com{path}", headers=headers, params=params,
+        )
+        remaining = resp.headers.get("X-RateLimit-Remaining")
+        if remaining and int(remaining) < 100:
+            logger.warning(f"GitHub rate limit low: {remaining} remaining")
+        resp.raise_for_status()
+        return resp
 
     async def post(self, path: str, json: dict | None = None) -> httpx.Response:
         token = await self.get_token()
@@ -261,9 +266,8 @@ class AsyncGitHubClient:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"https://api.github.com{path}", headers=headers, json=json,
-            )
-            resp.raise_for_status()
-            return resp
+        resp = await self._client.post(
+            f"https://api.github.com{path}", headers=headers, json=json,
+        )
+        resp.raise_for_status()
+        return resp
