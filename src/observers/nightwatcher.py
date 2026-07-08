@@ -227,6 +227,8 @@ class NightwatcherObserver:
                 tools=tools, temperature=temperature,
                 max_output_tokens=analysis_max_tokens, thinking_level=thinking,
             )
+            from src.agents.llm import record_token_usage
+            record_token_usage("nightwatcher", response.usage)
             if response.function_call:
                 name = response.function_call.name
                 args = response.function_call.args
@@ -284,6 +286,8 @@ class NightwatcherObserver:
                 tools=NIGHTWATCHER_DECLARE_CLUSTERS_SCHEMA, temperature=temperature,
                 max_output_tokens=max_tokens, thinking_level=thinking,
             )
+            from src.agents.llm import record_token_usage
+            record_token_usage("nightwatcher", response.usage)
             if response.function_call and response.function_call.name == "declare_clusters":
                 from .nightwatcher_tools import _handle_declare_clusters
                 result = await _handle_declare_clusters(response.function_call.args, ctx)
@@ -352,6 +356,8 @@ class NightwatcherObserver:
                     tools=report_tools, temperature=temperature,
                     max_output_tokens=max_tokens, thinking_level=thinking,
                 )
+                from src.agents.llm import record_token_usage
+                record_token_usage("nightwatcher", response.usage)
                 if response.function_call and response.function_call.name == expected_tool:
                     if is_extend:
                         result = await _handle_extend_incident(response.function_call.args, ctx, cluster)
@@ -400,6 +406,8 @@ class NightwatcherObserver:
             tools=summary_tools, temperature=temperature,
             max_output_tokens=max_tokens, thinking_level=thinking,
         )
+        from src.agents.llm import record_token_usage
+        record_token_usage("nightwatcher", response.usage)
         if response.function_call and response.function_call.name == "post_shift_summary":
             from .nightwatcher_tools import _handle_post_shift_summary
             await _handle_post_shift_summary(response.function_call.args, ctx)

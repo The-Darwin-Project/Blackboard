@@ -1341,6 +1341,9 @@ class Brain:
                             raw_parts = chunk.raw_parts
                         if chunk.grounding_metadata:
                             last_grounding = chunk.grounding_metadata
+                        if chunk.usage:
+                            from .llm import record_token_usage
+                            record_token_usage("brain", chunk.usage, event_id)
                     last_error = None
                     break  # Success
                 except Exception as e:
@@ -3736,7 +3739,13 @@ class Brain:
         if self._ephemeral_provisioner:
             await self._ephemeral_provisioner.terminate_agent(event_id)
         await self.cancel_active_task(event_id, f"Event closing: {summary}")
-        await self.blackboard.close_event(event_id, summary, close_reason=close_reason)
+        token_usage = None
+        try:
+            from .llm import get_token_meter
+            token_usage = get_token_meter().drain_event(event_id)
+        except Exception:
+            pass
+        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)
@@ -4049,7 +4058,13 @@ class Brain:
                     f"Stale: closed on Brain restart. Previous instance was processing this event. "
                     f"Last turn: {event.conversation[-1].actor}.{event.conversation[-1].action}"
                 )
-                await self.blackboard.close_event(eid, stale_summary, close_reason="stale")
+                stale_token_usage = None
+                try:
+                    from .llm import get_token_meter
+                    stale_token_usage = get_token_meter().drain_event(eid)
+                except Exception:
+                    pass
+                await self.blackboard.close_event(eid, stale_summary, close_reason="stale", token_usage=stale_token_usage)
                 # Persist report snapshot (non-fatal)
                 try:
                     await self.blackboard.persist_report(eid)
@@ -4156,12 +4171,14 @@ class Brain:
         except Exception:
             pass
         hh = self.agents.get("_headhunter")
+        from .llm import get_token_meter
         self._flow_collector = FlowCollector(
             scheduler=self._scheduler,
             blackboard=self.blackboard,
             registry=registry,
             headhunter=hh,
             provisioner=self._ephemeral_provisioner,
+            token_meter=get_token_meter(),
             interval=60.0,
         )
         await self._flow_collector.start()

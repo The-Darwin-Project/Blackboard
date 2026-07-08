@@ -107,6 +107,7 @@ async def list_active_events(
                 "created_by_email": event.created_by_email,
                 "unread_notes": getattr(event, "unread_notes", 0) or 0,
                 "subscription_active": _has_active_subscription(eid),
+                "token_total": event.token_usage.get("total_tokens") if event.token_usage else None,
             }
             if event.status == EventStatus.DEFERRED:
                 row.update(await _defer_timeline_fields(blackboard, eid, event))
@@ -327,7 +328,13 @@ async def close_event_by_user(
         brain.clear_cycle_id(event_id)
     except RuntimeError:
         pass  # Brain not initialized
-    await blackboard.close_event(event_id, close_summary, close_reason="user_closed")
+    token_usage = None
+    try:
+        from src.agents.llm import get_token_meter
+        token_usage = get_token_meter().drain_event(event_id)
+    except Exception:
+        pass
+    await blackboard.close_event(event_id, close_summary, close_reason="user_closed", token_usage=token_usage)
     # Clean up Slack thread mapping if event had Slack context
     if event.slack_channel_id and event.slack_thread_ts:
         await blackboard.delete_slack_mapping(event.slack_channel_id, event.slack_thread_ts)
@@ -410,6 +417,7 @@ async def list_closed_events(
                 "turns": len(event.conversation),
                 "created": event.event.timeDate,
                 "created_by_email": event.created_by_email,
+                "token_total": event.token_usage.get("total_tokens") if event.token_usage else None,
             })
     return events
 

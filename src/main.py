@@ -630,6 +630,8 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         wip_utilization_pct=round(wip_utilization_pct, 1),
         wip_available=wip_available,
         avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
+        token_total_60s=latest.token_total_delta if latest else 0,
+        token_calls_60s=latest.token_calls_delta if latest else 0,
         snapshot_timestamp=latest.timestamp if latest else None,
         agents_by_role=by_role,
         staleness_guards=staleness_guards,

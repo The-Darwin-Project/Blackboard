@@ -181,6 +181,7 @@ export interface ActiveEvent {
   defer_started_at?: number;
   /** True when a StateWatcher subscription is actively polling for this event. */
   subscription_active?: boolean;
+  token_total?: number;
 }
 
 // =============================================================================
@@ -217,6 +218,16 @@ export interface ConversationTurn {
 
 export type EventSource = 'aligner' | 'chat' | 'slack' | 'headhunter' | 'timekeeper' | 'jarvis';
 
+export interface TokenUsageDict {
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  cached_tokens: number;
+  tool_use_tokens: number;
+  total_tokens: number;
+  calls: number;
+}
+
 export interface EventDocument {
   id: string;
   source: EventSource;
@@ -228,6 +239,7 @@ export interface EventDocument {
   conversation: ConversationTurn[];
   sticky_notes?: Array<{ timestamp: string; content: string; read: boolean }>;
   unread_notes?: number;
+  token_usage?: TokenUsageDict;
 }
 
 // =============================================================================
@@ -306,6 +318,8 @@ export interface FlowMetrics {
   wip_utilization_pct: number;
   wip_available: number;
   avg_reconcile_ms: number;
+  token_total_60s: number;
+  token_calls_60s: number;
   snapshot_timestamp: number | null;
   agents_by_role: Record<string, { busy: number; idle: number }>;
   staleness_guards: Array<Record<string, unknown>>;
@@ -334,6 +348,14 @@ export interface FlowSnapshot {
   dispatch_infra_fails?: number;
   dispatch_circuit_breaks?: number;
   avg_spawn_latency_sec?: number;
+  token_input_delta: number;
+  token_output_delta: number;
+  token_thinking_delta: number;
+  token_cached_delta: number;
+  token_tool_use_delta: number;
+  token_total_delta: number;
+  token_calls_delta: number;
+  token_total_cumulative: number;
 }
 
 // =============================================================================

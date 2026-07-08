@@ -1779,21 +1779,38 @@ return 0
             n = len(group)
             result.append(FlowSnapshot(
                 timestamp=float(ts),
+                # Gauges: round(sum/n)
                 queue_depth=round(sum(s.queue_depth for s in group) / n),
                 active_events=round(sum(s.active_events for s in group) / n),
                 deferred_events=round(sum(s.deferred_events for s in group) / n),
+                waiting_approval_events=round(sum(s.waiting_approval_events for s in group) / n),
+                headhunter_pending=round(sum(s.headhunter_pending for s in group) / n),
+                wip_used=round(sum(s.wip_used for s in group) / n),
+                wip_cap=round(sum(s.wip_cap for s in group) / n),
+                wip_utilization_pct=sum(s.wip_utilization_pct for s in group) / n,
+                wip_available=round(sum(s.wip_available for s in group) / n),
                 busy_agents=round(sum(s.busy_agents for s in group) / n),
                 idle_agents=round(sum(s.idle_agents for s in group) / n),
                 active_subscriptions=round(sum(s.active_subscriptions for s in group) / n),
                 avg_event_age_sec=sum(s.avg_event_age_sec for s in group) / n,
                 avg_reconcile_ms=sum(s.avg_reconcile_ms for s in group) / n,
+                avg_spawn_latency_sec=sum(s.avg_spawn_latency_sec for s in group) / n,
+                dispatch_success_rate_pct=sum(s.dispatch_success_rate_pct for s in group) / n,
+                # Deltas: sum()
                 reconcile_count_delta=sum(s.reconcile_count_delta for s in group),
                 error_count_delta=sum(s.error_count_delta for s in group),
+                token_input_delta=sum(s.token_input_delta for s in group),
+                token_output_delta=sum(s.token_output_delta for s in group),
+                token_thinking_delta=sum(s.token_thinking_delta for s in group),
+                token_cached_delta=sum(s.token_cached_delta for s in group),
+                token_tool_use_delta=sum(s.token_tool_use_delta for s in group),
+                token_total_delta=sum(s.token_total_delta for s in group),
+                token_calls_delta=sum(s.token_calls_delta for s in group),
+                # Cumulative counters: max()
                 dispatch_total=max(s.dispatch_total for s in group),
-                dispatch_success_rate_pct=sum(s.dispatch_success_rate_pct for s in group) / n,
                 dispatch_infra_fails=max(s.dispatch_infra_fails for s in group),
                 dispatch_circuit_breaks=max(s.dispatch_circuit_breaks for s in group),
-                avg_spawn_latency_sec=sum(s.avg_spawn_latency_sec for s in group) / n,
+                token_total_cumulative=max(s.token_total_cumulative for s in group),
             ))
         return result
 
@@ -2040,11 +2057,15 @@ return 0
         entries.sort(key=lambda x: x[0], reverse=True)
         return [f"[{svc}] {text}" for _, svc, text in entries[:limit]]
 
-    async def close_event(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
+    async def close_event(
+        self, event_id: str, summary: str, close_reason: str = "resolved",
+        token_usage: dict | None = None,
+    ) -> None:
         """Close an event with summary. Move from active to closed.
 
         close_reason: structured reason for closure. Stored in close turn's evidence field.
         Values: resolved, stale, timeout, force_closed, duplicate, user_closed, error.
+        token_usage: pre-drained per-event token totals (caller drains BEFORE calling this).
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
@@ -2059,6 +2080,8 @@ return 0
                     event = EventDocument(**json.loads(data))
                     event.closed_at = time.time()
                     event.status = EventStatus.CLOSED
+                    if token_usage:
+                        event.token_usage = token_usage
                     close_turn = ConversationTurn(
                         turn=len(event.conversation) + 1,
                         actor="brain",

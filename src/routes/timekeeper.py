@@ -235,6 +235,8 @@ async def refine_instructions(
                 temperature=temp,
                 max_output_tokens=max_tokens,
             )
+            from src.agents.llm import record_token_usage
+            record_token_usage("timekeeper", response.usage)
 
             refined = response.text.strip()
             return RefineResponse(refined=refined, reasoning="")

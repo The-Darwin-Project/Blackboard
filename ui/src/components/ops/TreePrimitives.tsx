@@ -64,12 +64,15 @@ export function TreeNode({ icon, label, labelColor, sublabel, sublabelColor, onC
   );
 }
 
+import { formatTokenCount } from '../../utils/formatTokens';
+
 export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
   evt: {
     id: string; status: string; source: string; service: string; subject_type?: string;
     current_agent?: string | null; unread_notes?: number;
     defer_until?: number; defer_started_at?: number;
     subscription_active?: boolean;
+    token_total?: number;
     reason?: string;
     evidence?: { display_text?: string; domain?: string; severity?: string };
     created?: string;
@@ -131,6 +134,9 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
           <span className="text-[11px] text-text-muted/50 truncate flex-1 min-w-0 italic">{evt.id.slice(4, 12)}</span>
         )}
         {age && <span className="text-[10px] text-text-muted/60 flex-shrink-0">{age}</span>}
+        {evt.token_total != null && evt.token_total > 0 && (
+          <span className="text-[10px] text-text-muted/60 flex-shrink-0">{formatTokenCount(evt.token_total)}</span>
+        )}
         {isWaiting && <Bell size={12} className="text-amber-400 flex-shrink-0 animate-pulse" />}
         {!isWaiting && (evt.unread_notes ?? 0) > 0 && <StickyNote size={12} className="text-yellow-400 flex-shrink-0" />}
         {evt.subscription_active && (

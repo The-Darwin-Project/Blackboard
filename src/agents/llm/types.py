@@ -5,6 +5,8 @@
 # 3. [Gotcha]: Anthropic uses "input_schema" key; Gemini uses "parameters_json_schema". Adapters convert.
 # 4. [Constraint]: BRAIN_TOOL_SCHEMAS must stay in sync with _execute_function_call() in brain.py.
 # 5. [Pattern]: NIGHTWATCHER write_incident.description includes link guidance (MR URLs, pipeline IDs, Slack threads).
+# 6. [Pattern]: TokenUsage is provider-agnostic. Adapters normalize SDK usage_metadata into this dataclass.
+#    LLMResponse and LLMChunk carry optional usage for caller attribution.
 """
 Provider-agnostic LLM types, protocol, and tool schemas.
 
@@ -23,6 +25,18 @@ from typing import Optional, Protocol
 # =============================================================================
 
 @dataclass
+class TokenUsage:
+    """Provider-agnostic token usage. Adapters normalize SDK-specific fields into this."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+    cached_tokens: int = 0
+    tool_use_tokens: int = 0
+    total_tokens: int = 0
+    model_version: str = ""
+
+
+@dataclass
 class FunctionCall:
     """Normalized function call from any LLM provider."""
     name: str
@@ -35,6 +49,7 @@ class LLMResponse:
     function_call: Optional[FunctionCall] = None
     text: Optional[str] = None
     raw_parts: Optional[list] = None
+    usage: Optional[TokenUsage] = None
 
 
 @dataclass
@@ -43,9 +58,10 @@ class LLMChunk:
     text: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     done: bool = False
-    is_thought: bool = False  # True for thinking/reasoning tokens (Gemini ThinkingConfig)
-    raw_parts: Optional[list] = None  # Preserved response parts for thought_signature replay
-    grounding_metadata: Optional[dict] = None  # Google Search grounding (queries + source chunks)
+    is_thought: bool = False
+    raw_parts: Optional[list] = None
+    grounding_metadata: Optional[dict] = None
+    usage: Optional[TokenUsage] = None
 
 
 # =============================================================================
