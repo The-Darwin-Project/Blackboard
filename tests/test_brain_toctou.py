@@ -1,125 +1,154 @@
+# tests/test_brain_toctou.py
+# @ai-rules:
+# 1. [Constraint]: AST structural test — no runtime mocking, no Redis.
+# 2. [Pattern]: Validates code ordering invariant survives refactors.
+# 3. [Gotcha]: Visitor uses depth counter (not boolean) to handle nested AsyncFunctionDef.
+# 4. [Gotcha]: Skips nested function defs (on_progress, on_huddle) — only counts
+#    top-level calls within the target method body.
+"""AST structural guard: _release_task_state ordering invariant.
+
+Complements the behavioral tests in test_task_lifecycle_ordering.py.
+These tests read brain.py source and verify that _release_task_state
+appears before bookkeeping awaits in the AST, catching regressions
+that refactors might introduce even when mocks pass.
+"""
 import ast
 from pathlib import Path
 
-def test_run_agent_task_release_task_state_ordering():
-    """
-    Verify that _release_task_state is called BEFORE mark_turn_status and stamp_event
-    in _run_agent_task to prevent TOCTOU races with is_intermediate.
-    """
-    brain_path = Path("src/agents/brain.py")
-    if not brain_path.exists():
-        brain_path = Path("BlackBoard/src/agents/brain.py")
-        
-    with open(brain_path, "r") as f:
-        tree = ast.parse(f.read())
-        
-    class RunAgentTaskVisitor(ast.NodeVisitor):
-        def __init__(self):
-            self.in_run_agent_task = False
-            self.append_calls = []
-            self.release_calls = []
-            self.mark_calls = []
-            self.stamp_calls = []
-            
-        def visit_AsyncFunctionDef(self, node):
-            if node.name == "_run_agent_task":
-                self.in_run_agent_task = True
-                self.generic_visit(node)
-                self.in_run_agent_task = False
-            else:
-                self.generic_visit(node)
-                
-        def visit_Call(self, node):
-            if self.in_run_agent_task:
-                if isinstance(node.func, ast.Attribute):
-                    if node.func.attr == "_append_and_broadcast":
-                        self.append_calls.append(node.lineno)
-                    elif node.func.attr == "_release_task_state":
-                        self.release_calls.append(node.lineno)
-                    elif node.func.attr == "mark_turn_status":
-                        self.mark_calls.append(node.lineno)
-                    elif node.func.attr == "stamp_event":
-                        self.stamp_calls.append(node.lineno)
-            self.generic_visit(node)
-            
-    visitor = RunAgentTaskVisitor()
-    visitor.visit(tree)
-    
-    assert visitor.append_calls, "Expected _append_and_broadcast calls"
-    assert visitor.release_calls, "Expected _release_task_state calls"
-    
-    # In success path, _append_and_broadcast is around line 3331
-    # We want to ensure that _release_task_state is called immediately after it,
-    # and BEFORE mark_turn_status and stamp_event.
-    
-    # Let's find the first append call in the main try block (success path)
-    # and the corresponding release call.
-    # The success path append is typically the first one.
-    success_append_line = visitor.append_calls[0]
-    
-    # Find the release call that comes after this append
-    success_release_line = next(line for line in visitor.release_calls if line > success_append_line)
-    
-    # Find mark_turn_status and stamp_event that come after this append
-    success_mark_lines = [line for line in visitor.mark_calls if line > success_append_line]
-    success_stamp_lines = [line for line in visitor.stamp_calls if line > success_append_line]
-    
-    if success_mark_lines:
-        assert success_release_line < success_mark_lines[0], \
-            f"_release_task_state (line {success_release_line}) must be called BEFORE mark_turn_status (line {success_mark_lines[0]})"
-            
-    if success_stamp_lines:
-        assert success_release_line < success_stamp_lines[0], \
-            f"_release_task_state (line {success_release_line}) must be called BEFORE stamp_event (line {success_stamp_lines[0]})"
+import pytest
 
-def test_handle_wake_task_release_task_state_ordering():
+
+def _find_brain_path() -> Path:
+    """Locate brain.py, skip if not found."""
+    candidates = [
+        Path("src/agents/brain.py"),
+        Path("BlackBoard/src/agents/brain.py"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    pytest.skip("brain.py not found in expected locations")
+
+
+class _TopLevelCallVisitor(ast.NodeVisitor):
+    """Collect calls at the top level of a target async function.
+
+    Uses a depth counter to skip calls inside nested function defs
+    (on_progress, on_huddle, etc.) which contain their own
+    _append_and_broadcast calls that are not completion-path calls.
     """
-    Verify that _release_task_state is called BEFORE stamp_event
-    in handle_wake_task to prevent TOCTOU races.
-    """
-    brain_path = Path("src/agents/brain.py")
-    if not brain_path.exists():
-        brain_path = Path("BlackBoard/src/agents/brain.py")
-        
-    with open(brain_path, "r") as f:
-        tree = ast.parse(f.read())
-        
-    class HandleWakeTaskVisitor(ast.NodeVisitor):
-        def __init__(self):
-            self.in_handle_wake_task = False
-            self.append_calls = []
-            self.release_calls = []
-            self.stamp_calls = []
-            
-        def visit_AsyncFunctionDef(self, node):
-            if node.name == "handle_wake_task":
-                self.in_handle_wake_task = True
-                self.generic_visit(node)
-                self.in_handle_wake_task = False
-            else:
-                self.generic_visit(node)
-                
-        def visit_Call(self, node):
-            if self.in_handle_wake_task:
-                if isinstance(node.func, ast.Attribute):
-                    if node.func.attr == "_append_and_broadcast":
-                        self.append_calls.append(node.lineno)
-                    elif node.func.attr == "_release_task_state":
-                        self.release_calls.append(node.lineno)
-                    elif node.func.attr == "stamp_event":
-                        self.stamp_calls.append(node.lineno)
+
+    def __init__(self, target_name: str):
+        self.target_name = target_name
+        self._depth = 0
+        self.append_calls: list[int] = []
+        self.release_calls: list[int] = []
+        self.mark_calls: list[int] = []
+        self.stamp_calls: list[int] = []
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        if node.name == self.target_name and self._depth == 0:
+            self._depth = 1
             self.generic_visit(node)
-            
-    visitor = HandleWakeTaskVisitor()
+            self._depth = 0
+        elif self._depth > 0:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+        else:
+            self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        if self._depth > 0:
+            self._depth += 1
+            self.generic_visit(node)
+            self._depth -= 1
+        else:
+            self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if self._depth == 1:
+            if isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+                if name == "_append_and_broadcast":
+                    self.append_calls.append(node.lineno)
+                elif name == "_release_task_state":
+                    self.release_calls.append(node.lineno)
+                elif name == "mark_turn_status":
+                    self.mark_calls.append(node.lineno)
+                elif name == "stamp_event":
+                    self.stamp_calls.append(node.lineno)
+        self.generic_visit(node)
+
+
+def _assert_release_before_bookkeeping(
+    release_calls: list[int],
+    mark_calls: list[int],
+    stamp_calls: list[int],
+    after_line: int,
+    context: str,
+) -> None:
+    """Assert every _release_task_state after `after_line` precedes bookkeeping."""
+    releases_after = [l for l in release_calls if l > after_line]
+    assert releases_after, f"No _release_task_state after line {after_line} in {context}"
+    release_line = releases_after[0]
+
+    marks_after = [l for l in mark_calls if l > after_line]
+    stamps_after = [l for l in stamp_calls if l > after_line]
+
+    for mark_line in marks_after:
+        assert release_line < mark_line, (
+            f"{context}: _release_task_state (L{release_line}) must precede "
+            f"mark_turn_status (L{mark_line})"
+        )
+
+    for stamp_line in stamps_after:
+        assert release_line < stamp_line, (
+            f"{context}: _release_task_state (L{release_line}) must precede "
+            f"stamp_event (L{stamp_line})"
+        )
+
+
+def test_run_agent_task_release_ordering():
+    """_release_task_state precedes bookkeeping in _run_agent_task (top-level calls only)."""
+    brain_path = _find_brain_path()
+    tree = ast.parse(brain_path.read_text())
+
+    visitor = _TopLevelCallVisitor("_run_agent_task")
     visitor.visit(tree)
-    
-    # Find the success path append (the one before stamp_event)
-    success_stamp_line = visitor.stamp_calls[0] if visitor.stamp_calls else None
-    if success_stamp_line:
-        # Find the append that precedes this stamp
-        success_append_line = max(line for line in visitor.append_calls if line < success_stamp_line)
-        # Find the release that comes after this append
-        success_release_line = next(line for line in visitor.release_calls if line > success_append_line)
-        
-        assert success_release_line < success_stamp_line, \
-            f"_release_task_state (line {success_release_line}) must be called BEFORE stamp_event (line {success_stamp_line})"
+
+    assert visitor.append_calls, "Expected _append_and_broadcast calls in _run_agent_task"
+    assert visitor.release_calls, "Expected _release_task_state calls in _run_agent_task"
+
+    for append_line in visitor.append_calls:
+        _assert_release_before_bookkeeping(
+            visitor.release_calls,
+            visitor.mark_calls,
+            visitor.stamp_calls,
+            after_line=append_line,
+            context=f"_run_agent_task (append at L{append_line})",
+        )
+
+
+def test_handle_wake_task_release_ordering():
+    """_release_task_state precedes bookkeeping in handle_wake_task."""
+    brain_path = _find_brain_path()
+    tree = ast.parse(brain_path.read_text())
+
+    visitor = _TopLevelCallVisitor("handle_wake_task")
+    visitor.visit(tree)
+
+    assert visitor.release_calls, "Expected _release_task_state calls in handle_wake_task"
+    assert visitor.stamp_calls, "Expected stamp_event calls in handle_wake_task"
+
+    success_stamp = visitor.stamp_calls[0]
+    preceding_appends = [l for l in visitor.append_calls if l < success_stamp]
+    assert preceding_appends, "Expected _append_and_broadcast before stamp_event"
+
+    _assert_release_before_bookkeeping(
+        visitor.release_calls,
+        visitor.mark_calls,
+        visitor.stamp_calls,
+        after_line=preceding_appends[-1],
+        context="handle_wake_task",
+    )
