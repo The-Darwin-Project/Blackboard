@@ -181,3 +181,16 @@ If no proven fix exists, omit this section.
 | `affected_versions` | Extract from the event context (repo path contains version, e.g., `v5-99` → `v5.99`) |
 
 Include the event id in every output: incident summary, maintainer notifications, and close reason.
+
+### Related Skills
+
+- **Terminal state definition** → `always/08-flow-engineering.md`: defines what constitutes
+  a terminal vs in-progress state, subscription-backed verification, and systemic
+  reclassification rules. The terminal failure gate above inherits these definitions.
+- **Phase lifecycle** → `always/09-phase-lifecycle.md`: CLOSE is terminal — reopen requires
+  a new event. The post-escalation return to VERIFY is a phase transition, not a skip.
+- **Deferral calibration** → `always/06-decision-guidelines.md`: deferral intervals after
+  escalation should use the same measured baselines as pre-escalation deferrals.
+- **Control loop** → `always/03-control-theory.md`: the dual-gate (domain × phase) navigation
+  applies during post-escalation verification. Re-entering VERIFY means re-evaluating both
+  gates — domain may have shifted during the escalation window.
