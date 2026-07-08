@@ -58,7 +58,7 @@ def main():
 
     # --- Resolve App slug (needed for search qualifier) ---
     print("\n--- Resolving App identity ---")
-    jwt_token = auth._create_jwt()
+    jwt_token = auth.get_app_jwt()
     app_resp = requests.get(
         "https://api.github.com/app",
         headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/vnd.github+json"},
@@ -71,7 +71,7 @@ def main():
         app_name = app_data.get("name", "unknown")
         print(f"[OK] App: {app_name} (slug: {app_slug})")
     else:
-        print(f"[WARN] GET /app returned {app_resp.status_code}: {app_resp.text[:200]}")
+        print(f"[WARN] GET /app returned {app_resp.status_code} (response body omitted for security)")
 
     # --- Test (a): List open PRs ---
     print(f"\n--- Test (a): GET /repos/{owner}/{repo_name}/pulls?state=open ---")

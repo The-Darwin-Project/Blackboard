@@ -150,6 +150,13 @@ class GitHubAppAuth:
             logger.info(f"Got new token, expires at {expires_at_str}")
             return self._token
     
+    def get_app_jwt(self) -> str:
+        """Get a short-lived JWT for GitHub App-level API calls (e.g., GET /app).
+
+        Valid for ~10 minutes. Use get_token() for installation-level access.
+        """
+        return self._create_jwt()
+
     def get_clone_url(self, repo: str) -> str:
         """
         Get an authenticated clone URL for a repository.
