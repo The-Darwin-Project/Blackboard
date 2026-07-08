@@ -202,7 +202,13 @@ def _pred_hard_strip_defer(ctx: GateContext) -> bool:
 def _pred_hard_strip_wait_user(ctx: GateContext) -> bool:
     if ctx.brain_phase == "triage":
         return True
-    return ctx.event_source not in ("chat", "slack")
+    if ctx.event_source in ("chat", "slack"):
+        return False
+    has_user_turn = any(
+        (t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)) == "user"
+        for t in ctx.conversation
+    )
+    return not has_user_turn
 
 
 # ---------------------------------------------------------------------------
