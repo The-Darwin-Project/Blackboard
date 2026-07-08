@@ -5,6 +5,7 @@
 # 3. [Pattern]: AsyncGitHubClient uses persistent httpx.AsyncClient; call close() on shutdown.
 # 4. [Pattern]: Rate-limit warning at 100 remaining (GitHub soft-gate is at 0).
 # 5. [Pattern]: get_github_auth() is the singleton accessor — all consumers use it, not GitHubAppAuth() directly.
+# 6. [Pattern]: get/post/delete share the same auth header pattern. delete() calls raise_for_status().
 """
 GitHub App Authentication for GitOps operations.
 
@@ -275,6 +276,19 @@ class AsyncGitHubClient:
         }
         resp = await self._client.post(
             f"https://api.github.com{path}", headers=headers, json=json,
+        )
+        resp.raise_for_status()
+        return resp
+
+    async def delete(self, path: str) -> httpx.Response:
+        token = await self.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = await self._client.delete(
+            f"https://api.github.com{path}", headers=headers,
         )
         resp.raise_for_status()
         return resp

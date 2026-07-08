@@ -260,6 +260,16 @@ spec:
               value: "{{ .Values.headhunter.github.repos }}"
             - name: HEADHUNTER_GITHUB_TRIGGER_REASONS
               value: "{{ .Values.headhunter.github.triggerReasons }}"
+            {{- if .Values.headhunter.github.cortexUrl }}
+            - name: DARWIN_CORTEX_URL
+              value: "{{ .Values.headhunter.github.cortexUrl }}"
+            {{- end }}
+            - name: HEADHUNTER_GITHUB_LABEL
+              value: "{{ .Values.headhunter.github.labelReview }}"
+            - name: HEADHUNTER_GITHUB_LABEL_ACTIVE
+              value: "{{ .Values.headhunter.github.labelActive }}"
+            - name: HEADHUNTER_GITHUB_LABEL_DONE
+              value: "{{ .Values.headhunter.github.labelDone }}"
             {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
             - name: TEKTON_EVENTLISTENER_URL

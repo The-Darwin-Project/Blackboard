@@ -1,12 +1,15 @@
 # tests/test_headhunter_github.py
 # @ai-rules:
 # 1. [Constraint]: No real GitHub API calls. All async paths mocked.
-# 2. [Pattern]: Tests validate invariants from the code review fixes (F3-F9).
-"""Tests for GitHubPlatform adapter — discovery, check aggregation, state_key, parse_pr_url."""
+# 2. [Pattern]: Tests validate invariants from code review fixes + label lifecycle.
+# 3. [Pattern]: _make_platform_with_client helper provides pre-wired mock client for label/comment tests.
+"""Tests for GitHubPlatform adapter — discovery, check aggregation, state_key, label lifecycle."""
 from __future__ import annotations
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 
 # ---------------------------------------------------------------------------
@@ -194,3 +197,357 @@ class TestFormatterEmoji:
     def test_non_headhunter_unaffected(self):
         from src.channels.formatter import resolve_source_emoji
         assert resolve_source_emoji({"source": "chat"}) == ":speech_balloon:"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for label lifecycle tests
+# ---------------------------------------------------------------------------
+
+def _make_platform_with_client(repos: str = "org/repo"):
+    """Create a GitHubPlatform with a pre-wired mock client."""
+    platform = _make_platform(repos)
+    client = AsyncMock()
+    client.post = AsyncMock(return_value=MagicMock(status_code=200))
+    client.delete = AsyncMock(return_value=MagicMock(status_code=200))
+    platform._client = client
+    return platform, client
+
+
+def _make_work_item(labels=None, state="open", head_sha="abc123"):
+    return {
+        "owner": "org", "repo": "repo", "number": 42,
+        "title": "Test PR", "state": state, "user": "alice",
+        "labels": labels or ["darwin-review"],
+        "html_url": "https://github.com/org/repo/pull/42",
+        "created_at": "2026-01-01T00:00:00Z",
+        "head_sha": head_sha,
+    }
+
+
+def _make_event_stub(gh_ctx=None, close_reason="resolved"):
+    """Minimal event-like object for post_feedback()."""
+    evidence = MagicMock()
+    evidence.github_context = gh_ctx or {
+        "owner": "org", "repo": "repo", "pr_number": 42,
+        "head_sha": "abc123",
+    }
+    event_data = MagicMock()
+    event_data.evidence = evidence
+    turn = MagicMock()
+    turn.evidence = close_reason
+    turn.actor = "brain"
+    turn.action = "close"
+    turn.result = None
+    turn.thoughts = "Done"
+    turn.timestamp = 1719849600
+    evt = MagicMock()
+    evt.id = "evt-test123"
+    evt.event = event_data
+    evt.conversation = [turn]
+    return evt
+
+
+# ---------------------------------------------------------------------------
+# 1. Label lifecycle happy path
+# ---------------------------------------------------------------------------
+
+
+class TestLabelLifecycleHappyPath:
+
+    @pytest.mark.asyncio
+    async def test_create_event_swaps_labels_and_posts_comment(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.create_event = AsyncMock(return_value="evt-new123")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        event_id = await platform.create_platform_event(
+            _make_work_item(), "plan text", "COMPLICATED",
+            {"action": "review_requested", "check_status": "unknown",
+             "pr_title": "Test", "pr_state": "open", "pr_url": "...",
+             "head_sha": "abc123", "head_branch": "feat", "base_branch": "main",
+             "author": "alice", "labels": ["darwin-review"], "changed_files": []},
+        )
+        assert event_id == "evt-new123"
+
+        delete_calls = [c for c in client.delete.call_args_list]
+        assert any("darwin-review" in str(c) for c in delete_calls)
+        assert any("darwin-done" in str(c) for c in delete_calls)
+
+        post_calls = [c for c in client.post.call_args_list]
+        label_add = [c for c in post_calls if "labels" in str(c.kwargs.get("json", {}))]
+        assert len(label_add) >= 1
+
+        comment_calls = [c for c in post_calls if "comments" in str(c.args[0]) if c.args]
+        assert len(comment_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_close_event_swaps_active_to_done(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+        platform.blackboard.set_github_pr_sha = AsyncMock()
+
+        evt = _make_event_stub()
+        await platform.post_feedback(evt)
+
+        delete_calls = [str(c) for c in client.delete.call_args_list]
+        assert any("darwin-active" in c for c in delete_calls)
+
+        platform.blackboard.mark_feedback_sent.assert_called_once_with("evt-test123")
+        platform.blackboard.set_github_pr_sha.assert_called_once_with("org", "repo", 42, "abc123")
+
+
+# ---------------------------------------------------------------------------
+# 2. Partial failure — label fails, event still created
+# ---------------------------------------------------------------------------
+
+
+class TestPartialFailure:
+
+    @pytest.mark.asyncio
+    async def test_event_created_even_when_labels_fail(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.create_event = AsyncMock(return_value="evt-survives")
+
+        resp_500 = MagicMock(status_code=500)
+        resp_500.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=resp_500,
+        )
+        client.post = AsyncMock(side_effect=httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=resp_500,
+        ))
+        client.delete = AsyncMock(side_effect=httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=resp_500,
+        ))
+
+        event_id = await platform.create_platform_event(
+            _make_work_item(), "plan", "COMPLICATED",
+            {"action": "review_requested", "check_status": "unknown",
+             "pr_title": "T", "pr_state": "open", "pr_url": "...",
+             "head_sha": "a", "head_branch": "f", "base_branch": "m",
+             "author": "a", "labels": [], "changed_files": []},
+        )
+        assert event_id == "evt-survives"
+
+
+# ---------------------------------------------------------------------------
+# 3. Re-trigger same SHA → skipped
+# ---------------------------------------------------------------------------
+
+
+class TestRetriggerSameSha:
+
+    @pytest.mark.asyncio
+    async def test_done_label_same_sha_skipped(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+        platform.blackboard.get_github_pr_sha = AsyncMock(return_value="abc123")
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-done"}],
+             "head": {"sha": "abc123"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. Re-trigger new SHA → new event
+# ---------------------------------------------------------------------------
+
+
+class TestRetriggerNewSha:
+
+    @pytest.mark.asyncio
+    async def test_done_label_different_sha_creates_event(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+        platform.blackboard.get_github_pr_sha = AsyncMock(return_value="old_sha")
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-done"}],
+             "head": {"sha": "new_sha"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# 5. Re-trigger no stored SHA → new event
+# ---------------------------------------------------------------------------
+
+
+class TestRetriggerNoStoredSha:
+
+    @pytest.mark.asyncio
+    async def test_done_label_no_stored_sha_creates_event(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+        platform.blackboard.get_github_pr_sha = AsyncMock(return_value=None)
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-done"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Label 404 on remove → no exception
+# ---------------------------------------------------------------------------
+
+
+class TestLabel404OnRemove:
+
+    @pytest.mark.asyncio
+    async def test_remove_missing_label_no_error(self):
+        platform, client = _make_platform_with_client()
+        resp_404 = MagicMock(status_code=404)
+        client.delete = AsyncMock(side_effect=httpx.HTTPStatusError(
+            "404", request=MagicMock(), response=resp_404,
+        ))
+
+        await platform._remove_label("org", "repo", 42, "nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# 7. darwin-active skip → no duplicate
+# ---------------------------------------------------------------------------
+
+
+class TestActiveSkip:
+
+    @pytest.mark.asyncio
+    async def test_active_label_skips_pr(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-active"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# 8. Terminal PR → skipped
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalPrSkipped:
+
+    @pytest.mark.asyncio
+    async def test_closed_pr_with_review_label_skipped(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "closed",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-review"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_merged_pr_skipped(self):
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "merged",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-review"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# 9. Multiple labels priority: review wins over done
+# ---------------------------------------------------------------------------
+
+
+class TestMultipleLabelsPriority:
+
+    @pytest.mark.asyncio
+    async def test_review_plus_done_picks_review(self):
+        """darwin-review is explicit user intent — takes priority over passive done."""
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+        platform.blackboard.get_github_pr_sha = AsyncMock(return_value="abc")
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-review"}, {"name": "darwin-done"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_active_plus_review_picks_active_skip(self):
+        """darwin-active (event in progress) takes priority over review."""
+        platform = _make_platform("org/repo")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.json.return_value = [
+            {"number": 1, "title": "PR", "state": "open",
+             "user": {"login": "a"}, "html_url": "...", "created_at": "...",
+             "labels": [{"name": "darwin-active"}, {"name": "darwin-review"}],
+             "head": {"sha": "abc"}},
+        ]
+        client.get = AsyncMock(return_value=resp)
+        platform._client = client
+
+        result = await platform.poll_work_items()
+        assert len(result) == 0

@@ -2,14 +2,15 @@
 # @ai-rules:
 # 1. [Pattern]: Implements VcsPlatformPort for GitHub. All GitHub API calls live here.
 # 2. [Constraint]: AIR GAP: No kubernetes imports. GitHub API via AsyncGitHubClient only.
-# 3. [Pattern]: Dedup by (owner, repo, pr_number). Search API as primary discovery.
+# 3. [Pattern]: Dedup by (owner, repo, pr_number). Label truth table: active>review>done.
 # 4. [Pattern]: Brain-facing methods (refresh_pr_state, poll_github_pr_status, extract_github_state_key)
 #    are NOT part of VcsPlatformPort — they're GitHub-specific, accessed via Headhunter delegates.
 # 5. [Pattern]: _load_github_si() loads from headhunter_skills/github-pr-triage.md with emergency fallback.
 # 6. [Gotcha]: mergeable excluded from state_key (flaps during CI runs).
 # 7. [Pattern]: Lazy-init auth via get_github_auth() singleton — never raises in constructor.
-# 8. [Gotcha]: _list_from_repos only includes PRs where the bot IS in requested_reviewers. No empty-reviewer fallback.
+# 8. [Pattern]: Label/comment helpers are best-effort (never raise). URL-encode labels in DELETE path.
 # 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
+# 10. [Pattern]: Re-trigger via darwin-done + SHA comparison (Redis HASH darwin:github:pr_sha).
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -82,6 +84,8 @@ class GitHubPlatform:
             os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", "review_requested").split(",")
         )
         self._trigger_label = os.getenv("HEADHUNTER_GITHUB_LABEL", "darwin-review")
+        self._active_label = os.getenv("HEADHUNTER_GITHUB_LABEL_ACTIVE", "darwin-active")
+        self._done_label = os.getenv("HEADHUNTER_GITHUB_LABEL_DONE", "darwin-done")
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -148,24 +152,40 @@ class GitHubPlatform:
         prs = await self._list_from_repos(client, repos)
 
         active_keys = await self.get_active_keys()
-        result = []
+        result: list[dict] = []
+        seen_keys: set[tuple[str, str, int]] = set()
         skipped_terminal = 0
         skipped_no_label = 0
+        skipped_same_sha = 0
         for pr in prs:
             key = (pr["owner"], pr["repo"], pr["number"])
-            if key in active_keys:
+            if key in active_keys or key in seen_keys:
                 continue
-            if pr.get("state") in ("closed",):
+            if pr.get("state") in ("closed", "merged"):
                 skipped_terminal += 1
                 continue
-            if self._trigger_label not in pr.get("labels", []):
-                skipped_no_label += 1
+
+            labels = set(pr.get("labels", []))
+            if self._active_label in labels:
                 continue
-            result.append(pr)
+
+            if self._trigger_label in labels:
+                result.append(pr)
+                seen_keys.add(key)
+            elif self._done_label in labels:
+                stored_sha = await self.blackboard.get_github_pr_sha(pr["owner"], pr["repo"], pr["number"])
+                if stored_sha is not None and stored_sha == pr.get("head_sha", ""):
+                    skipped_same_sha += 1
+                else:
+                    result.append(pr)
+                    seen_keys.add(key)
+            else:
+                skipped_no_label += 1
 
         logger.info(
             f"GitHub poll: {len(prs)} discovered, {len(active_keys)} active, "
-            f"{skipped_terminal} terminal, {skipped_no_label} no-label, {len(result)} new"
+            f"{skipped_terminal} terminal, {skipped_no_label} no-label, "
+            f"{skipped_same_sha} same-sha, {len(result)} new"
         )
         return result
 
@@ -235,6 +255,7 @@ class GitHubPlatform:
             "labels": [l.get("name", "") for l in item.get("labels", [])],
             "html_url": item.get("html_url", ""),
             "created_at": item.get("created_at", ""),
+            "head_sha": "",
         }
 
     @staticmethod
@@ -253,6 +274,7 @@ class GitHubPlatform:
             "labels": [l.get("name", "") for l in pr_data.get("labels", [])],
             "html_url": pr_data.get("html_url", ""),
             "created_at": pr_data.get("created_at", ""),
+            "head_sha": (pr_data.get("head") or {}).get("sha", ""),
         }
 
     async def fetch_context(self, work_item: dict) -> dict:
@@ -274,6 +296,7 @@ class GitHubPlatform:
             "author": work_item.get("user", ""),
             "labels": work_item.get("labels", []),
             "pr_url": work_item.get("html_url", f"https://github.com/{owner}/{repo}/pull/{number}"),
+            "head_sha": work_item.get("head_sha", ""),
             "action": "review_requested",
         }
 
@@ -325,9 +348,11 @@ class GitHubPlatform:
             recent = []
             total_len = 0
             for c in comments:
-                if c.get("user", {}).get("login") == bot_name:
+                login = c.get("user", {}).get("login", "")
+                is_bot = login.endswith("[bot]")
+                if is_bot and login != bot_name:
                     continue
-                entry = f"[{c.get('user', {}).get('login', '?')}]: {(c.get('body') or '')[:500]}"
+                entry = f"[{login or '?'}]: {(c.get('body') or '')[:500]}"
                 total_len += len(entry)
                 if total_len > 2000:
                     break
@@ -452,10 +477,22 @@ class GitHubPlatform:
             evidence=evidence,
         )
         logger.info(f"GitHub event created: {event_id} for {action} on #{pr_number} in {owner}/{repo}")
+
+        await self._remove_label(owner, repo, pr_number, self._trigger_label)
+        await self._remove_label(owner, repo, pr_number, self._done_label)
+        await self._add_labels(owner, repo, pr_number, [self._active_label])
+        cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
+        if cortex_url and cortex_url.startswith(("https://", "http://")):
+            link = f" [{event_id}]({cortex_url}/events/{event_id})"
+        else:
+            link = f" `{event_id}`"
+        await self._post_comment(owner, repo, pr_number,
+            f"**Darwin** is reviewing this PR. Tracking as{link}.")
+
         return event_id
 
     async def post_feedback(self, event: object) -> None:
-        """Post resolution feedback as PR comment."""
+        """Post resolution feedback as PR comment + label lifecycle (active→done)."""
         gh_ctx = None
         if hasattr(event, "event") and event.event.evidence and hasattr(event.event.evidence, "github_context"):
             gh_ctx = event.event.evidence.github_context
@@ -468,37 +505,24 @@ class GitHubPlatform:
         if not owner or not repo or not pr_number:
             return
 
-        client = self._get_client()
-        if not client:
-            logger.warning(f"GitHub feedback skipped (no client) for {event.id}")
-            return
-
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
 
-        if close_reason in ("stale", "duplicate"):
-            await self.blackboard.mark_feedback_sent(event.id)
-            return
+        await self._remove_label(owner, repo, pr_number, self._active_label)
+        await self._add_labels(owner, repo, pr_number, [self._done_label])
 
-        comment_body = self._build_feedback_comment(event, close_reason)
+        head_sha = gh_ctx.get("head_sha", "")
+        if head_sha:
+            try:
+                await self.blackboard.set_github_pr_sha(owner, repo, pr_number, head_sha)
+            except Exception as e:
+                logger.warning(f"SHA store failed for {owner}/{repo}#{pr_number}: {e}")
 
-        try:
-            await client.post(
-                f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
-                json={"body": comment_body},
-            )
-            await self.blackboard.mark_feedback_sent(event.id)
-            logger.info(f"GitHub feedback posted for {event.id} on #{pr_number}")
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.info(f"Feedback skip: PR #{pr_number} not found in {owner}/{repo}")
-                await self.blackboard.mark_feedback_sent(event.id)
-            elif e.response.status_code == 403:
-                logger.warning(f"GitHub feedback forbidden for {event.id} (permissions?)")
-            else:
-                logger.warning(f"GitHub feedback failed ({e.response.status_code}) for {event.id}")
-        except Exception as e:
-            logger.warning(f"GitHub feedback error for {event.id}: {e}")
+        if close_reason not in ("stale", "duplicate"):
+            comment_body = self._build_feedback_comment(event, close_reason)
+            await self._post_comment(owner, repo, pr_number, comment_body)
+
+        await self.blackboard.mark_feedback_sent(event.id)
 
     # =========================================================================
     # Brain-Facing Methods (NOT part of VcsPlatformPort)
@@ -617,6 +641,72 @@ class GitHubPlatform:
         if ".." in owner or ".." in repo or "/" in owner or "/" in repo:
             return None
         return owner, repo, int(pr_str)
+
+    # =========================================================================
+    # Label / Comment Helpers (best-effort, never raise)
+    # =========================================================================
+
+    async def _ensure_label_exists(self, owner: str, repo: str, label: str, color: str = "7C3AED") -> None:
+        """Create label on repo if missing. Only silences 'already_exists' 422 and 409."""
+        client = self._get_client()
+        if not client:
+            return
+        try:
+            await client.post(f"/repos/{owner}/{repo}/labels", json={
+                "name": label, "color": color, "description": "Darwin PR lifecycle",
+            })
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                pass
+            elif e.response.status_code == 422:
+                body = e.response.json() if e.response.content else {}
+                errors = body.get("errors", [])
+                if not any(err.get("code") == "already_exists" for err in errors):
+                    logger.warning(f"Label create validation failed for {owner}/{repo}: {label} — {body}")
+            else:
+                logger.debug(f"Label ensure failed ({e.response.status_code}) for {owner}/{repo}: {label}")
+        except Exception:
+            pass
+
+    async def _add_labels(self, owner: str, repo: str, pr_number: int, labels: list[str]) -> None:
+        """Best-effort: ensure labels exist on repo, then add to PR."""
+        client = self._get_client()
+        if not client:
+            return
+        for label in labels:
+            await self._ensure_label_exists(owner, repo, label)
+        try:
+            await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/labels", json={"labels": labels})
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Label add failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {labels}")
+        except Exception as e:
+            logger.warning(f"Label add error for {owner}/{repo}#{pr_number}: {e}")
+
+    async def _remove_label(self, owner: str, repo: str, pr_number: int, label: str) -> None:
+        """Best-effort: remove label from PR. 404 is expected and silenced."""
+        client = self._get_client()
+        if not client:
+            return
+        encoded = urllib.parse.quote(label, safe="")
+        try:
+            await client.delete(f"/repos/{owner}/{repo}/issues/{pr_number}/labels/{encoded}")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                logger.warning(f"Label remove failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}: {label}")
+        except Exception as e:
+            logger.warning(f"Label remove error for {owner}/{repo}#{pr_number}: {e}")
+
+    async def _post_comment(self, owner: str, repo: str, pr_number: int, body: str) -> None:
+        """Best-effort: post comment on PR."""
+        client = self._get_client()
+        if not client:
+            return
+        try:
+            await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/comments", json={"body": body})
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Comment post failed ({e.response.status_code}) for {owner}/{repo}#{pr_number}")
+        except Exception as e:
+            logger.warning(f"Comment error for {owner}/{repo}#{pr_number}: {e}")
 
     # =========================================================================
     # Internal Helpers

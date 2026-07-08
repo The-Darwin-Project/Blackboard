@@ -2026,6 +2026,16 @@ return 0
         """Mark headhunter feedback as sent (48h TTL covers 24h scan window + margin)."""
         await self.redis.set(f"darwin:headhunter:feedback:{event_id}", "1", ex=ttl)
 
+    _PR_SHA_KEY = "darwin:github:pr_sha"
+
+    async def set_github_pr_sha(self, owner: str, repo: str, pr_number: int, sha: str) -> None:
+        """Store head SHA for GitHub PR re-trigger detection (O(1) HSET)."""
+        await self.redis.hset(self._PR_SHA_KEY, f"{owner}:{repo}:{pr_number}", sha)
+
+    async def get_github_pr_sha(self, owner: str, repo: str, pr_number: int) -> str | None:
+        """Look up stored head SHA for re-trigger comparison (O(1) HGET)."""
+        return await self.redis.hget(self._PR_SHA_KEY, f"{owner}:{repo}:{pr_number}")
+
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""
         from datetime import datetime, timezone

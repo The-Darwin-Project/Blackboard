@@ -444,6 +444,10 @@ headhunter:
     pollInterval: "300" # seconds between GitHub poll cycles
     repos: "" # CSV of owner/repo pairs to poll (e.g., "The-Darwin-Project/BlackBoard,org/repo2")
     triggerReasons: "review_requested" # CSV of PR event reasons that create events
+    cortexUrl: "" # e.g., https://darwin.example.com — used for PR tracking comment links
+    labelReview: "darwin-review" # Label users add to trigger review
+    labelActive: "darwin-active" # Label applied while event is in progress
+    labelDone: "darwin-done" # Label applied after event closes
 # =============================================================================
 # Jira Integration (QE Mission Polling -- Headhunter Jira Head)
 # =============================================================================
