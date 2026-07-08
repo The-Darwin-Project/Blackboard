@@ -134,15 +134,17 @@ class GitHubPlatform:
         return keys
 
     async def poll_work_items(self) -> list[dict]:
-        """Discover PRs needing attention via GitHub Search API with repo-scoped fallback."""
+        """Discover PRs from all repos where the App is installed.
+
+        Primary: list installation repos, then poll open PRs from each.
+        Fallback: if repos are pinned via env, use those instead.
+        """
         client = self._get_client()
         if not client:
             return []
 
-        if self._repos:
-            prs = await self._list_from_repos(client)
-        else:
-            prs = await self._search_review_requested(client)
+        repos = self._repos or await self._discover_installation_repos(client)
+        prs = await self._list_from_repos(client, repos)
 
         active_keys = await self.get_active_keys()
         result = []
@@ -179,16 +181,24 @@ class GitHubPlatform:
                 return []
             raise
 
-    async def _list_from_repos(self, client) -> list[dict]:
-        """List open PRs from explicitly configured repos.
+    async def _discover_installation_repos(self, client) -> list[str]:
+        """Discover repos where the App is installed (self-service boundary)."""
+        try:
+            resp = await client.get("/installation/repositories", params={"per_page": "100"})
+            repos = resp.json().get("repositories", [])
+            return [r["full_name"] for r in repos if not r.get("archived")]
+        except Exception as e:
+            logger.warning(f"GitHub installation repos discovery failed: {e}")
+            return []
 
-        When repos are pinned, all open PRs are candidates (the user opted in
-        by configuring the repo list). GitHub Apps cannot be requested as
-        reviewers via the API, so we don't filter on requested_reviewers here.
-        Dedup against active events prevents duplicates.
+    async def _list_from_repos(self, client, repos: list[str]) -> list[dict]:
+        """List open PRs from the given repos.
+
+        All open PRs are candidates — dedup against active events prevents
+        flooding. Users opt in by installing the App on their repo.
         """
         prs: list[dict] = []
-        for repo_full in self._repos:
+        for repo_full in repos:
             try:
                 resp = await client.get(
                     f"/repos/{repo_full}/pulls",

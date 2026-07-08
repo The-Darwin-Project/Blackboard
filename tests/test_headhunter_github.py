@@ -32,41 +32,28 @@ def _make_platform(repos: str = ""):
 
 
 class TestListFromReposFiltering:
-    """F3: Verify that _list_from_repos doesn't flood queue with unassigned PRs."""
+    """Verify _list_from_repos returns all open PRs from installed repos."""
 
     @pytest.mark.asyncio
-    async def test_only_bot_requested_prs_included(self):
+    async def test_all_open_prs_included(self):
+        """All open PRs from installed repos are candidates (self-service model)."""
         platform = _make_platform("org/repo")
         client = AsyncMock()
-        pr_with_bot = {
-            "number": 1, "title": "Fix", "state": "open",
-            "requested_reviewers": [{"login": "darwin-project-ai[bot]"}],
-            "user": {"login": "author"}, "labels": [],
-            "html_url": "https://github.com/org/repo/pull/1",
-            "created_at": "2026-01-01T00:00:00Z",
-        }
-        pr_no_reviewers = {
-            "number": 2, "title": "WIP", "state": "open",
-            "requested_reviewers": [],
-            "user": {"login": "author"}, "labels": [],
-            "html_url": "https://github.com/org/repo/pull/2",
-            "created_at": "2026-01-01T00:00:00Z",
-        }
-        pr_other_reviewer = {
-            "number": 3, "title": "Other", "state": "open",
-            "requested_reviewers": [{"login": "human-dev"}],
-            "user": {"login": "author"}, "labels": [],
-            "html_url": "https://github.com/org/repo/pull/3",
-            "created_at": "2026-01-01T00:00:00Z",
-        }
+        prs = [
+            {"number": 1, "title": "Fix", "state": "open",
+             "requested_reviewers": [], "user": {"login": "a"}, "labels": [],
+             "html_url": "https://github.com/org/repo/pull/1", "created_at": "2026-01-01T00:00:00Z"},
+            {"number": 2, "title": "WIP", "state": "open",
+             "requested_reviewers": [], "user": {"login": "b"}, "labels": [],
+             "html_url": "https://github.com/org/repo/pull/2", "created_at": "2026-01-01T00:00:00Z"},
+        ]
         resp = MagicMock()
-        resp.json.return_value = [pr_with_bot, pr_no_reviewers, pr_other_reviewer]
+        resp.json.return_value = prs
         client.get = AsyncMock(return_value=resp)
 
-        result = await platform._list_from_repos(client)
+        result = await platform._list_from_repos(client, ["org/repo"])
 
-        assert len(result) == 1
-        assert result[0]["number"] == 1
+        assert len(result) == 2
 
 
 # ---------------------------------------------------------------------------
