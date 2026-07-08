@@ -36,18 +36,21 @@ class TestGeminiRecordUsage:
         assert usage.model_version == "gemini-3-pro"
 
     def test_streaming_fallback_candidates_none(self):
-        """When candidates_token_count is None (streaming final chunk), derive from total."""
+        """When candidates_token_count is None (streaming final chunk), derive from total.
+        cached_t and tool_use_t are sub-breakdowns of prompt_token_count — not subtracted."""
         adapter = self._make_adapter()
         meta = SimpleNamespace(
             prompt_token_count=100,
             candidates_token_count=None,
-            cached_content_token_count=0,
+            cached_content_token_count=20,
             thoughts_token_count=30,
-            tool_use_prompt_token_count=0,
+            tool_use_prompt_token_count=10,
             total_token_count=180,
         )
         usage = adapter._record_usage(meta, estimate=150)
-        assert usage.output_tokens == 50  # 180 - 100 - 30 - 0 - 0
+        assert usage.output_tokens == 50  # 180 - 100(prompt) - 30(thinking)
+        assert usage.cached_tokens == 20
+        assert usage.tool_use_tokens == 10
 
     def test_none_usage_metadata(self):
         adapter = self._make_adapter()

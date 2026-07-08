@@ -12,7 +12,10 @@ Usage:
     from .llm import create_adapter, BRAIN_TOOL_SCHEMAS, LLMChunk
     adapter = create_adapter("gemini", project, location, model)
 """
+import logging
 import os
+
+_logger = logging.getLogger(__name__)
 
 from .types import (
     ALIGNER_TOOL_SCHEMAS,
@@ -68,8 +71,7 @@ def record_token_usage(caller: str, usage: "TokenUsage | None", event_id: str | 
     try:
         get_token_meter().record(caller, usage.model_version, usage, event_id)
     except Exception:
-        import logging
-        logging.getLogger(__name__).debug("Token recording failed for %s", caller, exc_info=True)
+        _logger.debug("Token recording failed for %s", caller, exc_info=True)
 
 
 def create_adapter(provider: str, project: str, location: str, model_name: str) -> LLMPort:

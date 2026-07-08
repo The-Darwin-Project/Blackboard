@@ -9,8 +9,9 @@
 """
 In-memory token usage counter with per-event and platform-level accumulation.
 
-Singleton via get_token_meter() in __init__.py. Thread-safe for concurrent
-async tasks sharing the event loop.
+Singleton via get_token_meter() in __init__.py. threading.Lock guards
+compound operations for safety when called from thread-pool executors
+(e.g. FlowCollector snapshot) alongside the async event loop.
 """
 from __future__ import annotations
 

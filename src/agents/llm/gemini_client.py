@@ -78,9 +78,10 @@ class GeminiAdapter:
         cached_t = getattr(usage_metadata, "cached_content_token_count", None) or 0
         tool_use_t = getattr(usage_metadata, "tool_use_prompt_token_count", None) or 0
 
-        # Streaming: candidates_token_count is None on final chunk (@ai-shebang Rule 10)
+        # Streaming: candidates_token_count is None on final chunk (@ai-shebang Rule 10).
+        # cached_t and tool_use_t are sub-breakdowns OF input_t — don't subtract them.
         if candidates_t is None and total > 0:
-            candidates_t = max(0, total - input_t - thinking_t - cached_t - tool_use_t)
+            candidates_t = max(0, total - input_t - thinking_t)
         output_t = candidates_t or 0
 
         if self._tracker and total:

@@ -8,6 +8,9 @@
 # 6. [Pattern]: _convert_contents() three-way: str (plain) | list[dict] with "role" (structured) | list (multimodal).
 # 7. [Pattern]: Structured contents map: model->assistant, functionCall->tool_use, functionResponse->tool_result.
 # 8. [Pattern]: tool_choice flows through _build_kwargs -> API kwargs. Only sent when tools are present.
+# 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
+#    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
+#    cached_tokens = cache_read + cache_creation. total = all_input + output.
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
