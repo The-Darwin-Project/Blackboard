@@ -81,6 +81,7 @@ class GitHubPlatform:
         self._trigger_reasons: set[str] = set(
             os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", "review_requested").split(",")
         )
+        self._trigger_label = os.getenv("HEADHUNTER_GITHUB_LABEL", "darwin-review")
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -149,6 +150,7 @@ class GitHubPlatform:
         active_keys = await self.get_active_keys()
         result = []
         skipped_terminal = 0
+        skipped_no_label = 0
         for pr in prs:
             key = (pr["owner"], pr["repo"], pr["number"])
             if key in active_keys:
@@ -156,11 +158,14 @@ class GitHubPlatform:
             if pr.get("state") in ("closed",):
                 skipped_terminal += 1
                 continue
+            if self._trigger_label not in pr.get("labels", []):
+                skipped_no_label += 1
+                continue
             result.append(pr)
 
         logger.info(
             f"GitHub poll: {len(prs)} discovered, {len(active_keys)} active, "
-            f"{skipped_terminal} terminal, {len(result)} new"
+            f"{skipped_terminal} terminal, {skipped_no_label} no-label, {len(result)} new"
         )
         return result
 
