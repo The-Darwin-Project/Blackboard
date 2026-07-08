@@ -41,6 +41,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "PHASE_OBSERVATION": "phase is close",
     "PHASE_JIRA_COMMENT": "phase not in dispatch/verify/escalate/close",
     "NO_KARGO_CONTEXT": "no Kargo evidence on event",
+    "NO_GITHUB_CONTEXT": "no GitHub evidence on event",
     "PHASE_JIRA_FETCH": "phase not in triage/dispatch/verify",
     "PHASE_INCIDENT_SEARCH": "phase not in triage/dispatch/verify/escalate",
     "BUDGET_EXHAUSTED": "refresh count exceeds budget",

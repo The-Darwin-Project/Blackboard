@@ -142,6 +142,14 @@ class TestParsePrUrl:
         platform = _make_platform()
         assert platform.parse_pr_url("https://github.com/org/repo/pull/abc") is None
 
+    def test_non_github_host_rejected(self):
+        platform = _make_platform()
+        assert platform.parse_pr_url("https://evil.com/org/repo/pull/1") is None
+
+    def test_path_traversal_rejected(self):
+        platform = _make_platform()
+        assert platform.parse_pr_url("https://github.com/../admin/repo/pull/1") is None
+
 
 # ---------------------------------------------------------------------------
 # extract_github_state_key (mergeable excluded)

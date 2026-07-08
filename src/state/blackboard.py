@@ -2227,7 +2227,7 @@ return 0
                         return
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
-                        if event.event.evidence.github_context:
+                        if event.event.evidence.github_context is not None:
                             logger.warning(f"Rejecting gitlab_context update on event {event_id}: github_context already set")
                             return
                         gl = event.event.evidence.gitlab_context or {}
@@ -2261,7 +2261,7 @@ return 0
                         return
                     event = EventDocument(**json.loads(data))
                     if isinstance(event.event.evidence, EventEvidence):
-                        if event.event.evidence.gitlab_context:
+                        if event.event.evidence.gitlab_context is not None:
                             logger.warning(f"Rejecting github_context update on event {event_id}: gitlab_context already set")
                             return
                         gc = event.event.evidence.github_context or {}

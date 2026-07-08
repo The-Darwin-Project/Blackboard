@@ -78,6 +78,9 @@ class GitHubPlatform:
         repos_env = os.getenv("HEADHUNTER_GITHUB_REPOS", "")
         if repos_env.strip():
             self._repos = [r.strip() for r in repos_env.split(",") if r.strip()]
+        self._trigger_reasons: set[str] = set(
+            os.getenv("HEADHUNTER_GITHUB_TRIGGER_REASONS", "review_requested").split(",")
+        )
 
     # =========================================================================
     # VcsPlatformPort Implementation
@@ -88,10 +91,10 @@ class GitHubPlatform:
         return "github"
 
     def enabled(self) -> bool:
-        return bool(
-            os.getenv("HEADHUNTER_GITHUB_ENABLED")
-            and os.getenv("GITHUB_APP_ID")
-            and os.getenv("GITHUB_INSTALLATION_ID")
+        return (
+            os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
+            and bool(os.getenv("GITHUB_APP_ID"))
+            and bool(os.getenv("GITHUB_INSTALLATION_ID"))
         )
 
     def _get_client(self):
@@ -104,6 +107,12 @@ class GitHubPlatform:
                 logger.warning(f"GitHub client init failed: {e}")
                 return None
         return self._client
+
+    async def close(self) -> None:
+        """Shut down the persistent HTTP client."""
+        if self._client:
+            await self._client.close()
+            self._client = None
 
     async def get_active_keys(self) -> set[tuple[str, str, int]]:
         """Get (owner, repo, pr_number) for all active/deferred headhunter events with github_context."""
@@ -158,7 +167,11 @@ class GitHubPlatform:
         try:
             resp = await client.get("/search/issues", params={"q": query, "per_page": "50"})
             items = resp.json().get("items", [])
-            return [self._normalize_search_item(item) for item in items]
+            results = [self._normalize_search_item(item) for item in items]
+            if self._repos:
+                allowed = set(self._repos)
+                results = [pr for pr in results if f"{pr['owner']}/{pr['repo']}" in allowed]
+            return results
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 logger.warning("GitHub search returned 422 — app slug may not be indexed yet")
@@ -179,8 +192,8 @@ class GitHubPlatform:
                     if f"{_APP_SLUG}[bot]" in requested:
                         prs.append(self._normalize_pr_data(repo_full, pr_data))
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 422:
-                    logger.warning(f"GitHub repo list 422 for {repo_full}")
+                if e.response.status_code in (404, 422):
+                    logger.warning(f"GitHub repo list {e.response.status_code} for {repo_full}")
                     continue
                 raise
         return prs
@@ -247,9 +260,9 @@ class GitHubPlatform:
         try:
             pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{number}")
             pr = pr_resp.json()
-            context["head_sha"] = pr.get("head", {}).get("sha", "")
-            context["head_branch"] = pr.get("head", {}).get("ref", "")
-            context["base_branch"] = pr.get("base", {}).get("ref", "")
+            context["head_sha"] = (pr.get("head") or {}).get("sha", "")
+            context["head_branch"] = (pr.get("head") or {}).get("ref", "")
+            context["base_branch"] = (pr.get("base") or {}).get("ref", "")
             context["pr_body"] = (pr.get("body") or "")[:2000]
             context["mergeable"] = pr.get("mergeable")
             context["changed_files"] = []
@@ -290,10 +303,15 @@ class GitHubPlatform:
             comments = comments_resp.json()
             bot_name = f"{_APP_SLUG}[bot]"
             recent = []
+            total_len = 0
             for c in comments:
                 if c.get("user", {}).get("login") == bot_name:
                     continue
-                recent.append(f"[{c.get('user', {}).get('login', '?')}]: {(c.get('body') or '')[:500]}")
+                entry = f"[{c.get('user', {}).get('login', '?')}]: {(c.get('body') or '')[:500]}"
+                total_len += len(entry)
+                if total_len > 2000:
+                    break
+                recent.append(entry)
                 if len(recent) >= 5:
                     break
             if recent:
@@ -331,7 +349,7 @@ class GitHubPlatform:
             return "pending"
         if any(s == "queued" for s in statuses):
             return "pending"
-        if all(c == "success" for c in conclusions if c):
+        if all(c in ("success", "neutral", "skipped") for c in conclusions if c):
             return "success"
         return "pending"
 
@@ -558,6 +576,7 @@ class GitHubPlatform:
         """Extract (owner, repo, pr_number) from a GitHub PR URL.
 
         Supports: https://github.com/owner/repo/pull/123
+        Only accepts github.com as host (defense-in-depth).
         """
         sep = "/pull/"
         if sep not in url:
@@ -570,8 +589,13 @@ class GitHubPlatform:
         path_parts = without_proto.split("/")
         if len(path_parts) < 3:
             return None
+        host = path_parts[0]
+        if host not in ("github.com", "www.github.com"):
+            return None
         owner = path_parts[1]
         repo = path_parts[2]
+        if ".." in owner or ".." in repo or "/" in owner or "/" in repo:
+            return None
         return owner, repo, int(pr_str)
 
     # =========================================================================

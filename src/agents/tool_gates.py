@@ -500,6 +500,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         hint="agent-based exploration can discover Kargo stage and freight state.",
     ),
     GateDefinition(
+        gate_id="NO_GITHUB_CONTEXT",
+        mode="strip",
+        predicate=_pred_no_github_context,
+        tools_affected=_tools_github,
+        message=_msg_no_github_context,
+        hint="supply pr_url parameter to hydrate GitHub context on any event.",
+    ),
+    GateDefinition(
         gate_id="PHASE_JIRA_FETCH",
         mode="strip",
         predicate=_pred_phase_jira_fetch,

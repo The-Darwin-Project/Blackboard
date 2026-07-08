@@ -38,17 +38,19 @@ export function eventMenuItems(
 ): ContextMenuItem[] {
   const ev = evt.evidence as Record<string, unknown> | undefined;
   const gc = ev?.gitlab_context as Record<string, unknown> | undefined;
+  const ghc = ev?.github_context as Record<string, unknown> | undefined;
   const mrUrl = evt.source === 'headhunter'
-    ? (gc?.target_url as string || ev?.target_url as string || null)
+    ? (gc?.target_url as string || ghc?.pr_url as string || ev?.target_url as string || null)
     : null;
+  const mrLabel = ghc?.pr_url ? 'Open PR in GitHub' : 'Open MR in GitLab';
 
   return [
     { id: 'chat', label: 'Open Chat', icon: <MessageSquare size={18} />, color: '#3b82f6', onClick: () => selectEvent(evt.id) },
     { id: 'plan', label: 'Open Plan', icon: <ListChecks size={18} />, color: '#8b5cf6', onClick: () => selectEvent(evt.id) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     ...(mrUrl ? [
-      { id: 'open-mr', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(mrUrl) },
-      { id: 'copy-mr', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(mrUrl) },
+      { id: 'open-mr', label: mrLabel, icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(mrUrl) },
+      { id: 'copy-mr', label: 'Copy URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(mrUrl) },
       { id: 'sep-mr', label: '', icon: null, separator: true, onClick: () => {} },
     ] : []),
     ...(evt.status === 'waiting_approval' ? [{

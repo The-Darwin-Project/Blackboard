@@ -27,6 +27,8 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+import httpx
+
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
@@ -152,7 +154,8 @@ class Headhunter:
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
         parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
         if context.get("mr_description") or context.get("pr_body"):
-            parts.append(f"Description:\n{context.get('mr_description', context.get('pr_body', ''))}")
+            desc = context.get('mr_description', context.get('pr_body', ''))
+            parts.append(f"<description>\n{desc}\n</description>")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
         if context.get("labels"):
@@ -160,12 +163,13 @@ class Headhunter:
         if context.get("failed_job_names"):
             parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
-            parts.append(f"First failed job log (last lines):\n{context['failed_job_log']}")
+            parts.append(f"<job_log>\n{context['failed_job_log']}\n</job_log>")
         if context.get("recent_notes") or context.get("recent_comments"):
             notes = context.get("recent_notes", context.get("recent_comments", []))
-            parts.append(f"Recent comments (newest first):\n" + "\n".join(notes))
+            joined = "\n".join(notes)[:2000]
+            parts.append(f"<comments>\n{joined}\n</comments>")
         if context.get("mention_comment"):
-            parts.append(f"Request from @{context.get('mention_author', 'unknown')}: {context['mention_comment']}")
+            parts.append(f"<mention_request author=\"{context.get('mention_author', 'unknown')}\">\n{context['mention_comment']}\n</mention_request>")
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
@@ -246,6 +250,15 @@ class Headhunter:
                 try:
                     await self._github_poll_and_process()
                     github_failures = 0
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (401, 403):
+                        logger.error(f"Headhunter GitHub auth error ({e.response.status_code}) — not counting toward circuit breaker")
+                    else:
+                        github_failures += 1
+                        logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
+                        if github_failures >= max_failures:
+                            logger.critical("Headhunter GitHub head disabled after 3 consecutive failures")
+                            _github_disabled = True
                 except Exception as e:
                     github_failures += 1
                     logger.error(f"Headhunter GitHub poll failed ({github_failures}/{max_failures}): {e}")
@@ -258,6 +271,7 @@ class Headhunter:
             github_dead = not self._github.enabled() or _github_disabled
             if gitlab_dead and github_dead:
                 logger.critical("Headhunter: all VCS heads disabled, shutting down")
+                await self._github.close()
                 return
 
             # Jira head (independent error boundary)

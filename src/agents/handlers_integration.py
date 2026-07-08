@@ -768,7 +768,7 @@ async def handle_refresh_github_context(
 
     condition = args.get("check_condition", "")
     headhunter = ctx.get_agent_instance("_headhunter")
-    gh_platform = getattr(headhunter, "_github_platform", None) if headhunter else None
+    gh_platform = getattr(headhunter, "_github", None) if headhunter else None
     if not gh_platform:
         result_text = "GitHub integration not available. Use select_agent to check PR state manually."
         turn = ConversationTurn(
