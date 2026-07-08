@@ -3,6 +3,8 @@
 // 1. [Pattern]: Background image from /projectDarwin.png (ui/public/). No overlay card.
 // 2. [Pattern]: Disclaimer default in component. Override via config.auth.loginDisclaimer if non-empty.
 // 3. [Pattern]: Login button hidden -- revealed on hover over "PROJECT DARWIN" title zone.
+// 4. [Gotcha]: CSS background-image does NOT retry on failed load. Using <img> element
+//    ensures the browser re-requests the image when LoginPage remounts after pod restart.
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -18,14 +20,20 @@ const LoginPage = () => {
   return (
     <div style={{
       position: 'fixed', inset: 0,
-      backgroundImage: 'url(/projectDarwin.png)',
-      backgroundSize: 'cover',
-      backgroundPosition: 'center',
-      backgroundRepeat: 'no-repeat',
       backgroundColor: '#030712',
     }}>
+      <img
+        src="/projectDarwin.png"
+        alt=""
+        style={{
+          position: 'absolute', inset: 0,
+          width: '100%', height: '100%',
+          objectFit: 'cover', objectPosition: 'center',
+          zIndex: 0,
+        }}
+      />
       {/* Animated energy particles + swirl effects */}
-      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'hidden', zIndex: 1 }}>
         {/* Traveling particles */}
         <div className="energy-particle particle-cyan p1" />
         <div className="energy-particle particle-cyan p2" />
@@ -57,6 +65,7 @@ const LoginPage = () => {
           alignItems: 'center',
           justifyContent: 'flex-end',
           paddingBottom: '0%',
+          zIndex: 2,
         }}
       >
         {/* Pulsing glow bar at bottom of title zone -- hints "hover here" */}
@@ -75,6 +84,7 @@ const LoginPage = () => {
         position: 'absolute',
         bottom: 28,
         right: 36,
+        zIndex: 2,
       }}>
         <p style={{
           maxWidth: 400,
