@@ -96,10 +96,10 @@ class TestClaudeExtractUsage:
         ))
         usage = adapter._extract_usage(msg)
         assert isinstance(usage, TokenUsage)
-        assert usage.input_tokens == 120  # 100 + 20 cache_read
+        assert usage.input_tokens == 130  # 100 + 20 cache_read + 10 cache_create
         assert usage.output_tokens == 50
-        assert usage.cached_tokens == 20
-        assert usage.total_tokens == 170  # 100 + 20 + 50
+        assert usage.cached_tokens == 30  # 20 read + 10 create
+        assert usage.total_tokens == 180  # 130 + 50
         assert usage.model_version == "claude-sonnet-4.6"
 
     def test_no_cache_fields(self):
@@ -112,6 +112,20 @@ class TestClaudeExtractUsage:
         assert usage.input_tokens == 80
         assert usage.cached_tokens == 0
         assert usage.total_tokens == 120
+
+    def test_cache_creation_included(self):
+        """cache_creation_input_tokens must contribute to input_tokens and cached_tokens."""
+        adapter = self._make_adapter()
+        msg = SimpleNamespace(usage=SimpleNamespace(
+            input_tokens=50,
+            output_tokens=30,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=25,
+        ))
+        usage = adapter._extract_usage(msg)
+        assert usage.input_tokens == 75  # 50 + 0 + 25
+        assert usage.cached_tokens == 25  # 0 + 25
+        assert usage.total_tokens == 105  # 75 + 30
 
     def test_none_usage(self):
         adapter = self._make_adapter()

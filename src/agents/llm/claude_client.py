@@ -42,18 +42,27 @@ class ClaudeAdapter:
     # -----------------------------------------------------------------
 
     def _extract_usage(self, message) -> TokenUsage | None:
-        """Extract TokenUsage from Anthropic message.usage."""
+        """Extract TokenUsage from Anthropic message.usage.
+
+        Anthropic bills three distinct input categories:
+          input_tokens        — uncached prompt tokens (cache misses)
+          cache_read_input_tokens  — served from cache (cache hits)
+          cache_creation_input_tokens — written to cache (billed at 1.25x)
+        All three are non-overlapping; total = sum of all + output.
+        """
         usage = getattr(message, "usage", None)
         if usage is None:
             return None
         input_t = getattr(usage, "input_tokens", None) or 0
         output_t = getattr(usage, "output_tokens", None) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", None) or 0
+        cache_create = getattr(usage, "cache_creation_input_tokens", None) or 0
+        total_input = input_t + cache_read + cache_create
         return TokenUsage(
-            input_tokens=input_t + cache_read,
+            input_tokens=total_input,
             output_tokens=output_t,
-            cached_tokens=cache_read,
-            total_tokens=input_t + cache_read + output_t,
+            cached_tokens=cache_read + cache_create,
+            total_tokens=total_input + output_t,
             model_version=self._model_name,
         )
 

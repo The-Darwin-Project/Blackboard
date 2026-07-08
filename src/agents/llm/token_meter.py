@@ -14,8 +14,11 @@ async tasks sharing the event loop.
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, TypedDict
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .types import TokenUsage
@@ -74,6 +77,7 @@ class TokenMeter:
             if event_id:
                 if event_id not in self._per_event and len(self._per_event) >= _MAX_EVENTS:
                     oldest = next(iter(self._per_event))
+                    logger.warning("TokenMeter: evicting %s (cap %d reached)", oldest, _MAX_EVENTS)
                     del self._per_event[oldest]
                 ev = self._per_event.setdefault(event_id, dict(_ZERO_USAGE))
                 for field in _TOKEN_FIELDS:
