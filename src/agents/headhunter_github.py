@@ -139,9 +139,10 @@ class GitHubPlatform:
         if not client:
             return []
 
-        prs = await self._search_review_requested(client)
-        if not prs and self._repos:
+        if self._repos:
             prs = await self._list_from_repos(client)
+        else:
+            prs = await self._search_review_requested(client)
 
         active_keys = await self.get_active_keys()
         result = []
@@ -179,7 +180,13 @@ class GitHubPlatform:
             raise
 
     async def _list_from_repos(self, client) -> list[dict]:
-        """Fallback: list open PRs from configured repos."""
+        """List open PRs from explicitly configured repos.
+
+        When repos are pinned, all open PRs are candidates (the user opted in
+        by configuring the repo list). GitHub Apps cannot be requested as
+        reviewers via the API, so we don't filter on requested_reviewers here.
+        Dedup against active events prevents duplicates.
+        """
         prs: list[dict] = []
         for repo_full in self._repos:
             try:
@@ -188,9 +195,7 @@ class GitHubPlatform:
                     params={"state": "open", "per_page": "30"},
                 )
                 for pr_data in resp.json():
-                    requested = [r.get("login", "") for r in pr_data.get("requested_reviewers", [])]
-                    if f"{_APP_SLUG}[bot]" in requested:
-                        prs.append(self._normalize_pr_data(repo_full, pr_data))
+                    prs.append(self._normalize_pr_data(repo_full, pr_data))
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
                     logger.warning(f"GitHub repo list {e.response.status_code} for {repo_full}")
