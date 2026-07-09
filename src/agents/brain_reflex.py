@@ -106,7 +106,10 @@ class ReflexSearcher:
         try:
             vector = None
             if hasattr(self._archivist, "embed_query"):
-                vector = await self._archivist.embed_query(query)
+                try:
+                    vector = await self._archivist.embed_query(query)
+                except Exception as embed_err:
+                    logger.warning(f"Reflex embed_query failed for {self._event_id}, searching without shared vector: {embed_err}")
 
             tasks = [self._archivist.search_lessons(query, limit=2, vector=vector)]
             if hasattr(self._archivist, "search_knowledge"):

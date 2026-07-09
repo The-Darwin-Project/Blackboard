@@ -1468,7 +1468,7 @@ class Brain:
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
-                        titles = [l["payload"].get("title") or l["payload"].get("topic", "") for l in lessons]
+                        titles = [l.get("payload", {}).get("title") or l.get("payload", {}).get("topic", "") for l in lessons]
                         self._recall_lessons[event_id] = lessons
                         self._reflex_fired_for.add(event_id)
                         try:
@@ -2002,7 +2002,7 @@ class Brain:
         if not lessons:
             return None
 
-        lines = ["## RECALL", "The following patterns were learned from past events similar to this one."]
+        lines = ["## RECALL", "Relevant patterns and facts from memory:"]
         for lesson in lessons:
             p = lesson.get("payload", {})
             if "title" in p:
