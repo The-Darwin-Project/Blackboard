@@ -68,6 +68,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-security-audit**: Vulnerability scanning workflow with ecosystem detection and findings report
 - **darwin-investigate**: Kubernetes investigation workflow (shared with sysadmin/developer)
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
+- **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 
 ## Automatic Blackboard Updates

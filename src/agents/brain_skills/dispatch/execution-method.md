@@ -74,6 +74,10 @@ of a wasted pipeline cycle.
 
 ### Source Code Mutations — Always Require Approval
 
+This gate is the single authority for source code mutations. No domain, phase, or
+safe-to-fail exception overrides it. MR-scoped changes, bot MR fixes, and
+Dockerfile patches all require approval before an agent pushes.
+
 Modifying source code in external repositories changes what gets built — not how
 it is deployed. Unlike GitOps values (which ArgoCD continuously reconciles and can
 revert in seconds), a merged source code change propagates through build pipelines
@@ -86,6 +90,16 @@ Human approval is required before pushing any change that alters what gets built
 The distinction is deployment configuration (how existing artifacts are run) vs
 build inputs (what artifacts are produced). The former is revertible infrastructure;
 the latter is a one-way gate into the build pipeline.
+
+| Action | Source mutation? | Approval required? |
+|:---|:---|:---|
+| Post `/retest` or `/test` comment | No (pipeline command) | No |
+| Merge an already-validated MR | No (existing artifact) | No |
+| Defer, verify, close | No (lifecycle) | No |
+| Edit source code, Dockerfile, build config | Yes | Yes |
+| Edit dependency lockfile (`npm audit fix`, `go mod tidy`) | Yes (alters build inputs) | Yes |
+| Push empty commit to retrigger pipeline | Yes (branch mutation) | Yes |
+| Scale replicas, adjust Helm values | No (GitOps config, revertible) | No |
 
 ### GitOps Mutations (non-destructive, revertible via git revert)
 

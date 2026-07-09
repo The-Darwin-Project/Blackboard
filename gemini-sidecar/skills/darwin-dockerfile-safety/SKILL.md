@@ -19,11 +19,11 @@ You MAY add:
 
 ## Forbidden Modifications
 
-You MUST NOT change:
+You MUST NOT add or change:
 
 - `FROM` -- base image (changing this breaks the build chain)
 - `CMD` / `ENTRYPOINT` -- the container's startup command
-- `USER` -- the runtime user (security context)
+- `USER` -- the runtime user (security context). Adding a USER directive to a Dockerfile that lacks one is also a security-sensitive change.
 - `WORKDIR` -- the working directory
 
 You MUST NOT remove:

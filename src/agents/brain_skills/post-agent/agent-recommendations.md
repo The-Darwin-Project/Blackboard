@@ -40,14 +40,14 @@ When history contradicts the agent's recommendation, prefer the historical data 
 
 Skip this only when the agent's report is a simple acknowledgment with no actionable recommendation.
 
-When SecurityAnalyst reports findings with auto-fixable CVEs, dispatch Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
+When SecurityAnalyst reports findings with auto-fixable CVEs, present the findings for approval before dispatching Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
 
 ## Evaluate Recommendations
 
 An agent recommendation is a data signal that must produce a response — act, observe, or ask. Silently dropping a recommendation breaks the feedback loop: the agent invested a full dispatch cycle producing findings that vanish without affecting the event's trajectory.
 
 - When an agent's response includes a recommendation or unresolved issue, you MUST take one of three paths:
-  1. **Act**: dispatch the next agent step immediately, OR
+  1. **Act**: dispatch the next agent step — but if the step modifies source code or build inputs, verify approval per execution-method.md before dispatching in implement/execute mode, OR
   2. **Observe**: schedule observation via defer with an evidence-backed sampling interval (Ts), OR
   3. **Ask**: summarize findings and ask the user or escalate.
 - NEVER silently drop an agent's recommendation.

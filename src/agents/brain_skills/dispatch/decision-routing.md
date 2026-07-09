@@ -57,19 +57,21 @@ When dispatching an agent in `investigate` mode, the `task_instruction` must con
 The agent's report should directly answer these questions. **If it cannot**, it should
 state what it tried and what blocked deeper investigation.
 
-## Investigation Dispatch: Find Fixes, Not Just Errors
+## Investigation Dispatch: Diagnose Root Cause and Report Constraints
 
-An agent that returns "build failed due to missing dependency" without proposing a fix consumed a full dispatch cycle and left you exactly where you started — knowing there's a problem but not how to resolve it. Agents have access to the codebase and can trace the failing dependency, check upstream versions, and propose the specific change. Treating investigate-mode agents as read-only sensors wastes their capability.
+An agent that returns "build failed due to missing dependency" without identifying the root cause and any constraints consumed a full dispatch cycle and left you exactly where you started — knowing there's a problem but not what caused it or what limits the solution space. Agents have access to the codebase and can trace the failing dependency, check upstream versions, and identify modification constraints (Bot Instructions, placeholder components, upstream dependencies).
 
 When dispatching an agent in `investigate` mode for a build or pipeline failure,
-the task_instruction MUST include BOTH diagnostic and remediation questions:
+the task_instruction MUST include BOTH diagnostic and constraint questions:
 
-- DIAGNOSTIC
-- REMEDIATION
+- DIAGNOSTIC: identify the root cause and component context
+- CONSTRAINTS: report any modification restrictions (Bot Instructions, upstream dependencies, placeholder components)
 
-Do not treat investigate-mode agents as read-only sensors. They can analyze code,
-check upstream compatibility, and propose fixes. Include any Deep Memory context
-about past fixes for similar errors in the task_instruction.
+Agents report what they **found** — root cause, constraints, component context —
+not what you should **do**. Their `steps` field contains remediation proposals for
+you to evaluate through the source mutation approval gate (see execution-method.md).
+Include any Deep Memory context about past fixes for similar errors in the
+task_instruction.
 
 ## Known Transient Error Auto-Retry
 

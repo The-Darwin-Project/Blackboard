@@ -37,9 +37,9 @@ FRIDAY uses your last `team_send_results` call as your final deliverable.
     - id: check-pac-controller
       agent: sysadmin
       summary: "Check PaC controller pod health on Konflux cluster"
-    - id: push-empty-commit
+    - id: retrigger-webhook
       agent: developer
-      summary: "Push empty commit to force new webhook event"
+      summary: "An empty commit may retrigger the webhook — requires FRIDAY approval as a branch mutation"
   ---
 
   ## Investigation Report
@@ -48,7 +48,8 @@ FRIDAY uses your last `team_send_results` call as your final deliverable.
   ```
 
 - `reasoning` (required): the root cause. team_send_results rejects without it.
-- `steps` (optional): remediation actions you recommend but cannot perform yourself.
+- `steps` (optional): remediation proposals for FRIDAY to evaluate. FRIDAY decides
+  whether to dispatch, approve, or escalate based on the source mutation approval gate.
   Each step needs `id`, `agent`, `summary`. Omit if no further action needed.
 
 ### Evidence Quality

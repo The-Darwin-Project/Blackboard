@@ -63,6 +63,7 @@ These specialized skills are loaded automatically when relevant:
 - **darwin-microservice-patterns**: Microservice technical patterns
 - **darwin-ux-patterns**: UI/UX design patterns for frontend plans (interaction, states, accessibility)
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
+- **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-repo-context**: Discover project-specific AI context (.gemini/, .claude/, .cursor/) in cloned repos
 - **darwin-gitlab-ops**: GitLab API interaction patterns, MCP tools, curl fallback
 

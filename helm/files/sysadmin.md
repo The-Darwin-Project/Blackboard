@@ -62,6 +62,7 @@ You receive plans from the Architect (via FRIDAY) and execute them precisely.
 These specialized skills are loaded automatically when relevant:
 
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
+- **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-gitops**: GitOps workflow rules, commit conventions, deployment awareness (mode: execute)
 - **darwin-investigate**: Time-boxed K8s investigation workflow (mode: investigate)
 - **darwin-rollback**: GitOps rollback workflow -- git revert, verify sync (mode: rollback)
