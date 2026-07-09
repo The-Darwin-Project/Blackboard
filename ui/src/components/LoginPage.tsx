@@ -1,12 +1,13 @@
 // BlackBoard/ui/src/components/LoginPage.tsx
 // @ai-rules:
-// 1. [Pattern]: Background image from /projectDarwin.png (ui/public/). No overlay card.
+// 1. [Pattern]: Background image imported via Vite asset pipeline (content-hashed filename).
 // 2. [Pattern]: Disclaimer default in component. Override via config.auth.loginDisclaimer if non-empty.
 // 3. [Pattern]: Login button hidden -- revealed on hover over "PROJECT DARWIN" title zone.
-// 4. [Gotcha]: CSS background-image does NOT retry on failed load. Using <img> element
-//    ensures the browser re-requests the image when LoginPage remounts after pod restart.
+// 4. [Gotcha]: Vite import produces a hashed URL (e.g., /assets/projectDarwin-abc123.png).
+//    This eliminates stale browser cache after pod restarts — new build = new hash.
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
+import bgImage from '../assets/projectDarwin.png';
 
 const DEFAULT_DISCLAIMER =
   'This system uses AI to autonomously manage infrastructure. ' +
@@ -23,7 +24,7 @@ const LoginPage = () => {
       backgroundColor: '#030712',
     }}>
       <img
-        src="/projectDarwin.png"
+        src={bgImage}
         alt=""
         style={{
           position: 'absolute', inset: 0,
