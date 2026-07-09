@@ -76,7 +76,7 @@ node server.js
 
 The sidecar Dockerfile is large (~170 lines) because it installs multiple CLIs and browser dependencies. First build takes ~10 minutes. CI builds and pushes to GHCR via `.github/workflows/build-gemini-sidecar.yaml`.
 
-Agent rules live in `gemini-sidecar/rules/` (architect, developer, sysadmin, qe). Skills live in `gemini-sidecar/skills/` (26 skills, role/mode filtered).
+Agent rules live in `gemini-sidecar/rules/` (architect, developer, sysadmin, qe, security_analyst). Skills live in `gemini-sidecar/skills/` (31 skills, role/mode filtered).
 
 ### Common targets
 

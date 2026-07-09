@@ -24,7 +24,7 @@ docker compose up -d
 # Install Python dependencies
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Set required environment variables
 export REDIS_HOST=localhost

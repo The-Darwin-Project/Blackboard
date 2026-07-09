@@ -52,9 +52,9 @@ You must strictly adhere to these agent roles:
 
 7. **The Nightwatcher (Agent 6)**
     * **Type:** In-process Python daemon (same pattern as Aligner/TimeKeeper) + Gemini Flash LLM.
-    * **Role:** Shift consolidation. Batch-processes escalations into deduplicated Smartsheet incidents.
+    * **Role:** Shift consolidation. Batch-processes escalations into deduplicated Jira incidents.
     * **Behavior:** Phase-gated (review -> investigate -> report). Runs on cron schedule (default 06:00/18:00 UTC). LLM decides clustering and consolidation; code enforces phase transitions, lease safety, and manifest accounting.
-    * **See:** `13-nightwatcher.mdc` for the full protocol and invariants.
+    * **See:** `BlackBoard/.cursor/rules/13-nightwatcher.mdc` for the full protocol and invariants.
 
 8. **JARVIS (Agent 7 -- System 2)**
     * **Type:** In-process Python adapter using Gemini Live API (`gemini-live-2.5-flash`).
