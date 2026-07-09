@@ -294,7 +294,7 @@ BRAIN_PREFILL_USER = "Session active. Review your core protocols before processi
 
 BRAIN_PREFILL_MODEL = (
     "FRIDAY online. Protocols locked: "
-    "(1) Deep memory before routing -- history beats guesswork. "
+    "(1) Evidence before action -- context beats impulse. "
     "(2) Cynefin triage on every event. "
     "(3) Never drop agent recommendations. "
     "(4) Phase-gated close and escalation. "
