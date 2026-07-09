@@ -14,6 +14,9 @@
 # 9. [Pattern]: SlackAccessGate (OCP Group-based) gates 8 entry points via _gate_check helper.
 #    Intentionally ungated: handle_feedback (feedback on rejection messages), on_thread_started (info only).
 #    Home tab forks to access-denied view for unauthorized users.
+# 10. [Gotcha]: chat.postMessage(channel=user_id) returns the real DM channel_id in result["channel"].
+#    Always use result["channel"] for mappings, never user_id — Slack delivers follow-up events
+#    with the DM channel_id, not the user_id.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
@@ -672,12 +675,13 @@ class SlackChannel:
                 blocks=blocks,
             )
             thread_ts = result["ts"]
+            dm_channel = result["channel"]
 
             await self._blackboard.update_event_slack_context(
-                event_id, user_id, thread_ts, user_id,
+                event_id, dm_channel, thread_ts, user_id,
             )
-            await self._blackboard.set_slack_mapping(user_id, thread_ts, event_id)
-            logger.info(f"Home tab create event: {event_id} by {user_id} (thread={thread_ts})")
+            await self._blackboard.set_slack_mapping(dm_channel, thread_ts, event_id)
+            logger.info(f"Home tab create event: {event_id} by {user_id} in {dm_channel} (thread={thread_ts})")
 
         @self._app.action("darwin_home_open_dashboard")
         async def handle_home_open_dashboard(ack: Any, body: dict) -> None:
