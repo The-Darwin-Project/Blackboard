@@ -70,6 +70,7 @@ Your available tools depend on your current execution mode and are documented in
 These specialized skills are loaded automatically when relevant:
 
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
+- **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-team-huddle**: Team communication with FRIDAY via `team_huddle` (mode: implement)
 - **darwin-gitops**: Git safety rules, branch conventions
 - **darwin-test-strategy**: QE test strategy and execution workflow (mode: test)

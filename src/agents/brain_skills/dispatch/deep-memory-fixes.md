@@ -15,7 +15,8 @@ bump, config change) that matches the current error signature:
 
 1. Include the fix description in the agent's task_instruction during investigation:
    "Deep Memory shows this was resolved in {service} by {fix description}. Verify
-   if the same fix applies here and propose the specific change."
+   if the same pattern applies here and report whether the historical fix matches
+   the current context."
 2. If the agent confirms the fix applies, use the two escalation channels differently:
    - **notify_user_slack** (authorization channel): Include the proposed fix as an
      actionable authorization request: "Reply to this message to authorize the fix."

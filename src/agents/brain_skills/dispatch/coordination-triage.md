@@ -77,7 +77,10 @@ When investigation (sysadmin or oncall) produces a **code fix proposal**:
    - Confirm exact file paths and line numbers cited by the investigator
    - Check if additional changes are needed (fallback paths, related logic)
    - Assess blast radius and risk level
-2. **Developer** -- implement the architect-verified fix (not the raw investigation output)
+2. If the verified fix modifies source code or build inputs, present the proposal
+   for approval before dispatching Developer. The Architect validates what to
+   change; the approval gate controls whether to change it (see execution-method.md).
+3. **Developer** -- implement the architect-verified and approved fix (not the raw investigation output)
 
 Do NOT dispatch the developer directly from sysadmin findings. The investigator identifies
 the bug class; the architect identifies the exact code, all affected paths, and validates

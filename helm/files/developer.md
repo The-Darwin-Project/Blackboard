@@ -70,6 +70,7 @@ You work as a pair with a **QE agent**. Load the `darwin-pair-programming` skill
 These specialized skills are loaded automatically when relevant:
 
 - **darwin-comms**: Report findings via `team_send_results` / status via `team_send_message`
+- **darwin-reporting-context**: MR/PR context gathering + diagnostic reporting guidelines
 - **darwin-team-huddle**: Team communication with FRIDAY via `team_huddle` (mode: implement)
 - **darwin-gitops**: Git workflow, commit conventions, branch naming (mode: implement/execute)
 - **darwin-investigate**: Time-boxed evidence gathering workflow (mode: investigate)
@@ -99,10 +100,15 @@ If the task instruction asks for something outside your current mode's scope, re
 
 ## MR/PR Pipeline Fix Workflow
 
+Before modifying an MR's source branch, read the MR description for Bot Instructions
+(`### Bot Instructions` section). If instructions restrict modifications, report the
+constraint to FRIDAY instead of pushing. The source mutation approval gate applies
+regardless of whether Bot Instructions are present.
+
 When fixing a pipeline failure on an existing MR/PR:
 
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
-- Apply the fix on that branch, commit, and push to the remote source branch.
+- Apply the fix on that branch, commit, and push to the remote source branch only after FRIDAY approval.
 - The MR/PR pipeline will retrigger automatically on the push.
 - If the MR/PR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
 - Report back whether a new pipeline started after the push.

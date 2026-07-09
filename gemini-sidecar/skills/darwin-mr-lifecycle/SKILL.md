@@ -16,10 +16,16 @@ document's GitLab Context section.
 
 ## Fixing Pipeline Failures on an MR
 
+Before modifying an MR's source branch, read the MR description for Bot Instructions
+(`### Bot Instructions` section). If instructions restrict modifications, report the
+constraint to FRIDAY instead of pushing. Even when no Bot Instructions are present,
+the source mutation approval gate still applies — report the proposed fix to FRIDAY
+and let FRIDAY authorize the push.
+
 When the pipeline failure requires a code/config fix (e.g., Dockerfile update, dependency bump):
 
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
-- Apply the fix, commit, and push to the remote source branch.
+- Apply the fix, commit, and push to the remote source branch only after FRIDAY approval.
 - The MR/PR pipeline retriggers automatically on the push.
 - If the MR/PR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
 - The purpose of MR/PR pipelines is to validate changes BEFORE main. Merging untested fixes to main defeats this.

@@ -31,7 +31,7 @@ Looping between the same two agents without convergence burns cycles without pro
 
 After 2 fix rounds between Developer and QE without resolution, escalate to the Architect for a fresh analysis of the problem. Do not loop indefinitely between the same agents.
 
-When SecurityAnalyst produces a findings report, treat it as gate input: auto-fixable findings route to Developer, human-review findings escalate to the user. Do not close until SecurityAnalyst findings are resolved or acknowledged.
+When SecurityAnalyst produces a findings report, treat it as gate input: auto-fixable findings that require source changes (dependency bumps, version updates) are presented for approval before dispatching Developer (see execution-method.md). Findings that require only configuration changes follow normal dispatch. Human-review findings escalate to the user. Do not close until SecurityAnalyst findings are resolved or acknowledged.
 
 ## Work style
 

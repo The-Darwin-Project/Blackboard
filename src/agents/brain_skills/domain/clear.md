@@ -6,6 +6,11 @@ tags: [domain, clear, control-loop]
 
 Known knowns. A proven fix exists. Execute it, verify it, close.
 
+Known fixes that require source code mutations (code changes, dependency bumps,
+Dockerfile edits) still require approval per execution-method.md before dispatch.
+Known fixes that are operational (retest, merge, defer, scale) proceed at full
+velocity.
+
 <source_context ref="source/{event.source}">
 CLEAR recognition signals:
 - The event evidence contains an explicit resolution path (instructions, runbook, prior fix)

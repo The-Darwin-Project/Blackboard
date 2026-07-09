@@ -70,7 +70,8 @@ steps:
 ```
 
 - `reasoning` (required): the root cause. Must be a specific error condition.
-- `steps` (optional): remediation actions you recommend but cannot perform in your current mode.
+- `steps` (optional): remediation proposals for FRIDAY to evaluate. FRIDAY decides
+  whether to dispatch, approve, or escalate based on the source mutation approval gate.
   Each step needs `id`, `agent`, `summary`. Omit if no further action needed.
 
 ## Rules
