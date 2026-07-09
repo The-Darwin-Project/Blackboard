@@ -146,6 +146,7 @@ export const MOCK_EVENT_DOC = {
   slack_thread_title: null,
   sticky_notes: [],
   unread_notes: 0,
+  token_usage: undefined as Record<string, number> | undefined,
 };
 
 export const MOCK_HH_TODOS = [
