@@ -8,7 +8,7 @@ roles: [architect, sysadmin, developer, qe, security_analyst]
 
 ## MR/PR Context Prerequisite
 
-When the task references an MR/PR (URL, ID, or branch): read the MR description via the GitLab or GitHub API BEFORE any analysis or modifications.
+When the task references an MR/PR (URL, ID, or branch): read the full MR/PR description BEFORE any analysis or modifications.
 
 - Look for `### Bot Instructions` — these are constraints from the MR author or automation bot
 - Include constraints in your report to FRIDAY (they are evidence, not optional metadata)
