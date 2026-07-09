@@ -177,7 +177,7 @@ class TestStreamTimeout:
         brain = _make_brain(stream_factory=lambda **kw: stream)
         event = _make_event()
 
-        with _gate_patch(), _gate_ctx_patch():
+        with _gate_patch(), _gate_ctx_patch(), _sleep_patch:
             result = await brain._process_with_llm("evt-test", event)
 
         assert result is False
@@ -193,7 +193,7 @@ class TestStreamTimeout:
         brain = _make_brain(stream_factory=lambda **kw: stream)
         event = _make_event()
 
-        with _gate_patch(), _gate_ctx_patch():
+        with _gate_patch(), _gate_ctx_patch(), _sleep_patch:
             result = await brain._process_with_llm("evt-test", event)
 
         assert result is False
