@@ -166,7 +166,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             )}
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <SourceIcon source={selectedEvent.source} subjectType={selectedEvent.subject_type} evidence={selectedEvent.event?.evidence as Record<string, unknown> | undefined} size={14} />
+            <SourceIcon source={selectedEvent.source} subjectType={selectedEvent.subject_type} evidence={selectedEvent.event?.evidence as unknown as Record<string, unknown> | undefined} size={14} />
             <span style={{ fontSize: 11, color: '#64748b' }}>{selectedEvent.source} | {selectedEvent.conversation.length} turns</span>
           </div>
         </div>
