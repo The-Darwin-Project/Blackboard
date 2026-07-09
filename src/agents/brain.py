@@ -1599,7 +1599,7 @@ class Brain:
         return best_thinking, best_temp, best_tokens
 
     def _resolve_terminal_prompt(self, active_phases: list[str], domain: str | None = None) -> str:
-        """Resolve terminal prompt from phase metadata. Lowest priority wins.
+        """Resolve terminal prompt from phase metadata. Lowest priority number wins.
 
         Checks terminal_prompts[domain] first (phase x domain cross),
         falls back to terminal_prompt scalar, then to _TERMINAL_PROMPT_FALLBACK.
