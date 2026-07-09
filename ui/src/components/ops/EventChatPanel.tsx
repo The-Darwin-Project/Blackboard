@@ -11,6 +11,7 @@ import { useOpsControl } from '../../contexts/OpsStateContext';
 import { useEventDocument, useActiveEvents, useQueueInvalidation } from '../../hooks/useQueue';
 import { STATUS_COLORS } from '../../constants/colors';
 import { MOCK_EVENTS, MOCK_EVENT_DOC } from './mockData';
+import { formatTokenCount } from '../../utils/formatTokens';
 import SourceIcon from '../SourceIcon';
 import { ConversationFeed } from '../ConversationFeed';
 import { PlanProgress, usePlanState } from '../PlanProgress';
@@ -18,12 +19,62 @@ import ChatInput from '../ChatInput';
 import CollapsibleSection from '../CollapsibleSection';
 import DeferCountdownBar from '../DeferCountdownBar';
 import MockConversationFeed from './MockConversationFeed';
-import type { ConversationTurn } from '../../api/types';
+import type { ConversationTurn, TokenUsageDict } from '../../api/types';
 
 const DEV_MODE = import.meta.env.DEV;
 const MIN_WIDTH = 350;
 const DEFAULT_WIDTH = 500;
 const MAX_WIDTH = 900;
+
+const TOKEN_SEGMENTS: { key: keyof TokenUsageDict; label: string; color: string }[] = [
+  { key: 'input_tokens', label: 'In', color: '#34d399' },
+  { key: 'output_tokens', label: 'Out', color: '#f472b6' },
+  { key: 'thinking_tokens', label: 'Think', color: '#a78bfa' },
+  { key: 'cached_tokens', label: 'Cache', color: '#fbbf24' },
+];
+
+function TokenUsageMini({ usage, isLive }: { usage: TokenUsageDict; isLive: boolean }) {
+  const total = usage.total_tokens || 0;
+  return (
+    <div className="pt-1.5 mt-1 border-t border-border/50">
+      <div className="flex justify-between items-center mb-1">
+        <span className="text-[12px] text-text-muted">
+          Tokens{isLive ? <span className="text-emerald-400 ml-1 text-[10px]">live</span> : ''}
+        </span>
+        <span className="text-[13px] font-mono text-blue-400">{formatTokenCount(total)}</span>
+      </div>
+      {total > 0 && (
+        <>
+          <div className="flex h-1.5 rounded-full overflow-hidden bg-bg-tertiary mb-1">
+            {TOKEN_SEGMENTS.map(({ key, color }) => {
+              const val = usage[key] || 0;
+              const pct = (val / total) * 100;
+              return pct > 0 ? <div key={key} style={{ width: `${pct}%`, background: color }} /> : null;
+            })}
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+            {TOKEN_SEGMENTS.map(({ key, label, color }) => {
+              const val = usage[key] || 0;
+              if (!val) return null;
+              return (
+                <span key={key} className="text-[10px] flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: color }} />
+                  <span className="text-text-muted">{label}</span>
+                  <span className="font-mono" style={{ color }}>{formatTokenCount(val)}</span>
+                </span>
+              );
+            })}
+            {(usage.calls || 0) > 0 && (
+              <span className="text-[10px] text-text-muted">
+                {usage.calls} calls
+              </span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 interface EventChatPanelProps {
   eventId: string;
@@ -148,6 +199,9 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
                 </span>
               </div>
               <div className="flex justify-between"><span>Turns</span><span>{doc.conversation.length}</span></div>
+              {doc.token_usage && (doc.token_usage as TokenUsageDict).total_tokens > 0 && (
+                <TokenUsageMini usage={doc.token_usage as TokenUsageDict} isLive={doc.status !== 'closed'} />
+              )}
             </div>
           </CollapsibleSection>
           {doc.sticky_notes && doc.sticky_notes.length > 0 && (

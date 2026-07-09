@@ -97,6 +97,12 @@ class TokenMeter:
         with self._lock:
             return dict(self._cumulative)
 
+    def peek_event(self, event_id: str) -> dict[str, int] | None:
+        """Non-destructive read of per-event totals. None if event not tracked."""
+        with self._lock:
+            ev = self._per_event.get(event_id)
+            return dict(ev) if ev else None
+
     def drain_event(self, event_id: str) -> dict[str, int] | None:
         """Return per-event totals and delete the entry. None on second call (idempotent)."""
         with self._lock:

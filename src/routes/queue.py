@@ -230,6 +230,14 @@ async def get_event_document(
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    if not event.token_usage:
+        try:
+            from src.agents.llm import get_token_meter
+            live = get_token_meter().peek_event(event_id)
+            if live:
+                event.token_usage = live
+        except Exception:
+            pass
     return event
 
 
