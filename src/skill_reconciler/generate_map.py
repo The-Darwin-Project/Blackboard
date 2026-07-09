@@ -56,6 +56,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "HOLD_WATCH": "not (jarvis source + close phase)",
     "POST_STICKY": "not (jarvis source + close phase)",
     "READ_STICKY": "no unread sticky notes",
+    "UNEVALUATED_CLOSE": "unevaluated jarvis/user message exists",
     "HARD_STRIP_DEFER": "triage phase OR jarvis source",
     "HARD_STRIP_WAIT_USER": "triage phase OR non-user source",
 }
