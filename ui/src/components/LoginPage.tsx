@@ -7,7 +7,7 @@
 //    This eliminates stale browser cache after pod restarts — new build = new hash.
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import bgImage from '../assets/projectDarwin.png';
+import bgImage from '../assets/projectDarwin.webp';
 
 const DEFAULT_DISCLAIMER =
   'This system uses AI to autonomously manage infrastructure. ' +
