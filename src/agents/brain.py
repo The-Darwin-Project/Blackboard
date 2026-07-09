@@ -149,6 +149,8 @@
 #     during thinking stream. Gate stores hits in _recall_lessons (overwrite) and returns True
 #     to re-invoke LLM with RECALL block in SI. BRAIN_MEMORY_REFLEX env var. Max 1 gate per cycle.
 #     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
+#     _REFLEX_EXEMPT tools (classify_event) bypass the gate — they are state mutations that must
+#     execute or the event document stays inconsistent (e.g., domain never set).
 # 43. [Pattern]: User interrupt injection in LLM iteration loop. After re-fetch (iteration > 0),
 #     detect new user turns beyond turn_snapshot. If found (and not intermediate), inject PRIORITY
 #     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot

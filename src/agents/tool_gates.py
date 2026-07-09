@@ -9,6 +9,8 @@
 #    (build_gate_context normalizes None -> {}).
 # 7. [Gotcha]: GateDefinition.hint is appended by diagnose_rejection(), not by _msg_* functions.
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
+# 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
+#    user.message turns exist. Prevents closing over unread interventions.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -193,6 +195,19 @@ def _pred_post_sticky(ctx: GateContext) -> bool:
 
 def _pred_read_sticky(ctx: GateContext) -> bool:
     return ctx.unread_notes <= 0
+
+
+def _pred_unevaluated_close(ctx: GateContext) -> bool:
+    """Block close_event when unevaluated jarvis.message or user.message turns exist."""
+    for t in reversed(ctx.conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        evaluated = t.get("evaluated") if isinstance(t, dict) else getattr(t, "evaluated", None)
+        if actor == "brain" and action == "close":
+            break
+        if actor in ("jarvis", "user") and action == "message" and not evaluated:
+            return True
+    return False
 
 
 def _pred_hard_strip_defer(ctx: GateContext) -> bool:
@@ -435,6 +450,14 @@ def _msg_read_sticky(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: no unread sticky notes."
 
 
+def _tools_unevaluated_close(_ctx: GateContext) -> set[str]:
+    return {"close_event"}
+
+
+def _msg_unevaluated_close(tool: str, _ctx: GateContext) -> str:
+    return f"[GATE] {tool} blocked. Unevaluated jarvis or user message exists. Read and address the message before closing."
+
+
 def _msg_hard_strip_defer(tool: str, ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: phase={ctx.brain_phase}, source={ctx.event_source}. Constraint: not available in triage or jarvis events."
 
@@ -536,6 +559,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_budget,
         message=_msg_budget_exhausted,
         hint="budget replenishes when agent completion turns are present.",
+    ),
+    GateDefinition(
+        gate_id="UNEVALUATED_CLOSE",
+        mode="strip",
+        predicate=_pred_unevaluated_close,
+        tools_affected=_tools_unevaluated_close,
+        message=_msg_unevaluated_close,
+        hint="address the pending jarvis or user message, then close.",
     ),
     GateDefinition(
         gate_id="PRE_CLASSIFICATION",
