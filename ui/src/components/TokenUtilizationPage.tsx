@@ -25,14 +25,14 @@ const formatTokens = formatTokenCount;
 function SparkCard({ title, data, dataKey, color }: {
   title: string; data: FlowSnapshot[]; dataKey: keyof FlowSnapshot; color: string;
 }) {
-  const latest = data.length > 0 ? (data[data.length - 1][dataKey] as number) : 0;
+  const rangeTotal = data.reduce((sum, s) => sum + ((s[dataKey] as number) || 0), 0);
   const isCalls = dataKey === 'token_calls_delta';
   return (
     <div className="bg-bg-secondary border border-border rounded-lg p-4">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium text-text-primary">{title}</h3>
         <span className="text-lg font-mono" style={{ color }}>
-          {isCalls ? latest : formatTokens(latest)}
+          {isCalls ? rangeTotal : formatTokens(rangeTotal)}
         </span>
       </div>
       <div className="h-16">
