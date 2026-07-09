@@ -202,10 +202,11 @@ def _pred_unevaluated_close(ctx: GateContext) -> bool:
     for t in reversed(ctx.conversation):
         actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
-        evaluated = t.get("evaluated") if isinstance(t, dict) else getattr(t, "evaluated", None)
+        status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
+        status_val = status.value if hasattr(status, "value") else status
         if actor == "brain" and action == "close":
             break
-        if actor in ("jarvis", "user") and action == "message" and not evaluated:
+        if actor in ("jarvis", "user") and action == "message" and status_val != "evaluated":
             return True
     return False
 
