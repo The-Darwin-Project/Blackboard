@@ -2005,8 +2005,13 @@ class Brain:
         lines = ["## RECALL", "The following patterns were learned from past events similar to this one."]
         for lesson in lessons:
             p = lesson.get("payload", {})
-            title = p.get("title", "untitled")
-            lines.append(f"- {title}: {p.get('pattern', '')}")
+            if "title" in p:
+                lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+            elif "topic" in p:
+                scope = p.get("scope", "")
+                fact = p.get("fact", "")
+                label = f"[Fact] {p.get('topic', 'unknown')}"
+                lines.append(f"- {label} ({scope}): {fact}" if scope else f"- {label}: {fact}")
 
         logger.debug(f"Brain RECALL: {len(lessons)} lessons in SI for {event.id}")
         return "\n".join(lines)
