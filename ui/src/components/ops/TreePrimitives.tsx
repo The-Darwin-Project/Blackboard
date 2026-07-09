@@ -74,7 +74,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
     subscription_active?: boolean;
     token_total?: number;
     reason?: string;
-    evidence?: { display_text?: string; domain?: string; severity?: string };
+    evidence?: { display_text?: string; domain?: string; brain_domain?: string; severity?: string };
     created?: string;
   };
   isSelected: boolean; onClick: () => void; onContextMenu: (e: React.MouseEvent) => void;
@@ -82,7 +82,7 @@ export function EventNode({ evt, isSelected, onClick, onContextMenu }: {
   const sc = STATUS_COLORS[evt.status];
   const isWaiting = evt.status === 'waiting_approval';
   const isDeferred = evt.status === 'deferred';
-  const domain = evt.evidence?.domain;
+  const domain = evt.evidence?.brain_domain || evt.evidence?.domain;
   const dc = domain ? DOMAIN_COLORS[domain as keyof typeof DOMAIN_COLORS] : undefined;
   const summary = evt.evidence?.display_text || evt.reason || '';
   const age = relativeAge(evt.created);
