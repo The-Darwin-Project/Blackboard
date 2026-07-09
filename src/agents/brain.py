@@ -13,6 +13,10 @@
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
 # 11. [Constraint]: Resync scan has_unread + deferred re-activation paths skip enqueueing when _waiting_for_user.
 # 12. [Pattern]: LLM adapter layer (.llm subpackage) -- Brain uses generate_stream(), tool schemas in llm/types.py.
+# 12b. [Pattern]: Per-chunk stream timeout: asyncio.wait_for(anext(it), timeout=LLM_STREAM_CHUNK_TIMEOUT_SEC).
+#     On timeout: bounded aclose(stream, 5s) + retry once (dedicated timeout_retries counter, independent
+#     from transient retries). On exhaustion: clear all accumulators, write timeout-specific error turn.
+#     3-level nesting: OUTER try/except Exception > MIDDLE try/except TimeoutError > INNER try/except StopAsyncIteration.
 # 13. [Pattern]: brain_thinking + brain_thinking_done WS messages bracket streaming. UI clears on done/turn/error.
 # 13b. [Pattern]: ReconcileScheduler (src/scheduling/) replaces monolithic event loop. start_event_loop() is a
 #     thin facade that wires QueueTrigger (BRPOP), ResyncTrigger (5s scan), StalenessGuard (jarvis 120s, chat 5400s).
@@ -486,6 +490,9 @@ class _BrainToolContext:
     @property
     def ephemeral_only_roles(self) -> frozenset:
         return self._b.EPHEMERAL_ONLY_ROLES
+
+
+_ACLOSE_TIMEOUT = 5.0
 
 
 class Brain:
@@ -1294,22 +1301,8 @@ class Brain:
         if want_search and hasattr(self._adapter, 'set_search_enabled'):
             self._adapter.set_search_enabled(True)
 
-        reflex_chunker = None
-        reflex_searcher = None
-        if self._memory_reflex_enabled and event_id not in self._reflex_fired_for:
-            try:
-                from .brain_reflex import SentenceChunker, ReflexSearcher
-                archivist = self.agents.get("_archivist_memory")
-                if archivist and hasattr(archivist, "search_lessons"):
-                    reflex_chunker = SentenceChunker()
-                    reflex_searcher = ReflexSearcher(
-                        archivist,
-                        event_id,
-                        score_threshold=float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60")),
-                        max_searches=int(os.getenv("BRAIN_REFLEX_MAX_SEARCHES", "5")),
-                    )
-            except Exception as e:
-                logger.warning(f"Memory reflex init failed for {event_id}: {e}")
+        chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "120"))
+        timeout_retries = 0
 
         try:
             for attempt in range(max_retries + 1):
@@ -1318,45 +1311,75 @@ class Brain:
                 function_call = None
                 raw_parts = None
                 last_grounding = None
+                reflex_chunker, reflex_searcher = self._create_reflex_pair(event_id)
 
                 try:
-                    async for chunk in self._adapter.generate_stream(
-                        system_prompt=system_prompt,
-                        contents=prompt,
-                        tools=active_tools,
-                        temperature=call_temp,
-                        max_output_tokens=phase_max_tokens,
-                        thinking_level=thinking_level,
-                    ):
-                        if chunk.text:
-                            if chunk.is_thought:
-                                accumulated_thoughts += chunk.text
-                                if reflex_chunker:
-                                    window = reflex_chunker.feed(chunk.text)
-                                    if window and reflex_searcher:
-                                        reflex_searcher.fire(window)
-                            else:
-                                accumulated_text += chunk.text
-                            await self._broadcast({
-                                "type": "brain_thinking",
-                                "event_id": event_id,
-                                "text": chunk.text,
-                                "accumulated": accumulated_thoughts + accumulated_text,
-                                "is_thought": chunk.is_thought,
-                            })
-                        if chunk.function_call:
-                            function_call = chunk.function_call
-                        if chunk.raw_parts:
-                            raw_parts = chunk.raw_parts
-                        if chunk.grounding_metadata:
-                            last_grounding = chunk.grounding_metadata
-                        if chunk.usage:
-                            from .llm import record_token_usage
-                            record_token_usage("brain", chunk.usage, event_id)
-                    last_error = None
-                    break  # Success
+                    stream = None
+                    try:
+                        stream = self._adapter.generate_stream(
+                            system_prompt=system_prompt,
+                            contents=prompt,
+                            tools=active_tools,
+                            temperature=call_temp,
+                            max_output_tokens=phase_max_tokens,
+                            thinking_level=thinking_level,
+                        )
+                        it = stream.__aiter__()
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
+                            except StopAsyncIteration:
+                                break
+                            if chunk.text:
+                                if chunk.is_thought:
+                                    accumulated_thoughts += chunk.text
+                                    if reflex_chunker:
+                                        window = reflex_chunker.feed(chunk.text)
+                                        if window and reflex_searcher:
+                                            reflex_searcher.fire(window)
+                                else:
+                                    accumulated_text += chunk.text
+                                await self._broadcast({
+                                    "type": "brain_thinking",
+                                    "event_id": event_id,
+                                    "text": chunk.text,
+                                    "accumulated": accumulated_thoughts + accumulated_text,
+                                    "is_thought": chunk.is_thought,
+                                })
+                            if chunk.function_call:
+                                function_call = chunk.function_call
+                            if chunk.raw_parts:
+                                raw_parts = chunk.raw_parts
+                            if chunk.grounding_metadata:
+                                last_grounding = chunk.grounding_metadata
+                            if chunk.usage:
+                                from .llm import record_token_usage
+                                record_token_usage("brain", chunk.usage, event_id)
+                        last_error = None
+                        break
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Brain LLM stream timed out for {event_id} after {chunk_timeout}s (attempt {attempt+1})")
+                        if stream is not None and hasattr(stream, 'aclose'):
+                            try:
+                                await asyncio.wait_for(stream.aclose(), timeout=_ACLOSE_TIMEOUT)
+                            except (asyncio.TimeoutError, Exception) as cleanup_err:
+                                logger.warning(f"Stream cleanup failed for {event_id}: {cleanup_err}")
+                        raise
                 except Exception as e:
                     last_error = e
+                    if isinstance(e, asyncio.TimeoutError):
+                        if timeout_retries < 1 and attempt < max_retries:
+                            timeout_retries += 1
+                            logger.warning(f"Brain LLM stream timeout for {event_id}, retrying once")
+                            await asyncio.sleep(5)
+                            continue
+                        accumulated_text = ""
+                        accumulated_thoughts = ""
+                        function_call = None
+                        raw_parts = None
+                        last_grounding = None
+                        logger.error(f"Brain LLM stream timeout for {event_id} after retry — giving up")
+                        break
                     if attempt < max_retries and self._is_transient(e):
                         is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
                         base = 30 if is_rate_limit else 5
@@ -1387,11 +1410,17 @@ class Brain:
         # If all retries failed with no output, write error turn
         if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
             self._reasoning_by_event.pop(event_id, None)
+            is_timeout = isinstance(last_error, asyncio.TimeoutError)
+            error_text = (
+                f"LLM stream timed out (no chunks for {chunk_timeout}s) after {attempt + 1} attempts"
+                if is_timeout
+                else f"LLM call failed after {attempt + 1} attempts: {last_error}"
+            )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="error",
-                thoughts=f"LLM call failed after {attempt + 1} attempts: {last_error}",
+                thoughts=error_text,
             )
             await self._append_and_broadcast(event_id, turn)
             return False
@@ -1533,6 +1562,26 @@ class Brain:
 
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
+
+    def _create_reflex_pair(self, event_id: str):
+        """Create (SentenceChunker, ReflexSearcher) or (None, None)."""
+        if not self._memory_reflex_enabled or event_id in self._reflex_fired_for:
+            return None, None
+        try:
+            from .brain_reflex import SentenceChunker, ReflexSearcher
+            archivist = self.agents.get("_archivist_memory")
+            if archivist and hasattr(archivist, "search_lessons"):
+                return (
+                    SentenceChunker(),
+                    ReflexSearcher(
+                        archivist, event_id,
+                        score_threshold=float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60")),
+                        max_searches=int(os.getenv("BRAIN_REFLEX_MAX_SEARCHES", "5")),
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"Memory reflex init failed for {event_id}: {e}")
+        return None, None
 
     @staticmethod
     def _is_transient(e: Exception) -> bool:
