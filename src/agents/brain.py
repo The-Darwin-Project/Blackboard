@@ -151,6 +151,10 @@
 #     Reflex searches share Archivist embedding quota. Cap at BRAIN_REFLEX_MAX_SEARCHES (5) per cycle.
 #     _REFLEX_EXEMPT tools (classify_event) bypass the gate — they are state mutations that must
 #     execute or the event document stays inconsistent (e.g., domain never set).
+# 44. [Pattern]: _resolve_terminal_prompt(active_phases, domain) resolves the terminal user prompt from
+#     _phase.yaml metadata (terminal_prompt/terminal_prompts keys). Priority-wins (same as _resolve_llm_params).
+#     Falls back to _TERMINAL_PROMPT_FALLBACK when no phase declares one. Domain cross via terminal_prompts dict.
+#     Reflex gate logs individual match scores with source tag (L=lesson, K=knowledge) for observability.
 # 43. [Pattern]: User interrupt injection in LLM iteration loop. After re-fetch (iteration > 0),
 #     detect new user turns beyond turn_snapshot. If found (and not intermediate), inject PRIORITY
 #     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
@@ -297,6 +301,8 @@ BRAIN_PREFILL_MODEL = (
     "(5) Voice: confident peer, Cynefin-gated tone. "
     "Let's get to work."
 )
+
+_TERMINAL_PROMPT_FALLBACK = "What is the next action? Call one of your functions."
 
 
 import re as _re
@@ -1248,7 +1254,8 @@ class Brain:
                 active_tools = [t for t in active_tools if t["name"] in allowed]
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
 
-        prompt = await self._build_contents(event, context_cache=context_flags)
+        terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
+        prompt = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt)
 
         prompt = [
             {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
@@ -1461,7 +1468,7 @@ class Brain:
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
-                        titles = [l["payload"].get("title", "") for l in lessons]
+                        titles = [l["payload"].get("title") or l["payload"].get("topic", "") for l in lessons]
                         self._recall_lessons[event_id] = lessons
                         self._reflex_fired_for.add(event_id)
                         try:
@@ -1474,9 +1481,15 @@ class Brain:
                             })
                         except Exception as be:
                             logger.warning(f"RECALL broadcast failed for {event_id} (non-fatal): {be}")
+                        def _score_tag(hit):
+                            p = hit.get("payload", {})
+                            kind = "L" if "title" in p else "K"
+                            return f"{round(hit.get('score', 0), 3)}:{kind}"
+
                         logger.info(
                             f"Brain RECALL: gate fired for {event_id}, "
-                            f"blocked {function_call.name}, {len(lessons)} lessons stored"
+                            f"blocked {function_call.name}, {len(lessons)} hits "
+                            f"(scores: {[_score_tag(l) for l in lessons]})"
                         )
                         return True  # Re-invoke LLM with RECALL block in SI
                 except Exception as e:
@@ -1584,6 +1597,37 @@ class Brain:
 
         logger.debug(f"LLM params: thinking={best_thinking}, temp={best_temp}, tokens={best_tokens} (priority={best_priority})")
         return best_thinking, best_temp, best_tokens
+
+    def _resolve_terminal_prompt(self, active_phases: list[str], domain: str | None = None) -> str:
+        """Resolve terminal prompt from phase metadata. Lowest priority wins.
+
+        Checks terminal_prompts[domain] first (phase x domain cross),
+        falls back to terminal_prompt scalar, then to _TERMINAL_PROMPT_FALLBACK.
+        Preserves current behavior when no _phase.yaml declares prompts.
+        """
+        if not self._skill_loader:
+            return _TERMINAL_PROMPT_FALLBACK
+
+        best_priority = float("inf")
+        best_prompt = _TERMINAL_PROMPT_FALLBACK
+
+        for phase_name in active_phases:
+            meta = self._skill_loader.get_phase_meta(phase_name)
+            if not meta:
+                continue
+            priority = meta.get("priority", 50)
+            if priority >= best_priority:
+                continue
+
+            prompts_dict = meta.get("terminal_prompts")
+            if isinstance(prompts_dict, dict) and domain and domain in prompts_dict:
+                best_priority = priority
+                best_prompt = prompts_dict[domain]
+            elif "terminal_prompt" in meta:
+                best_priority = priority
+                best_prompt = meta["terminal_prompt"]
+
+        return best_prompt
 
     @staticmethod
     def _determine_thinking_params_legacy(event: "EventDocument") -> tuple[str, float]:
@@ -2153,6 +2197,7 @@ class Brain:
 
     async def _build_contents(
         self, event: EventDocument, context_cache: ContextFlags | None = None,
+        terminal_prompt: str = _TERMINAL_PROMPT_FALLBACK,
     ) -> list[dict]:
         """Build structured Gemini-format contents array from Redis conversation.
 
@@ -2161,6 +2206,7 @@ class Brain:
         Subsequent messages alternate user/model based on ConversationTurn actor.
         Consecutive same-role turns are merged (Gemini requires alternating roles).
         context_cache: if provided, reuse cached Redis data from _extract_context_flags.
+        terminal_prompt: phase-contextual action prompt from _resolve_terminal_prompt().
         """
         from ..models import EventEvidence
         from .llm.prompt import build_event_header
@@ -2229,7 +2275,7 @@ class Brain:
         )
 
         if not event.conversation:
-            new_event_text = header + "\n\n(No turns yet -- this is a new event. Triage it.)\nWhat is the next action? Call one of your functions."
+            new_event_text = header + f"\n\n(No turns yet -- this is a new event. Triage it.)\n{terminal_prompt}"
             return [{"role": "user", "parts": [{"text": new_event_text}]}]
 
         context_text = header
@@ -2267,8 +2313,7 @@ class Brain:
             else:
                 contents.append({"role": role, "parts": parts})
 
-        # Ensure the last message is a user prompt requesting action
-        action_prompt = {"text": "What is the next action? Call one of your functions."}
+        action_prompt = {"text": terminal_prompt}
         if contents[-1]["role"] == "user":
             contents[-1]["parts"].append(action_prompt)
         else:
