@@ -1,10 +1,12 @@
 # BlackBoard/src/agents/brain_reflex.py
 # @ai-rules:
 # 1. [Constraint]: Non-blocking. All searches via asyncio.create_task. Never await in feed().
-# 2. [Pattern]: Dedup by lesson title. Same lesson from different windows fires once.
+# 2. [Pattern]: Dedup by title (lessons) or topic:scope composite key (knowledge facts). Same hit from different windows fires once.
 # 3. [Gotcha]: gather() timeout must be generous enough for late searches but not block the LLM loop.
 # 4. [Constraint]: max_searches cap prevents flooding the embedding API during verbose thinking.
 # 5. [Pattern]: All errors caught and logged as warnings. Failure = empty results, never crash.
+# 6. [Pattern]: Searches both lessons AND knowledge facts in parallel. Pre-embeds query once via embed_query(), shares vector. hasattr guards for test/mock safety.
+# 7. [Constraint]: Stale knowledge facts (hit.get("stale")) filtered before dedup key registration.
 
 """Memory Reflex: real-time lesson search during FRIDAY's thinking stream.
 
@@ -88,7 +90,7 @@ class ReflexSearcher:
         self._max_searches = max_searches
         self._search_count: int = 0
         self._pending_tasks: list[asyncio.Task] = []
-        self._seen_titles: set[str] = set()
+        self._seen_keys: set[str] = set()
         self.matched_lessons: list[dict] = []
 
     def fire(self, query: str) -> None:
@@ -100,10 +102,28 @@ class ReflexSearcher:
         self._pending_tasks.append(task)
 
     async def _search(self, query: str) -> list[dict]:
-        """Execute a single lesson search against the archivist."""
+        """Execute lesson + knowledge search against the archivist."""
         try:
-            results = await self._archivist.search_lessons(query, limit=2)
-            return results if results else []
+            vector = None
+            if hasattr(self._archivist, "embed_query"):
+                try:
+                    vector = await self._archivist.embed_query(query)
+                except Exception as embed_err:
+                    logger.warning(f"Reflex embed_query failed for {self._event_id}, searching without shared vector: {embed_err}")
+
+            tasks = [self._archivist.search_lessons(query, limit=2, vector=vector)]
+            if hasattr(self._archivist, "search_knowledge"):
+                tasks.append(self._archivist.search_knowledge(query, limit=2, vector=vector))
+
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+            merged = []
+            for result in results_list:
+                if isinstance(result, list):
+                    merged.extend(result)
+                elif isinstance(result, Exception):
+                    logger.warning(f"Reflex sub-search failed for {self._event_id}: {result}")
+            return merged
         except Exception as e:
             logger.warning(f"Reflex search failed for {self._event_id}: {e}")
             return []
@@ -134,10 +154,13 @@ class ReflexSearcher:
                     score = hit.get("score", 0)
                     if score < self._score_threshold:
                         continue
-                    title = hit.get("payload", {}).get("title", "")
-                    if title in self._seen_titles:
+                    if hit.get("stale"):
                         continue
-                    self._seen_titles.add(title)
+                    payload = hit.get("payload", {})
+                    key = payload.get("title") or f"{payload.get('topic', '')}:{payload.get('scope', '')}"
+                    if not key or key == ":" or key in self._seen_keys:
+                        continue
+                    self._seen_keys.add(key)
                     self.matched_lessons.append(hit)
             except Exception as e:
                 logger.warning(f"Reflex task result error: {e}")
