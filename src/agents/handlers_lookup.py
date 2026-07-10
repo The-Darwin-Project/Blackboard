@@ -251,6 +251,15 @@ async def handle_consult_deep_memory(
                 "The ops journal for this service may also have relevant entries."
             )
 
+    if ev and ev.source in ("chat", "slack"):
+        last_user = next(
+            (t for t in reversed(ev.conversation) if t.actor == "user"), None
+        )
+        if last_user:
+            user_text = last_user.evidence or last_user.thoughts or ""
+            if user_text:
+                memory_text += f"\n\n---\nRespond to the user: {user_text}"
+
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",

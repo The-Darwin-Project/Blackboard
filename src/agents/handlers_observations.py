@@ -41,7 +41,8 @@ async def handle_record_observation(
 async def handle_list_observations(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
-    result = await ctx.get_blackboard().list_observations()
+    bb = ctx.get_blackboard()
+    result = await bb.list_observations()
     if not result["observations"]:
         summary_text = "No observations recorded yet."
     else:
@@ -56,6 +57,17 @@ async def handle_list_observations(
                 f"events={len(events_in_series)}"
             )
         summary_text = "\n".join(lines)
+
+    ev = await bb.get_event(event_id)
+    if ev and ev.source in ("chat", "slack"):
+        last_user = next(
+            (t for t in reversed(ev.conversation) if t.actor == "user"), None
+        )
+        if last_user:
+            user_text = last_user.evidence or last_user.thoughts or ""
+            if user_text:
+                summary_text += f"\n\n---\nRespond to the user: {user_text}"
+
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
