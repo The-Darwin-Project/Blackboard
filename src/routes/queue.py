@@ -782,7 +782,7 @@ class KnowledgeRequest(BaseModel):
     source: str = Field(..., min_length=1, max_length=200)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     valid_until: float | None = None
-    service: str | None = Field(default=None, max_length=200)
+    service: str | None = Field(default=None, max_length=200, pattern=r"^[a-zA-Z0-9_\-.]+$")
 
 
 class KnowledgeUpdateRequest(BaseModel):
