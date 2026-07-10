@@ -57,6 +57,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "POST_STICKY": "not (jarvis source + close phase)",
     "READ_STICKY": "no unread sticky notes",
     "UNEVALUATED_CLOSE": "unevaluated jarvis/user message exists",
+    "SILENT_PARK": "no brain.response after last user.message (chat/slack only)",
     "HARD_STRIP_DEFER": "triage phase OR jarvis source",
     "HARD_STRIP_WAIT_USER": "triage phase OR non-user source",
 }

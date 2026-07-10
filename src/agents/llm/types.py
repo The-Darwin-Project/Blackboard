@@ -442,10 +442,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Park the conversation until the user sends their next message. "
             "ONLY available for chat and slack events. "
-            "IMPORTANT: your text response to the user must be generated as normal text output "
-            "BEFORE calling this tool. The summary parameter is an internal note only -- "
-            "the user will NOT see it. If you have not yet responded to the user in this turn, "
-            "generate your response text first, then call wait_for_user to park."
+            "CRITICAL: you MUST generate a visible text response BEFORE calling this tool. "
+            "Every user message deserves an answer — never park silently. "
+            "The summary parameter is internal only (user will NOT see it). "
+            "If you have nothing substantive to say, at minimum acknowledge the user's message."
         ),
         "input_schema": {
             "type": "object",

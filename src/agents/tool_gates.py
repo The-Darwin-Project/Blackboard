@@ -217,6 +217,26 @@ def _pred_unevaluated_close(ctx: GateContext) -> bool:
     return False
 
 
+def _pred_silent_park(ctx: GateContext) -> bool:
+    """Block wait_for_user if no brain.response exists after the last user.message.
+
+    Only applies to chat/slack events. Prevents FRIDAY from silently parking
+    without answering the user. Does NOT fire if there's no user message at all.
+    """
+    if ctx.event_source not in ("chat", "slack"):
+        return False
+    found_user_msg = False
+    for t in reversed(ctx.conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        if actor == "brain" and action == "response":
+            return False
+        if actor == "user" and action == "message":
+            found_user_msg = True
+            break
+    return found_user_msg
+
+
 def _pred_hard_strip_defer(ctx: GateContext) -> bool:
     return ctx.brain_phase == "triage" or ctx.event_source == "jarvis"
 
@@ -461,6 +481,17 @@ def _tools_unevaluated_close(_ctx: GateContext) -> set[str]:
     return {"close_event"}
 
 
+def _tools_silent_park(_ctx: GateContext) -> set[str]:
+    return {"wait_for_user"}
+
+
+def _msg_silent_park(ctx: GateContext) -> str:
+    return (
+        "wait_for_user blocked. No visible response generated since the last user message. "
+        "Generate a text response to the user before parking."
+    )
+
+
 def _msg_unevaluated_close(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} blocked. Unevaluated jarvis or user message exists. Read and address the message before closing."
 
@@ -574,6 +605,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_unevaluated_close,
         message=_msg_unevaluated_close,
         hint="address the pending jarvis or user message, then close.",
+    ),
+    GateDefinition(
+        gate_id="SILENT_PARK",
+        mode="strip",
+        predicate=_pred_silent_park,
+        tools_affected=_tools_silent_park,
+        message=_msg_silent_park,
+        hint="respond to the user first, then park.",
     ),
     GateDefinition(
         gate_id="PRE_CLASSIFICATION",

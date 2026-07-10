@@ -71,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_26_gates(self):
-        assert len(GATE_REGISTRY) == 26
+    def test_registry_has_27_gates(self):
+        assert len(GATE_REGISTRY) == 27
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -83,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentytwo_strip_mode_gates(self):
+    def test_twentythree_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 22
+        assert len(strip_gates) == 23
 
 
 # ---------------------------------------------------------------------------
