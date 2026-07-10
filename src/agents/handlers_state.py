@@ -332,8 +332,6 @@ async def handle_defer_event(
         await ctx.append_and_broadcast(event_id, turn)
         return False
     ctx.clear_waiting_for_agent(event_id)
-    current_cycle = ctx.get_cycle_id(event_id)
-    ctx.cancel_stale_subscriptions(event_id, current_cycle)
     reason = args.get("reason", "Deferred by Brain")
     delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))
     defer_started_at = time.time()
