@@ -8,6 +8,10 @@
 # 5. [Gotcha]: _waiting_for_user (dict[str,float]: event_id -> wait_start_timestamp) is cleared by main.py WS handler AND queue.py REST endpoints (clear_waiting), not by Brain internally.
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
+# 7b. [Gotcha]: _close_and_broadcast archival re-fetches the event via get_event() AFTER close_event()
+#     -- the pre-close `event` local is stale (missing the final closing turns) by the time Archivist runs.
+# 7c. [Pattern]: _create_reflex_pair(event_id, event_domain, event_service) threads event.service into
+#     ReflexSearcher for service-scoped knowledge-fact search (lessons stay unscoped).
 # 8. [Pattern]: _event_to_markdown is a backward-compat wrapper for src/utils/event_markdown.event_to_markdown.
 # 9. [Pattern]: Use _append_and_broadcast() for all turn persistence. Direct append_turn only for probe-mode (line ~517).
 # 10. [Constraint]: defer_event is blocked when _waiting_for_user -- prevents defer→re-activate→close leak. Automated nudge escalation also sets _waiting_for_user.
@@ -1348,7 +1352,9 @@ class Brain:
                 raw_parts = None
                 last_grounding = None
                 reflex_chunker, reflex_searcher = self._create_reflex_pair(
-                    event_id, event_domain=context_flags.get("event_domain") or ""
+                    event_id,
+                    event_domain=context_flags.get("event_domain") or "",
+                    event_service=event.service or "",
                 )
 
                 try:
@@ -1490,7 +1496,7 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
-            if accumulated_text and (is_terminal or not response_emitted):
+            if accumulated_text and not response_emitted:
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
@@ -1604,11 +1610,13 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
-    def _create_reflex_pair(self, event_id: str, event_domain: str = ""):
+    def _create_reflex_pair(self, event_id: str, event_domain: str = "", event_service: str = ""):
         """Create (SentenceChunker, ReflexSearcher) or (None, None).
 
         CASUAL events use a raised threshold (0.80) -- casual chat/slack chatter
         produces more false-positive lesson matches at the default 0.60.
+        event_service scopes the knowledge-fact half of the reflex search --
+        lessons remain unscoped (cross-service behavioral patterns are valid).
         """
         if not self._memory_reflex_enabled or event_id in self._reflex_fired_for:
             return None, None
@@ -1626,6 +1634,7 @@ class Brain:
                         archivist, event_id,
                         score_threshold=threshold,
                         max_searches=int(os.getenv("BRAIN_REFLEX_MAX_SEARCHES", "5")),
+                        service=event_service or None,
                     ),
                 )
         except Exception as e:
@@ -3910,10 +3919,14 @@ class Brain:
             )
             # Invalidate journal cache for this service (immediate freshness)
             self._journal_cache.pop(event.service, None)
-            # Archive to deep memory (fire-and-forget, non-blocking)
+            # Archive to deep memory (fire-and-forget, non-blocking).
+            # Re-fetch post-close: the pre-close `event` snapshot lacks the final
+            # closing turns (summary, close_reason) that Archivist needs to see.
             archivist = self.agents.get("_archivist_memory")
             if archivist and hasattr(archivist, "archive_event"):
-                asyncio.create_task(archivist.archive_event(event))
+                closed_event = await self.blackboard.get_event(event_id)
+                if closed_event:
+                    asyncio.create_task(archivist.archive_event(closed_event))
         # Cancel any active state watcher subscription
         if self._state_watcher:
             self._state_watcher.cancel(event_id)
