@@ -251,11 +251,14 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
             );
           })}
           {brainThinking && brainThinking.eventId === eventId && (
-            <div style={{ padding: '8px 12px', margin: '4px 0', borderLeft: `3px solid ${brainThinking.isThought ? '#8b5cf6' : '#3b82f6'}`, background: brainThinking.isThought ? '#7c3aed10' : '#1e3a5f15', borderRadius: 4, fontSize: 13, color: '#94a3b8', fontStyle: 'italic', animation: 'pulse 2s infinite' }}>
-              <span style={{ color: brainThinking.isThought ? '#8b5cf6' : '#3b82f6', fontWeight: 600, fontSize: 11 }}>
-                {brainThinking.isThought ? 'Brain reasoning...' : 'Brain thinking...'}
+            <div style={{ padding: '10px 14px', margin: '6px 0', borderLeft: '3px solid #8b5cf6', background: '#7c3aed08', borderRadius: 6, fontSize: 13, color: '#94a3b8' }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span className="friday-thinking-dots" />
+                <span style={{ color: '#a78bfa', fontWeight: 600, fontSize: 12 }}>FRIDAY is thinking</span>
               </span>
-              <p style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap' }}>{brainThinking.text}</p>
+              {brainThinking.text && (
+                <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap', fontStyle: 'italic', opacity: 0.7 }}>{brainThinking.text}</p>
+              )}
             </div>
           )}
         </div>

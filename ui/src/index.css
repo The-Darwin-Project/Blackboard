@@ -64,9 +64,26 @@ html, body {
   @apply bg-text-muted;
 }
 
-/* Brain thinking indicator pulse (used by inline animation in ConversationFeed) */
+/* FRIDAY thinking indicator */
 @keyframes pulse {
   50% { opacity: 0.5; }
+}
+@keyframes friday-dots {
+  0%, 20% { content: '.'; }
+  40% { content: '..'; }
+  60%, 100% { content: '...'; }
+}
+.friday-thinking-dots {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #a78bfa;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: friday-spin 0.8s linear infinite;
+}
+@keyframes friday-spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Terminal view: hide scrollbar but keep scroll functionality */
