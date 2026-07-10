@@ -319,10 +319,18 @@ class EventInput(BaseModel):
 
 
 class MessageStatus(str, Enum):
-    """Message delivery status (read receipt protocol)."""
+    """Message delivery status (WhatsApp read-receipt model).
+
+    SENT → DELIVERED → EVALUATED → PROCESSED
+    - SENT: turn created in conversation
+    - DELIVERED: Brain dequeued the event (grey checks)
+    - EVALUATED: Brain LLM has read the turn (blue checks, mark-on-read)
+    - PROCESSED: Brain completed the full response cycle for this turn
+    """
     SENT = "sent"
     DELIVERED = "delivered"
     EVALUATED = "evaluated"
+    PROCESSED = "processed"
 
 
 class ConversationTurn(BaseModel):

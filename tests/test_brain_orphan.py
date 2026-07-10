@@ -52,6 +52,7 @@ def _make_brain() -> Brain:
     bb.append_journal = AsyncMock()
     bb.record_event = AsyncMock()
     bb.mark_turns_evaluated = AsyncMock()
+    bb.mark_turns_status = AsyncMock()
     bb.stamp_event = AsyncMock()
     bb.update_event_phase = AsyncMock()
     bb.get_active_events = AsyncMock(return_value=[])
@@ -207,7 +208,7 @@ class TestErrorTurnOnFailure:
         with pytest.raises(RuntimeError, match="LLM down"):
             await brain._process_event_inner("evt-orphan-1")
 
-        brain.blackboard.mark_turns_evaluated.assert_awaited()
+        brain.blackboard.mark_turns_status.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_no_error_turn_if_conversation_exists(self):

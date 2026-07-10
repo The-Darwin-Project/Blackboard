@@ -210,7 +210,9 @@ def _pred_unevaluated_close(ctx: GateContext) -> bool:
         status_val = status.value if hasattr(status, "value") else status
         if actor == "brain" and action in ("close", "phase"):
             break
-        if actor in ("jarvis", "user") and action == "message" and status_val != "evaluated":
+        if actor in ("jarvis", "user") and action == "message" and (
+            not status_val or status_val in ("sent", "delivered")
+        ):
             return True
     return False
 

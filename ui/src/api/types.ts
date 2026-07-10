@@ -135,7 +135,7 @@ export interface GraphResponse {
 // Message Status (read receipt protocol)
 // =============================================================================
 
-export type MessageStatus = 'sent' | 'delivered' | 'evaluated';
+export type MessageStatus = 'sent' | 'delivered' | 'evaluated' | 'processed';
 
 // =============================================================================
 // Event Evidence (structured ticket data)

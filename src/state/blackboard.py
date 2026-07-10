@@ -1502,6 +1502,51 @@ return 0
                 except WatchError:
                     continue
 
+    _STATUS_RANK: dict = {
+        "sent": 0, "delivered": 1, "evaluated": 2, "processed": 3,
+    }
+
+    async def mark_turns_status(
+        self,
+        event_id: str,
+        up_to_turn: Optional[int] = None,
+        status: Optional["MessageStatus"] = None,
+    ) -> int:
+        """Mark turns up to index with arbitrary status (batch version).
+
+        Only upgrades — never downgrades. Uses _STATUS_RANK ordering.
+        """
+        if status is None:
+            return 0
+        target_rank = self._STATUS_RANK.get(status.value, 99)
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        return 0
+                    event = EventDocument(**json.loads(data))
+                    scope = event.conversation[:up_to_turn] if up_to_turn is not None else event.conversation
+                    changed = 0
+                    for t in scope:
+                        current_rank = self._STATUS_RANK.get(
+                            t.status.value if hasattr(t.status, "value") else t.status, -1
+                        )
+                        if current_rank < target_rank:
+                            t.status = status
+                            changed += 1
+                    if changed == 0:
+                        return 0
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    logger.debug(f"Marked {changed} turns {status.value.upper()} for event {event_id}")
+                    return changed
+                except WatchError:
+                    continue
+
     async def mark_turn_status(
         self,
         event_id: str,

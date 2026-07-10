@@ -145,7 +145,8 @@ function ResultViewer({ result }: { result: string }) {
 function StatusCheck({ status }: { status?: MessageStatus }) {
   if (!status || status === 'sent') return <span title="Sent" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓</span>;
   if (status === 'delivered') return <span title="Delivered" style={{ fontSize: 11, color: '#64748b', marginLeft: 4 }}>✓✓</span>;
-  return <span title="Evaluated" style={{ fontSize: 11, color: '#3b82f6', marginLeft: 4 }}>✓✓</span>;
+  if (status === 'evaluated') return <span title="Read" style={{ fontSize: 11, color: '#3b82f6', marginLeft: 4 }}>✓✓</span>;
+  return <span title="Processed" style={{ fontSize: 11, color: '#10b981', marginLeft: 4 }}>✓✓●</span>;
 }
 
 function FeedbackButtons({ eventId, turnNumber }: { eventId: string; turnNumber: number }) {

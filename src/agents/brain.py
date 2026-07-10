@@ -1006,6 +1006,15 @@ class Brain:
         try:
             turn_snapshot = len(event.conversation)
 
+            # Mark-on-read: turns entering this cycle are now EVALUATED (blue checks).
+            # Gates can immediately trust "Brain has seen this." Crash recovery uses
+            # the absence of PROCESSED to detect incomplete cycles.
+            await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
+            await self._broadcast_status_update(
+                event_id, "evaluated",
+                turns=[t.turn for t in event.conversation[:turn_snapshot]],
+            )
+
             # Get LLM adapter; fall back to probe mode if unavailable
             adapter = await self._get_adapter()
             if not adapter:
@@ -1088,12 +1097,9 @@ class Brain:
             else:
                 logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
 
-            # After LLM loop exits -- only mark turns the Brain actually saw.
-            # Turns appended during LLM processing (e.g., Aligner confirm) stay SENT/DELIVERED
-            # and will trigger re-processing on the next event loop scan.
-            await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
-            # Also mark consecutive brain turns appended during the LLM loop (tool results),
-            # but stop at the first non-brain turn (e.g., aligner confirm, agent progress).
+            # After LLM loop exits -- mark turns as PROCESSED (cycle complete).
+            # Brain turns appended during the loop (tool results) also get PROCESSED.
+            # Non-brain turns after turn_snapshot stay SENT/DELIVERED for next cycle.
             event_after = await self.blackboard.get_event(event_id)
             extra_brain_count = 0
             if event_after:
@@ -1105,17 +1111,19 @@ class Brain:
                         break
                 if extra_brain_turns:
                     extra_brain_count = len(extra_brain_turns)
-                    await self.blackboard.mark_turns_evaluated(
-                        event_id, up_to_turn=turn_snapshot + extra_brain_count
-                    )
+            processed_up_to = turn_snapshot + extra_brain_count
+            await self.blackboard.mark_turns_status(
+                event_id, up_to_turn=processed_up_to,
+                status=MessageStatus.PROCESSED,
+            )
             if event_after:
-                evaluated_scope = event_after.conversation[:turn_snapshot + extra_brain_count]
-                evaluated_turns = [t.turn for t in evaluated_scope]
+                processed_scope = event_after.conversation[:processed_up_to]
+                processed_turns = [t.turn for t in processed_scope]
             else:
-                evaluated_turns = list(range(1, turn_snapshot + 1))
+                processed_turns = list(range(1, turn_snapshot + 1))
             await self._broadcast_status_update(
-                event_id, "evaluated",
-                turns=evaluated_turns,
+                event_id, "processed",
+                turns=processed_turns,
             )
         except Exception as e:
             event_fresh = await self.blackboard.get_event(event_id)
@@ -1127,7 +1135,10 @@ class Brain:
                     thoughts=f"Brain failed on first processing: {type(e).__name__}: {e}",
                 )
                 await self._append_and_broadcast(event_id, error_turn)
-                await self.blackboard.mark_turns_evaluated(event_id)
+                await self.blackboard.mark_turns_status(
+                    event_id, up_to_turn=turn_snapshot + 1,
+                    status=MessageStatus.PROCESSED,
+                )
             raise
 
     async def _process_with_llm(
@@ -1827,7 +1838,7 @@ class Brain:
             and any(t.actor == "user" and t.source == "slack" for t in event.conversation)
         )
         flags["has_pending_huddle"] = any(
-            t.action == "huddle" and t.status.value != "evaluated"
+            t.action == "huddle" and t.status.value in ("sent", "delivered")
             for t in event.conversation
         )
 
