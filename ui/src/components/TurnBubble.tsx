@@ -271,13 +271,36 @@ export default function TurnBubble({ turn, eventId, attachment, recallApplied, o
     );
   }
 
+  if ((turn.action === 'tool_result' || turn.action === 'triage' || turn.action === 'wait') && turn.actor === 'brain') {
+    const label = turn.action === 'tool_result'
+      ? (turn.waitingFor ? `tool: ${turn.waitingFor}` : 'tool result')
+      : turn.action === 'wait'
+        ? `waiting for ${turn.waitingFor || 'user'}...`
+        : 'triage';
+    const body = turn.thoughts || turn.evidence || '';
+    return (
+      <div style={{ borderLeft: '3px solid #475569', paddingLeft: 12, marginBottom: 8, opacity: 0.7 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }} onClick={() => setThoughtsExpanded(!thoughtsExpanded)}>
+          <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
+          <span style={{ fontSize: 12, color: '#64748b', fontStyle: 'italic' }}>{label}</span>
+          <span style={{ fontSize: 10, color: '#475569', transform: thoughtsExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▶</span>
+        </div>
+        {thoughtsExpanded && body && (
+          <div style={{ marginTop: 6, padding: '8px 12px', background: '#1e293b', borderRadius: 6, border: '1px solid #334155', maxHeight: 300, overflow: 'auto' }}>
+            <MarkdownPreview source={body} style={{ fontSize: 13, background: 'transparent', color: '#94a3b8' }} wrapperElement={{ 'data-color-mode': 'dark' }} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ ...(isHuman ? { borderRight: `3px solid ${color}`, paddingRight: 12, marginLeft: 'auto', maxWidth: '85%', textAlign: 'right' as const } : { borderLeft: `3px solid ${color}`, paddingLeft: 12 }), marginBottom: 12 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4, ...(isHuman ? { justifyContent: 'flex-end' } : {}) }}>
         {isHuman && attachment && <AttachmentIcon filename={attachment.filename} content={attachment.content} />}
         {isHuman && turn.actor !== 'brain' && <StatusCheck status={turn.status} />}
         <span style={{ fontSize: 11, color: '#666' }}>{new Date(turn.timestamp * 1000).toLocaleTimeString()}</span>
-        <span style={{ fontSize: 12, color: '#888' }}>{turn.action === 'tool_result' ? (turn.waitingFor ? `tool: ${turn.waitingFor}` : 'tool result') : turn.action}</span>
+        <span style={{ fontSize: 12, color: '#888' }}>{turn.action}</span>
         <span style={{ background: color, color: '#fff', padding: '2px 8px', borderRadius: 12, fontSize: 12, fontWeight: 600 }}>{turn.user_name ? `${ACTOR_LABELS[turn.actor] ?? turn.actor} (${turn.user_name})` : (ACTOR_LABELS[turn.actor] ?? turn.actor)}</span>
         {!isHuman && <span style={{ fontSize: 10, color: '#94a3b8', background: '#334155', padding: '1px 6px', borderRadius: 8, fontWeight: 500 }}>AI-generated</span>}
         {!isHuman && recallApplied && <span title="Decision informed by RECALL (lesson memory)" style={{ fontSize: 10, color: '#a78bfa', background: 'rgba(168, 85, 247, 0.15)', padding: '1px 6px', borderRadius: 8, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}>🧠 RECALL</span>}

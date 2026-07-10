@@ -308,6 +308,19 @@ BRAIN_PREFILL_MODEL = (
 
 _TERMINAL_PROMPT_FALLBACK = "What is the next action? Call one of your functions."
 
+# Tools whose invocation always ends the LLM loop this cycle. Text flushed
+# immediately before one of these is the Brain's final user-facing answer --
+# it must bypass the response_emitted guard (which otherwise suppresses it as
+# a duplicate of an earlier narration flush). Exclusions:
+#   report_incident/message_agent: handlers can return True (continuation).
+#   reply_to_agent: always returns False, but excluded for UX -- preceding text
+#   is agent-directed reasoning, not a user-facing answer.
+_CYCLE_ENDING_TOOLS = frozenset({
+    "wait_for_user", "close_event", "defer_event",
+    "select_agent", "wait_for_agent",
+    "request_user_approval",
+})
+
 
 import re as _re
 
@@ -1035,6 +1048,7 @@ class Brain:
             is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
             max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
             response_emitted = False  # Track if brain.response was already flushed this cycle
+            acknowledged_interrupts: set[int] = set()
             for iteration in range(max_llm_iterations):
                 # Re-fetch event to pick up turns appended by the previous iteration
                 if iteration > 0:
@@ -1050,9 +1064,11 @@ class Brain:
                     new_user_turns = [
                         t for t in event.conversation[turn_snapshot:]
                         if t.actor == "user" and t.status.value in ("sent", "delivered")
+                        and t.turn not in acknowledged_interrupts
                     ]
                     if new_user_turns:
                         user_interrupt_turn = new_user_turns[-1].turn
+                        acknowledged_interrupts.update(t.turn for t in new_user_turns)
                         response_emitted = False
                         self._response_emitted_for.discard(event_id)
                         logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
@@ -1311,7 +1327,9 @@ class Brain:
                 function_call = None
                 raw_parts = None
                 last_grounding = None
-                reflex_chunker, reflex_searcher = self._create_reflex_pair(event_id)
+                reflex_chunker, reflex_searcher = self._create_reflex_pair(
+                    event_id, event_domain=context_flags.get("event_domain") or ""
+                )
 
                 try:
                     stream = None
@@ -1448,8 +1466,11 @@ class Brain:
         # Process the final result
         if function_call:
             # Flush text response before executing tool (mixed text + function call)
-            # Suppress if a response was already emitted this cycle (RECALL gate continuation)
-            if accumulated_text and not response_emitted:
+            # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
+            # unless the upcoming tool is terminal (loop ends), in which case this text IS the
+            # final answer and must bypass the guard.
+            is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
+            if accumulated_text and (is_terminal or not response_emitted):
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
@@ -1540,7 +1561,7 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, thoughts_turn)
 
-        if accumulated_text and not response_emitted:
+        if accumulated_text:  # Text-only response is always terminal -- no tool, loop ends
             response_turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
@@ -1563,19 +1584,27 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
-    def _create_reflex_pair(self, event_id: str):
-        """Create (SentenceChunker, ReflexSearcher) or (None, None)."""
+    def _create_reflex_pair(self, event_id: str, event_domain: str = ""):
+        """Create (SentenceChunker, ReflexSearcher) or (None, None).
+
+        CASUAL events use a raised threshold (0.80) -- casual chat/slack chatter
+        produces more false-positive lesson matches at the default 0.60.
+        """
         if not self._memory_reflex_enabled or event_id in self._reflex_fired_for:
             return None, None
         try:
             from .brain_reflex import SentenceChunker, ReflexSearcher
             archivist = self.agents.get("_archivist_memory")
             if archivist and hasattr(archivist, "search_lessons"):
+                threshold = (
+                    0.80 if event_domain.lower() == "casual"
+                    else float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60"))
+                )
                 return (
                     SentenceChunker(),
                     ReflexSearcher(
                         archivist, event_id,
-                        score_threshold=float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60")),
+                        score_threshold=threshold,
                         max_searches=int(os.getenv("BRAIN_REFLEX_MAX_SEARCHES", "5")),
                     ),
                 )
@@ -4457,10 +4486,10 @@ class Brain:
                     if not user_after_defer:
                         continue
                     logger.info(f"User message interrupted defer for {eid} -- waking early")
-                if self._state_watcher:
-                    self._state_watcher.cancel(eid)
                 logger.info(f"Defer expired for {eid} -- attempting re-activation (defer_key exists={defer_until is not None})")
                 woke = await self._wake_deferred_event(eid)
+                if self._state_watcher:
+                    self._state_watcher.cancel(eid)
                 if woke:
                     if eid in self._waiting_for_user:
                         logger.warning(f"Deferred event {eid} re-activated but waiting for user -- skipping")
