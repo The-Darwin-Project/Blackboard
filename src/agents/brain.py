@@ -1015,6 +1015,15 @@ class Brain:
                 turns=[t.turn for t in event.conversation[:turn_snapshot]],
             )
 
+            # Signal UI immediately — user sees "thinking" during RECALL/skill loading
+            await self._broadcast({
+                "type": "brain_thinking",
+                "event_id": event_id,
+                "text": "",
+                "accumulated": "",
+                "is_thought": True,
+            })
+
             # Get LLM adapter; fall back to probe mode if unavailable
             adapter = await self._get_adapter()
             if not adapter:
