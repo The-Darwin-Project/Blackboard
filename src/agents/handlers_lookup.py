@@ -5,6 +5,8 @@
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: consult_deep_memory cached guard uses string matching coupled to Archivist response text.
+# 6. [Pattern]: consult_deep_memory scopes search_knowledge() via service_filter=svc or event.service --
+#    explicit tool-call `service` arg wins, falling back to the event's own service.
 """Lookup and query tool handlers (service, deep memory, journal)."""
 from __future__ import annotations
 
@@ -168,7 +170,10 @@ async def handle_consult_deep_memory(
 
     if archivist and hasattr(archivist, "search_knowledge"):
         try:
-            knowledge = await archivist.search_knowledge(query, limit=3, context=pulse_ctx, vector=query_vector)
+            knowledge = await archivist.search_knowledge(
+                query, limit=3, context=pulse_ctx, vector=query_vector,
+                service_filter=svc or (ev.service if ev else None),
+            )
         except Exception as e:
             logger.warning(f"Deep memory knowledge search failed: {e}")
             knowledge = None

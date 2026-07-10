@@ -6,6 +6,7 @@
 # 4. [Constraint]: max_searches cap prevents flooding the embedding API during verbose thinking.
 # 5. [Pattern]: All errors caught and logged as warnings. Failure = empty results, never crash.
 # 6. [Pattern]: Searches both lessons AND knowledge facts in parallel. Pre-embeds query once via embed_query(), shares vector. hasattr guards for test/mock safety.
+#    Knowledge half is service-scoped via ReflexSearcher(service=...) -> search_knowledge(service_filter=...); lessons stay unscoped.
 # 7. [Constraint]: Stale knowledge facts (hit.get("stale")) filtered before dedup key registration.
 
 """Memory Reflex: real-time lesson search during FRIDAY's thinking stream.
@@ -83,11 +84,13 @@ class ReflexSearcher:
         event_id: str,
         score_threshold: float = 0.60,
         max_searches: int = 5,
+        service: str | None = None,
     ):
         self._archivist = archivist
         self._event_id = event_id
         self._score_threshold = score_threshold
         self._max_searches = max_searches
+        self._service = service
         self._search_count: int = 0
         self._pending_tasks: list[asyncio.Task] = []
         self._seen_keys: set[str] = set()
@@ -113,7 +116,9 @@ class ReflexSearcher:
 
             tasks = [self._archivist.search_lessons(query, limit=2, vector=vector)]
             if hasattr(self._archivist, "search_knowledge"):
-                tasks.append(self._archivist.search_knowledge(query, limit=2, vector=vector))
+                tasks.append(self._archivist.search_knowledge(
+                    query, limit=2, vector=vector, service_filter=self._service
+                ))
 
             results_list = await asyncio.gather(*tasks, return_exceptions=True)
 

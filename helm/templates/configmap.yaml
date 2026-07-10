@@ -50,6 +50,8 @@ data:
   LESSON_RECALL_OVERFETCH: "{{ .Values.archivist.lessonRecallOverfetch }}"
   LESSON_RECALL_SCORE_FLOOR: "{{ .Values.archivist.lessonRecallScoreFloor }}"
   LESSON_RECALL_MAX_EXPERIENCE: "{{ .Values.archivist.lessonRecallMaxExperience }}"
+  KNOWLEDGE_DEDUP_THRESHOLD: "{{ .Values.archivist.knowledgeDedupThreshold }}"
+  KNOWLEDGE_DEDUP_SEARCH_LIMIT: "{{ .Values.archivist.knowledgeDedupLimit }}"
   
   # Brain Progressive Skills
   BRAIN_PROGRESSIVE_SKILLS: "{{ .Values.app.progressiveSkills }}"

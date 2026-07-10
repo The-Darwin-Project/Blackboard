@@ -10,6 +10,8 @@
 # 8. [Pattern]: /active response includes unread_notes for sidebar badge display.
 # 9. [Pattern]: Knowledge CRUD routes mirror lesson pattern. KnowledgeUpdateRequest uses extra="forbid" to enforce immutability of identity fields (topic, scope) -- Pydantic returns 422 on unknown fields.
 # 10. [Pattern]: PATCH /admin/knowledge/{id} does read-modify-reembed-upsert. Only mutable fields (fact, source, confidence, valid_until) can be updated.
+# 11. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
+#     deliberately omits it -- service is immutable once a fact is created.
 """
 Conversation Queue API - Event document management.
 
@@ -780,9 +782,11 @@ class KnowledgeRequest(BaseModel):
     source: str = Field(..., min_length=1, max_length=200)
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     valid_until: float | None = None
+    service: str | None = Field(default=None, max_length=200, pattern=r"^[a-zA-Z0-9_\-.]+$")
 
 
 class KnowledgeUpdateRequest(BaseModel):
+    # service is immutable (part of uuid5 identity) -- set at creation, not updatable.
     model_config = ConfigDict(extra="forbid")
     fact: str | None = Field(default=None, max_length=2000)
     source: str | None = Field(default=None, max_length=200)
