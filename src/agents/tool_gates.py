@@ -198,13 +198,17 @@ def _pred_read_sticky(ctx: GateContext) -> bool:
 
 
 def _pred_unevaluated_close(ctx: GateContext) -> bool:
-    """Block close_event when unevaluated jarvis.message or user.message turns exist."""
+    """Block close_event when unevaluated jarvis.message or user.message turns exist.
+
+    Scan stops at the close phase transition — messages before it triggered
+    the close and are by definition addressed.
+    """
     for t in reversed(ctx.conversation):
         actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
         status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
         status_val = status.value if hasattr(status, "value") else status
-        if actor == "brain" and action == "close":
+        if actor == "brain" and action in ("close", "phase"):
             break
         if actor in ("jarvis", "user") and action == "message" and status_val != "evaluated":
             return True
