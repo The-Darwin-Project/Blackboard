@@ -1597,7 +1597,7 @@ class Brain:
             archivist = self.agents.get("_archivist_memory")
             if archivist and hasattr(archivist, "search_lessons"):
                 threshold = (
-                    0.80 if event_domain == "casual"
+                    0.80 if event_domain.lower() == "casual"
                     else float(os.getenv("BRAIN_REFLEX_THRESHOLD", "0.60"))
                 )
                 return (
