@@ -813,6 +813,8 @@ class LiveAPIAdapter:
     async def _tool_search_deep_memory(self, query: str) -> str:
         if not query:
             return "Error: query required"
+        # Intentionally unscoped (no service_filter): JARVIS's meta-cognitive role
+        # requires cross-service visibility to detect patterns spanning multiple services.
         knowledge = await self._archivist.search_knowledge(query, limit=3) if hasattr(self._archivist, "search_knowledge") else []
         memories = await self._archivist.search(query, limit=3)
         lessons = await self._archivist.search_lessons(query, limit=3)

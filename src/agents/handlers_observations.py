@@ -4,6 +4,8 @@
 # 2. [Constraint]: No Brain import. All state access via ToolContext protocol.
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
+# 5. [Pattern]: handle_take_note prefixes the thoughts turn with `[{category}]` (e.g. "Noted [correction]").
+#    Archivist's archive_event() reads this text to detect field-note corrections during archival.
 """Observation and field notes tool handlers."""
 from __future__ import annotations
 
@@ -93,7 +95,7 @@ async def handle_take_note(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
         action="tool_result",
-        thoughts=f"Noted ({result['note_id'][:8]}): {content}",
+        thoughts=f"Noted [{category}] ({result['note_id'][:8]}): {content}",
         waitingFor="take_note",
         response_parts=response_parts,
     )
