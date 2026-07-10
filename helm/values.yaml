@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "a2d0538" # Updated by CI to commit SHA
+  tag: "b62504f" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
