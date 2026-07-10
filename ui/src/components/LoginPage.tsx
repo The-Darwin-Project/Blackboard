@@ -3,11 +3,45 @@
 // 1. [Pattern]: Background image imported via Vite asset pipeline (content-hashed filename).
 // 2. [Pattern]: Disclaimer default in component. Override via config.auth.loginDisclaimer if non-empty.
 // 3. [Pattern]: Login button hidden -- revealed on hover over "PROJECT DARWIN" title zone.
-// 4. [Gotcha]: Vite import produces a hashed URL (e.g., /assets/projectDarwin-abc123.png).
-//    This eliminates stale browser cache after pod restarts — new build = new hash.
-import { useState } from 'react';
+// 4. [Gotcha]: Vite import resolves to a URL string — the browser still fetches from the server.
+//    Cache API stores the blob on first load so the image survives pod restarts.
+// 5. [Pattern]: useCachedImage hook: Cache API first → network fallback → Vite URL fallback.
+import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import bgImage from '../assets/projectDarwin.webp';
+
+const BG_CACHE = 'darwin-login-bg';
+
+function useCachedImage(url: string): string {
+  const [src, setSrc] = useState(url);
+
+  useEffect(() => {
+    if (!('caches' in window)) return;
+    let revoked = false;
+
+    (async () => {
+      try {
+        const cache = await caches.open(BG_CACHE);
+        const cached = await cache.match(url);
+        if (cached) {
+          const blob = await cached.blob();
+          if (!revoked) setSrc(URL.createObjectURL(blob));
+          return;
+        }
+        const resp = await fetch(url);
+        if (resp.ok) {
+          await cache.put(url, resp.clone());
+          const blob = await resp.blob();
+          if (!revoked) setSrc(URL.createObjectURL(blob));
+        }
+      } catch { /* Cache API unavailable or fetch failed — use Vite URL */ }
+    })();
+
+    return () => { revoked = true; };
+  }, [url]);
+
+  return src;
+}
 
 const DEFAULT_DISCLAIMER =
   'This system uses AI to autonomously manage infrastructure. ' +
@@ -17,6 +51,7 @@ const LoginPage = () => {
   const { login, authConfig, isLoading } = useAuth();
   const disclaimer = authConfig?.loginDisclaimer || DEFAULT_DISCLAIMER;
   const [showLogin, setShowLogin] = useState(false);
+  const cachedBg = useCachedImage(bgImage);
 
   return (
     <div style={{
@@ -24,7 +59,7 @@ const LoginPage = () => {
       backgroundColor: '#030712',
     }}>
       <img
-        src={bgImage}
+        src={cachedBg}
         alt=""
         style={{
           position: 'absolute', inset: 0,
