@@ -485,9 +485,9 @@ def _tools_silent_park(_ctx: GateContext) -> set[str]:
     return {"wait_for_user"}
 
 
-def _msg_silent_park(ctx: GateContext) -> str:
+def _msg_silent_park(tool: str, _ctx: GateContext) -> str:
     return (
-        "wait_for_user blocked. No visible response generated since the last user message. "
+        f"[GATE] {tool} blocked. No visible response generated since the last user message. "
         "Generate a text response to the user before parking."
     )
 
