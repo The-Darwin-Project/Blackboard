@@ -289,6 +289,9 @@ class EventEvidence(BaseModel):
     github_context: Optional[dict] = Field(
         None, description="GitHub PR context: owner, repo, pr_number, pr_title, pr_state, action, check_status, head_sha, pr_url, maintainer"
     )
+    github_issue_context: Optional[dict] = Field(
+        None, description="GitHub Issue context: owner, repo, issue_number, title, body, labels, assignees, html_url, state, author, created_at, skill_label"
+    )
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
@@ -297,6 +300,10 @@ class EventEvidence(BaseModel):
     def _validate_vcs_context_exclusivity(self) -> 'EventEvidence':
         if self.gitlab_context and self.github_context:
             raise ValueError("EventEvidence cannot have both gitlab_context and github_context (one-of invariant)")
+        if self.gitlab_context and self.github_issue_context:
+            raise ValueError("EventEvidence cannot have both gitlab_context and github_issue_context (one-of invariant)")
+        if self.github_context and self.github_issue_context:
+            raise ValueError("EventEvidence cannot have both github_context and github_issue_context — PR and Issue are mutually exclusive")
         return self
 
 
@@ -412,8 +419,8 @@ class EventDocument(BaseModel):
             return None
         return _PHASE_ALIASES.get(v, v)
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage", "system", "jira"] = Field(
-        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, or Jira issue"
+    subject_type: Literal["service", "kargo_stage", "system", "jira", "github_issue"] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, Jira issue, or GitHub Issue"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)

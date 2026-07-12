@@ -15,6 +15,7 @@ _MD_SUBJECT_LABEL = {
     "kargo_stage": "Stage",
     "system": "Subject",
     "jira": "Jira Issue",
+    "github_issue": "GitHub Issue",
 }
 
 
@@ -24,7 +25,7 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
     subject_type = getattr(event, "subject_type", "service")
     if subject_type != "service":
         subj_label = _MD_SUBJECT_LABEL.get(subject_type, "Service")
-    elif isinstance(evidence, EventEvidence) and (evidence.gitlab_context or evidence.github_context):
+    elif isinstance(evidence, EventEvidence) and (evidence.gitlab_context or evidence.github_context or getattr(evidence, "github_issue_context", None)):
         subj_label = "Component"
     elif event.service in ("general", "system", ""):
         subj_label = "Topic"
@@ -103,6 +104,24 @@ def event_to_markdown(event: EventDocument, service_meta=None, mermaid: str = ""
                 emails = maintainer.get("emails", [])
                 lines.append(f"- **Maintainer Emails:** {', '.join(emails) if emails else 'none'}")
                 lines.append(f"- **Maintainer Source:** {maintainer.get('source', '')}")
+        issue_ctx = getattr(evidence, "github_issue_context", None)
+        if issue_ctx:
+            lines.append("")
+            lines.append("## GitHub Issue Context")
+            lines.append(f"- **Repo:** {issue_ctx.get('owner', '')}/{issue_ctx.get('repo', '')}")
+            lines.append(f"- **Issue:** #{issue_ctx.get('issue_number', '')} - {issue_ctx.get('title', '')}")
+            lines.append(f"- **URL:** {issue_ctx.get('html_url', '')}")
+            lines.append(f"- **State:** {issue_ctx.get('state', 'open')}")
+            lines.append(f"- **Author:** {issue_ctx.get('author', '')}")
+            if issue_ctx.get("assignees"):
+                lines.append(f"- **Assignees:** {', '.join(issue_ctx['assignees'])}")
+            if issue_ctx.get("labels"):
+                lines.append(f"- **Labels:** {', '.join(issue_ctx['labels'])}")
+            if issue_ctx.get("skill_label"):
+                lines.append(f"- **Skill:** {issue_ctx['skill_label']}")
+            body = issue_ctx.get("body", "")
+            if body:
+                lines.append(f"- **Body (truncated):** {body[:300]}")
     else:
         lines.append(f"- **Evidence:** {evidence}")
     lines.append(f"- **Time:** {event.event.timeDate}")

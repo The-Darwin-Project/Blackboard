@@ -355,16 +355,21 @@ export async function getKargoStages(): Promise<KargoStageStatus[]> {
 // =============================================================================
 
 export interface HeadhunterTodo {
-  todo_id: number;
+  todo_id?: number;
   action: string;
   priority: number;
-  mr_iid: number;
-  mr_title: string;
+  mr_iid?: number;
+  mr_title?: string;
   project_path: string;
   author: string;
-  pipeline_status: string;
+  pipeline_status?: string;
   created_at: string;
   target_url: string;
+  // Cross-platform extensions (optional for backward compat)
+  platform?: 'gitlab' | 'github';
+  pr_number?: number;
+  pr_title?: string;
+  queue_position?: number;
 }
 
 export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {

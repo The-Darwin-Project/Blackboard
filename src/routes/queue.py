@@ -924,5 +924,31 @@ async def headhunter_pending_todos():
             "created_at": todo.get("created_at", ""),
             "target_url": todo.get("target_url", ""),
         })
+    # Attach platform discriminator to GitLab items
+    for item in result:
+        item["platform"] = "gitlab"
+        item.setdefault("queue_position", None)
+
+    # Append GitHub queued PRs from agent cached state (single event loop, no lock needed)
+    try:
+        brain = await get_brain()
+        if brain and brain.headhunter and brain.headhunter._github:
+            for idx, pr in enumerate(brain.headhunter._github.queued_prs, start=1):
+                result.append({
+                    "platform": "github",
+                    "pr_number": pr.get("number"),
+                    "pr_title": pr.get("title", ""),
+                    "project_path": f"{pr.get('owner', '')}/{pr.get('repo', '')}",
+                    "author": pr.get("user", ""),
+                    "created_at": pr.get("created_at", ""),
+                    "target_url": pr.get("html_url", ""),
+                    "queue_position": idx,
+                    "action": "queued",
+                    "priority": 0,
+                })
+    except Exception:
+        pass
+
+    # Sort after GitHub items are appended so FIFO ordering spans both platforms
     result.sort(key=lambda t: t.get("created_at", ""))
     return result

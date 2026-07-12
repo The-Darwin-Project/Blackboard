@@ -46,6 +46,20 @@ The event targets a Jira issue. The prompt shows `Jira Issue:` with key,
 summary, status, and priority. Jira-specific tools provide issue state
 and transitions. Service lookup is not applicable.
 
+### github_issue
+
+The event targets a GitHub Issue assigned to Darwin for autonomous work. The prompt shows
+`GitHub Issue:` with the issue number, title, repository, and body.
+
+The issue body is the specification — it describes what the requester wants done, not a
+failure to triage. No deployment metadata, no pipeline state, no service lookup applies.
+Labels may indicate a skill domain or routing preference; the issue body is the authoritative
+source of intent.
+
+Darwin's execution boundary is the repository. Agents may create commits and pull requests
+within that repository. A PR link in the close comment is the expected deliverable when
+the work involves code changes.
+
 ### system
 
 The event is system-level (e.g., from JARVIS). There is no specific

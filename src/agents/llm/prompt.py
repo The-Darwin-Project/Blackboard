@@ -134,6 +134,23 @@ def _build_subject_block(
             if emails:
                 lines.append(f"  Maintainer Emails: {', '.join(emails)}")
 
+    elif subject_type == "github_issue" and ev and getattr(ev, "github_issue_context", None):
+        ic = ev.github_issue_context
+        lines.append(f"GitHub Issue: #{ic.get('issue_number', '')} - {ic.get('title', '')}")
+        lines.append(f"  Repo: {ic.get('owner', '')}/{ic.get('repo', '')}")
+        lines.append(f"  URL: {ic.get('html_url', '')}")
+        lines.append(f"  State: {ic.get('state', 'open')}")
+        lines.append(f"  Author: {ic.get('author', '')}")
+        if ic.get("assignees"):
+            lines.append(f"  Assignees: {', '.join(ic['assignees'])}")
+        if ic.get("labels"):
+            lines.append(f"  Labels: {', '.join(ic['labels'])}")
+        if ic.get("skill_label"):
+            lines.append(f"  Skill: {ic['skill_label']}")
+        body = ic.get("body", "")
+        if body:
+            lines.append(f"  Body (snippet): {body[:300]}")
+
     elif ev and ev.github_context:
         gc = ev.github_context
         lines.append(f"Component: {event.service}")

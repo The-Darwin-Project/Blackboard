@@ -450,6 +450,10 @@ headhunter:
     labelReview: "darwin-review" # Label users add to trigger review
     labelActive: "darwin-active" # Label applied while event is in progress
     labelDone: "darwin-done" # Label applied after event closes
+    labelQueued: "darwin-queued" # Label applied when PR is queued (WIP cap reached)
+    labelWork: "darwin-work" # Label on Issues to trigger Darwin triage
+    skills: {} # label -> git raw URL map for issue skill routing
+    # e.g., darwin_audit: "https://raw.githubusercontent.com/org/repo/main/skills/audit.md"
 # =============================================================================
 # Jira Integration (QE Mission Polling -- Headhunter Jira Head)
 # =============================================================================
