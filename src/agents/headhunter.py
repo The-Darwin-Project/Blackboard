@@ -377,7 +377,10 @@ class Headhunter:
             self._github._last_queued_prs = queued_items + newly_queued
             self._github_queued = len(self._github._last_queued_prs)
             self._github_pending = 0  # All new items moved to queued state — avoid double-count
-            await self._github_poll_issues()
+            try:
+                await self._github_poll_issues()
+            except Exception as e:
+                logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
             return
 
         si = self._github.load_triage_instruction()
@@ -400,9 +403,15 @@ class Headhunter:
             if gate_closed or not await self.check_flow_gate():
                 gate_closed = True
                 position = len(remaining_queued) + 1
-                await self._github._queue_pr(pr, position)
-                remaining_queued.append({**pr, "queued": True})
-                newly_queued_in_phase_b += 1
+                try:
+                    await self._github._queue_pr(pr, position)
+                    remaining_queued.append({**pr, "queued": True})
+                    newly_queued_in_phase_b += 1
+                except Exception as e:
+                    logger.warning(
+                        f"GitHub queue PR failed for "
+                        f"{pr.get('owner')}/{pr.get('repo')}#{pr.get('number')}: {e}"
+                    )
                 continue
             context = await self._github.fetch_context(pr)
             plan_text, domain = await self.analyze_and_plan(context, si)
@@ -418,7 +427,10 @@ class Headhunter:
             logger.debug("Headhunter GitHub: no actionable PRs")
 
         # Phase C: Poll Issues (darwin-work label) — no queuing for issues
-        await self._github_poll_issues()
+        try:
+            await self._github_poll_issues()
+        except Exception as e:
+            logger.warning(f"GitHub issue poll failed (non-fatal): {e}")
 
     async def _github_poll_issues(self) -> None:
         """Poll GitHub Issues (darwin-work label), triage via LLM, and create events.
@@ -431,7 +443,12 @@ class Headhunter:
         if not client:
             return
         repos = self._github._repos or await self._github._discover_installation_repos(client)
-        issues = await self._github._poll_issues(client, repos)
+        prev_pending = self._github_issue_pending
+        try:
+            issues = await self._github._poll_issues(client, repos)
+        except Exception as e:
+            logger.warning(f"GitHub issue poll failed (preserving last count={prev_pending}): {e}")
+            return
         self._github_issue_pending = len(issues)
         if not issues:
             return

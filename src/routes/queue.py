@@ -947,7 +947,7 @@ async def headhunter_pending_todos():
                     "priority": 0,
                 })
     except Exception as e:
-        logger.debug(f"GitHub queued PR lookup skipped: {e}")
+        logger.warning(f"GitHub queued PR lookup skipped: {e}")
 
     # Sort after GitHub items are appended so FIFO ordering spans both platforms
     result.sort(key=lambda t: t.get("created_at", ""))
