@@ -20,6 +20,8 @@
 #     Capped at 10 comment checks per cycle to avoid Jira rate limits.
 # 13. [Pattern]: Plan generation uses function calling (produce_execution_plan tool), not text parsing.
 #     _plan_args_to_yaml() converts structured args to YAML. _extract_yaml() kept as fallback.
+# 14. [Constraint]: Skill URL 10KB cap -- len(content) > 10240 → cache empty string + return None
+#     (caller falls back to BUSINESS_ANALYST_SYSTEM_PROMPT).
 """
 Headhunter Jira: polls Jira issues assigned to bot with a label filter.
 
@@ -324,6 +326,12 @@ class HeadhunterJira:
                     content = resp.text
                     if content.strip().startswith("<!DOCTYPE") or "<html" in content[:200]:
                         logger.warning(f"Skill fetch for '{label}' returned HTML (login page?) -- token may be expired")
+                        return None
+                    if len(content) > 10240:
+                        logger.warning(
+                            f"Skill URL {url} exceeds 10KB ({len(content)} bytes), using fallback"
+                        )
+                        self._skill_cache[label] = {"content": "", "ts": time.time()}
                         return None
                     self._skill_cache[label] = {"content": content, "ts": time.time()}
                     logger.debug(f"Skill fetched for label '{label}' ({len(content)} chars)")

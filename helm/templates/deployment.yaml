@@ -276,7 +276,7 @@ spec:
               value: "{{ .Values.headhunter.github.labelWork }}"
             {{- range $label, $url := .Values.headhunter.github.skills }}
             - name: "HEADHUNTER_GITHUB_SKILL_{{ $label | upper }}"
-              value: "{{ $url }}"
+              value: {{ $url | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
