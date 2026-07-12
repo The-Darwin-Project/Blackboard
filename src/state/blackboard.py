@@ -2081,6 +2081,16 @@ return 0
         """Look up stored head SHA for re-trigger comparison (O(1) HGET)."""
         return await self.redis.hget(self._PR_SHA_KEY, f"{owner}:{repo}:{pr_number}")
 
+    async def set_github_issue_processed(self, owner: str, repo: str, number: int) -> None:
+        """Mark a GitHub Issue as processed (7d TTL for dedup)."""
+        key = f"darwin:github:issue:{owner}:{repo}:{number}"
+        await self.redis.set(key, "1", ex=604800)  # 7 days
+
+    async def get_github_issue_processed(self, owner: str, repo: str, number: int) -> bool:
+        """Check if a GitHub Issue has already been processed."""
+        key = f"darwin:github:issue:{owner}:{repo}:{number}"
+        return await self.redis.exists(key) > 0
+
     async def append_journal(self, service: str, entry: str) -> None:
         """Append a one-line ops journal entry for a service."""
         from datetime import datetime, timezone

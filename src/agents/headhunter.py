@@ -62,6 +62,8 @@ class Headhunter:
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_pending: int = 0
         self._github_pending: int = 0
+        self._github_issue_pending: int = 0
+        self._github_queued: int = 0
 
         # Platform adapters
         self._gitlab = GitLabPlatform(blackboard)
@@ -102,7 +104,11 @@ class Headhunter:
             logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
             return self._emergency_plan(context), "complicated"
 
-        prompt = self._build_analysis_prompt(context)
+        prompt = (
+            self._build_issue_analysis_prompt(context)
+            if "issue_number" in context
+            else self._build_analysis_prompt(context)
+        )
         try:
             response = await adapter.generate(
                 system_prompt=system_instruction,
@@ -177,6 +183,26 @@ class Headhunter:
         return "\n".join(parts)
 
     @staticmethod
+    def _build_issue_analysis_prompt(context: dict) -> str:
+        """Build issue-specific prompt. Excludes PR-only fields (branch, pipeline, merge, head_sha)."""
+        parts = [
+            f"GitHub Issue #{context.get('issue_number', '?')}: {context.get('issue_title', 'unknown')}",
+            f"Repo: {context.get('owner', '?')}/{context.get('repo', '?')}",
+            f"State: {context.get('state', 'open')} | Author: {context.get('author', 'unknown')}",
+        ]
+        if context.get("labels"):
+            parts.append(f"Labels: {', '.join(context['labels'])}")
+        if context.get("assignees"):
+            parts.append(f"Assignees: {', '.join(context['assignees'])}")
+        body = context.get("body", "").replace("</issue_body>", "")
+        if body:
+            parts.append(f"<issue_body>\n{body}\n</issue_body>")
+        if context.get("skill_label"):
+            parts.append(f"Skill context: {context['skill_label']} routing")
+        parts.append("\nProduce a YAML frontmatter work plan.")
+        return "\n".join(parts)
+
+    @staticmethod
     def _extract_domain(plan_text: str) -> str:
         for line in plan_text.splitlines():
             if line.strip().startswith("domain:"):
@@ -192,7 +218,7 @@ class Headhunter:
     @property
     def pending_count(self) -> int:
         """Pending items from last poll cycle (not yet converted to events)."""
-        return self._gitlab_pending + self._github_pending
+        return self._gitlab_pending + self._github_pending + self._github_issue_pending + self._github_queued
 
     async def check_flow_gate(self) -> bool:
         """Back off when system is at global WIP capacity."""
@@ -317,26 +343,96 @@ class Headhunter:
             await self._gitlab.create_platform_event(todo, plan_text, domain, context)
 
     async def _github_poll_and_process(self) -> None:
-        """Single GitHub poll cycle: check gate, fetch PRs, analyze, create events."""
-        if not await self.check_flow_gate():
-            logger.debug("Headhunter flow gate closed -- skipping GitHub cycle")
-            return
+        """Single GitHub poll cycle: promote queued PRs, create events for new, poll issues.
 
+        Order: (1) reset queued cache, (2) poll ALL items (always — gate must not skip poll,
+        UI needs queued state), (3) separate queued/new, (4) check gate: if open promote queued
+        + process new; if closed queue new items and expose queued state for observability.
+        (5) poll issues.
+        """
+        # Reset queued cache at top of cycle
+        self._github._last_queued_prs = []
+
+        # Always poll regardless of gate state — UI needs queued count even when gate is closed
         prs = await self._github.poll_work_items()
-        self._github_pending = len(prs)
-        if not prs:
-            logger.debug("Headhunter GitHub: no actionable PRs")
+        queued_items = sorted(
+            [p for p in prs if p.get("queued")],
+            key=lambda x: x.get("created_at", ""),
+        )
+        new_items = [p for p in prs if not p.get("queued")]
+        self._github_pending = len(new_items)
+
+        if not await self.check_flow_gate():
+            logger.debug("Headhunter flow gate closed -- queuing new PRs, observing queued state")
+            # Queue all new items so they get the darwin-queued label
+            for i, pr in enumerate(new_items, start=len(queued_items) + 1):
+                await self._github._queue_pr(pr, i)
+            # Expose all queued items for /headhunter/pending observability
+            newly_queued = [{**pr, "queued": True} for pr in new_items]
+            self._github._last_queued_prs = queued_items + newly_queued
+            self._github_queued = len(self._github._last_queued_prs)
+            await self._github_poll_issues()
             return
 
-        logger.info(f"Headhunter GitHub: {len(prs)} actionable PR(s)")
         si = self._github.load_triage_instruction()
-        for pr in prs:
+
+        # Phase A: Promote oldest queued PRs first (FIFO)
+        remaining_queued = list(queued_items)
+        for pr in queued_items:
             if not await self.check_flow_gate():
-                logger.info("Headhunter flow gate closed mid-cycle -- stopping")
                 break
             context = await self._github.fetch_context(pr)
             plan_text, domain = await self.analyze_and_plan(context, si)
             await self._github.create_platform_event(pr, plan_text, domain, context)
+            remaining_queued.pop(0)
+
+        # Phase B: Process new darwin-review PRs
+        for pr in new_items:
+            if not await self.check_flow_gate():
+                # Gate closed mid-cycle — queue remaining new PRs
+                position = len(remaining_queued) + 1
+                await self._github._queue_pr(pr, position)
+                remaining_queued.append({**pr, "queued": True})
+                continue
+            context = await self._github.fetch_context(pr)
+            plan_text, domain = await self.analyze_and_plan(context, si)
+            await self._github.create_platform_event(pr, plan_text, domain, context)
+
+        # Expose remaining queued for /headhunter/pending REST endpoint
+        self._github._last_queued_prs = remaining_queued
+        self._github_queued = len(remaining_queued)
+
+        if not queued_items and not new_items:
+            logger.debug("Headhunter GitHub: no actionable PRs")
+
+        # Phase C: Poll Issues (darwin-work label) — no queuing for issues
+        await self._github_poll_issues()
+
+    async def _github_poll_issues(self) -> None:
+        """Poll GitHub Issues (darwin-work label), triage via LLM, and create events.
+
+        Issues skip queue logic — they are processed immediately or skipped if gate is closed.
+        LLM triage (analyze_and_plan) is called per issue with its label-specific SI,
+        matching the PR triage path for consistent evidence quality.
+        """
+        client = self._github._get_client()
+        if not client:
+            return
+        repos = self._github._repos or await self._github._discover_installation_repos(client)
+        issues = await self._github._poll_issues(client, repos)
+        self._github_issue_pending = len(issues)
+        if not issues:
+            return
+
+        logger.info(f"Headhunter GitHub Issues: {len(issues)} actionable issue(s)")
+        for issue in issues:
+            if not await self.check_flow_gate():
+                logger.info("Headhunter flow gate closed mid-issue-cycle -- stopping")
+                break
+            # Load label-specific SI then triage via LLM (same path as PR triage)
+            si = await self._github._load_issue_triage_instruction(issue.get("labels", []))
+            plan_text, domain = await self.analyze_and_plan(issue, si)
+            await self._github.create_issue_event(issue, plan_text, domain)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)
@@ -363,9 +459,11 @@ class Headhunter:
         if not event:
             return
         evidence = event.event.evidence if event.event else None
-        if evidence and evidence.github_context:
+        if evidence and getattr(evidence, "github_issue_context", None):
+            await self._github.post_issue_feedback(event)
+        elif evidence and getattr(evidence, "github_context", None):
             await self._github.post_feedback(event)
-        elif evidence and evidence.gitlab_context:
+        elif evidence and getattr(evidence, "gitlab_context", None):
             await self._gitlab.post_feedback(event)
         else:
             await self._gitlab.post_feedback(event)
@@ -379,7 +477,9 @@ class Headhunter:
             if await self.blackboard.is_feedback_sent(event.id):
                 continue
             evidence = event.event.evidence if event.event else None
-            if evidence and evidence.github_context:
+            if evidence and getattr(evidence, "github_issue_context", None):
+                await self._github.post_issue_feedback(event)
+            elif evidence and getattr(evidence, "github_context", None):
                 await self._github.post_feedback(event)
             else:
                 await self._gitlab.post_feedback(event)

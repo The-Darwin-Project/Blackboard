@@ -270,6 +270,14 @@ spec:
               value: "{{ .Values.headhunter.github.labelActive }}"
             - name: HEADHUNTER_GITHUB_LABEL_DONE
               value: "{{ .Values.headhunter.github.labelDone }}"
+            - name: HEADHUNTER_GITHUB_LABEL_QUEUED
+              value: "{{ .Values.headhunter.github.labelQueued }}"
+            - name: HEADHUNTER_GITHUB_LABEL_WORK
+              value: "{{ .Values.headhunter.github.labelWork }}"
+            {{- range $label, $url := .Values.headhunter.github.skills }}
+            - name: "HEADHUNTER_GITHUB_SKILL_{{ $label | upper }}"
+              value: "{{ $url }}"
+            {{- end }}
             {{- end }}
             {{- if .Values.ephemeralAgents.enabled }}
             - name: TEKTON_EVENTLISTENER_URL
