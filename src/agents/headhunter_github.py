@@ -20,7 +20,7 @@
 # 15. [Pattern]: close_reason sanitized via re.sub([<>@`])[:200] before posting to GitHub.
 # 16. [Pattern]: post_issue_feedback guards via is_feedback_sent() at entry (defense-in-depth dedup).
 # 17. [Pattern]: set_github_issue_processed called BEFORE label swap -- dedup survives label API failures.
-# 18. [Pattern]: domain_confidence="default" when plan_text is None (inline stub, no LLM ran).
+# 18. [Pattern]: domain_confidence is always "assessed" -- headhunter always runs LLM triage.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -391,6 +391,8 @@ class GitHubPlatform:
             cached = self._issue_skill_cache.get(label_key)
             if cached and now < cached[1]:
                 return cached[0], None
+            # Redact query params before logging — credentials may appear in query string
+            log_url = url.split("?")[0] + ("?..." if "?" in url else "")
             try:
                 async with httpx.AsyncClient(timeout=10.0) as http:
                     resp = await http.get(url)
@@ -399,7 +401,7 @@ class GitHubPlatform:
                     if content:
                         if len(content) > 10240:
                             logger.warning(
-                                f"Skill URL {url} exceeds 10KB ({len(content)} bytes), using fallback"
+                                f"Skill URL {log_url} exceeds 10KB ({len(content)} bytes), using fallback"
                             )
                             self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
                             warning = (
@@ -413,7 +415,7 @@ class GitHubPlatform:
             except httpx.HTTPStatusError as e:
                 # 404: log once + cache sentinel (full 5-min TTL prevents re-logging every cycle)
                 if e.response.status_code == 404:
-                    logger.warning(f"Skill URL 404 for label {label_key}: {url}")
+                    logger.warning(f"Skill URL 404 for label {label_key}: {log_url}")
                     self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
                 else:
                     # 5xx / other: cache with short 60s TTL to prevent hammering every cycle
@@ -703,8 +705,9 @@ class GitHubPlatform:
         )
         # Warning string injected by _github_poll_issues when skill URL exceeded 10KB cap
         skill_size_warning: str | None = issue.get("_skill_size_warning")
-        # domain_confidence reflects whether the LLM actually ran (plan_text provided by caller)
-        domain_confidence = "assessed" if plan_text else "default"
+        # domain_confidence is always "assessed" -- headhunter always runs LLM triage
+        # (emergency inline stub is still a classification, per event-evidence-contract)
+        domain_confidence = "assessed"
         body_truncated = issue.get("body", "")[:2000]
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
         body_truncated = body_truncated.replace("</issue_body>", "")
