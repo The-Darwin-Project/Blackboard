@@ -255,7 +255,7 @@ class SlackChannel:
                     await say(":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
                     return
 
-                await set_status("Darwin is thinking...")
+                await set_status("FRIDAY is thinking...")
 
                 event_id = await self._blackboard.get_event_by_slack_thread(channel_id, thread_ts)
 
@@ -815,25 +815,28 @@ class SlackChannel:
     # =========================================================================
 
     async def _handle_assistant_thinking(self, event_id: str, message: dict) -> None:
-        """Set status indicator for Assistant threads. Streaming removed — turns use Block Kit."""
+        """Set status indicator for Assistant threads. Refreshes periodically to prevent Slack timeout."""
         text = message.get("text", "")
         is_thought = message.get("is_thought", False)
 
-        if not text:
-            ctx = self._assistant_context.get(event_id)
-            if not ctx:
-                logger.debug(f"No assistant context for {event_id}, skipping setStatus")
+        ctx = self._assistant_context.get(event_id)
+        if not ctx:
+            logger.debug(f"No assistant context for {event_id}, skipping setStatus")
+            return
+
+        if not text or is_thought:
+            now = time.time()
+            last_set = ctx.get("_last_status_at", 0)
+            if now - last_set < 20:
                 return
             try:
                 await self._app.client.assistant_threads_setStatus(
                     channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
-                    status="Darwin is analyzing...",
+                    status="FRIDAY is thinking...",
                 )
+                ctx["_last_status_at"] = now
             except Exception as e:
                 logger.warning(f"setStatus failed for {event_id}: {e}")
-            return
-
-        if is_thought:
             return
 
     # =========================================================================
