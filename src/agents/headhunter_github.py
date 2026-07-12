@@ -16,6 +16,11 @@
 # 11. [Pattern]: _queue_pr() ADD new label BEFORE removing old (prevents orphan on partial failure).
 # 12. [Pattern]: queued_prs @property exposes _last_queued_prs for /headhunter/pending REST endpoint.
 # 13. [Gotcha]: Issue dedup uses separate Redis namespace darwin:github:issue:{owner}:{repo}:{number}.
+# 14. [Constraint]: Skill URL 10KB cap -- >10240 bytes falls back to _EMERGENCY_ISSUE_SI + returns warning.
+# 15. [Pattern]: close_reason sanitized via re.sub([<>@`])[:200] before posting to GitHub.
+# 16. [Pattern]: post_issue_feedback guards via is_feedback_sent() at entry (defense-in-depth dedup).
+# 17. [Pattern]: set_github_issue_processed called BEFORE label swap -- dedup survives label API failures.
+# 18. [Pattern]: domain_confidence="default" when plan_text is None (inline stub, no LLM ran).
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -118,9 +124,10 @@ class GitHubPlatform:
         self._queued_label = os.getenv("HEADHUNTER_GITHUB_LABEL_QUEUED", "darwin-queued")
         self._work_label = os.getenv("HEADHUNTER_GITHUB_LABEL_WORK", "darwin-work")
         self._last_queued_prs: list[dict] = []
-        # Skill URL map: populated from HEADHUNTER_GITHUB_SKILL_<LABEL> env vars at runtime
+        # Skill URL map: populated from HEADHUNTER_GITHUB_SKILL_<LABEL> env vars at runtime.
+        # Both env-var key (underscores) and label lookup (hyphens→underscores) normalize identically.
         self._issue_skill_urls: dict[str, str] = {
-            k[len("HEADHUNTER_GITHUB_SKILL_"):].lower(): v
+            k[len("HEADHUNTER_GITHUB_SKILL_"):].lower().replace("-", "_"): v
             for k, v in os.environ.items()
             if k.startswith("HEADHUNTER_GITHUB_SKILL_") and v.strip()
         }
@@ -366,12 +373,14 @@ class GitHubPlatform:
             "body": (issue_data.get("body") or "")[:2000],
         }
 
-    async def _load_issue_triage_instruction(self, labels: list[str]) -> str:
+    async def _load_issue_triage_instruction(self, labels: list[str]) -> tuple[str, str | None]:
         """Load issue triage SI from skill URL cache (5-min TTL).
 
+        Returns (si_content, skill_size_warning | None).
         Matches issue labels against _issue_skill_urls (HEADHUNTER_GITHUB_SKILL_<LABEL> env vars).
         404 does NOT reset TTL — avoids hammering a missing URL on every cycle.
-        Falls back to _EMERGENCY_ISSUE_SI on any failure.
+        >10KB content falls back to _EMERGENCY_ISSUE_SI and returns a user-facing warning string.
+        Falls back to _EMERGENCY_ISSUE_SI on any failure (no warning on fallback-only paths).
         """
         now = time.monotonic()
         for label in labels:
@@ -381,19 +390,30 @@ class GitHubPlatform:
                 continue
             cached = self._issue_skill_cache.get(label_key)
             if cached and now < cached[1]:
-                return cached[0]
+                return cached[0], None
             try:
                 async with httpx.AsyncClient(timeout=10.0) as http:
                     resp = await http.get(url)
                     resp.raise_for_status()
                     content = resp.text.strip()
                     if content:
+                        if len(content) > 10240:
+                            logger.warning(
+                                f"Skill URL {url} exceeds 10KB ({len(content)} bytes), using fallback"
+                            )
+                            self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
+                            warning = (
+                                f"Darwin skill file at `{url}` exceeds the 10KB size limit. "
+                                "Using default triage. Please reduce the skill file size."
+                            )
+                            return _EMERGENCY_ISSUE_SI, warning
                         self._issue_skill_cache[label_key] = (content, now + 300)
-                        return content
+                        return content, None
                     logger.warning(f"Issue skill URL returned empty content for {label_key}")
             except httpx.HTTPStatusError as e:
-                # 404: cache a sentinel to avoid re-fetching — full 5-min TTL
+                # 404: log once + cache sentinel (full 5-min TTL prevents re-logging every cycle)
                 if e.response.status_code == 404:
+                    logger.warning(f"Skill URL 404 for label {label_key}: {url}")
                     self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 300)
                 else:
                     # 5xx / other: cache with short 60s TTL to prevent hammering every cycle
@@ -401,7 +421,7 @@ class GitHubPlatform:
                     self._issue_skill_cache[label_key] = (_EMERGENCY_ISSUE_SI, now + 60)
             except Exception as e:
                 logger.warning(f"Issue skill fetch error for {label_key}: {e}")
-        return _EMERGENCY_ISSUE_SI
+        return _EMERGENCY_ISSUE_SI, None
 
     @staticmethod
     def _normalize_search_item(item: dict) -> dict:
@@ -681,7 +701,10 @@ class GitHubPlatform:
             (l.lower().replace("-", "_") for l in labels if l.lower().replace("-", "_") in self._issue_skill_urls),
             None,
         )
-        si = await self._load_issue_triage_instruction(labels)
+        # Warning string injected by _github_poll_issues when skill URL exceeded 10KB cap
+        skill_size_warning: str | None = issue.get("_skill_size_warning")
+        # domain_confidence reflects whether the LLM actually ran (plan_text provided by caller)
+        domain_confidence = "assessed" if plan_text else "default"
         body_truncated = issue.get("body", "")[:2000]
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
         body_truncated = body_truncated.replace("</issue_body>", "")
@@ -691,7 +714,7 @@ class GitHubPlatform:
             source_type="headhunter",
             triggered_by="github-issue",
             domain=domain or "complicated",
-            domain_confidence="assessed",
+            domain_confidence=domain_confidence,
             severity="info",
             github_issue_context={
                 "owner": owner,
@@ -731,6 +754,9 @@ class GitHubPlatform:
         )
         logger.info(f"GitHub issue event created: {event_id} for #{number} in {owner}/{repo}")
 
+        # Mark processed BEFORE label swap — dedup survives a label API failure on next cycle
+        await self.blackboard.set_github_issue_processed(owner, repo, number)
+
         # Label swap: ADD active BEFORE removing work
         await self._add_labels(owner, repo, number, [self._active_label])
         await self._remove_label(owner, repo, number, self._work_label)
@@ -742,12 +768,15 @@ class GitHubPlatform:
             link = f" `{event_id}`"
         await self._post_comment(owner, repo, number,
             f"**Darwin** is triaging this issue. Tracking as{link}.")
+        if skill_size_warning:
+            await self._post_comment(owner, repo, number, skill_size_warning)
 
-        await self.blackboard.set_github_issue_processed(owner, repo, number)
         return event_id
 
     async def post_issue_feedback(self, event: object) -> None:
         """Post resolution feedback on a GitHub Issue (active→done label + close comment)."""
+        if await self.blackboard.is_feedback_sent(event.id):
+            return
         issue_ctx = None
         if hasattr(event, "event") and event.event.evidence and hasattr(event.event.evidence, "github_issue_context"):
             issue_ctx = event.event.evidence.github_issue_context
@@ -766,10 +795,11 @@ class GitHubPlatform:
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
+        close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
         if close_reason not in ("stale", "duplicate"):
             turns = len(event.conversation)
             await self._post_comment(owner, repo, number,
-                f"**Darwin** closed this issue ({turns} turns). Outcome: {close_reason[:500]}")
+                f"**Darwin** closed this issue ({turns} turns). Outcome: {close_reason}")
 
         await self.blackboard.mark_feedback_sent(event.id)
 
@@ -789,6 +819,7 @@ class GitHubPlatform:
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
+        close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
 
         await self._remove_label(owner, repo, pr_number, self._active_label)
         await self._add_labels(owner, repo, pr_number, [self._done_label])

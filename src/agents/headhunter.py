@@ -10,6 +10,9 @@
 # 7. [Pattern]: Feedback loop uses poll-interval safety net for cross-pod catch-up.
 # 8. [Gotcha]: mark_as_done is called in feedback (on close), NOT during poll.
 # 9. [Pattern]: process_event_feedback routes by evidence context (github_context vs gitlab_context).
+# 10. [Pattern]: issue_title sanitized (replace </ → < /) in _build_issue_analysis_prompt.
+# 11. [Pattern]: Phase B uses gate_closed flag — no per-item Redis gate re-check after first closure.
+# 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -185,8 +188,10 @@ class Headhunter:
     @staticmethod
     def _build_issue_analysis_prompt(context: dict) -> str:
         """Build issue-specific prompt. Excludes PR-only fields (branch, pipeline, merge, head_sha)."""
+        # Sanitize title to prevent XML-like breakout in the prompt
+        title = context.get("issue_title", "unknown").replace("</", "< /")
         parts = [
-            f"GitHub Issue #{context.get('issue_number', '?')}: {context.get('issue_title', 'unknown')}",
+            f"GitHub Issue #{context.get('issue_number', '?')}: {title}",
             f"Repo: {context.get('owner', '?')}/{context.get('repo', '?')}",
             f"State: {context.get('state', 'open')} | Author: {context.get('author', 'unknown')}",
         ]
@@ -371,6 +376,7 @@ class Headhunter:
             newly_queued = [{**pr, "queued": True} for pr in new_items]
             self._github._last_queued_prs = queued_items + newly_queued
             self._github_queued = len(self._github._last_queued_prs)
+            self._github_pending = 0  # All new items moved to queued state — avoid double-count
             await self._github_poll_issues()
             return
 
@@ -386,13 +392,17 @@ class Headhunter:
             await self._github.create_platform_event(pr, plan_text, domain, context)
             remaining_queued.pop(0)
 
-        # Phase B: Process new darwin-review PRs
+        # Phase B: Process new darwin-review PRs.
+        # gate_closed flag avoids per-item Redis gate re-check once closure is confirmed.
+        gate_closed = False
+        newly_queued_in_phase_b = 0
         for pr in new_items:
-            if not await self.check_flow_gate():
-                # Gate closed mid-cycle — queue remaining new PRs
+            if gate_closed or not await self.check_flow_gate():
+                gate_closed = True
                 position = len(remaining_queued) + 1
                 await self._github._queue_pr(pr, position)
                 remaining_queued.append({**pr, "queued": True})
+                newly_queued_in_phase_b += 1
                 continue
             context = await self._github.fetch_context(pr)
             plan_text, domain = await self.analyze_and_plan(context, si)
@@ -401,6 +411,8 @@ class Headhunter:
         # Expose remaining queued for /headhunter/pending REST endpoint
         self._github._last_queued_prs = remaining_queued
         self._github_queued = len(remaining_queued)
+        # Subtract newly-queued items from pending — they moved to queued state (avoids double-count)
+        self._github_pending = max(0, self._github_pending - newly_queued_in_phase_b)
 
         if not queued_items and not new_items:
             logger.debug("Headhunter GitHub: no actionable PRs")
@@ -429,9 +441,12 @@ class Headhunter:
             if not await self.check_flow_gate():
                 logger.info("Headhunter flow gate closed mid-issue-cycle -- stopping")
                 break
-            # Load label-specific SI then triage via LLM (same path as PR triage)
-            si = await self._github._load_issue_triage_instruction(issue.get("labels", []))
+            # Load label-specific SI then triage via LLM (same path as PR triage).
+            # skill_warning is non-None when skill URL exceeded 10KB cap.
+            si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
             plan_text, domain = await self.analyze_and_plan(issue, si)
+            if skill_warning:
+                issue = {**issue, "_skill_size_warning": skill_warning}
             await self._github.create_issue_event(issue, plan_text, domain)
 
     # =========================================================================

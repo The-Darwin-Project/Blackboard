@@ -277,9 +277,10 @@ async def test_issue_skill_url_failure_uses_fallback():
         mock_client.get = AsyncMock(side_effect=Exception("connection refused"))
         mock_client_cls.return_value = mock_client
 
-        result = await platform._load_issue_triage_instruction(["darwin_general"])
+        si, warning = await platform._load_issue_triage_instruction(["darwin_general"])
 
-    assert result == _EMERGENCY_ISSUE_SI
+    assert si == _EMERGENCY_ISSUE_SI
+    assert warning is None
 
 
 # =============================================================================
