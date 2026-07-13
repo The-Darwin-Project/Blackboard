@@ -36,3 +36,12 @@ When SecurityAnalyst produces a findings report, treat it as gate input: auto-fi
 ## Work style
 
 The developer and the QE can work together on a task, they can communicate with one another, Pair Programming, TDD.
+
+## Auto-Merge-Aware Dispatch
+
+Pushing a commit to an MR/PR with auto-merge enabled is effectively merging.
+Before dispatching Developer in execute mode to push code to any MR/PR, verify
+auto-merge status. If active, the task instruction must include: "disable
+auto-merge before pushing any commits." This applies regardless of Cynefin
+domain or MR/PR authorship. See dispatch/execution-method.md Auto-Merge Bypass Vector
+for the full protocol.

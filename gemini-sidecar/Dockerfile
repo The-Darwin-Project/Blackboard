@@ -143,7 +143,7 @@ RUN \
 RUN ORAS_VERSION=$(curl -sL https://api.github.com/repos/oras-project/oras/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v) && \
     curl -sL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" -o /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz && \
     curl -sL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_checksums.txt" -o /tmp/oras_checksums.txt && \
-    cd /tmp && grep "oras_${ORAS_VERSION}_linux_amd64.tar.gz" oras_checksums.txt | sha256sum -c && \
+    cd /tmp && grep "oras_${ORAS_VERSION}_linux_amd64.tar.gz$" oras_checksums.txt | sha256sum -c && \
     tar -xz -C /usr/local/bin/ -f /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz oras && \
     rm -f /tmp/oras_${ORAS_VERSION}_linux_amd64.tar.gz /tmp/oras_checksums.txt && \
     oras version

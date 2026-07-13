@@ -42,6 +42,12 @@ versions" persists even if the investigation shows a version change would fix
 the pipeline. The correct action is to report the finding and let the
 maintainer decide.
 
+## Auto-Merge Awareness
+
+Bot-authored MR/PRs typically have auto-merge enabled. When dispatching agents
+to fix pipeline failures on these MR/PRs, include an auto-merge check in the
+task instruction. See dispatch/execution-method.md Auto-Merge Bypass Vector.
+
 ## Maintainer Notification
 
 Notifications are an interrupt — every notification demands context-switching

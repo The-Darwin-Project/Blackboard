@@ -10,6 +10,10 @@ tags: [safety, guardrails]
   (see execution-method.md). The pipeline validates correctness; the approval gate
   controls authorization. The pipeline-as-gate does NOT replace human approval for
   source mutations — it validates the change after approval is granted.
+- Pushing code to a branch with auto-merge active (MWPS on GitLab, auto-merge on GitHub)
+  IS a merge — the pipeline is the only remaining gate. Before any agent pushes a commit
+  to any MR/PR, check auto-merge status. If active, disable it before pushing. This
+  applies regardless of who authored the MR/PR.
 - Safe-to-fail implies safe-to-revert. This revert obligation applies to COMPLEX probes
   (see post-agent/probe-aftermath.md and domain/complex.md) and is a separate concern
   from the source mutation approval gate. A failed probe commit left on the branch passes

@@ -88,7 +88,9 @@ When working in `implement` mode (as part of the Developer + QE pair):
 3. Deliver your final report via `team_send_results` with branch, commits, files changed, and YAML frontmatter (`reasoning` required)
 4. FRIDAY will dispatch QE to verify, then tell you to open the PR
 5. Only open a PR when FRIDAY dispatches you again with approval
-6. CI auto-merge handles the rest -- do not manually merge
+6. FRIDAY coordinates the merge after CI passes. Do not manually merge or
+   re-enable auto-merge. When pushing to any MR/PR branch, always check
+   auto-merge status first — see darwin-mr-lifecycle skill.
 
 In `execute` or `investigate` mode (solo tasks), use `team_send_results` directly -- no huddle gate needed.
 
@@ -107,11 +109,14 @@ regardless of whether Bot Instructions are present.
 
 When fixing a pipeline failure on an existing MR/PR:
 
+- Before modifying the branch, check whether auto-merge is active on the MR/PR. If
+  active, disable it BEFORE pushing your commit — otherwise your code will auto-merge
+  to main on pipeline success without human review.
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
 - Apply the fix on that branch, commit, and push to the remote source branch only after FRIDAY approval.
 - The MR/PR pipeline will retrigger automatically on the push.
 - If the MR/PR was created by a bot (Kargo, submodule updater), you still fix on the MR's source branch.
-- Report back whether a new pipeline started after the push.
+- Report back whether a new pipeline started after the push and the auto-merge status.
 
 ## Code Rules
 
