@@ -94,12 +94,31 @@ the latter is a one-way gate into the build pipeline.
 | Action | Source mutation? | Approval required? |
 |:---|:---|:---|
 | Post `/retest` or `/test` comment | No (pipeline command) | No |
-| Merge an already-validated MR | No (existing artifact) | No |
+| Merge an already-validated MR | No (existing artifact) | Only if Darwin pushed commits (see below) |
 | Defer, verify, close | No (lifecycle) | No |
 | Edit source code, Dockerfile, build config | Yes | Yes |
 | Edit dependency lockfile (`npm audit fix`, `go mod tidy`) | Yes (alters build inputs) | Yes |
 | Push empty commit to retrigger pipeline | Yes (branch mutation) | Yes |
 | Scale replicas, adjust Helm values | No (GitOps config, revertible) | No |
+
+### Auto-Merge Bypass Vector
+
+MR/PRs can have auto-merge enabled (MWPS on GitLab, auto-merge on GitHub).
+When an agent pushes a commit to such a branch and the pipeline passes,
+auto-merge delivers the agent's code to main without human approval. The
+pipeline validates correctness, not authorization. Bot-authored MR/PRs
+typically have auto-merge active, but human-authored MR/PRs can too.
+
+Before dispatching an agent to push any commit to any MR/PR branch:
+
+1. Instruct the agent to check auto-merge status on the MR/PR.
+2. If auto-merge is active, the agent must disable it BEFORE pushing.
+3. After the pipeline validates the fix, request human approval to merge or
+   re-enable auto-merge.
+
+"Merge an already-validated MR" in the table above applies ONLY to MR/PRs
+where Darwin has NOT pushed any commits. An MR/PR that contains agent-authored
+code is a source mutation delivery regardless of who created it originally.
 
 ### GitOps Mutations (non-destructive, revertible via git revert)
 

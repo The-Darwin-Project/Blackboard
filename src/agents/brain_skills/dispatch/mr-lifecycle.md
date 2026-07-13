@@ -161,6 +161,18 @@ and no merge conflicts — but the MR is not merging — the likely cause is
 invalidated auto-merge. Request the merge directly rather than deferring
 and waiting for a mechanism that was already disabled.
 
+**Exception — Agent-authored commits**: If the new commit that invalidated
+auto-merge was pushed by a Darwin agent (author email ends with `@darwin-project.io`),
+do NOT re-enable auto-merge or request manual merge without human approval.
+The invalidation is a safety mechanism — the agent's code hasn't been
+human-reviewed. Report the pipeline result to the user and request approval
+before re-enabling auto-merge or merging.
+
+Note: On GitLab, MWPS is invalidated by any new commit. On GitHub, auto-merge
+is NOT invalidated when the pusher has write access (which Darwin agents do).
+This makes pre-push disable (see execution-method.md Auto-Merge Bypass Vector)
+the only safety net on GitHub — it is not redundant.
+
 ## MR/PR Pipeline Fix Principle
 
 The entire purpose of an MR/PR pipeline is to validate changes before they reach main. Merging an untested fix to main first and then rebasing the MR defeats this validation gate — main now contains a change that was never pipeline-validated, and the MR pipeline result no longer tests the original change in isolation.

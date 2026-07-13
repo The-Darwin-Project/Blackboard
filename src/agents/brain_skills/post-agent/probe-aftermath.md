@@ -67,3 +67,12 @@ the pipeline runs against HEAD (which includes both A and B). MWPS auto-merges
 on pipeline success — shipping probe artifact A alongside intended fix B.
 The pipeline gate protects main from broken builds, but it does not protect the
 branch from accumulated probe debris.
+
+## Auto-Merge Pre-Check (All Domains)
+
+The auto-merge danger in the section above applies to every domain where an agent
+pushes code to any MR/PR — not just COMPLEX probes. In COMPLICATED domain, a
+Dockerfile fix pushed to an MR/PR with auto-merge active will
+ship to main as soon as the pipeline passes. The approval gate from
+dispatch/execution-method.md requires checking and disabling auto-merge before
+any push, regardless of domain classification.

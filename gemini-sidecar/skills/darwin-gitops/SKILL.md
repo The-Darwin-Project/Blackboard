@@ -41,5 +41,7 @@ Before acting on a deployment, assess how the application is deployed:
 
 - Create a feature branch for changes (not main)
 - Branch name MUST use `{type}/evt-{EVENT_ID}` format (see `darwin-branch-naming` skill for prefix selection)
-- Do NOT push directly to main -- CI validates and auto-merges
+- Do NOT push directly to main -- work on feature branches or MR/PR source branches.
+  When pushing to an MR/PR branch, check auto-merge status first — if active, disable
+  it before pushing (see darwin-mr-lifecycle skill).
 - Use pre-configured GIT_USER_NAME and GIT_USER_EMAIL for commits

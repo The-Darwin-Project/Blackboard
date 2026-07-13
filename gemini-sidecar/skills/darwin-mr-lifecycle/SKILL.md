@@ -24,6 +24,10 @@ and let FRIDAY authorize the push.
 
 When the pipeline failure requires a code/config fix (e.g., Dockerfile update, dependency bump):
 
+- Before modifying the branch, check whether auto-merge is active on the MR/PR. If
+  active, disable it BEFORE pushing your commit. A push to a branch with auto-merge
+  enabled will merge to main on pipeline success, bypassing human review of your code
+  changes. Report the auto-merge status in your response to FRIDAY.
 - Checkout the MR's **source branch** -- NEVER push fixes to main directly.
 - Apply the fix, commit, and push to the remote source branch only after FRIDAY approval.
 - The MR/PR pipeline retriggers automatically on the push.
@@ -52,11 +56,15 @@ Do NOT poll in a loop -- report the current state and let FRIDAY handle the timi
 
 Before merging, perform these pre-merge checks IN ORDER:
 
-1. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to FRIDAY.
-2. **CI bot comments**: Read the last 5 MR/PR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to FRIDAY.
-3. **Merge status**: Confirm `merge_status` is `can_be_merged`.
+1. **Agent-authored commits**: Check the MR/PR's recent commit history. If ANY
+   commit was authored by a Darwin agent (author email ends with `@darwin-project.io`),
+   do NOT merge. Report to FRIDAY that the MR/PR contains agent-authored code
+   requiring human review.
+2. **Pipeline status on HEAD**: Verify the latest pipeline ran on the MR's current HEAD commit and its status is `success`. If the pipeline is from an older commit, or status is `pending`/`running`/`failed`, do NOT merge. Report the state to FRIDAY.
+3. **CI bot comments**: Read the last 5 MR/PR notes. If any CI bot comment contains `CAUTION`, `error`, `Pending approval`, or `waiting for /ok-to-test`, do NOT merge. Report the CI warning to FRIDAY.
+4. **Merge status**: Confirm `merge_status` is `can_be_merged`.
 
-Only merge when ALL three checks pass. Merge the MR/PR via the GitLab API.
+Only merge when ALL checks pass.
 
 ## Safety Rules
 
@@ -66,6 +74,7 @@ Only merge when ALL three checks pass. Merge the MR/PR via the GitLab API.
 - NEVER merge when the latest pipeline is from a different commit than HEAD
 - NEVER auto-rebase -- if merge_status is `cannot_be_merged`, report conflicts to maintainer
 - NEVER delete branches after merge (let GitLab's auto-delete handle it)
+- NEVER merge when the MR/PR contains agent-authored commits (author email ends with `@darwin-project.io`)
 
 ## Conflict / Unmergeable Handling
 
@@ -97,3 +106,4 @@ Do NOT include GitLab usernames or @mentions -- FRIDAY has its own maintainer li
 - **Merge blocked by CI**: "Cannot merge — CI bot reported warnings or pipeline has not run on HEAD. Details: {summary of CI comments}."
 - **Conflict (submodule)**: "Closed obsolete submodule MR/PR -- newer update already merged to main."
 - **Conflict (other)**: "Merge conflicts detected. Recommend notifying maintainer to rebase."
+- **Agent code detected**: "MR/PR contains Darwin-authored commits. Requires human approval before merge. Recommend notifying maintainer."

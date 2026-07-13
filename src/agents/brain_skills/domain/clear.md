@@ -8,8 +8,10 @@ Known knowns. A proven fix exists. Execute it, verify it, close.
 
 Known fixes that require source code mutations (code changes, dependency bumps,
 Dockerfile edits) still require approval per execution-method.md before dispatch.
-Known fixes that are operational (retest, merge, defer, scale) proceed at full
-velocity.
+Known fixes that are operational (retest, defer, scale) proceed at full velocity.
+Merge proceeds at full velocity ONLY for MR/PRs where Darwin has not pushed any
+commits — if the MR/PR contains agent-authored code, treat merge as a source
+mutation delivery requiring human approval (see execution-method.md).
 
 <source_context ref="source/{event.source}">
 CLEAR recognition signals:
