@@ -56,7 +56,7 @@ Do NOT poll in a loop -- report the current state and let FRIDAY handle the timi
 
 Before merging, perform these pre-merge checks IN ORDER:
 
-1. **Agent-authored commits**: Check the MR/PR's recent commit history. If ANY
+1. **Agent-authored commits**: Check ALL commits between HEAD and the merge base. If ANY
    commit was authored by a Darwin agent (author email ends with `@darwin-project.io`),
    do NOT merge. Report to FRIDAY that the MR/PR contains agent-authored code
    requiring human review.

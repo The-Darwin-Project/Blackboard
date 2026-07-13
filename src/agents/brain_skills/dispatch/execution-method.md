@@ -94,7 +94,7 @@ the latter is a one-way gate into the build pipeline.
 | Action | Source mutation? | Approval required? |
 |:---|:---|:---|
 | Post `/retest` or `/test` comment | No (pipeline command) | No |
-| Merge an already-validated MR | No (existing artifact) | Only if Darwin pushed commits (see below) |
+| Merge an already-validated MR | No (existing artifact) | Only if Darwin pushed commits (see `darwin-mr-lifecycle` sidecar skill) |
 | Defer, verify, close | No (lifecycle) | No |
 | Edit source code, Dockerfile, build config | Yes | Yes |
 | Edit dependency lockfile (`npm audit fix`, `go mod tidy`) | Yes (alters build inputs) | Yes |
