@@ -17,6 +17,9 @@ spec:
   params:
     - name: event_id
       description: Darwin event ID this agent is bound to
+    - name: installation_id
+      description: GitHub App installation ID (empty for non-GitHub events)
+      default: ""
   resourcetemplates:
     - apiVersion: tekton.dev/v1
       kind: TaskRun
@@ -57,6 +60,8 @@ spec:
                   value: ""
                 - name: EVENT_ID
                   value: $(tt.params.event_id)
+                - name: GITHUB_INSTALLATION_ID
+                  value: $(tt.params.installation_id)
                 - name: BRAIN_WS_URL
                   value: "ws://{{ .Release.Name }}-brain:8000{{ .Values.app.agentWsPath }}"
                 - name: BRAIN_HTTP_URL
@@ -284,6 +289,8 @@ spec:
   params:
     - name: event_id
       value: $(body.event_id)
+    - name: installation_id
+      value: $(body.installation_id)
 ---
 apiVersion: triggers.tekton.dev/v1beta1
 kind: EventListener
@@ -314,7 +321,7 @@ spec:
             name: "cel"
           params:
             - name: "filter"
-              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn')"
+              value: "has(body.event_id) && body.event_id.matches('^[a-z]+-[a-f0-9]{8,}$') && (!has(body.action) || body.action == 'spawn') && (!has(body.installation_id) || body.installation_id == '' || body.installation_id.matches('^[0-9]+$'))"
       bindings:
         - ref: {{ .Release.Name }}-ephemeral-agent
       template:

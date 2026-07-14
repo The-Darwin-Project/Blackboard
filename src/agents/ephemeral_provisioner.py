@@ -117,8 +117,11 @@ class EphemeralProvisioner:
     def dispatch_metrics(self) -> DispatchMetrics:
         return _dc_replace(self._dispatch_metrics)
 
-    async def ensure_agent(self, event_id: str) -> "AgentConnection | str | None":
+    async def ensure_agent(self, event_id: str, installation_id: str = "") -> "AgentConnection | str | None":
         """Ensure an ephemeral agent exists for this event. Spawn if needed.
+
+        `installation_id` (GitHub App installation) is forwarded to the TaskRun as
+        GITHUB_INSTALLATION_ID -- the provisioner stays pure and never resolves it itself.
 
         Returns ``AgentConnection`` on success, or:
         - ``INFRA_SENTINEL``: Tekton unreachable, caller should defer
@@ -138,7 +141,7 @@ class EphemeralProvisioner:
             return None
 
         try:
-            await self._trigger_taskrun(event_id)
+            await self._trigger_taskrun(event_id, installation_id)
             agent = await self._wait_for_registration(
                 event_id, self._deadline_sec,
                 self._poll_interval_sec, self._stall_timeout_sec,
@@ -156,7 +159,7 @@ class EphemeralProvisioner:
             await asyncio.sleep(5)
 
             try:
-                await self._trigger_taskrun(event_id)
+                await self._trigger_taskrun(event_id, installation_id)
                 retry_deadline = max(60.0, self._deadline_sec / 2)
                 agent = await self._wait_for_registration(
                     event_id, retry_deadline,
@@ -195,9 +198,11 @@ class EphemeralProvisioner:
         if self._health_port:
             self._health_port.clear_event(event_id)
 
-    async def _trigger_taskrun(self, event_id: str) -> None:
+    async def _trigger_taskrun(self, event_id: str, installation_id: str = "") -> None:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(self._url, json={"event_id": event_id, "action": "spawn"})
+            resp = await client.post(self._url, json={
+                "event_id": event_id, "action": "spawn", "installation_id": installation_id,
+            })
             resp.raise_for_status()
             logger.info("Triggered TaskRun for %s (status=%d)", event_id, resp.status_code)
 

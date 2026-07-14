@@ -49,7 +49,7 @@ function findPrivateKeyPath() {
  */
 function hasGitHubCredentials() {
   return fs.existsSync(APP_ID_PATH) &&
-         fs.existsSync(INSTALL_ID_PATH) &&
+         (process.env.GITHUB_INSTALLATION_ID || fs.existsSync(INSTALL_ID_PATH)) &&
          findPrivateKeyPath() !== null;
 }
 
@@ -66,7 +66,7 @@ async function generateInstallationToken() {
 
   // Read credentials from mounted secrets
   const appId = fs.readFileSync(APP_ID_PATH, 'utf8').trim();
-  const installId = fs.readFileSync(INSTALL_ID_PATH, 'utf8').trim();
+  const installId = (process.env.GITHUB_INSTALLATION_ID || fs.readFileSync(INSTALL_ID_PATH, 'utf8')).trim();
   const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
 
   console.log(`[${new Date().toISOString()}] Generating GitHub App token (app=${appId}, install=${installId})`);

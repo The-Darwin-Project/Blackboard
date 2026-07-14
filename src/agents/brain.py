@@ -3230,7 +3230,11 @@ class Brain:
                         except Exception:
                             logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
                         _spawn_start = time.time()
-                        provision_result = await self._ephemeral_provisioner.ensure_agent(event_id)
+                        evidence = event_doc.event.evidence if event_doc.event else None
+                        _ctx = (getattr(evidence, "github_context", None)
+                                or getattr(evidence, "github_issue_context", None) or {})
+                        _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
+                        provision_result = await self._ephemeral_provisioner.ensure_agent(event_id, _install_id)
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:
                                 self._ephemeral_provisioner.record_dispatch_circuit_break()
