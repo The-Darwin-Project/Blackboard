@@ -433,7 +433,7 @@ class MultiInstallationManager:
 
     async def get_client_for(self, installation_id: str) -> Optional["AsyncGitHubClient"]:
         """Direct lookup by installation ID (no discovery refresh -- caller already knows the ID)."""
-        if not self._installations:
+        if not self._installations and time.monotonic() >= self._last_refresh + self.REFRESH_TTL_SECONDS:
             await self._refresh()
         return self._clients.get(str(installation_id))
 
