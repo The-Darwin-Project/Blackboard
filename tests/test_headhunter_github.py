@@ -2,7 +2,8 @@
 # @ai-rules:
 # 1. [Constraint]: No real GitHub API calls. All async paths mocked.
 # 2. [Pattern]: Tests validate invariants from code review fixes + label lifecycle.
-# 3. [Pattern]: _make_platform_with_client helper provides pre-wired mock client for label/comment tests.
+# 3. [Pattern]: _make_platform_with_client helper provides pre-wired mock manager+client for
+#    label/comment tests. _mock_manager() builds a MultiInstallationManager double.
 """Tests for GitHubPlatform adapter — discovery, check aggregation, state_key, label lifecycle."""
 from __future__ import annotations
 
@@ -27,6 +28,18 @@ def _make_platform(repos: str = ""):
         from src.agents.headhunter_github import GitHubPlatform
         bb = AsyncMock()
         return GitHubPlatform(bb)
+
+
+def _mock_manager(client, installation_id: str = "456", repos: list[str] | None = None):
+    """Build a MultiInstallationManager double wired to a single installation/client."""
+    manager = MagicMock()
+    manager.get_clients_with_repos = AsyncMock(
+        return_value=[(installation_id, client, repos or ["org/repo"])]
+    )
+    manager.get_client_for = AsyncMock(return_value=client)
+    manager.get_client_for_repo = AsyncMock(return_value=(installation_id, client))
+    manager.close_all = AsyncMock()
+    return manager
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +67,7 @@ class TestListFromReposFiltering:
         resp.json.return_value = prs
         client.get = AsyncMock(return_value=resp)
 
-        result = await platform._list_from_repos(client, ["org/repo"])
+        result = await platform._list_from_repos(client, ["org/repo"], "456")
 
         assert len(result) == 2
 
@@ -204,12 +217,12 @@ class TestFormatterEmoji:
 # ---------------------------------------------------------------------------
 
 def _make_platform_with_client(repos: str = "org/repo"):
-    """Create a GitHubPlatform with a pre-wired mock client."""
+    """Create a GitHubPlatform with a pre-wired mock manager/client."""
     platform = _make_platform(repos)
     client = AsyncMock()
     client.post = AsyncMock(return_value=MagicMock(status_code=200))
     client.delete = AsyncMock(return_value=MagicMock(status_code=200))
-    platform._client = client
+    platform._manager = _mock_manager(client)
     return platform, client
 
 
@@ -351,7 +364,7 @@ class TestRetriggerSameSha:
              "head": {"sha": "abc123"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 0
@@ -379,7 +392,7 @@ class TestRetriggerNewSha:
              "head": {"sha": "new_sha"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 1
@@ -407,7 +420,7 @@ class TestRetriggerNoStoredSha:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 1
@@ -428,7 +441,7 @@ class TestLabel404OnRemove:
             "404", request=MagicMock(), response=resp_404,
         ))
 
-        await platform._remove_label("org", "repo", 42, "nonexistent")
+        await platform._remove_label("456", "org", "repo", 42, "nonexistent")
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +465,7 @@ class TestActiveSkip:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 0
@@ -479,7 +492,7 @@ class TestTerminalPrSkipped:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 0
@@ -498,7 +511,7 @@ class TestTerminalPrSkipped:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 0
@@ -527,7 +540,7 @@ class TestMultipleLabelsPriority:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 1
@@ -547,7 +560,162 @@ class TestMultipleLabelsPriority:
              "head": {"sha": "abc"}},
         ]
         client.get = AsyncMock(return_value=resp)
-        platform._client = client
+        platform._manager = _mock_manager(client)
 
         result = await platform.poll_work_items()
         assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# Multi-installation routing tests (g-n)
+# ---------------------------------------------------------------------------
+
+
+class TestMultiInstallationRouting:
+
+    @pytest.mark.asyncio
+    async def test_poll_work_items_merges_two_installations(self):
+        """(g) poll_work_items with 2 installations merges repos from both."""
+        platform = _make_platform()
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client_a, client_b = AsyncMock(), AsyncMock()
+        resp_a = MagicMock()
+        resp_a.json.return_value = [{
+            "number": 1, "title": "PR-A", "state": "open", "user": {"login": "a"},
+            "html_url": "...", "created_at": "...",
+            "labels": [{"name": "darwin-review"}], "head": {"sha": "sha-a"},
+        }]
+        resp_b = MagicMock()
+        resp_b.json.return_value = [{
+            "number": 2, "title": "PR-B", "state": "open", "user": {"login": "b"},
+            "html_url": "...", "created_at": "...",
+            "labels": [{"name": "darwin-review"}], "head": {"sha": "sha-b"},
+        }]
+        client_a.get = AsyncMock(return_value=resp_a)
+        client_b.get = AsyncMock(return_value=resp_b)
+
+        manager = MagicMock()
+        manager.get_clients_with_repos = AsyncMock(return_value=[
+            ("1", client_a, ["org-a/repo1"]),
+            ("2", client_b, ["org-b/repo1"]),
+        ])
+        platform._manager = manager
+
+        result = await platform.poll_work_items()
+        assert len(result) == 2
+        installs = {pr["installation_id"] for pr in result}
+        assert installs == {"1", "2"}
+
+    @pytest.mark.asyncio
+    async def test_one_installation_500_other_still_works(self):
+        """(h) one installation 500s -- the other's PRs still come through."""
+        platform = _make_platform()
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client_a, client_b = AsyncMock(), AsyncMock()
+        resp_500 = MagicMock(status_code=500)
+        client_a.get = AsyncMock(side_effect=httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=resp_500,
+        ))
+        resp_b = MagicMock()
+        resp_b.json.return_value = [{
+            "number": 2, "title": "PR-B", "state": "open", "user": {"login": "b"},
+            "html_url": "...", "created_at": "...",
+            "labels": [{"name": "darwin-review"}], "head": {"sha": "sha-b"},
+        }]
+        client_b.get = AsyncMock(return_value=resp_b)
+
+        manager = MagicMock()
+        manager.get_clients_with_repos = AsyncMock(return_value=[
+            ("1", client_a, ["org-a/repo1"]),
+            ("2", client_b, ["org-b/repo1"]),
+        ])
+        platform._manager = manager
+
+        result = await platform.poll_work_items()
+        assert len(result) == 1
+        assert result[0]["installation_id"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_installation_id_threaded_to_label_helpers(self):
+        """(i)/(j) create_platform_event threads installation_id to label helper calls."""
+        platform, client = _make_platform_with_client()
+        platform.blackboard.create_event = AsyncMock(return_value="evt-new")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        work_item = _make_work_item()
+        work_item["installation_id"] = "999"
+
+        await platform.create_platform_event(
+            work_item, "plan text", "COMPLICATED",
+            {"action": "review_requested", "check_status": "unknown",
+             "pr_title": "Test", "pr_state": "open", "pr_url": "...",
+             "head_sha": "abc123", "head_branch": "feat", "base_branch": "main",
+             "author": "alice", "labels": ["darwin-review"], "changed_files": []},
+        )
+
+        platform._manager.get_client_for.assert_any_call("999")
+
+    @pytest.mark.asyncio
+    async def test_repos_env_intersects_per_installation(self):
+        """(k) self._repos intersects each installation's discovered repo set."""
+        platform = _make_platform("org-a/repo1")
+        platform.blackboard.get_active_events = AsyncMock(return_value=[])
+
+        client_a, client_b = AsyncMock(), AsyncMock()
+        resp_a = MagicMock()
+        resp_a.json.return_value = [{
+            "number": 1, "title": "PR-A", "state": "open", "user": {"login": "a"},
+            "html_url": "...", "created_at": "...",
+            "labels": [{"name": "darwin-review"}], "head": {"sha": "sha-a"},
+        }]
+        client_a.get = AsyncMock(return_value=resp_a)
+        client_b.get = AsyncMock(return_value=MagicMock(json=MagicMock(return_value=[])))
+
+        manager = MagicMock()
+        manager.get_clients_with_repos = AsyncMock(return_value=[
+            ("1", client_a, ["org-a/repo1", "org-a/repo2"]),
+            ("2", client_b, ["org-b/repo1"]),
+        ])
+        platform._manager = manager
+
+        result = await platform.poll_work_items()
+        assert len(result) == 1
+        client_b.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_github_pr_status_raises_on_cache_miss(self):
+        """(l) poll_github_pr_status raises RuntimeError when repo isn't in any installation's cache."""
+        platform = _make_platform()
+        manager = MagicMock()
+        manager.get_client_for_repo = AsyncMock(return_value=None)
+        platform._manager = manager
+
+        with pytest.raises(RuntimeError):
+            await platform.poll_github_pr_status("unknown-org", "unknown-repo", 1)
+
+    @pytest.mark.asyncio
+    async def test_refresh_pr_state_override_uses_repo_cache(self):
+        """(m) refresh_pr_state with overrides resolves the client via the repo cache."""
+        platform = _make_platform()
+        platform.blackboard.get_event = AsyncMock(return_value=None)
+
+        result = await platform.refresh_pr_state(
+            "evt-x", override_owner="org-a", override_repo="repo1", override_pr_number=5,
+        )
+        assert "error" in result  # event not found short-circuits before client resolution
+
+    @pytest.mark.asyncio
+    async def test_preexisting_event_empty_installation_id_falls_back_to_repo_cache(self):
+        """(n) empty installation_id (pre-existing event) resolves via repo -> installation cache."""
+        platform = _make_platform()
+        client = AsyncMock()
+        manager = MagicMock()
+        manager.get_client_for = AsyncMock(return_value=None)
+        manager.get_client_for_repo = AsyncMock(return_value=("1", client))
+        platform._manager = manager
+
+        resolved = await platform._resolve_client("", "org-a", "repo1")
+        assert resolved is client
+        manager.get_client_for_repo.assert_called_once_with("org-a", "repo1")

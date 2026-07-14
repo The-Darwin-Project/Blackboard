@@ -720,3 +720,66 @@ class TestEvaluateHealthWiring:
         assert result.status == SpawnStatus.RUNNING
         assert result.reason == "sidecar_healthy"
         mock_httpx_get.assert_called_once()
+
+
+class TestInstallationIdPropagation:
+    """(p)/(q): ensure_agent forwards installation_id to the TaskRun POST body."""
+
+    @pytest.mark.asyncio
+    async def test_ensure_agent_with_installation_id_includes_it_in_post_body(self):
+        """(p) ensure_agent(event_id, "123") -> POST body includes installation_id."""
+        prov, registry = _make_provisioner()
+        registry.get_ephemeral = AsyncMock(return_value=None)
+
+        captured = {}
+
+        class _FakeResponse:
+            status_code = 202
+            def raise_for_status(self):
+                pass
+
+        class _FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def post(self, url, json):
+                captured["json"] = json
+                return _FakeResponse()
+
+        with patch("httpx.AsyncClient", return_value=_FakeAsyncClient()):
+            with patch.object(prov, "_wait_for_registration", new_callable=AsyncMock) as mock_wait:
+                mock_wait.return_value = MagicMock()
+                await prov.ensure_agent("evt-install001", "123")
+
+        assert captured["json"]["installation_id"] == "123"
+        assert captured["json"]["event_id"] == "evt-install001"
+
+    @pytest.mark.asyncio
+    async def test_ensure_agent_without_installation_id_sends_empty_string(self):
+        """(q) ensure_agent(event_id) -> sends installation_id="" (default, backward compat)."""
+        prov, registry = _make_provisioner()
+        registry.get_ephemeral = AsyncMock(return_value=None)
+
+        captured = {}
+
+        class _FakeResponse:
+            status_code = 202
+            def raise_for_status(self):
+                pass
+
+        class _FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def post(self, url, json):
+                captured["json"] = json
+                return _FakeResponse()
+
+        with patch("httpx.AsyncClient", return_value=_FakeAsyncClient()):
+            with patch.object(prov, "_wait_for_registration", new_callable=AsyncMock) as mock_wait:
+                mock_wait.return_value = MagicMock()
+                await prov.ensure_agent("evt-install002")
+
+        assert captured["json"]["installation_id"] == ""
