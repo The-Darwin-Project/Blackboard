@@ -712,3 +712,24 @@ class TestProcessClosedEventsFeedback:
             await hh._process_closed_events()
 
         assert ev.id not in bb.feedback_sent
+
+
+class TestPollIssuesAllInstallations:
+    """(o) orchestrator delegates to poll_issues_all_installations() across installations."""
+
+    @pytest.mark.asyncio
+    async def test_github_poll_issues_calls_all_installations(self):
+        hh = _make_headhunter(HEADHUNTER_GITHUB_ENABLED="true", GITHUB_APP_ID="123")
+        issue_a = {"owner": "org-a", "repo": "repo1", "installation_id": "1", "issue_number": 1, "labels": []}
+        issue_b = {"owner": "org-b", "repo": "repo1", "installation_id": "2", "issue_number": 2, "labels": []}
+        hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_a, issue_b])
+        hh._github._load_issue_triage_instruction = AsyncMock(return_value=("SI", None))
+        hh._github.create_issue_event = AsyncMock(side_effect=["evt-1", "evt-2"])
+        hh.analyze_and_plan = AsyncMock(return_value=("plan", "COMPLICATED"))
+        hh.check_flow_gate = AsyncMock(return_value=True)
+
+        await hh._github_poll_issues()
+
+        hh._github.poll_issues_all_installations.assert_called_once()
+        assert hh._github.create_issue_event.call_count == 2
+        assert hh._github_issue_pending == 2

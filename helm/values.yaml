@@ -254,7 +254,9 @@ brain:
 github:
   # Pre-created secret containing:
   # - app-id: GitHub App ID
-  # - installation-id: GitHub App Installation ID
+  # - installation-id: GitHub App Installation ID (OPTIONAL -- omit for multi-install mode,
+  #   where all installations of the App are discovered and polled dynamically. Set this
+  #   key to restrict polling to a single installation, exclusive-filter style.)
   # - <name>.pem: Private key file
   existingSecret: "" # e.g., "darwin-github-app"
   # Branch to use (for reference, sidecar defaults to main)

@@ -190,6 +190,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.github.existingSecret }}
                   key: installation-id
+                  optional: true
             - name: GITHUB_PRIVATE_KEY_PATH
               value: "/secrets/github" # Directory -- .pem file discovered dynamically
             - name: GITHUB_BRANCH
@@ -663,6 +664,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.github.existingSecret }}
                   key: installation-id
+                  optional: true
             - name: GITHUB_PRIVATE_KEY_PATH
               value: "/secrets/github"
             {{- end }}

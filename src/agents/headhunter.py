@@ -439,13 +439,9 @@ class Headhunter:
         LLM triage (analyze_and_plan) is called per issue with its label-specific SI,
         matching the PR triage path for consistent evidence quality.
         """
-        client = self._github._get_client()
-        if not client:
-            return
-        repos = self._github._repos or await self._github._discover_installation_repos(client)
         prev_pending = self._github_issue_pending
         try:
-            issues = await self._github._poll_issues(client, repos)
+            issues = await self._github.poll_issues_all_installations()
         except Exception as e:
             logger.warning(f"GitHub issue poll failed (preserving last count={prev_pending}): {e}")
             return

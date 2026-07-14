@@ -66,7 +66,7 @@ async def test_poll_issues_filters_out_prs():
     resp.json.return_value = [issue_item, pr_item]
     client.get = AsyncMock(return_value=resp)
 
-    issues = await platform._poll_issues(client, ["o/r"])
+    issues = await platform._poll_issues(client, ["o/r"], "456")
     assert len(issues) == 1
     assert issues[0]["issue_number"] == 10
 
@@ -81,7 +81,7 @@ def test_normalize_issue_data_shape():
            "user": {"login": "alice"}, "labels": [{"name": "darwin_audit"}],
            "assignees": [{"login": "bob"}], "html_url": "https://github.com/o/r/issues/5",
            "created_at": "2026-07-01T00:00:00Z", "body": "Please audit"}
-    result = GitHubPlatform._normalize_issue_data("o/r", raw)
+    result = GitHubPlatform._normalize_issue_data("o/r", raw, "456")
     assert result["owner"] == "o"
     assert result["repo"] == "r"
     assert result["issue_number"] == 5
@@ -234,8 +234,7 @@ async def test_promote_before_discover_ordering():
     hh._github.fetch_context = AsyncMock(side_effect=mock_fetch_context)
     hh._github.create_platform_event = AsyncMock(side_effect=mock_create_event)
     hh._github.load_triage_instruction = MagicMock(return_value="")
-    hh._github._get_client = MagicMock(return_value=None)
-    hh._github._poll_issues = AsyncMock(return_value=[])
+    hh._github.poll_issues_all_installations = AsyncMock(return_value=[])
     hh._github._repos = ["o/r"]
 
     await hh._github_poll_and_process()
