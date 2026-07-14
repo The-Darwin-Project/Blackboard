@@ -6,6 +6,11 @@
 # 4. [Pattern]: Rate-limit warning at 100 remaining (GitHub soft-gate is at 0).
 # 5. [Pattern]: get_github_auth() is the singleton accessor — all consumers use it, not GitHubAppAuth() directly.
 # 6. [Pattern]: get/post/delete share the same auth header pattern. delete() calls raise_for_status().
+# 7. [Pattern]: MultiInstallationManager owns all per-installation GitHubAppAuth/AsyncGitHubClient
+#    instances + the repo->installation_id cache (single source of truth for GitHubPlatform).
+# 8. [Constraint]: MultiInstallationManager discovery uses the App JWT (installation_id=None on
+#    GitHubAppAuth is invalid for GET /app/installations -- needs get_app_jwt() from any instance
+#    or a dedicated JWT-only helper). Discovery failure serves stale cache; raises only cold-start.
 """
 GitHub App Authentication for GitOps operations.
 
@@ -69,11 +74,12 @@ class GitHubAppAuth:
         self._token_expires_at: float = 0
         self._lock = threading.Lock()
         
-        # Validate configuration
+        # Validate configuration. installation_id is intentionally NOT required here --
+        # App-level JWT calls (get_app_jwt, discover_installations) need only app_id +
+        # private_key. installation_id is validated lazily, only when an installation
+        # token is actually requested (get_token / _request_installation_token).
         if not self.app_id:
             raise ValueError("GITHUB_APP_ID not configured")
-        if not self.installation_id:
-            raise ValueError("GITHUB_INSTALLATION_ID not configured")
         # Discover .pem file (path may be a directory or a direct file)
         self.private_key_path = _find_pem_file(
             private_key_path or GITHUB_PRIVATE_KEY_PATH
@@ -109,6 +115,8 @@ class GitHubAppAuth:
         - token: The access token
         - expires_at: ISO timestamp when token expires
         """
+        if not self.installation_id:
+            raise ValueError("GITHUB_INSTALLATION_ID not configured")
         jwt_token = self._create_jwt()
         
         url = f"https://api.github.com/app/installations/{self.installation_id}/access_tokens"
@@ -292,3 +300,160 @@ class AsyncGitHubClient:
         )
         resp.raise_for_status()
         return resp
+
+
+class MultiInstallationManager:
+    """Discovers and owns all GitHub App installations for this App.
+
+    Single source of truth for per-installation auth/client instances and
+    the repo -> installation_id cache. GitHubPlatform delegates ALL client
+    resolution to this manager instead of holding a single client.
+
+    Exclusive filter mode: if `filter_installation_id` is set, only that
+    installation is ever polled (matches pre-multi-install behavior).
+    """
+
+    REFRESH_TTL_SECONDS = 300  # 5-min discovery cache
+
+    def __init__(
+        self,
+        app_id: Optional[str] = None,
+        private_key_path: Optional[str] = None,
+        filter_installation_id: Optional[str] = None,
+    ):
+        self.app_id = app_id or GITHUB_APP_ID
+        self.private_key_path = private_key_path or GITHUB_PRIVATE_KEY_PATH
+        self.filter_installation_id = filter_installation_id or None
+
+        # App-JWT-only auth instance, used for discovery calls (no installation_id needed).
+        self._app_auth = GitHubAppAuth(
+            app_id=self.app_id, installation_id=None, private_key_path=self.private_key_path,
+        )
+
+        self._clients: dict[str, AsyncGitHubClient] = {}
+        self._installations: list[dict] = []
+        self._repo_to_installation: dict[str, str] = {}
+        self._installation_repos: dict[str, list[str]] = {}
+
+        self._last_refresh: float = 0.0
+        self._refresh_lock = asyncio.Lock()
+
+    async def _discover_installations(self) -> list[dict]:
+        """App JWT call to GET /app/installations. Returns list of installation dicts."""
+        jwt_token = self._app_auth.get_app_jwt()
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        async with httpx.AsyncClient(timeout=30) as http:
+            resp = await http.get(
+                "https://api.github.com/app/installations",
+                headers=headers, params={"per_page": "100"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    def _get_or_create_client(self, installation_id: str) -> AsyncGitHubClient:
+        client = self._clients.get(installation_id)
+        if client is None:
+            auth = GitHubAppAuth(
+                app_id=self.app_id,
+                installation_id=installation_id,
+                private_key_path=self.private_key_path,
+            )
+            client = AsyncGitHubClient(auth)
+            self._clients[installation_id] = client
+        return client
+
+    async def _refresh(self) -> None:
+        """Refresh installation list + repo cache. Stale-serve on discovery failure."""
+        async with self._refresh_lock:
+            now = time.monotonic()
+            if self._installations and now < self._last_refresh + self.REFRESH_TTL_SECONDS:
+                return  # Another caller already refreshed while we waited on the lock.
+
+            try:
+                discovered = await self._discover_installations()
+            except Exception as e:
+                if self._installations:
+                    logger.warning(f"GitHub installation discovery failed, serving stale cache: {e}")
+                    return
+                raise
+
+            if self.filter_installation_id:
+                discovered = [
+                    inst for inst in discovered
+                    if str(inst.get("id")) == str(self.filter_installation_id)
+                ]
+
+            installation_repos: dict[str, list[str]] = {}
+            repo_to_installation: dict[str, str] = {}
+            for inst in discovered:
+                inst_id = str(inst.get("id"))
+                client = self._get_or_create_client(inst_id)
+                try:
+                    resp = await client.get(
+                        "/installation/repositories", params={"per_page": "100"},
+                    )
+                    repos = resp.json().get("repositories", [])
+                    full_names = [r["full_name"] for r in repos if not r.get("archived")]
+                except Exception as e:
+                    logger.warning(f"Repo discovery failed for installation {inst_id}: {e}")
+                    full_names = []
+                installation_repos[inst_id] = full_names
+                for full_name in full_names:
+                    repo_to_installation[full_name] = inst_id
+
+            self._installations = discovered
+            self._installation_repos = installation_repos
+            self._repo_to_installation = repo_to_installation
+            self._last_refresh = now
+            logger.info(f"Found {len(discovered)} installation(s)")
+
+    async def get_clients_with_repos(
+        self, filter_id: Optional[str] = None,
+    ) -> list[tuple[str, "AsyncGitHubClient", list[str]]]:
+        """Return (installation_id, client, repo_full_names) for all discovered installations.
+
+        When `filter_id` is set, returns ONLY that installation (exclusive filter).
+        """
+        await self._refresh()
+        effective_filter = filter_id or self.filter_installation_id
+        result: list[tuple[str, AsyncGitHubClient, list[str]]] = []
+        for inst in self._installations:
+            inst_id = str(inst.get("id"))
+            if effective_filter and inst_id != str(effective_filter):
+                continue
+            client = self._clients.get(inst_id)
+            if client is None:
+                continue
+            result.append((inst_id, client, self._installation_repos.get(inst_id, [])))
+        return result
+
+    async def get_client_for(self, installation_id: str) -> Optional["AsyncGitHubClient"]:
+        """Direct lookup by installation ID (no discovery refresh -- caller already knows the ID)."""
+        if not self._installations:
+            await self._refresh()
+        return self._clients.get(str(installation_id))
+
+    async def get_client_for_repo(
+        self, owner: str, repo: str,
+    ) -> Optional[tuple[str, "AsyncGitHubClient"]]:
+        """Reverse lookup via the repo -> installation_id cache. None on cache miss."""
+        await self._refresh()
+        full_name = f"{owner}/{repo}"
+        inst_id = self._repo_to_installation.get(full_name)
+        if inst_id is None:
+            return None
+        client = self._clients.get(inst_id)
+        if client is None:
+            return None
+        return inst_id, client
+
+    async def close_all(self) -> None:
+        """Shut down all persistent HTTP clients (lifecycle cleanup)."""
+        await asyncio.gather(
+            *[c.close() for c in self._clients.values()], return_exceptions=True,
+        )
+        self._clients.clear()
