@@ -239,7 +239,6 @@ async def lifespan(app: FastAPI):
         github_configured = (
             os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
             and bool(os.getenv("GITHUB_APP_ID"))
-            and bool(os.getenv("GITHUB_INSTALLATION_ID"))
         )
         headhunter_close_signal: asyncio.Event | None = None
         if headhunter_enabled and (gitlab_host or github_configured):

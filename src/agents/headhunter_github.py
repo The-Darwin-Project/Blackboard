@@ -9,7 +9,9 @@
 # 5. [Pattern]: _load_github_si() loads from headhunter_skills/github-pr-triage.md with emergency fallback.
 #    _load_issue_triage_instruction() loads from URL (HEADHUNTER_GITHUB_SKILL_<LABEL>), 5-min cache.
 # 6. [Gotcha]: mergeable excluded from state_key (flaps during CI runs).
-# 7. [Pattern]: Lazy-init auth via get_github_auth() singleton — never raises in constructor.
+# 7. [Pattern]: Lazy-init MultiInstallationManager via _get_manager() — never raises in constructor.
+#    _resolve_client(installation_id, owner, repo) is the unified client resolution helper used by
+#    ALL label/comment/context call sites -- direct ID lookup, falling back to repo->installation cache.
 # 8. [Pattern]: Label/comment helpers are best-effort (never raise). URL-encode labels in DELETE path.
 # 9. [Pattern]: 429/5xx propagate to circuit breaker. Only 422 (search not indexed) is silently caught.
 # 10. [Pattern]: Re-trigger via darwin-done + SHA comparison (Redis HASH darwin:github:pr_sha).
@@ -29,6 +31,7 @@ Also exposes Brain-facing methods for refresh_github_context and StateWatcher in
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -110,7 +113,7 @@ class GitHubPlatform:
 
     def __init__(self, blackboard: "BlackboardState"):
         self.blackboard = blackboard
-        self._client = None
+        self._manager = None  # lazy-init in _get_manager(); never raises here
         self._repos: list[str] = []
         repos_env = os.getenv("HEADHUNTER_GITHUB_REPOS", "")
         if repos_env.strip():
@@ -151,25 +154,55 @@ class GitHubPlatform:
         return (
             os.getenv("HEADHUNTER_GITHUB_ENABLED", "false").lower() == "true"
             and bool(os.getenv("GITHUB_APP_ID"))
-            and bool(os.getenv("GITHUB_INSTALLATION_ID"))
         )
 
-    def _get_client(self):
-        """Lazy-init AsyncGitHubClient. Returns None if auth is unavailable."""
-        if self._client is None:
+    def _get_manager(self):
+        """Lazy-init MultiInstallationManager. Returns None if auth is unavailable."""
+        if self._manager is None:
             try:
-                from ..utils.github_app import get_github_auth, AsyncGitHubClient
-                self._client = AsyncGitHubClient(get_github_auth())
+                from ..utils.github_app import MultiInstallationManager
+                self._manager = MultiInstallationManager(
+                    filter_installation_id=os.getenv("GITHUB_INSTALLATION_ID") or None,
+                )
             except Exception as e:
-                logger.warning(f"GitHub client init failed: {e}")
+                logger.warning(f"GitHub manager init failed: {e}")
                 return None
-        return self._client
+        return self._manager
+
+    async def _get_client_for(self, installation_id: str):
+        """Direct lookup by installation_id. None if manager/installation unavailable."""
+        if not installation_id:
+            return None
+        manager = self._get_manager()
+        if not manager:
+            return None
+        return await manager.get_client_for(installation_id)
+
+    async def _get_client_for_repo(self, owner: str, repo: str):
+        """Reverse lookup via the repo -> installation_id cache. None on cache miss."""
+        manager = self._get_manager()
+        if not manager:
+            return None
+        result = await manager.get_client_for_repo(owner, repo)
+        return result[1] if result else None
+
+    async def _resolve_client(self, installation_id: str, owner: str, repo: str):
+        """Unified client resolution: direct ID lookup, else fall back to repo cache.
+
+        Backward compat: pre-existing events with no installation_id in evidence
+        resolve via the repo -> installation_id cache instead.
+        """
+        if installation_id:
+            client = await self._get_client_for(installation_id)
+            if client:
+                return client
+        return await self._get_client_for_repo(owner, repo)
 
     async def close(self) -> None:
-        """Shut down the persistent HTTP client."""
-        if self._client:
-            await self._client.close()
-            self._client = None
+        """Shut down all persistent HTTP clients."""
+        if self._manager:
+            await self._manager.close_all()
+            self._manager = None
 
     async def get_active_keys(self) -> set[tuple[str, str, int]]:
         """Get (owner, repo, number) for all active/deferred headhunter events.
@@ -207,17 +240,35 @@ class GitHubPlatform:
         return keys
 
     async def poll_work_items(self) -> list[dict]:
-        """Discover PRs from all repos where the App is installed.
+        """Discover PRs from all repos across all discovered installations.
 
-        Primary: list installation repos, then poll open PRs from each.
-        Fallback: if repos are pinned via env, use those instead.
+        Fan-out via asyncio.gather, one call per installation. Per-installation
+        errors are isolated (logged + skipped) so one bad installation cannot
+        take down polling for the rest. Fallback: if repos are pinned via env,
+        intersect with each installation's repo set.
         """
-        client = self._get_client()
-        if not client:
+        manager = self._get_manager()
+        if not manager:
             return []
 
-        repos = self._repos or await self._discover_installation_repos(client)
-        prs = await self._list_from_repos(client, repos)
+        installations = await manager.get_clients_with_repos()
+
+        async def _poll_one(inst_id: str, client, inst_repos: list[str]) -> list[dict]:
+            effective_repos = (
+                [r for r in inst_repos if r in set(self._repos)] if self._repos else inst_repos
+            )
+            if not effective_repos:
+                return []
+            try:
+                return await self._list_from_repos(client, effective_repos, inst_id)
+            except Exception as e:
+                logger.warning(f"GitHub PR poll failed for installation {inst_id}: {e}")
+                return []
+
+        results = await asyncio.gather(
+            *[_poll_one(inst_id, client, repos) for inst_id, client, repos in installations],
+        )
+        prs = [pr for batch in results for pr in batch]
 
         active_keys = await self.get_active_keys()
         result: list[dict] = []
@@ -278,17 +329,7 @@ class GitHubPlatform:
                 return []
             raise
 
-    async def _discover_installation_repos(self, client) -> list[str]:
-        """Discover repos where the App is installed (self-service boundary)."""
-        try:
-            resp = await client.get("/installation/repositories", params={"per_page": "100"})
-            repos = resp.json().get("repositories", [])
-            return [r["full_name"] for r in repos if not r.get("archived")]
-        except Exception as e:
-            logger.warning(f"GitHub installation repos discovery failed: {e}")
-            return []
-
-    async def _list_from_repos(self, client, repos: list[str]) -> list[dict]:
+    async def _list_from_repos(self, client, repos: list[str], installation_id: str) -> list[dict]:
         """List open PRs from the given repos.
 
         All open PRs are candidates — dedup against active events prevents
@@ -302,7 +343,7 @@ class GitHubPlatform:
                     params={"state": "open", "per_page": "30"},
                 )
                 for pr_data in resp.json():
-                    prs.append(self._normalize_pr_data(repo_full, pr_data))
+                    prs.append(self._normalize_pr_data(repo_full, pr_data, installation_id))
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (404, 422):
                     logger.warning(f"GitHub repo list {e.response.status_code} for {repo_full}")
@@ -310,7 +351,36 @@ class GitHubPlatform:
                 raise
         return prs
 
-    async def _poll_issues(self, client, repos: list[str]) -> list[dict]:
+    async def poll_issues_all_installations(self) -> list[dict]:
+        """Fan out Issue polling across all discovered installations.
+
+        Encapsulates the multi-installation fan-out pattern (hexagonal boundary --
+        the orchestrator calls this single method, it never iterates clients itself).
+        """
+        manager = self._get_manager()
+        if not manager:
+            return []
+
+        installations = await manager.get_clients_with_repos()
+
+        async def _poll_one(inst_id: str, client, inst_repos: list[str]) -> list[dict]:
+            effective_repos = (
+                [r for r in inst_repos if r in set(self._repos)] if self._repos else inst_repos
+            )
+            if not effective_repos:
+                return []
+            try:
+                return await self._poll_issues(client, effective_repos, inst_id)
+            except Exception as e:
+                logger.warning(f"GitHub issue poll failed for installation {inst_id}: {e}")
+                return []
+
+        results = await asyncio.gather(
+            *[_poll_one(inst_id, client, repos) for inst_id, client, repos in installations],
+        )
+        return [issue for batch in results for issue in batch]
+
+    async def _poll_issues(self, client, repos: list[str], installation_id: str) -> list[dict]:
         """Poll open Issues with darwin-work label from the given repos.
 
         Uses sort=created&direction=asc for oldest-first FIFO ordering.
@@ -335,7 +405,7 @@ class GitHubPlatform:
                 for item in resp.json():
                     if "pull_request" in item:
                         continue
-                    normalized = self._normalize_issue_data(repo_full, item)
+                    normalized = self._normalize_issue_data(repo_full, item, installation_id)
                     key = (normalized["owner"], normalized["repo"], normalized["issue_number"])
                     if key in active_keys:
                         continue
@@ -354,7 +424,7 @@ class GitHubPlatform:
         return issues
 
     @staticmethod
-    def _normalize_issue_data(repo_full: str, issue_data: dict) -> dict:
+    def _normalize_issue_data(repo_full: str, issue_data: dict, installation_id: str) -> dict:
         """Normalize a GitHub Issues API item to our internal issue shape."""
         parts = repo_full.split("/", 1)
         owner = parts[0] if parts else ""
@@ -362,6 +432,7 @@ class GitHubPlatform:
         return {
             "owner": owner,
             "repo": repo,
+            "installation_id": installation_id,
             "issue_number": issue_data["number"],
             "issue_title": issue_data.get("title", ""),
             "state": issue_data.get("state", "open"),
@@ -446,7 +517,7 @@ class GitHubPlatform:
         }
 
     @staticmethod
-    def _normalize_pr_data(repo_full: str, pr_data: dict) -> dict:
+    def _normalize_pr_data(repo_full: str, pr_data: dict, installation_id: str = "") -> dict:
         """Normalize a repo PR list item to our internal work item shape."""
         parts = repo_full.split("/", 1)
         owner = parts[0] if parts else ""
@@ -454,6 +525,7 @@ class GitHubPlatform:
         return {
             "owner": owner,
             "repo": repo,
+            "installation_id": installation_id,
             "number": pr_data["number"],
             "title": pr_data.get("title", ""),
             "state": pr_data.get("state", "open"),
@@ -466,13 +538,13 @@ class GitHubPlatform:
 
     async def fetch_context(self, work_item: dict) -> dict:
         """Enrich a PR work item with full context from GitHub API."""
-        client = self._get_client()
-        if not client:
-            return self._minimal_context(work_item)
-
         owner = work_item["owner"]
         repo = work_item["repo"]
         number = work_item["number"]
+
+        client = await self._resolve_client(work_item.get("installation_id", ""), owner, repo)
+        if not client:
+            return self._minimal_context(work_item)
 
         context: dict = {
             "owner": owner,
@@ -618,6 +690,7 @@ class GitHubPlatform:
         owner = work_item["owner"]
         repo = work_item["repo"]
         pr_number = work_item["number"]
+        installation_id = work_item.get("installation_id", "")
         action = context.get("action", "review_requested")
         check_status = context.get("check_status", "unknown")
         severity = self.classify_severity(action, check_status)
@@ -633,6 +706,7 @@ class GitHubPlatform:
             github_context={
                 "owner": owner,
                 "repo": repo,
+                "installation_id": installation_id,
                 "pr_number": pr_number,
                 "pr_title": context.get("pr_title", ""),
                 "pr_state": context.get("pr_state", "open"),
@@ -665,16 +739,16 @@ class GitHubPlatform:
         )
         logger.info(f"GitHub event created: {event_id} for {action} on #{pr_number} in {owner}/{repo}")
 
-        await self._remove_label(owner, repo, pr_number, self._trigger_label)
-        await self._remove_label(owner, repo, pr_number, self._done_label)
-        await self._remove_label(owner, repo, pr_number, self._queued_label)
-        await self._add_labels(owner, repo, pr_number, [self._active_label])
+        await self._remove_label(installation_id, owner, repo, pr_number, self._trigger_label)
+        await self._remove_label(installation_id, owner, repo, pr_number, self._done_label)
+        await self._remove_label(installation_id, owner, repo, pr_number, self._queued_label)
+        await self._add_labels(installation_id, owner, repo, pr_number, [self._active_label])
         cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
         if cortex_url and cortex_url.startswith(("https://", "http://")):
             link = f" [{event_id}]({cortex_url}/events/{event_id})"
         else:
             link = f" `{event_id}`"
-        await self._post_comment(owner, repo, pr_number,
+        await self._post_comment(installation_id, owner, repo, pr_number,
             f"**Darwin** is reviewing this PR. Tracking as{link}.")
 
         return event_id
@@ -698,6 +772,7 @@ class GitHubPlatform:
         owner = issue["owner"]
         repo = issue["repo"]
         number = issue["issue_number"]
+        installation_id = issue.get("installation_id", "")
         labels = issue.get("labels", [])
         skill_label = next(
             (l.lower().replace("-", "_") for l in labels if l.lower().replace("-", "_") in self._issue_skill_urls),
@@ -722,6 +797,7 @@ class GitHubPlatform:
             github_issue_context={
                 "owner": owner,
                 "repo": repo,
+                "installation_id": installation_id,
                 "issue_number": number,
                 "title": issue.get("issue_title", ""),
                 "body": f"<issue_body>{body_truncated}</issue_body>",
@@ -761,18 +837,18 @@ class GitHubPlatform:
         await self.blackboard.set_github_issue_processed(owner, repo, number)
 
         # Label swap: ADD active BEFORE removing work
-        await self._add_labels(owner, repo, number, [self._active_label])
-        await self._remove_label(owner, repo, number, self._work_label)
+        await self._add_labels(installation_id, owner, repo, number, [self._active_label])
+        await self._remove_label(installation_id, owner, repo, number, self._work_label)
 
         cortex_url = os.getenv("DARWIN_CORTEX_URL", "")
         if cortex_url and cortex_url.startswith(("https://", "http://")):
             link = f" [{event_id}]({cortex_url}/events/{event_id})"
         else:
             link = f" `{event_id}`"
-        await self._post_comment(owner, repo, number,
+        await self._post_comment(installation_id, owner, repo, number,
             f"**Darwin** is triaging this issue. Tracking as{link}.")
         if skill_size_warning:
-            await self._post_comment(owner, repo, number, skill_size_warning)
+            await self._post_comment(installation_id, owner, repo, number, skill_size_warning)
 
         return event_id
 
@@ -789,19 +865,20 @@ class GitHubPlatform:
         owner = issue_ctx.get("owner", "")
         repo = issue_ctx.get("repo", "")
         number = issue_ctx.get("issue_number", 0)
+        installation_id = issue_ctx.get("installation_id", "")
         if not owner or not repo or not number:
             return
 
         # Label swap: ADD done BEFORE removing active
-        await self._add_labels(owner, repo, number, [self._done_label])
-        await self._remove_label(owner, repo, number, self._active_label)
+        await self._add_labels(installation_id, owner, repo, number, [self._done_label])
+        await self._remove_label(installation_id, owner, repo, number, self._active_label)
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
         close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
         if close_reason not in ("stale", "duplicate"):
             turns = len(event.conversation)
-            await self._post_comment(owner, repo, number,
+            await self._post_comment(installation_id, owner, repo, number,
                 f"**Darwin** closed this issue ({turns} turns). Outcome: {close_reason}")
 
         await self.blackboard.mark_feedback_sent(event.id)
@@ -817,6 +894,7 @@ class GitHubPlatform:
         owner = gh_ctx.get("owner", "")
         repo = gh_ctx.get("repo", "")
         pr_number = gh_ctx.get("pr_number", 0)
+        installation_id = gh_ctx.get("installation_id", "")
         if not owner or not repo or not pr_number:
             return
 
@@ -824,8 +902,8 @@ class GitHubPlatform:
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
         close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
 
-        await self._remove_label(owner, repo, pr_number, self._active_label)
-        await self._add_labels(owner, repo, pr_number, [self._done_label])
+        await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
+        await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
 
         head_sha = gh_ctx.get("head_sha", "")
         if head_sha:
@@ -836,7 +914,7 @@ class GitHubPlatform:
 
         if close_reason not in ("stale", "duplicate"):
             comment_body = self._build_feedback_comment(event, close_reason)
-            await self._post_comment(owner, repo, pr_number, comment_body)
+            await self._post_comment(installation_id, owner, repo, pr_number, comment_body)
 
         await self.blackboard.mark_feedback_sent(event.id)
 
@@ -864,7 +942,7 @@ class GitHubPlatform:
         if not owner or not repo or not pr_number:
             return {"error": "No PR reference available. Supply pr_url or ensure the event has github_context."}
 
-        client = self._get_client()
+        client = await self._get_client_for_repo(owner, repo)
         if not client:
             return {"error": "GitHub client unavailable"}
 
@@ -905,9 +983,9 @@ class GitHubPlatform:
 
     async def poll_github_pr_status(self, owner: str, repo: str, pr_number: int) -> dict:
         """Lightweight read-only poll for StateWatcher. Raises on HTTP errors."""
-        client = self._get_client()
+        client = await self._get_client_for_repo(owner, repo)
         if not client:
-            raise RuntimeError("GitHub client unavailable for poll")
+            raise RuntimeError(f"No installation found for {owner}/{repo}")
 
         pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
         pr = pr_resp.json()
@@ -972,15 +1050,16 @@ class GitHubPlatform:
         owner = pr["owner"]
         repo = pr["repo"]
         number = pr["number"]
+        installation_id = pr.get("installation_id", "")
         labels = set(pr.get("labels", []))
         already_queued = self._queued_label in labels
 
-        await self._add_labels(owner, repo, number, [self._queued_label])
-        await self._remove_label(owner, repo, number, self._trigger_label)
+        await self._add_labels(installation_id, owner, repo, number, [self._queued_label])
+        await self._remove_label(installation_id, owner, repo, number, self._trigger_label)
 
         if not already_queued:
             await self._post_comment(
-                owner, repo, number,
+                installation_id, owner, repo, number,
                 f"**Darwin** acknowledged your PR — queued at position {position}. "
                 "FIFO processing when capacity opens.",
             )
@@ -989,9 +1068,9 @@ class GitHubPlatform:
     # Label / Comment Helpers (best-effort, never raise)
     # =========================================================================
 
-    async def _ensure_label_exists(self, owner: str, repo: str, label: str, color: str = "7C3AED") -> None:
+    async def _ensure_label_exists(self, installation_id: str, owner: str, repo: str, label: str, color: str = "7C3AED") -> None:
         """Create label on repo if missing. Only silences 'already_exists' 422 and 409."""
-        client = self._get_client()
+        client = await self._resolve_client(installation_id, owner, repo)
         if not client:
             return
         try:
@@ -1011,13 +1090,13 @@ class GitHubPlatform:
         except Exception:
             pass
 
-    async def _add_labels(self, owner: str, repo: str, pr_number: int, labels: list[str]) -> None:
+    async def _add_labels(self, installation_id: str, owner: str, repo: str, pr_number: int, labels: list[str]) -> None:
         """Best-effort: ensure labels exist on repo, then add to PR."""
-        client = self._get_client()
+        client = await self._resolve_client(installation_id, owner, repo)
         if not client:
             return
         for label in labels:
-            await self._ensure_label_exists(owner, repo, label)
+            await self._ensure_label_exists(installation_id, owner, repo, label)
         try:
             await client.post(f"/repos/{owner}/{repo}/issues/{pr_number}/labels", json={"labels": labels})
         except httpx.HTTPStatusError as e:
@@ -1025,9 +1104,9 @@ class GitHubPlatform:
         except Exception as e:
             logger.warning(f"Label add error for {owner}/{repo}#{pr_number}: {e}")
 
-    async def _remove_label(self, owner: str, repo: str, pr_number: int, label: str) -> None:
+    async def _remove_label(self, installation_id: str, owner: str, repo: str, pr_number: int, label: str) -> None:
         """Best-effort: remove label from PR. 404 is expected and silenced."""
-        client = self._get_client()
+        client = await self._resolve_client(installation_id, owner, repo)
         if not client:
             return
         encoded = urllib.parse.quote(label, safe="")
@@ -1039,9 +1118,9 @@ class GitHubPlatform:
         except Exception as e:
             logger.warning(f"Label remove error for {owner}/{repo}#{pr_number}: {e}")
 
-    async def _post_comment(self, owner: str, repo: str, pr_number: int, body: str) -> None:
+    async def _post_comment(self, installation_id: str, owner: str, repo: str, pr_number: int, body: str) -> None:
         """Best-effort: post comment on PR."""
-        client = self._get_client()
+        client = await self._resolve_client(installation_id, owner, repo)
         if not client:
             return
         try:
