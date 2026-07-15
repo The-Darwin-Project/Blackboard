@@ -4,7 +4,7 @@
 // 2. [Constraint]: No search/sort UI here -- that lives in EventHistoryToolbar.
 // 3. [Pattern]: Uses shared DOMAIN_COLORS, SEVERITY_COLORS, SourceIcon.
 import type { ReportMeta } from '../api/types';
-import { extractReasonDisplay, resolveSubjectType } from '../utils/eventFormat';
+import { resolveDescription, resolveSubjectType } from '../utils/eventFormat';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
 
@@ -81,8 +81,8 @@ function GridTile({ report, isSelected, onClick }: {
         </span>
       </div>
 
-      <div className="text-text-secondary text-[13px] leading-relaxed mb-2 line-clamp-3" title={report.reason}>
-        {extractReasonDisplay(report.reason)}
+      <div className="text-text-secondary text-[13px] leading-relaxed mb-2 line-clamp-3" title={report.display_text || report.reason}>
+        {resolveDescription(report.display_text, report.reason)}
       </div>
 
       <div className="flex justify-between items-center text-[11px] text-text-muted">

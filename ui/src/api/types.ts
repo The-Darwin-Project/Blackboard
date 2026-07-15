@@ -464,6 +464,8 @@ export interface ReportMeta {
   severity: 'info' | 'warning' | 'critical';
   turns: number;
   reason: string;
+  /** Evidence display_text from the original event. Absent on legacy reports persisted before this field was added. */
+  display_text?: string;
   closed_at: string;
   indexed_at?: number;
   triggered_by?: string | null;

@@ -2519,6 +2519,10 @@ return 0
                 triggered_by = evidence.triggered_by
 
             indexed_at = time.time()
+            display_text = ""
+            if isinstance(evidence, EventEvidence) and evidence.display_text:
+                display_text = evidence.display_text
+
             report_data = {
                 "event_id": event_id,
                 "markdown": markdown,
@@ -2529,6 +2533,7 @@ return 0
                 "severity": severity,
                 "turns": len(event.conversation),
                 "reason": event.event.reason,
+                "display_text": display_text,
                 "closed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "indexed_at": indexed_at,
                 "triggered_by": triggered_by,
