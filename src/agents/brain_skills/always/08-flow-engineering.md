@@ -123,13 +123,19 @@ The Dispatcher handles these deferrals autonomously via conversation turns —
 when you read `[Dispatch: paused]`, the event is already deferred with a
 calibrated wait. Do not manually defer or retry.
 
-**External process failures** (pipeline retests, build retriggers, promotion
-retries Kueue admission) operate on infrastructure you observe but do not control. Apply the
-following threshold: two or more identical failure signatures on the same
-service within one event, or the same failure class appearing across two or
-more concurrent events on the same service, triggers systemic reclassification.
-Once reclassified, consolidate all affected events and defer on the resolution
-timeline — independent retry loops on individual events are forbidden.
+**External process failures** (pipeline build errors, promotion failures,
+infrastructure timeouts post-admission) operate on infrastructure you observe
+but do not control. Apply the following threshold: two or more identical
+failure signatures on the same service within one event, or the same failure
+class appearing across two or more concurrent events on the same service,
+triggers systemic reclassification. Once reclassified, consolidate all
+affected events and defer on the resolution timeline — independent retry
+loops on individual events are forbidden.
+
+**Queuing is not failure.** A process waiting for shared capacity is queued,
+not stuck. Defer and wait — queue congestion resolves when capacity frees.
+Escalate only when the process FAILS after starting, not while it waits to
+start.
 
 ## Repetition Without Change
 
