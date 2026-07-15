@@ -8,6 +8,12 @@ export function extractReasonDisplay(reason: string): string {
   return match?.[1]?.trim() || reason.replace(/---[\s\S]*?---/, '').trim() || reason;
 }
 
+export function resolveDescription(displayText?: string, reason?: string): string {
+  if (displayText) return displayText;
+  if (reason) return extractReasonDisplay(reason);
+  return '';
+}
+
 export function resolveSubjectType(subjectType?: SubjectType, service?: string): SubjectType | undefined {
   if (subjectType && subjectType !== 'service') return subjectType;
   if (service && service.includes('@kargo-')) return 'kargo_stage';

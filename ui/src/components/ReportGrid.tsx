@@ -8,7 +8,7 @@
  * Displays persisted report metadata in a multi-column grid.
  */
 import type { ReportMeta } from '../api/types';
-import { extractReasonDisplay, resolveSubjectType } from '../utils/eventFormat';
+import { resolveDescription, resolveSubjectType } from '../utils/eventFormat';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
 
@@ -164,8 +164,8 @@ function ReportTile({ report, onClick }: { report: ReportMeta; onClick: () => vo
         overflow: 'hidden', display: '-webkit-box',
         WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
         marginBottom: 8,
-      }} title={report.reason}>
-        {extractReasonDisplay(report.reason)}
+      }} title={report.display_text || report.reason}>
+        {resolveDescription(report.display_text, report.reason)}
       </div>
 
       {/* Footer: turns + event ID */}

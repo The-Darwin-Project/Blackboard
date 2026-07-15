@@ -194,7 +194,7 @@ export default function EventHistory() {
 }
 
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
-import { extractReasonDisplay } from '../utils/eventFormat';
+import { resolveDescription } from '../utils/eventFormat';
 
 function CompactCardStrip({ reports, selectedId, onSelect, onClose }: {
   reports: import('../api/types').ReportMeta[];
@@ -242,7 +242,7 @@ function CompactCardStrip({ reports, selectedId, onSelect, onClose }: {
                   </span>
                 </div>
                 <div className="text-[11px] text-text-muted truncate">
-                  {extractReasonDisplay(r.reason)}
+                  {resolveDescription(r.display_text, r.reason)}
                 </div>
                 <div className="text-[10px] text-text-muted mt-0.5">
                   {new Date(r.closed_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} · {r.turns}t

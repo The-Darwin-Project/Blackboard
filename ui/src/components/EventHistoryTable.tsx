@@ -15,7 +15,7 @@ import {
 import type { ReportMeta } from '../api/types';
 import { DOMAIN_COLORS, SEVERITY_COLORS } from '../constants/colors';
 import SourceIcon from './SourceIcon';
-import { resolveSubjectType } from '../utils/eventFormat';
+import { resolveSubjectType, resolveDescription } from '../utils/eventFormat';
 
 interface Props {
   reports: ReportMeta[];
@@ -50,6 +50,18 @@ const columns = [
     cell: (info) => (
       <span className="font-medium">{info.getValue()}</span>
     ),
+  }),
+  col.display({
+    id: 'description',
+    header: 'Description',
+    cell: (info) => {
+      const desc = resolveDescription(info.row.original.display_text, info.row.original.reason);
+      return (
+        <span className="text-text-muted truncate block max-w-[300px]" title={desc}>
+          {desc || <span className="italic text-text-muted/50">—</span>}
+        </span>
+      );
+    },
   }),
   col.accessor('source', {
     header: 'Source',
