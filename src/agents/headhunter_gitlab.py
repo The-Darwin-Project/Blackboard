@@ -289,7 +289,7 @@ class GitLabPlatform:
                             if allowed_authors and note_author not in allowed_authors:
                                 logger.info(f"Ignoring @mention from {note_author} (not in maintainer list)")
                                 continue
-                            context["mention_comment"] = body[:2000]
+                            context["mention_comment"] = body[:5000]
                             context["mention_author"] = note_author
                             break
                     if note_author == darwin_bot:

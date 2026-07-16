@@ -194,7 +194,7 @@ class NightwatcherObserver:
         """LLM-driven analysis loop: review + investigate phases."""
         adapter = await self._get_adapter()
         escalation_text = "\n\n".join(
-            f"**{e.event_id}** | {e.service} | {e.platform} | {e.summary}\n{e.description[:300]}"
+            f"**{e.event_id}** | {e.service} | {e.platform} | {e.summary}\n{e.description}"
             for e in escalations
         )
         contents = [{"role": "user", "parts": [{"text": escalation_text}]}]

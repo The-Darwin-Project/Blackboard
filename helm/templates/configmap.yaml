@@ -26,6 +26,8 @@ data:
   LLM_TEMPERATURE_ARCHIVIST: "{{ .Values.gcp.llm.archivist.temperature }}"
   LLM_THINKING_ARCHIVIST: "{{ .Values.gcp.llm.archivist.thinkingLevel }}"
   LLM_MAX_TOKENS_ARCHIVIST: "{{ .Values.gcp.llm.archivist.maxOutputTokens }}"
+  LLM_MAX_TOKENS_ARCHIVIST_CLAUDE: "{{ .Values.gcp.llm.archivist.maxOutputTokensClaude }}"
+  LLM_MAX_TOKENS_ARCHIVIST_DIGEST: "{{ .Values.gcp.llm.archivist.maxOutputTokensDigest }}"
   # Lesson Extractor (Claude via Vertex AI for document analysis)
   LLM_MODEL_LESSON_EXTRACTOR: "{{ .Values.gcp.llm.lessonExtractor.model }}"
   # Headhunter (MR triage classification)

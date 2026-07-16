@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -69,7 +70,7 @@ async def handle_inspect_event(
         content = t.thoughts or t.result or ""
         lines.append(f"[{t.action}] {content}")
     result_text = header + "\n".join(lines)
-    result_text = result_text[:15000]
+    result_text = result_text[:int(os.getenv("AGENT_RESULT_MAX_CHARS", "100000"))]
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",

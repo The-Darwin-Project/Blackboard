@@ -826,7 +826,7 @@ class LiveAPIAdapter:
                 stale = " [STALE]" if k.get("stale") else ""
                 lines.append(
                     f"- [{k.get('score', 0):.2f}] {p.get('topic', '?')} ({p.get('scope', '?')}): "
-                    f"{p.get('fact', '?')[:150]}{stale}"
+                    f"{p.get('fact', '?')}{stale}"
                 )
         if memories:
             lines.append("\n### Past Events")
@@ -1002,7 +1002,6 @@ class LiveAPIAdapter:
             return "Error: title and description required"
         if severity not in ("nice_to_have", "would_improve", "blocking"):
             severity = "nice_to_have"
-        description = description[:1000]
         redis = self._blackboard.redis
         key = "darwin:cortex:proposals"
         entry = json.dumps({
@@ -1355,7 +1354,7 @@ class LiveAPIAdapter:
         try:
             await self._broadcast({
                 "type": "cortex_session_report",
-                "report": report[:2000],
+                "report": report,
                 "timestamp": time.time(),
             })
         except Exception:
@@ -1444,7 +1443,7 @@ class LiveAPIAdapter:
         key = "darwin:cortex:handoff_reports"
         entry = json.dumps({
             "timestamp": time.time(),
-            "report": report[:4000],
+            "report": report,
             "events_tracked": self._last_pulse_event_id,
         })
         try:
@@ -1453,7 +1452,7 @@ class LiveAPIAdapter:
             logger.info("Cortex handoff report stored (%d chars)", len(report))
             await self._broadcast({
                 "type": "cortex_handoff_report",
-                "report": report[:2000],
+                "report": report,
                 "timestamp": time.time(),
             })
         except Exception as e:

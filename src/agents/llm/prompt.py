@@ -149,7 +149,7 @@ def _build_subject_block(
             lines.append(f"  Skill: {ic['skill_label']}")
         body = ic.get("body", "")
         if body:
-            lines.append(f"  Body (snippet): {body[:300]}")
+            lines.append(f"  Body (snippet): {body[:1000]}")
 
     elif ev and ev.github_context:
         gc = ev.github_context

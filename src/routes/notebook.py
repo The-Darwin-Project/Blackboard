@@ -24,7 +24,7 @@ CategoryType = Literal["env-quirk", "correction", "cross-event", "workflow", "co
 
 
 class NotePatchRequest(BaseModel):
-    content: Optional[str] = Field(None, max_length=2000)
+    content: Optional[str] = Field(None, max_length=5000)
     category: Optional[CategoryType] = None
     model_config = ConfigDict(extra="forbid")
 

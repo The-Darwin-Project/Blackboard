@@ -128,6 +128,16 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_ARCHIVIST
+            - name: LLM_MAX_TOKENS_ARCHIVIST_CLAUDE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_ARCHIVIST_CLAUDE
+            - name: LLM_MAX_TOKENS_ARCHIVIST_DIGEST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_ARCHIVIST_DIGEST
             # AI Transparency & Compliance
             - name: DARWIN_CONTACT_EMAIL
               valueFrom:
@@ -157,9 +167,15 @@ spec:
               value: {{ .Values.app.maxConcurrentDispatches | default 0 | quote }}
             - name: MAX_ACTIVE_EVENTS
               value: {{ .Values.app.maxActiveEvents | default 20 | quote }}
+            - name: AGENT_RESULT_MAX_CHARS
+              value: {{ .Values.app.agentResultMaxChars | default "100000" | quote }}
             {{- if .Values.brain }}
             - name: BRAIN_RECONCILE_WORKERS
               value: {{ .Values.brain.reconcileWorkers | default 0 | quote }}
+            - name: BRAIN_CONTENT_BUDGET_TOKENS
+              value: {{ .Values.brain.contentBudgetTokens | default "800000" | quote }}
+            - name: BRAIN_FULL_TIER_MAX_CHARS
+              value: {{ .Values.brain.fullTierMaxChars | default "100000" | quote }}
             {{- end }}
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs
@@ -403,6 +419,8 @@ spec:
             - name: LLM_MODEL_SYSTEM2
               value: "{{ .Values.cortex.system2.model }}"
             {{- end }}
+            - name: SYSTEM2_MAX_TOKENS
+              value: {{ .Values.cortex.system2.maxOutputTokens | default "8192" | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.nightwatcher }}

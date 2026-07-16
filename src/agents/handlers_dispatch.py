@@ -375,15 +375,6 @@ async def handle_report_incident(
         )
     elif os.environ.get("NIGHTWATCHER_ENABLED", "false").lower() == "true":
         from ..models import StagedEscalation
-        conv_turns = [
-            t for t in (event_doc.conversation or [])
-            if t.actor != "user" and t.action != "phase"
-        ]
-        summary_parts = [
-            f"[{t.actor}.{t.action}] {(t.thoughts or '')[:150]}"
-            for t in conv_turns[-3:]
-        ]
-        conversation_summary = " | ".join(summary_parts)[:500]
         slack_thread_url = ""
         if event_doc.slack_thread_ts and event_doc.slack_channel_id:
             ts_nodot = event_doc.slack_thread_ts.replace(".", "")
@@ -400,7 +391,6 @@ async def handle_report_incident(
             priority=args.get("priority", "Normal"),
             description=args.get("description", ""),
             evidence_snapshot=evidence.model_dump() if hasattr(evidence, "model_dump") else {},
-            conversation_summary=conversation_summary,
             slack_thread_url=slack_thread_url,
         )
         try:

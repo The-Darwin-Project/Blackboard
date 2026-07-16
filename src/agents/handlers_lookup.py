@@ -183,7 +183,7 @@ async def handle_consult_deep_memory(
             for i, r in enumerate(knowledge, 1):
                 p = r.get("payload", {})
                 stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
-                fact_text = p.get("fact", "?")[:200]
+                fact_text = p.get("fact", "?")
                 memory_text += (
                     f"{i}. **{p.get('topic', '?')}** ({p.get('scope', '?')}, confidence: {p.get('confidence', '?')}){stale_tag}\n"
                     f"   - {fact_text}\n"

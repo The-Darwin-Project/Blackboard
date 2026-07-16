@@ -737,17 +737,21 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "summary": {
                     "type": "string",
+                    "maxLength": 200,
                     "description": (
                         "One-line incident summary. Format: '[evt-XXXXXXX] summary'. "
-                        "Must describe the specific failure, not just 'pipeline failed'."
+                        "Must describe the specific failure, not just 'pipeline failed'. "
+                        "Max ~200 chars (Jira summary field limit)."
                     ),
                 },
                 "description": {
                     "type": "string",
+                    "maxLength": 10000,
                     "description": (
                         "Detailed description: event_id, what failed (specific error), "
                         "timeline, actions taken, evidence from agent investigation. "
-                        "Include log excerpts or error messages when available."
+                        "Include log excerpts or error messages when available. "
+                        "Max ~10000 chars."
                     ),
                 },
                 "priority": {
@@ -1113,9 +1117,10 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "content": {
                     "type": "string",
+                    "maxLength": 5000,
                     "description": (
                         "The note content — what you learned, discovered, or want to remember. "
-                        "Max ~2000 chars."
+                        "Max ~5000 chars."
                     ),
                 },
                 "category": {
@@ -1289,9 +1294,9 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "get_event_report",
         "description": (
-            "(review, investigate) Read the full closed event report for a specific event. "
-            "Returns the complete markdown conversation history with agent actions, "
-            "plans, and outcomes. Use to understand WHAT happened, not just the manifest summary."
+            "(review, investigate) Read the structured archive digest for a specific closed "
+            "event: symptom, root cause, fix action, outcome, domain, duration/turns, and "
+            "procedures followed. Use to understand WHAT happened, not just the manifest summary."
         ),
         "input_schema": {
             "type": "object",
@@ -1389,14 +1394,17 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "summary": {
                     "type": "string",
+                    "maxLength": 200,
                     "description": "One-line consolidated root cause summary (max 200 chars)",
                 },
                 "description": {
                     "type": "string",
+                    "maxLength": 10000,
                     "description": (
                         "Full consolidated description including: root cause, "
                         "affected services list, timeline, investigation findings if any, "
-                        "and relevant links (MR URLs, pipeline IDs, Slack threads) from the Related Links data"
+                        "and relevant links (MR URLs, pipeline IDs, Slack threads) from the Related Links data. "
+                        "Max ~10000 chars."
                     ),
                 },
                 "priority": {
@@ -1429,6 +1437,7 @@ NIGHTWATCHER_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "summary": {
                     "type": "string",
+                    "maxLength": 200,
                     "description": "New escalation summary to add to the existing incident",
                 },
                 "comment": {

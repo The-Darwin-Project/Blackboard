@@ -594,7 +594,6 @@ class StagedEscalation(BaseModel):
     priority: str = Field("Normal", description="Normal | Major | Critical")
     description: str = Field("", description="Brain's report_incident description")
     evidence_snapshot: dict = Field(default_factory=dict, description="Serialized EventEvidence at staging time")
-    conversation_summary: str = Field("", max_length=500, description="Last 3 non-automated turns")
     slack_thread_url: str = Field("", description="Slack thread URL for traceability")
     staged_at: float = Field(default_factory=time.time, description="Unix timestamp when staged")
 

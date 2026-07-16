@@ -103,6 +103,7 @@ class TestExecuteTool:
     @pytest.mark.asyncio
     async def test_handler_exception_returns_error(self):
         ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value=None)
         ctx.blackboard.get_report = AsyncMock(side_effect=RuntimeError("boom"))
         result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
         assert "Tool error" in result
@@ -115,8 +116,70 @@ class TestExecuteTool:
 
 class TestGetEventReport:
     @pytest.mark.asyncio
-    async def test_returns_markdown_content(self):
+    async def test_returns_digest_when_archive_exists(self):
         ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value={
+            "id": "point-1",
+            "payload": {
+                "service": "release-console",
+                "symptom": "CPU spike",
+                "root_cause": "runaway loop",
+                "fix_action": "restarted pod",
+                "outcome": "resolved",
+                "domain": "complicated",
+                "duration_seconds": 120,
+                "turns": 5,
+                "procedures": ["checked logs", "restarted pod"],
+            },
+        })
+        result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
+        assert "CPU spike" in result
+        assert "runaway loop" in result
+        assert "resolved" in result
+        assert "checked logs" in result
+        ctx.blackboard.get_report.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_digest_handles_procedures_as_string(self):
+        """_archive_event_fallback sets procedures='unknown' (string, not list)."""
+        ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value={
+            "id": "point-1",
+            "payload": {
+                "service": "test-svc", "symptom": "crash",
+                "root_cause": "?", "fix_action": "?",
+                "outcome": "escalated", "domain": "complex",
+                "duration_seconds": 60, "turns": 2,
+                "procedures": "unknown",
+            },
+        })
+        result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
+        assert "Procedures: unknown" in result
+        assert "u; n; k" not in result
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_markdown_when_archive_missing(self):
+        ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value=None)
+        ctx.blackboard.get_report = AsyncMock(return_value={"markdown": "# Report\nCPU spike."})
+        result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
+        assert "CPU spike" in result
+
+    @pytest.mark.asyncio
+    async def test_fallback_returns_tail_for_long_reports(self):
+        ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value=None)
+        body = "x" * 20000 + "TAIL_MARKER"
+        ctx.blackboard.get_report = AsyncMock(return_value={"markdown": body})
+        result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
+        assert "TAIL_MARKER" in result
+        assert len(result) <= 10011
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_digest_payload_malformed(self):
+        """Malformed Qdrant payload triggers formatting error -> logged, falls back to markdown."""
+        ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value={"payload": "not-a-dict"})
         ctx.blackboard.get_report = AsyncMock(return_value={"markdown": "# Report\nCPU spike."})
         result = await execute_tool("get_event_report", {"event_id": "evt-1"}, ctx)
         assert "Report" in result
@@ -125,6 +188,7 @@ class TestGetEventReport:
     @pytest.mark.asyncio
     async def test_missing_report(self):
         ctx = _make_ctx()
+        ctx.archivist.get_memory = AsyncMock(return_value=None)
         ctx.blackboard.get_report = AsyncMock(return_value=None)
         result = await execute_tool("get_event_report", {"event_id": "evt-missing"}, ctx)
         assert "No report found" in result

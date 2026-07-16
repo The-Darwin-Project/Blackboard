@@ -74,15 +74,16 @@ async def test_store_handoff_report_skips_empty():
 
 
 @pytest.mark.asyncio
-async def test_store_handoff_report_truncates():
-    """Reports exceeding 4KB are truncated."""
+async def test_store_handoff_report_not_truncated():
+    """Report text is JARVIS-generated and already bounded by SYSTEM2_MAX_TOKENS
+    at generation time -- storage must not re-truncate it (redundancy test)."""
     adapter = _make_adapter()
     long_report = "x" * 5000
 
     await adapter._store_handoff_report(long_report)
 
     entry = json.loads(adapter._blackboard.redis.rpush.call_args[0][1])
-    assert len(entry["report"]) == 4000
+    assert len(entry["report"]) == 5000
 
 
 @pytest.mark.asyncio

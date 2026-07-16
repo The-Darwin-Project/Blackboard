@@ -329,7 +329,20 @@ _CYCLE_ENDING_TOOLS = frozenset({
 import re as _re
 
 _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
+_HTML_TAG_RE = _re.compile(r'<[^>]+>')
 
+_ERROR_TEXT_MAX = 300
+
+
+def _sanitize_error_text(error: BaseException) -> str:
+    """Strip HTML from API error responses and truncate to a readable summary."""
+    raw = str(error)
+    if '<' in raw and '>' in raw:
+        raw = _HTML_TAG_RE.sub('', raw)
+        raw = ' '.join(raw.split())
+    if len(raw) > _ERROR_TEXT_MAX:
+        raw = raw[:_ERROR_TEXT_MAX] + '...'
+    return raw
 
 
 def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
@@ -511,6 +524,12 @@ class _BrainToolContext:
 
 _ACLOSE_TIMEOUT = 5.0
 
+# Conversation compression safety net (Goal 2, truncation-search-destroy):
+# raises the compression trigger budget and bounds any single "full" tier
+# turn so one oversized message can't blow the model context window.
+_CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
+_FULL_TIER_MAX_CHARS = int(os.getenv("BRAIN_FULL_TIER_MAX_CHARS", "100000"))
+
 
 class Brain:
     """
@@ -581,6 +600,9 @@ class Brain:
         self.temperature = float(os.getenv("LLM_TEMPERATURE_BRAIN", "0.8"))
         self.model_name = os.getenv("LLM_MODEL_BRAIN", "gemini-3.1-pro-preview")
         self.max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_BRAIN", "65000"))
+        # CLI stdout is not bounded by an LLM's maxOutputTokens -- this is the
+        # only configurable ceiling on agent result turn size (Goal 1, truncation-search-destroy).
+        self._agent_result_max = int(os.getenv("AGENT_RESULT_MAX_CHARS", "100000"))
         self._adapter = None  # Lazy-loaded via _get_adapter()
         self._scheduler = None  # ReconcileScheduler | None -- set by start_event_loop()
         self._state_watcher = None  # StateWatcher | None -- set by start_event_loop()
@@ -1145,7 +1167,7 @@ class Brain:
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
                     action="error",
-                    thoughts=f"Brain failed on first processing: {type(e).__name__}: {e}",
+                    thoughts=f"Brain failed on first processing: {type(e).__name__}: {_sanitize_error_text(e)}",
                 )
                 await self._append_and_broadcast(event_id, error_turn)
                 await self.blackboard.mark_turns_status(
@@ -1458,7 +1480,7 @@ class Brain:
             error_text = (
                 f"LLM stream timed out (no chunks for {chunk_timeout}s) after {attempt + 1} attempts"
                 if is_timeout
-                else f"LLM call failed after {attempt + 1} attempts: {last_error}"
+                else f"LLM call failed after {attempt + 1} attempts: {_sanitize_error_text(last_error)}"
             )
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -2247,7 +2269,7 @@ class Brain:
             return (
                 f"## ROOT CAUSE ANALYSIS (from {last_agent_turn.actor}, "
                 f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
-                f"{reasoning[:1200]}{qe_gate}"
+                f"{reasoning}{qe_gate}"
             )
 
         # Legacy fallback: regex extraction from result body
@@ -2280,13 +2302,16 @@ class Brain:
         )
 
     @staticmethod
-    def _extract_recommendation(text: str, max_tokens: int = 300) -> str | None:
+    def _extract_recommendation(text: str) -> str | None:
         """Extract recommendation section from agent result text.
 
         Heuristics (no LLM call):
         1. Look for ## Recommendation, ### Next Step, **Recommendation** headers
         2. If no header, take the last paragraph
-        3. Cap at max_tokens (~1200 chars) to avoid re-bloating the prompt
+
+        No length cap here: `text` is the agent's result turn, already bounded
+        at write time by `self._agent_result_max` (Goal 1, truncation-search-destroy).
+        Slicing an already-bounded field again downstream is redundant truncation.
         """
         patterns = [
             r"(?:^|\n)##?\s*(?:Recommendation|Next Step|Suggested Action)s?\s*\n(.*?)(?=\n##?\s|\Z)",
@@ -2295,15 +2320,11 @@ class Brain:
         for pattern in patterns:
             match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
             if match:
-                rec = match.group(1).strip()
-                max_chars = max_tokens * 4
-                return rec[:max_chars] if len(rec) > max_chars else rec
+                return match.group(1).strip()
 
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         if paragraphs:
-            last = paragraphs[-1]
-            max_chars = max_tokens * 4
-            return last[:max_chars] if len(last) > max_chars else last
+            return paragraphs[-1]
 
         return None
 
@@ -2518,7 +2539,7 @@ class Brain:
         return total_chars // 4
 
     @classmethod
-    def _compress_contents(cls, contents: list[dict], max_tokens: int = 200_000) -> list[dict]:
+    def _compress_contents(cls, contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -> list[dict]:
         """Progressive compression: skeleton/summary/full tiers. No LLM call.
 
         First message (event context) always kept intact.
@@ -2567,7 +2588,7 @@ class Brain:
                 first_text = ""
                 for p in msg.get("parts", []):
                     if isinstance(p, dict) and "text" in p:
-                        first_text = p["text"][:60]
+                        first_text = p["text"][:300]
                         break
                 compressed.append({"role": role, "parts": [{"text": f"(earlier turn: {first_text}...)"}]})
             elif tier == "summary":
@@ -2581,7 +2602,15 @@ class Brain:
                         parts.append(p)
                 compressed.append({"role": role, "parts": parts or msg["parts"]})
             else:
-                compressed.append(msg)
+                role = msg["role"]
+                parts = []
+                for p in msg.get("parts", []):
+                    if isinstance(p, dict) and "text" in p and len(p["text"]) > _FULL_TIER_MAX_CHARS:
+                        truncated = p["text"][:_FULL_TIER_MAX_CHARS]
+                        parts.append({"text": f"{truncated}\n...(turn truncated at {_FULL_TIER_MAX_CHARS} chars)"})
+                    else:
+                        parts.append(p)
+                compressed.append({"role": role, "parts": parts})
 
         return compressed
 
@@ -3024,7 +3053,7 @@ class Brain:
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=role, action="execute",
-                result=result_str[:15000],
+                result=result_str[:self._agent_result_max],
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)
@@ -3042,7 +3071,7 @@ class Brain:
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
                 actor=role, action="error",
-                thoughts=f"Wake task failed: {str(e)}",
+                thoughts=f"Wake task failed: {_sanitize_error_text(e)}",
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)
@@ -3496,11 +3525,11 @@ class Brain:
             has_structured_plan = body and plan_steps
 
             if has_structured_plan:
-                result_for_turn = body[:15000]
+                result_for_turn = body[:self._agent_result_max]
             elif reasoning and body:
-                result_for_turn = body[:15000]
+                result_for_turn = body[:self._agent_result_max]
             else:
-                result_for_turn = result_str[:15000]
+                result_for_turn = result_str[:self._agent_result_max]
 
             task_for_agent = None
             if has_structured_plan:
@@ -3553,7 +3582,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor=agent_name,
                 action="error",
-                thoughts=f"Agent execution failed: {str(e)}",
+                thoughts=f"Agent execution failed: {_sanitize_error_text(e)}",
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)

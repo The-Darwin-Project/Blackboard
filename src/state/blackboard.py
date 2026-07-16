@@ -3236,7 +3236,7 @@ return 0
         self, event_id: str, content: str, category: str,
     ) -> dict:
         """Record a qualitative field note. Returns {note_id, count}."""
-        content = content[:2000]
+        content = content[:5000]
         note_id = str(uuid.uuid4())
         note = json.dumps({
             "note_id": note_id,
@@ -3305,7 +3305,7 @@ return 1
         result = await self.redis.eval(
             self._UPDATE_NOTE_LUA, 1, self.NOTEBOOK_KEY,
             note_id,
-            content[:2000] if content is not None else "",
+            content[:5000] if content is not None else "",
             category if category is not None else "",
         )
         return bool(result)

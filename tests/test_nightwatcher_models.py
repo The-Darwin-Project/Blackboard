@@ -45,7 +45,6 @@ class TestStagedEscalation:
         assert e.platform == ""
         assert e.priority == "Normal"
         assert e.description == ""
-        assert e.conversation_summary == ""
         assert e.slack_thread_url == ""
 
     def test_summary_max_length(self):
@@ -71,7 +70,6 @@ class TestStagedEscalation:
             summary="OOM on payload-viewer", platform="Konflux",
             priority="Critical", description="Pods restarting",
             evidence_snapshot={"severity": "critical"},
-            conversation_summary="[brain.triage] High memory",
             slack_thread_url="https://slack.com/archives/C1/p123",
             staged_at=1000.0,
         )

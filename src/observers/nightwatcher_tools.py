@@ -204,12 +204,39 @@ async def execute_tool(name: str, args: dict, ctx: NightwatcherContext) -> str:
 
 
 async def _handle_get_event_report(args: dict, ctx: NightwatcherContext) -> str:
+    """Structured archive digest first (compact, has closure info); raw markdown
+    report as fallback for the rare case where the closing archive write hasn't
+    landed in Qdrant yet. See docs/plans -- Goal 5, truncation-search-destroy."""
     event_id = args.get("event_id", "")
+    digest = await ctx.archivist.get_memory(event_id)
+    if digest:
+        try:
+            p = digest.get("payload", {})
+            lines = [
+                f"## {event_id} ({p.get('service', '?')})",
+                f"Symptom: {p.get('symptom', '?')}",
+                f"Root cause: {p.get('root_cause', '?')}",
+                f"Fix: {p.get('fix_action', '?')}",
+                f"Outcome: {p.get('outcome', '?')}",
+                f"Domain: {p.get('domain', '?')}",
+                f"Duration: {p.get('duration_seconds', 0)}s, {p.get('turns', 0)} turns",
+            ]
+            procs = p.get("procedures")
+            if procs:
+                lines.append(f"Procedures: {'; '.join(procs) if isinstance(procs, list) else str(procs)}")
+            if p.get("fix_action_after_approval"):
+                lines.append(f"Pending approval: {p['fix_action_after_approval']}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning("Nightwatcher: digest format failed for %s: %s", event_id, e)
     report = await ctx.blackboard.get_report(event_id)
     if not report:
         return f"No report found for {event_id}"
     content = report.get("markdown", report.get("content", ""))
-    return content[:8000] if content else f"Report for {event_id} is empty"
+    if not content:
+        return f"Report for {event_id} is empty"
+    tail_start = max(0, len(content) - 10000) if len(content) > 10000 else 0
+    return content[tail_start:]
 
 
 async def _handle_search_journal(args: dict, ctx: NightwatcherContext) -> str:
@@ -283,12 +310,15 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
             logger.debug("Nightwatcher: failed to terminate sweep agent %s (may already be gone)", sweep_event_id)
     duration = round(time.time() - start, 1)
     ctx.dispatch_count += 1
+    # Sidecar CLI stdout is not bounded by an LLM's maxOutputTokens -- same
+    # ceiling Brain uses for agent result turns (AGENT_RESULT_MAX_CHARS).
+    result_max = int(os.getenv("AGENT_RESULT_MAX_CHARS", "100000"))
     ctx.investigations.append(ShiftInvestigation(
         task=task_prompt, service=service,
-        agent_result=result_text[:3000], duration_seconds=duration,
+        agent_result=result_text[:result_max], duration_seconds=duration,
     ))
     logger.info("Nightwatcher investigation %d/%d: %s (%.1fs)", ctx.dispatch_count, ctx.dispatch_cap, service, duration)
-    return result_text[:3000]
+    return result_text[:result_max]
 
 
 async def _handle_search_existing_incidents(args: dict, ctx: NightwatcherContext) -> str:

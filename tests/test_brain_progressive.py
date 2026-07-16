@@ -38,11 +38,13 @@ class TestExtractRecommendation:
     def test_empty_text_returns_none(self):
         assert Brain._extract_recommendation("") is None
 
-    def test_max_tokens_cap(self):
+    def test_no_length_cap(self):
+        # Input text is already bounded upstream by AGENT_RESULT_MAX_CHARS at
+        # write time -- _extract_recommendation must not re-truncate it.
         long_rec = "## Recommendation\n" + "x" * 2000
-        result = Brain._extract_recommendation(long_rec, max_tokens=100)
+        result = Brain._extract_recommendation(long_rec)
         assert result is not None
-        assert len(result) <= 400  # 100 tokens * 4 chars
+        assert len(result) == 2000
 
 
 class TestMatchPhases:

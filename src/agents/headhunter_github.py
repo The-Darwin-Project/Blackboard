@@ -613,7 +613,7 @@ class GitHubPlatform:
                 is_bot = login.endswith("[bot]")
                 if is_bot and login != bot_name:
                     continue
-                entry = f"[{login or '?'}]: {(c.get('body') or '')[:500]}"
+                entry = f"[{login or '?'}]: {(c.get('body') or '')[:5000]}"
                 total_len += len(entry)
                 if total_len > _COMMENT_LIMIT:
                     break

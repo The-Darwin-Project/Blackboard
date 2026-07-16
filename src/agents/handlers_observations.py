@@ -113,7 +113,7 @@ async def handle_review_notes(
         lines = [f"{len(notes)} field notes in notebook:"]
         for n in notes:
             lines.append(
-                f"  • [{n.get('category', '?')}] {n.get('content', '')[:120]}"
+                f"  • [{n.get('category', '?')}] {n.get('content', '')}"
                 f" (evt:{n.get('event_id', '?')[:8]}, {n.get('timestamp', '?')})"
             )
         summary_text = "\n".join(lines)
