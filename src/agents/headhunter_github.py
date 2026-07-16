@@ -785,9 +785,9 @@ class GitHubPlatform:
         # domain_confidence is always "assessed" -- headhunter always runs LLM triage
         # (emergency inline stub is still a classification, per event-evidence-contract)
         domain_confidence = "assessed"
-        body_truncated = issue.get("body", "")
+        body_sanitized = issue.get("body", "")
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
-        body_truncated = body_truncated.replace("</issue_body>", "")
+        body_sanitized = body_sanitized.replace("</issue_body>", "")
 
         evidence = EventEvidence(
             display_text=f"GitHub Issue #{number}: {issue.get('issue_title', '')} in {owner}/{repo}",
@@ -802,7 +802,7 @@ class GitHubPlatform:
                 "installation_id": installation_id,
                 "issue_number": number,
                 "title": issue.get("issue_title", ""),
-                "body": f"<issue_body>{body_truncated}</issue_body>",
+                "body": f"<issue_body>{body_sanitized}</issue_body>",
                 "labels": labels,
                 "assignees": issue.get("assignees", []),
                 "html_url": issue.get("html_url", f"https://github.com/{owner}/{repo}/issues/{number}"),

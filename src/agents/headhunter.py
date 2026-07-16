@@ -171,6 +171,7 @@ class Headhunter:
         parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
         if context.get("mr_description") or context.get("pr_body"):
             desc = context.get('mr_description', context.get('pr_body', ''))
+            desc = desc.replace("</description>", "")  # prompt injection defense
             parts.append(f"<description>\n{desc}\n</description>")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
