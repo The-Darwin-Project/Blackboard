@@ -252,6 +252,8 @@ spec:
               value: "{{ .Values.headhunter.maintainerSource }}"
             - name: HEADHUNTER_MAINTAINERS
               value: "{{ .Values.headhunter.maintainers }}"
+            - name: HEADHUNTER_COMMENT_LIMIT
+              value: "{{ .Values.headhunter.commentLimit }}"
             {{- if .Values.headhunter.github.enabled }}
             - name: HEADHUNTER_GITHUB_ENABLED
               value: "true"
@@ -323,6 +325,11 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_THINKING_HEADHUNTER
+            - name: LLM_MAX_TOKENS_HEADHUNTER
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-config
+                  key: LLM_MAX_TOKENS_HEADHUNTER
             {{- end }}
             {{- if .Values.timekeeper }}
             # TimeKeeper (scheduled task observer)

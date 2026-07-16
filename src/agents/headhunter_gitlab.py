@@ -27,6 +27,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+
 logger = logging.getLogger(__name__)
 
 V1_ACTIONABLE = {"assigned", "build_failed", "approval_required", "review_requested", "unmergeable", "directly_addressed"}
@@ -206,7 +207,7 @@ class GitLabPlatform:
             "action_name": action,
             "mr_iid": target.get("iid"),
             "mr_title": target.get("title", ""),
-            "mr_description": (target.get("description") or "")[:2000],
+            "mr_description": target.get("description") or "",
             "mr_state": target.get("state", ""),
             "merge_status": target.get("detailed_merge_status") or target.get("merge_status", ""),
             "source_branch": target.get("source_branch", ""),
@@ -365,7 +366,7 @@ class GitLabPlatform:
                 "pipeline_status": pipeline_status,
                 "pipeline_id": context.get("pipeline_id"),
                 "todo_created_at": todo.get("created_at", ""),
-                "mr_description": (target.get("description") or "")[:2000],
+                "mr_description": target.get("description") or "",
                 "maintainer": maintainer,
             },
         )

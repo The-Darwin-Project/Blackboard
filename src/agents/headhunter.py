@@ -13,6 +13,8 @@
 # 10. [Pattern]: issue_title sanitized (replace </ → < /) in _build_issue_analysis_prompt.
 # 11. [Pattern]: Phase B uses gate_closed flag — no per-item Redis gate re-check after first closure.
 # 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
+# 13. [Pattern]: No input truncation on descriptions — full text flows to Flash (1M+ context).
+#     Output controlled by max_output_tokens. _COMMENT_LIMIT (default 2000) for aggregated notes only.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -45,6 +47,8 @@ from .headhunter_jira import HeadhunterJira
 
 logger = logging.getLogger(__name__)
 
+from .headhunter_utils import _COMMENT_LIMIT  # noqa: E402
+
 
 class Headhunter:
     """VCS todo poller orchestrator — platform-agnostic loop with pluggable adapters."""
@@ -62,6 +66,7 @@ class Headhunter:
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
+        self._max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_HEADHUNTER", "10000"))
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_pending: int = 0
         self._github_pending: int = 0
@@ -117,7 +122,7 @@ class Headhunter:
                 system_prompt=system_instruction,
                 contents=prompt,
                 temperature=self._temperature,
-                max_output_tokens=10000,
+                max_output_tokens=self._max_output_tokens,
                 thinking_level=self._thinking_level,
             )
             from .llm import record_token_usage
@@ -177,7 +182,7 @@ class Headhunter:
             parts.append(f"<job_log>\n{context['failed_job_log']}\n</job_log>")
         if context.get("recent_notes") or context.get("recent_comments"):
             notes = context.get("recent_notes", context.get("recent_comments", []))
-            joined = "\n".join(notes)[:2000]
+            joined = "\n".join(notes)[:_COMMENT_LIMIT]
             parts.append(f"<comments>\n{joined}\n</comments>")
         if context.get("mention_comment"):
             parts.append(f"<mention_request author=\"{context.get('mention_author', 'unknown')}\">\n{context['mention_comment']}\n</mention_request>")

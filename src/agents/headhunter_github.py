@@ -45,6 +45,8 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
+from .headhunter_utils import _COMMENT_LIMIT
+
 logger = logging.getLogger(__name__)
 
 _SKILLS_DIR = Path(__file__).parent / "headhunter_skills"
@@ -441,7 +443,7 @@ class GitHubPlatform:
             "assignees": [(a or {}).get("login", "") for a in issue_data.get("assignees", [])],
             "html_url": issue_data.get("html_url", ""),
             "created_at": issue_data.get("created_at", ""),
-            "body": (issue_data.get("body") or "")[:2000],
+            "body": issue_data.get("body") or "",
         }
 
     async def _load_issue_triage_instruction(self, labels: list[str]) -> tuple[str, str | None]:
@@ -565,7 +567,7 @@ class GitHubPlatform:
             context["head_sha"] = (pr.get("head") or {}).get("sha", "")
             context["head_branch"] = (pr.get("head") or {}).get("ref", "")
             context["base_branch"] = (pr.get("base") or {}).get("ref", "")
-            context["pr_body"] = (pr.get("body") or "")[:2000]
+            context["pr_body"] = pr.get("body") or ""
             context["mergeable"] = pr.get("mergeable")
             context["changed_files"] = []
 
@@ -613,7 +615,7 @@ class GitHubPlatform:
                     continue
                 entry = f"[{login or '?'}]: {(c.get('body') or '')[:500]}"
                 total_len += len(entry)
-                if total_len > 2000:
+                if total_len > _COMMENT_LIMIT:
                     break
                 recent.append(entry)
                 if len(recent) >= 5:
@@ -783,7 +785,7 @@ class GitHubPlatform:
         # domain_confidence is always "assessed" -- headhunter always runs LLM triage
         # (emergency inline stub is still a classification, per event-evidence-contract)
         domain_confidence = "assessed"
-        body_truncated = issue.get("body", "")[:2000]
+        body_truncated = issue.get("body", "")
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
         body_truncated = body_truncated.replace("</issue_body>", "")
 
