@@ -147,6 +147,7 @@ gcp:
       model: "gemini-3.5-flash" # MR triage and plan generation
       temperature: "0.3"
       thinkingLevel: "low"
+      maxOutputTokens: "10000"
     timekeeper:
       model: "gemini-3.5-flash" # Instruction refinement (user-facing, fast)
       temperature: "0.3"
@@ -440,6 +441,7 @@ headhunter:
   enabled: false # Set to true + configure GITLAB_HOST to activate
   pollInterval: "300" # seconds between poll cycles
   startupDelay: "180" # seconds to wait for sidecars before first poll (pod takes 2-3 min)
+  commentLimit: "2000" # Max chars for aggregated comment/note text
   maintainerSource: "static" # "static" (env var CSV) or "smartsheet" (API)
   maintainers: "" # CSV of maintainer emails for static source
   # --- GitHub Platform (GitHub App-based PR polling) ---

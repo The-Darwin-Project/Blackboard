@@ -15,7 +15,7 @@ alwaysApply: true
 
 * **File:** `src/agents/headhunter.py`
 * **Pattern:** Poll -> Classify -> Create Event -> Brain handles routing
-* **LLM:** Flash Lite via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
+* **LLM:** Flash via `_get_adapter()` (env: `LLM_MODEL_HEADHUNTER`, `LLM_TEMPERATURE_HEADHUNTER`, `LLM_MAX_TOKENS_HEADHUNTER`). System instruction loaded from `headhunter_skills/gitlab-mr-triage.md` via `_load_gitlab_si()` (fallback: `_EMERGENCY_SI`).
 * **Flow Gate:** Global WIP cap (`MAX_ACTIVE_EVENTS`) controls event creation. Headhunter's `check_flow_gate()` counts all non-closed events (new+active+deferred) against the global cap. Conservative (no `_waiting_for_user` subtraction). Backs off when system is at capacity.
 * **Circuit Breaker:** 3 consecutive failures -> self-disable. Brain continues.
 * **Startup Delay:** 180s default (env: `HEADHUNTER_STARTUP_DELAY`). Waits for sidecars.
@@ -26,7 +26,7 @@ All MRs go through Flash Lite analysis with the system instruction from `headhun
 
 | Path | Trigger | How |
 |---|---|---|
-| **LLM Analysis** | All MRs | Flash Lite reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. Bot Instructions in the MR description are included as prompt context. |
+| **LLM Analysis** | All MRs | Flash reads full MR context (description, pipeline, changed files, comments) and generates a YAML plan. No input truncation — full description flows to Flash (1M+ context). Bot Instructions in the description are included as prompt context. Output controlled by `LLM_MAX_TOKENS_HEADHUNTER`. |
 | **Emergency Fallback** | LLM unavailable | Inline `_emergency_plan()` produces COMPLICATED/developer plan. Safety net only. |
 
 ## Maintainer Resolution
@@ -94,14 +94,20 @@ Brain can override via `classify_event(severity=...)` -> stored in `brain_severi
 * `evidence.gitlab_context.mr_description` contains the original MR description (Bot Instructions visible to Brain).
 * `GITLAB_BOT_USERNAME` env var controls which account name to match in @mention scanning.
 
+## Prompt Injection Defense
+
+* XML fence sanitization via `_sanitize_xml_fence()` in `headhunter.py`. Strips closing tags for all prompt XML fences (`</description>`, `</job_log>`, `</comments>`, `</mention_request>`, `</issue_body>`) from user-controlled content before embedding.
+* `mention_author` sanitized (quote stripping) before XML attribute insertion.
+* `_DESC_SAFETY_CAP` (env: `HEADHUNTER_DESCRIPTION_CAP`, default 100K) prevents degenerate descriptions from consuming excessive tokens.
+
 ## Helm Configuration
 
 ```yaml
 headhunter:
   enabled: false
   pollInterval: "300"
-  # maxActive removed — global cap (app.maxActiveEvents) controls admission
   startupDelay: "180"
+  commentLimit: "2000"
   maintainerSource: "static"
   maintainers: ""  # CSV of emails
 
@@ -111,4 +117,6 @@ gcp:
     headhunter:
       model: "gemini-3.5-flash"
       temperature: "0.3"
+      thinkingLevel: "low"
+      maxOutputTokens: "10000"
 ```

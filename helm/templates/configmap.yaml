@@ -32,6 +32,7 @@ data:
   LLM_MODEL_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.model }}"
   LLM_TEMPERATURE_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.temperature }}"
   LLM_THINKING_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.thinkingLevel }}"
+  LLM_MAX_TOKENS_HEADHUNTER: "{{ .Values.gcp.llm.headhunter.maxOutputTokens }}"
   # TimeKeeper (instruction refinement)
   LLM_MODEL_TIMEKEEPER: "{{ .Values.gcp.llm.timekeeper.model }}"
   LLM_TEMPERATURE_TIMEKEEPER: "{{ .Values.gcp.llm.timekeeper.temperature }}"
