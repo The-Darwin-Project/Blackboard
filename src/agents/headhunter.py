@@ -47,7 +47,16 @@ from .headhunter_jira import HeadhunterJira
 
 logger = logging.getLogger(__name__)
 
-from .headhunter_utils import _COMMENT_LIMIT  # noqa: E402
+from .headhunter_utils import _COMMENT_LIMIT, _safe_int  # noqa: E402
+
+import re
+
+_XML_CLOSE_TAG = re.compile(r"</(?:description|job_log|comments|mention_request|issue_body)>")
+
+
+def _sanitize_xml_fence(text: str) -> str:
+    """Strip XML closing tags that could break prompt fencing."""
+    return _XML_CLOSE_TAG.sub("", text) if text else text
 
 
 class Headhunter:
@@ -66,7 +75,7 @@ class Headhunter:
         self._model_name = os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash")
         self._temperature = float(os.getenv("LLM_TEMPERATURE_HEADHUNTER", "0.3"))
         self._thinking_level = os.getenv("LLM_THINKING_HEADHUNTER", "low")
-        self._max_output_tokens = int(os.getenv("LLM_MAX_TOKENS_HEADHUNTER", "10000"))
+        self._max_output_tokens = _safe_int("LLM_MAX_TOKENS_HEADHUNTER", 10000)
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self._gitlab_pending: int = 0
         self._github_pending: int = 0
@@ -170,8 +179,7 @@ class Headhunter:
             parts.append(f"Pipeline ID: {context['pipeline_id']}")
         parts.append(f"Project: {context.get('project_path', context.get('repo', 'unknown'))}")
         if context.get("mr_description") or context.get("pr_body"):
-            desc = context.get('mr_description', context.get('pr_body', ''))
-            desc = desc.replace("</description>", "")  # prompt injection defense
+            desc = _sanitize_xml_fence(context.get('mr_description', context.get('pr_body', '')))
             parts.append(f"<description>\n{desc}\n</description>")
         if context.get("changed_files"):
             parts.append(f"Changed files ({len(context['changed_files'])}): {', '.join(context['changed_files'][:10])}")
@@ -180,13 +188,16 @@ class Headhunter:
         if context.get("failed_job_names"):
             parts.append(f"Failed jobs ({context.get('failed_job_count', '?')}/{context.get('total_job_count', '?')} total): {', '.join(context['failed_job_names'])}")
         if context.get("failed_job_log"):
-            parts.append(f"<job_log>\n{context['failed_job_log']}\n</job_log>")
+            log = _sanitize_xml_fence(context['failed_job_log'])
+            parts.append(f"<job_log>\n{log}\n</job_log>")
         if context.get("recent_notes") or context.get("recent_comments"):
             notes = context.get("recent_notes", context.get("recent_comments", []))
-            joined = "\n".join(notes)[:_COMMENT_LIMIT]
+            joined = _sanitize_xml_fence("\n".join(notes)[:_COMMENT_LIMIT])
             parts.append(f"<comments>\n{joined}\n</comments>")
         if context.get("mention_comment"):
-            parts.append(f"<mention_request author=\"{context.get('mention_author', 'unknown')}\">\n{context['mention_comment']}\n</mention_request>")
+            author = context.get('mention_author', 'unknown').replace('"', '')
+            comment = _sanitize_xml_fence(context['mention_comment'])
+            parts.append(f"<mention_request author=\"{author}\">\n{comment}\n</mention_request>")
 
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)

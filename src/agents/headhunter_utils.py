@@ -9,4 +9,17 @@ from __future__ import annotations
 
 import os
 
-_COMMENT_LIMIT = int(os.getenv("HEADHUNTER_COMMENT_LIMIT", "2000"))
+
+def _safe_int(env_key: str, default: int) -> int:
+    """Parse int env var with fallback on invalid values."""
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+_COMMENT_LIMIT = _safe_int("HEADHUNTER_COMMENT_LIMIT", 2000)
+_DESC_SAFETY_CAP = _safe_int("HEADHUNTER_DESCRIPTION_CAP", 100_000)

@@ -45,7 +45,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +443,7 @@ class GitHubPlatform:
             "assignees": [(a or {}).get("login", "") for a in issue_data.get("assignees", [])],
             "html_url": issue_data.get("html_url", ""),
             "created_at": issue_data.get("created_at", ""),
-            "body": issue_data.get("body") or "",
+            "body": (issue_data.get("body") or "")[:_DESC_SAFETY_CAP],
         }
 
     async def _load_issue_triage_instruction(self, labels: list[str]) -> tuple[str, str | None]:
@@ -567,7 +567,7 @@ class GitHubPlatform:
             context["head_sha"] = (pr.get("head") or {}).get("sha", "")
             context["head_branch"] = (pr.get("head") or {}).get("ref", "")
             context["base_branch"] = (pr.get("base") or {}).get("ref", "")
-            context["pr_body"] = pr.get("body") or ""
+            context["pr_body"] = (pr.get("body") or "")[:_DESC_SAFETY_CAP]
             context["mergeable"] = pr.get("mergeable")
             context["changed_files"] = []
 
@@ -785,7 +785,7 @@ class GitHubPlatform:
         # domain_confidence is always "assessed" -- headhunter always runs LLM triage
         # (emergency inline stub is still a classification, per event-evidence-contract)
         domain_confidence = "assessed"
-        body_sanitized = issue.get("body", "")
+        body_sanitized = (issue.get("body") or "")[:_DESC_SAFETY_CAP]
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
         body_sanitized = body_sanitized.replace("</issue_body>", "")
 
