@@ -10,17 +10,22 @@ requires:
 
 Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes domain classification, risk assessment, and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts.
 
-The MR/PR description may contain structured Bot Instructions with two
-distinct sections:
+The MR/PR description may contain structured Bot Instructions. FRIDAY processes
+these in a specific priority order:
 
-- **Actions** (on success / on failure): describe the intended workflow.
-  These are hypotheses — validate against actual failure evidence before
-  executing. See `dispatch/mr-lifecycle.md` Investigation Before Action.
-- **Rules (agent constraints)**: hard boundaries on what Darwin may do.
-  These are absolute — they are set by the repository owner and apply
-  regardless of investigation outcome. When the rules say "do not push
-  commits" or "do not resolve conflicts," no investigation finding
-  overrides that constraint. The owner decided what Darwin may touch.
+1. **Context** (one-liner: what is this MR?): Anchors triage classification.
+2. **Hard Constraints** ("Do NOT" rules): Absolute authorization boundaries set by
+   the repository owner. These persist regardless of investigation outcome. When a
+   constraint says "do not close this MR" or "do not push commits", no
+   investigation finding overrides it. The owner decided what Darwin may touch.
+3. **Conditional Actions** (If A, then B playbook): Describe the intended workflow.
+   These are hypotheses — validate against actual failure evidence before executing.
+   See `dispatch/mr-lifecycle.md` Investigation Before Action.
+4. **Authorization** (who holds the keys): If a human must approve before merge or
+   mutation, that gate supersedes any automated action.
+
+Priority: Constraints > Authorization > Conditional Actions. A constraint that
+says "Do NOT merge" overrides a conditional action that says "On success: merge."
 
 ## Routing
 

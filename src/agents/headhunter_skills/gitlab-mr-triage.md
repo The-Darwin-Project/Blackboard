@@ -71,15 +71,17 @@ Assign each step to exactly one agent:
 ## Rules
 
 1. Steps describe WHAT needs to happen. The FRIDAY decides WHEN and handles dispatch.
-2. If the MR description contains a "Bot Instructions" section, incorporate the
-   success/failure actions into your plan steps.
-3. If Bot Instructions contain a "Rules (agent constraints)" section, surface those
-   constraints in the plan `reasoning` field. These are authorization boundaries —
-   agents must not exceed them regardless of investigation outcome.
-4. For pipeline failures, include the failed job names and error context in the step summary.
-5. Keep step summaries specific: include MR IID, project path, branch names, and error details.
-6. For COMPLICATED situations, explain your reasoning in the plan summary line.
-7. If the MR is already merged or closed, produce a single-step plan to verify and close.
+2. If the MR description contains a "Bot Instructions" section, parse it in priority order:
+   - **Hard Constraints** ("Do NOT" rules): Surface in the plan `reasoning` field AND
+     prefix each relevant step summary with the constraint. These are authorization
+     boundaries — agents must not exceed them regardless of investigation outcome.
+   - **Conditional Actions** (On success / On failure): Incorporate into plan steps.
+   - **Authorization** (requires human approval): Add a step for notification, do not
+     plan automated merge or mutation without approval.
+3. For pipeline failures, include the failed job names and error context in the step summary.
+4. Keep step summaries specific: include MR IID, project path, branch names, and error details.
+5. For COMPLICATED situations, explain your reasoning in the plan summary line.
+6. If the MR is already merged or closed, produce a single-step plan to verify and close.
 </rules>
 
 <awareness>
