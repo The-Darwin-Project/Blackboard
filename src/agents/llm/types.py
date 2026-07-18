@@ -1062,11 +1062,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "record_observation",
         "description": (
-            "Record a numeric observation. Every quantifiable signal you encounter "
-            "is worth recording -- error counts, durations, queue depths, retry "
-            "attempts, replica counts, pipeline wait times. Numbers are evidence; "
-            "text is opinion. Call this often. The series you build is your "
-            "institutional memory and the operator's shared evidence."
+            "Record a numeric observation to an EXISTING time series or a canonical "
+            "series name. Observations build trajectories — a single data point has "
+            "zero value. Before recording, mentally check: will this same metric name "
+            "be recorded again in future events for this service? If not, use take_note "
+            "instead. Reuse existing series names from list_observations. "
+            "Canonical names: pipeline_duration_m, kueue_wait_m, s390x_build_duration_m, "
+            "error_count, pod_restart_count, promotion_duration_m."
         ),
         "input_schema": {
             "type": "object",
