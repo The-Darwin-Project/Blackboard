@@ -975,14 +975,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["context"],
         },
     },
-    # --- inspect_event (gated: jarvis-sourced meta-events only) ---
+    # --- inspect_event (gated: jarvis, chat, slack sources) ---
     {
         "name": "inspect_event",
         "description": (
-            "Read your own action history on another event. "
-            "Use when JARVIS references a specific event and you need to understand "
-            "what you did there -- your triage decisions, agent routing, phase transitions, "
-            "and reasoning. Read-only: you cannot modify the inspected event."
+            "Read the full conversation and action history of another event. "
+            "Returns the complete event document: triage decisions, agent results, "
+            "phase transitions, plans, and reasoning. "
+            "Read-only: you cannot modify the inspected event."
         ),
         "input_schema": {
             "type": "object",
