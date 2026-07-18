@@ -17,6 +17,8 @@
 #     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
 #     with models that don't clear thought history.
+# 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
+#     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -38,11 +40,22 @@ class GeminiAdapter:
 
     def __init__(self, project: str, location: str, model_name: str, quota_tracker=None):
         from google import genai
+        from google.genai.types import HttpOptions, HttpRetryOptions
 
         self._client = genai.Client(
             vertexai=True,
             project=project,
             location=location,
+            http_options=HttpOptions(
+                timeout=180 * 1000,
+                retry_options=HttpRetryOptions(
+                    attempts=5,
+                    initial_delay=1.0,
+                    max_delay=60.0,
+                    exp_base=2.0,
+                    http_status_codes=[408, 429, 500, 502, 503, 504],
+                ),
+            ),
         )
         self._model_name = model_name
         self._tracker = quota_tracker
