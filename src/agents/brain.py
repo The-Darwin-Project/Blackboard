@@ -1670,7 +1670,7 @@ class Brain:
         if isinstance(e, QuotaExhaustedError):
             return True
         err_str = str(e)
-        return any(code in err_str for code in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+        return any(code in err_str for code in ["429", "502", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 
     @staticmethod
     async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:
