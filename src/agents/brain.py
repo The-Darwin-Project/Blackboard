@@ -1405,6 +1405,16 @@ class Brain:
                                             reflex_searcher.fire(window)
                                 else:
                                     accumulated_text += chunk.text
+                                    if len(accumulated_text) > 2000:
+                                        tail = accumulated_text[-200:]
+                                        token = tail[:20]
+                                        if token and tail.count(token) > 8:
+                                            logger.warning(
+                                                "Repetition collapse detected for %s — aborting stream (%d chars)",
+                                                event_id, len(accumulated_text),
+                                            )
+                                            accumulated_text = ""
+                                            break
                                 await self._broadcast({
                                     "type": "brain_thinking",
                                     "event_id": event_id,
