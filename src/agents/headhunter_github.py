@@ -62,16 +62,17 @@ service: [component name]
 repository: [owner/repo]
 domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
-reasoning: "[One sentence]"
+reasoning: "[One sentence -- include any constraints from PR description]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect]
+    agent: [sysadmin|developer|qe|architect|security_analyst]
     summary: "[What this step accomplishes -- include PR number, branch, error details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/PR/CI), qe (test/verify), architect (analysis/review).
+Agents: sysadmin (k8s/gitops), developer (code/PR/CI), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/dependency audit/supply chain).
 Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
+If the PR body contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
 
 _EMERGENCY_ISSUE_SI = """\
@@ -88,12 +89,12 @@ risk: [low|medium|high]
 reasoning: "[One sentence]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect]
+    agent: [sysadmin|developer|qe|architect|security_analyst]
     summary: "[What this step accomplishes — include issue number and key details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify), architect (analysis/design).
+Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify), architect (analysis/design), security_analyst (CVE/vulnerability/dependency audit/supply chain).
 Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
 """
 

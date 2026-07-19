@@ -87,7 +87,10 @@ corresponding agent:
 ## Rules
 
 1. Steps describe WHAT needs to happen. The FRIDAY decides WHEN and handles dispatch.
-2. If the MR description contains a "Bot Instructions" or "DARWIN Instructions" section, parse it in priority order:
+2. **MR description instructions override built-in rules.** If the MR description
+   contains a "Bot Instructions" or "DARWIN Instructions" section, those instructions
+   take HIGHER priority than any rule below. The repository owner knows their
+   workflow better than generic triage heuristics. Parse in priority order:
    - **Hard Constraints** ("Do NOT" rules): Surface in the plan `reasoning` field AND
      prefix each relevant step summary with the constraint. These are authorization
      boundaries — agents must not exceed them regardless of investigation outcome.

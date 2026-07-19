@@ -60,16 +60,17 @@ service: [component name]
 repository: [GitLab project path]
 domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
-reasoning: "[One sentence]"
+reasoning: "[One sentence -- include any constraints from MR description]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect]
+    agent: [sysadmin|developer|qe|architect|security_analyst]
     summary: "[What this step accomplishes -- include MR IID, branch, error details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review).
+Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain).
 Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
+If the MR description contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
 
 

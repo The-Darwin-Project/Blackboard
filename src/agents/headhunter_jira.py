@@ -94,7 +94,8 @@ Given an analysis of a Jira issue, produce a structured execution plan using the
 - architect: code review, analysis, design assessment, plan creation (READ-ONLY)
 - developer: implementation, code changes, bug fixes, creating branches/MRs (WRITE access)
 - qe: testing, verification, running test suites, validating fixes (READ + EXECUTE tests)
-- sysAdmin: infrastructure, deployment, cluster operations, pipeline investigation
+- sysadmin: infrastructure, deployment, cluster operations, pipeline investigation
+- security_analyst: vulnerability scanning, CVE remediation, dependency audit, supply chain security
 
 ## Rules
 
