@@ -1,5 +1,5 @@
 thinking_level: "medium"
-temperature: 0.3
+temperature: 0.7
 priority: 90
 max_output_tokens: 2048
 description: "Evaluate intermediate turns during active dispatch. Tools:
