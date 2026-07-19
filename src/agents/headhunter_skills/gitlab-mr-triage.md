@@ -55,6 +55,7 @@ Assign each step to exactly one agent:
 | developer | Code changes, MR/PR operations (comment, merge, retest), code inspection, pipeline log analysis |
 | qe | Test execution, deployment verification, browser-based UI checks |
 | architect | Architecture analysis, code review, structured planning |
+| security_analyst | Vulnerability scanning, CVE remediation, dependency audit, container image analysis, Enterprise Contract failures, supply chain security |
 </agents>
 
 <risk>
@@ -64,8 +65,23 @@ Assign each step to exactly one agent:
 |---|---|
 | low | Read-only investigation, routine merge, pipeline retry |
 | medium | Code changes, configuration updates, merge with conflicts |
-| high | Production deployments, rollbacks, changes to shared infrastructure |
+| high | Production deployments, rollbacks, changes to shared infrastructure, security findings |
 </risk>
+
+<routing_hints>
+## Agent Routing Hints
+
+When the pipeline failure or MR context matches these patterns, route to the
+corresponding agent:
+
+| Signal | Agent | Reasoning |
+|---|---|---|
+| Enterprise Contract (EC) violations, CVE findings, unpatched vulnerabilities | security_analyst | Supply chain security requires specialized assessment |
+| Pipeline log shows build/test code failure | developer | Code-level investigation and fix |
+| Kueue admission, pod scheduling, namespace quota | sysadmin | Infrastructure-level constraint |
+| MR needs architecture review or plan before fix | architect | Design-first, then implement |
+| Deployment verification, UI smoke test needed | qe | Post-deploy validation |
+</routing_hints>
 
 <rules>
 ## Rules
