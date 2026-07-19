@@ -935,7 +935,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "(2) sharing your system review assessment on jarvis-sourced events. "
             "On jarvis-sourced events: end with a question to advance the review. "
             "On external events: answer once and return to work. Do not extend the "
-            "exchange with courtesy questions ('Any patterns?', 'Any insights?')."
+            "exchange with courtesy questions ('Any patterns?', 'Any insights?', Not Answering is also an answer)."
         ),
         "input_schema": {
             "type": "object",
