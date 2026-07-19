@@ -65,6 +65,8 @@ def _get_github_headers() -> dict[str, str]:
     if _github_auth is None:
         from src.utils.github_app import GitHubAppAuth
         _github_auth = GitHubAppAuth()
+        if not _github_auth.installation_id:
+            _github_auth.resolve_installation_for_repo(REPO)
     token = _github_auth.get_token()
     return {
         "Accept": "application/vnd.github+json",

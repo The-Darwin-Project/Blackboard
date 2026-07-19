@@ -166,6 +166,36 @@ class GitHubAppAuth:
         """
         return self._create_jwt()
 
+    def resolve_installation_for_repo(self, repo: str) -> str:
+        """Discover the installation ID that covers a given repo (sync, App JWT).
+
+        Calls GET /repos/{owner}/{repo}/installation with the App JWT.
+        Caches the result on self.installation_id so subsequent get_token()
+        calls use it without re-discovery.
+
+        Args:
+            repo: Repository in "owner/repo" format.
+
+        Returns:
+            The installation ID as a string.
+
+        Raises:
+            ValueError: If the app is not installed on the repo.
+        """
+        jwt_token = self._create_jwt()
+        url = f"https://api.github.com/repos/{repo}/installation"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {jwt_token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        inst_id = str(resp.json()["id"])
+        self.installation_id = inst_id
+        logger.info("Resolved installation_id=%s for repo %s", inst_id, repo)
+        return inst_id
+
     def get_clone_url(self, repo: str) -> str:
         """
         Get an authenticated clone URL for a repository.
