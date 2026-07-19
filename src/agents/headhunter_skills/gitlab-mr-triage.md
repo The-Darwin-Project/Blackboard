@@ -39,7 +39,7 @@ Classify the MR situation using evidence from the context provided:
 
 | Domain | When | Plan shape |
 |---|---|---|
-| CLEAR | Known fix: pipeline retry, routine merge, bot MR with explicit instructions | 1-3 steps, direct execution |
+| CLEAR | Known fix: pipeline retry, routine merge, bot MR with explicit instructions, image updates | 1-3 steps, direct execution |
 | COMPLICATED | Needs analysis: test failures with unclear cause, merge conflicts, multiple failing jobs | 2-4 steps, investigation then action |
 | COMPLEX | Novel or contradictory: never-seen error pattern, cascading failures across services | 1-2 probe steps (safe-to-fail investigation) |
 </domain_classification>
@@ -71,7 +71,7 @@ Assign each step to exactly one agent:
 ## Rules
 
 1. Steps describe WHAT needs to happen. The FRIDAY decides WHEN and handles dispatch.
-2. If the MR description contains a "Bot Instructions" section, parse it in priority order:
+2. If the MR description contains a "Bot Instructions" or "DARWIN Instructions" section, parse it in priority order:
    - **Hard Constraints** ("Do NOT" rules): Surface in the plan `reasoning` field AND
      prefix each relevant step summary with the constraint. These are authorization
      boundaries — agents must not exceed them regardless of investigation outcome.
@@ -118,6 +118,7 @@ The FRIDAY interprets merge_status literally. Help it by understanding what thes
 | can_be_merged | Ready to merge now, no blockers | "Confirm MR !{iid} merged or trigger merge" |
 | checking | GitLab computing eligibility | Treat as ci_still_running |
 | cannot_be_merged | Conflict or policy block | "Investigate merge blocker on MR !{iid}" |
+| conflict | MR has merge conflicts — cannot be merged | For bot MRs: "Close MR !{iid} — merge conflict on bot-generated content, bot will recreate" |
 | not_approved | Requires human approval | "Notify maintainer: MR !{iid} needs approval" |
 | discussions_not_resolved | Open review threads | "Investigate unresolved discussions on MR !{iid}" |
 | draft_status | MR is still draft | "MR !{iid} is draft -- no action until published" |
@@ -126,6 +127,11 @@ The FRIDAY interprets merge_status literally. Help it by understanding what thes
 
 Critical: "mergeable" does NOT mean complete. It means "will auto-merge when pipeline passes."
 Always treat mergeable + pipeline running as "external process in flight, needs verification."
+
+Critical: merge_status "conflict" on bot-authored MRs means the MR CANNOT be merged regardless
+of pipeline status. A successful pipeline with merge conflicts is NOT a mergeable MR. The plan
+must acknowledge the conflict as the primary blocker — pipeline success is irrelevant until
+conflicts are resolved.
 </merge_semantics>
 
 <pipeline_rule>
