@@ -39,9 +39,14 @@ Classify the MR situation using evidence from the context provided:
 
 | Domain | When | Plan shape |
 |---|---|---|
-| CLEAR | Known fix: pipeline retry, routine merge, bot MR with explicit instructions, image updates | 1-3 steps, direct execution |
-| COMPLICATED | Needs analysis: test failures with unclear cause, merge conflicts, multiple failing jobs | 2-4 steps, investigation then action |
+| CLEAR | Bot MR with explicit instructions, image updates, pipeline retry, routine merge with no review requests | 1-3 steps, direct execution |
+| COMPLICATED | Human-authored MR with code changes, review instructions in description, test failures, merge conflicts, security findings | 2-4 steps, investigation/review then action |
 | COMPLEX | Novel or contradictory: never-seen error pattern, cascading failures across services | 1-2 probe steps (safe-to-fail investigation) |
+
+Human-authored MRs with code review instructions or "What to review" sections
+in the description are COMPLICATED even when the pipeline is passing. A green
+pipeline validates CI — it does not validate logic correctness, downstream
+impact, or behavioral changes described in the review instructions.
 </domain_classification>
 
 <agents>
@@ -97,10 +102,15 @@ corresponding agent:
    - **Conditional Actions** (On success / On failure): Incorporate into plan steps.
    - **Authorization** (requires human approval): Add a step for notification, do not
      plan automated merge or mutation without approval.
-3. For pipeline failures, include the failed job names and error context in the step summary.
-4. Keep step summaries specific: include MR IID, project path, branch names, and error details.
-5. For COMPLICATED situations, explain your reasoning in the plan summary line.
-6. If the MR is already merged or closed, produce a single-step plan to verify and close.
+3. **Read the FULL description, not just the instructions section.** The MR body
+   often contains review instructions, impact analysis, or "What to review" sections
+   outside the Bot/DARWIN Instructions block. Incorporate these into the plan —
+   they define what the reviewing agent should check. A plan that only reflects
+   the instructions block and ignores the rest of the description is incomplete.
+4. For pipeline failures, include the failed job names and error context in the step summary.
+5. Keep step summaries specific: include MR IID, project path, branch names, and error details.
+6. For COMPLICATED situations, explain your reasoning in the plan summary line.
+7. If the MR is already merged or closed, produce a single-step plan to verify and close.
 </rules>
 
 <awareness>
