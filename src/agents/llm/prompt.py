@@ -133,6 +133,11 @@ def _build_subject_block(
             emails = maintainer.get("emails", [])
             if emails:
                 lines.append(f"  Maintainer Emails: {', '.join(emails)}")
+        mr_desc = gl.get("mr_description", "")
+        if mr_desc:
+            lines.append("")
+            lines.append("MR Description:")
+            lines.append(mr_desc)
 
     elif subject_type == "github_issue" and ev and getattr(ev, "github_issue_context", None):
         ic = ev.github_issue_context
@@ -169,6 +174,11 @@ def _build_subject_block(
             emails = maintainer.get("emails", [])
             if emails:
                 lines.append(f"  Maintainer Emails: {', '.join(emails)}")
+        pr_body = gc.get("body", "")
+        if pr_body:
+            lines.append("")
+            lines.append("PR Description:")
+            lines.append(pr_body)
 
     elif service_meta:
         lines.append(f"Service: {service_meta.name} (K8s Deployment)")
