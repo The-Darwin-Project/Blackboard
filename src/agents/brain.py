@@ -312,6 +312,11 @@ BRAIN_PREFILL_MODEL = (
 
 _TERMINAL_PROMPT_FALLBACK = "What is the next action? Call one of your functions."
 
+_ACTION_PATTERN = re.compile(
+    r"\b(escalat|clos[ei]|fail|block|stall|stuck|timeout|exceed|retest|retry|reject|abort|broken|crash|oom|kill)\w*\b",
+    re.IGNORECASE,
+)
+
 # Tools whose invocation always ends the LLM loop this cycle. Text flushed
 # immediately before one of these is the Brain's final user-facing answer --
 # it must bypass the response_emitted guard (which otherwise suppresses it as
@@ -2282,6 +2287,10 @@ class Brain:
 
         query_text = query_text[:2000]
         if not query_text.strip():
+            return qe_gate or None
+
+        if not _ACTION_PATTERN.search(query_text):
+            logger.debug(f"Post-agent recall: no action language in assessment for {event.id}, skipping memory search")
             return qe_gate or None
 
         archivist = self.agents.get("_archivist_memory")
