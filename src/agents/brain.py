@@ -2270,11 +2270,15 @@ class Brain:
             "Dispatch QE (mode: test) to verify before any PR, merge, or close action."
         ) if was_implement else ""
 
-        query_text = last_agent_turn.result or last_agent_turn.thoughts or ""
+        query_text = ""
         if last_agent_turn.taskForAgent:
-            reasoning = last_agent_turn.taskForAgent.get("reasoning", "")
-            if reasoning:
-                query_text = f"{reasoning} {query_text}"
+            query_text = last_agent_turn.taskForAgent.get("assessment", "")
+            if not query_text:
+                query_text = last_agent_turn.taskForAgent.get("reasoning", "")
+        if not query_text:
+            query_text = Brain._extract_recommendation(
+                last_agent_turn.result or last_agent_turn.thoughts or ""
+            ) or ""
 
         query_text = query_text[:2000]
         if not query_text.strip():
@@ -3541,14 +3545,19 @@ class Brain:
             # (loosened from architect-only; reasoning: guard mirrors MCP enforcement)
             body, plan_steps, fm = None, None, {}
             reasoning = None
+            assessment = None
             if not is_cancel and result_str.lstrip().startswith("---"):
                 body, plan_steps, fm = self._parse_plan_frontmatter(result_str)
                 reasoning = fm.get("reasoning")
                 if reasoning and not isinstance(reasoning, str):
                     reasoning = str(reasoning)
+                assessment = fm.get("assessment")
+                if assessment and not isinstance(assessment, str):
+                    assessment = str(assessment)
                 if not reasoning:
                     body, plan_steps, fm = None, None, {}
                     reasoning = None
+                    assessment = None
 
             has_structured_plan = body and plan_steps
 
@@ -3562,8 +3571,12 @@ class Brain:
             task_for_agent = None
             if has_structured_plan:
                 task_for_agent = {"steps": plan_steps, "source": agent_name, "reasoning": reasoning}
+                if assessment:
+                    task_for_agent["assessment"] = assessment
             elif reasoning:
                 task_for_agent = {"reasoning": reasoning}
+                if assessment:
+                    task_for_agent["assessment"] = assessment
 
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),

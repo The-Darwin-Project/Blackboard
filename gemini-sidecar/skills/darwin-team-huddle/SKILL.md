@@ -13,7 +13,7 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 
 | Tool | When to use | Who receives |
 |------|------------|--------------|
-| `team_send_results` | **Final report** -- deliver your completed work with YAML frontmatter (`reasoning` + optional `steps`) | FRIDAY (final deliverable) |
+| `team_send_results` | **Final report** -- deliver your completed work with YAML frontmatter (`reasoning` + `assessment` + optional `steps`) | FRIDAY (final deliverable) |
 | `team_huddle` | Mid-task questions that need FRIDAY input before you can continue | FRIDAY (blocks until reply) |
 | `team_send_message` | Progress updates while working | FRIDAY UI (informational only) |
 | `team_send_to_teammate` | Coordinate with your Dev/QE partner | Teammate's inbox |
@@ -23,7 +23,7 @@ You are working in implement mode as part of a Developer + QE pair coordinated b
 
 Use `team_send_results` to deliver your final report when your work is complete. This is FRIDAY's primary input for deciding the next action.
 
-Your report MUST include YAML frontmatter with `reasoning` (required) and `steps` (optional):
+Your report MUST include YAML frontmatter with `reasoning` (required), `assessment` (your judgment), and `steps` (optional):
 
 ```
 ---

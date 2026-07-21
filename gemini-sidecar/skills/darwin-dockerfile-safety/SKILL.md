@@ -51,4 +51,4 @@ FRIDAY — what you applied and what requires Architect review before proceeding
 
 These restrictions exist because `FROM`, `CMD`, `USER`, and `WORKDIR` changes alter
 the security posture or execution contract of the container. Source mutation approval
-applies — see the Brain's execution-method rules.
+applies — see FRIDAY's execution-method rules.

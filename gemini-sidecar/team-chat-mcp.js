@@ -18,10 +18,10 @@ const PEER_PORT = parseInt(process.env.PEER_PORT) || 0;
 const IS_TEAM = ROLE === 'developer' || ROLE === 'qe';
 
 const ALL_TOOLS = [
-  { name: 'team_send_message', description: 'Send a progress update to the Brain (shown in event chat, does NOT overwrite deliverable)', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Status update text' } }, required: ['message'] } },
-  { name: 'team_send_results', description: 'Deliver your final report/findings to the Brain (overwrites previous deliverable)', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report or findings' } }, required: ['content'] }, notInModes: ['message'] },
-  { name: 'team_check_messages', description: 'Check your inbox for pending messages from Manager or Brain. Returns and clears the queue.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'team_huddle', description: 'Send a message to the Brain and BLOCK until the Brain replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for Brain' } }, required: ['message'] }, teamOnly: true, notInModes: ['message'] },
+  { name: 'team_send_message', description: 'Send a progress update to FRIDAY (shown in event chat, does NOT overwrite deliverable)', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Status update text' } }, required: ['message'] } },
+  { name: 'team_send_results', description: 'Deliver your final report/findings to FRIDAY (overwrites previous deliverable). Frontmatter must include reasoning (root cause) and assessment (your professional judgment on what happens next — FRIDAY weighs this against institutional memory).', inputSchema: { type: 'object', properties: { content: { type: 'string', description: 'Final report with YAML frontmatter: ---\\nreasoning: "root cause"\\nassessment: "your judgment on the situation and what should happen next"\\n---\\n<diagnostic body>' } }, required: ['content'] }, notInModes: ['message'] },
+  { name: 'team_check_messages', description: 'Check your inbox for pending messages from FRIDAY. Returns and clears the queue.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'team_huddle', description: 'Send a message to FRIDAY and BLOCK until FRIDAY replies (up to 90s). Use for status reports and questions in implement mode.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Question or status for FRIDAY' } }, required: ['message'] }, teamOnly: true, notInModes: ['message'] },
   { name: 'team_send_to_teammate', description: 'Send a direct message to your dev/QE teammate via their sidecar. Message is stored in their teammate queue.', inputSchema: { type: 'object', properties: { message: { type: 'string', description: 'Message for teammate' } }, required: ['message'] }, teamOnly: true },
   { name: 'team_read_teammate_notes', description: "Read and clear messages your teammate sent you. Drains the teammate's outbound queue for you.", inputSchema: { type: 'object', properties: {} }, teamOnly: true },
 ];
@@ -107,6 +107,9 @@ async function handleToolCall(name, args) {
       const fmBlock = trimmed.slice(3, endIdx);
       if (!fmBlock.includes('reasoning:') && !fmBlock.includes('reasoning :')) {
         return { error: 'Frontmatter must include reasoning field. Add reasoning: "your root cause" between --- delimiters.' };
+      }
+      if (!fmBlock.includes('assessment:') && !fmBlock.includes('assessment :')) {
+        console.error('[TeamChat] WARN: team_send_results missing assessment field. Add assessment: "your judgment" to frontmatter.');
       }
       const r = await httpPost(SIDECAR_PORT, '/callback', { type: 'result', content });
       return r.status === 200 ? { sent: true } : { error: `HTTP ${r.status}` };

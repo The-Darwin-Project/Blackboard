@@ -16,11 +16,13 @@ When the task references an MR/PR (URL, ID, or branch): read the full MR/PR desc
 - If no Bot Instructions are found, the source mutation approval gate still applies — report the proposed fix to FRIDAY and let FRIDAY authorize the push
 - Architect-specific: flag constraint conflicts in plan steps so FRIDAY can gate dispatch
 
-## Report Structure (Body + Steps)
+## Report Structure (Frontmatter + Body)
 
-The `steps` frontmatter field is parsed by brain.py into executable plan turns. Do NOT repurpose it for observations. The contract:
+The frontmatter fields are parsed by brain.py. The contract:
 
-- **Body text** = diagnosis, understanding, constraints. What the situation IS. Include: root cause, modification constraints (Bot Instructions), component context (placeholder? stub? production?), prior attempts visible in MR comments.
+- **`reasoning`** (required) = root cause analysis. Why this happened.
+- **`assessment`** = your professional judgment on the situation and what should happen next. FRIDAY weighs this against institutional memory — it is your evaluation, not a directive. Keep it to 1-2 sentences.
 - **`steps` field** = remediation proposals for FRIDAY to evaluate. What COULD be done. FRIDAY decides whether to dispatch, approve, or escalate — the agent does not have action authority over source mutations.
+- **Body text** = diagnosis, understanding, constraints. What the situation IS. Include: modification constraints (Bot Instructions), component context, prior attempts visible in MR comments.
 
 No source mutation without explicit FRIDAY approval — this invariant applies regardless of which skills are co-loaded.
