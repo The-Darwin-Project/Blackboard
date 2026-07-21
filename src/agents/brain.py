@@ -116,7 +116,7 @@
 #     actor=source, action="evidence", result=<formatted context> turn into the FILO survivor
 #     via _append_and_broadcast, then close the duplicate. Cross-source guard: existing.source
 #     != event.source. "headhunter" excluded from has_agent_result + all agent-turn classifiers
-#     (agent_rounds, last_agent, _surface_agent_recommendation, legacy thinking) so dispatch
+#     (agent_rounds, last_agent, _post_agent_recall, legacy thinking) so dispatch
 #     phase stays active and recommendation surfacing skips evidence turns.
 #     URL normalized: split("#")[0].rstrip("/").
 # 32. [Pattern]: _cleanup_stale_events calls hh.process_event_feedback directly for headhunter events
@@ -304,7 +304,7 @@ BRAIN_PREFILL_MODEL = (
     "FRIDAY online. Protocols locked: "
     "(1) Evidence before action -- context beats impulse. "
     "(2) Cynefin triage on every event. "
-    "(3) Never drop agent recommendations. "
+    "(3) Weigh agent findings against institutional memory. "
     "(4) Phase-gated close and escalation. "
     "(5) Voice: confident peer, Cynefin-gated tone. "
     "Let's get to work."
@@ -2074,11 +2074,9 @@ class Brain:
                     )
 
         if "post-agent" in active_phases:
-            rec = self._surface_agent_recommendation(event)
-            if rec:
-                has_explicit = "LATEST AGENT RECOMMENDATION" in rec
-                logger.debug(f"Agent recommendation surfaced for {event.id}: {'explicit' if has_explicit else 'ask-agent directive'} ({len(rec)} chars)")
-                resolved_contents.append(rec)
+            recall_block = await self._post_agent_recall(event)
+            if recall_block:
+                resolved_contents.append(recall_block)
 
         if "defer-wake" in active_phases and context_flags:
             consecutive = context_flags.get("consecutive_defers", 0)
@@ -2230,10 +2228,15 @@ class Brain:
 
         return f"{line1}\n{line2}"
 
-    @staticmethod
-    def _surface_agent_recommendation(event: EventDocument) -> str | None:
-        """Extract and promote last agent's recommendation to system-level priority.
-        Skips if a brain.defer already addressed it (prevents stale defer loops).
+    async def _post_agent_recall(self, event: EventDocument) -> str | None:
+        """Search deep memory using agent findings and inject matching patterns into SI.
+
+        Mirrors the RECALL gate pattern: only institutional memory reaches the SI.
+        The agent recommendation stays in conversation turns at natural weight.
+        If no memory matches (or archivist unavailable), returns None — no SI injection.
+
+        QE gate is the one exception: it's a process gate (not a recommendation)
+        and always injects when developer completed implement mode.
         """
         last_agent_turn = next(
             (t for t in reversed(event.conversation)
@@ -2251,7 +2254,6 @@ class Brain:
         if has_defer_after:
             return None
 
-        # QE gate: resolve early for both structured and legacy paths
         last_route = next(
             (t for t in reversed(event.conversation)
              if t.actor == "brain" and t.action == "route" and t.taskForAgent),
@@ -2263,53 +2265,69 @@ class Brain:
             and last_agent_turn.actor == "developer"
         )
         qe_gate = (
-            "\n\n## QE VERIFICATION GATE (mandatory)\n"
+            "\n\n## QE VERIFICATION GATE\n"
             "The Developer completed work in implement mode. "
-            "You MUST dispatch QE (mode: test) to verify before any PR, merge, or close action."
+            "Dispatch QE (mode: test) to verify before any PR, merge, or close action."
         ) if was_implement else ""
 
-        # Structured path: reasoning from plan frontmatter (stored in taskForAgent)
-        reasoning = None
+        query_text = last_agent_turn.result or last_agent_turn.thoughts or ""
         if last_agent_turn.taskForAgent:
-            reasoning = last_agent_turn.taskForAgent.get("reasoning")
+            reasoning = last_agent_turn.taskForAgent.get("reasoning", "")
+            if reasoning:
+                query_text = f"{reasoning} {query_text}"
 
-        if reasoning:
-            logger.info(f"Agent reasoning promoted for {event.id} ({len(reasoning)} chars)")
-            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
-            return (
-                f"## ROOT CAUSE ANALYSIS (from {last_agent_turn.actor}, "
-                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
-                f"{reasoning}{qe_gate}"
+        query_text = query_text[:2000]
+        if not query_text.strip():
+            return qe_gate or None
+
+        archivist = self.agents.get("_archivist_memory")
+        if not archivist or not hasattr(archivist, "search_lessons"):
+            logger.debug(f"Post-agent recall: no archivist for {event.id}")
+            return qe_gate or None
+
+        try:
+            lessons, knowledge = await asyncio.gather(
+                archivist.search_lessons(query_text, limit=3),
+                archivist.search_knowledge(
+                    query_text, limit=3,
+                    service_filter=event.service if event.service not in ("general", "system") else None,
+                ),
+                return_exceptions=True,
             )
+            if isinstance(lessons, BaseException):
+                logger.warning(f"Post-agent recall lesson search failed for {event.id}: {lessons}")
+                lessons = []
+            if isinstance(knowledge, BaseException):
+                logger.warning(f"Post-agent recall knowledge search failed for {event.id}: {knowledge}")
+                knowledge = []
+        except Exception as e:
+            logger.warning(f"Post-agent recall search failed for {event.id}: {e}")
+            return qe_gate or None
 
-        # Legacy fallback: regex extraction from result body
-        result_text = last_agent_turn.result or last_agent_turn.thoughts or ""
-        rec = Brain._extract_recommendation(result_text)
+        hits = list(lessons) + list(knowledge)
+        if not hits:
+            logger.debug(f"Post-agent recall: no memory matches for {event.id}")
+            return qe_gate or None
 
-        if was_implement:
-            base_rec = rec or ""
-            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
-            return (
-                f"## LATEST AGENT RESULT (from {last_agent_turn.actor}, "
-                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
-                f"{base_rec}{qe_gate}"
-            )
+        lines = [
+            "## POST-AGENT RECALL",
+            "Relevant patterns from memory (triggered by agent findings):",
+        ]
+        for hit in hits:
+            p = hit.get("payload", {})
+            if "title" in p:
+                lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+            elif "topic" in p:
+                scope = p.get("scope", "")
+                fact = p.get("fact", "")
+                label = f"[Fact] {p.get('topic', 'unknown')}"
+                lines.append(f"- {label} ({scope}): {fact}" if scope else f"- {label}: {fact}")
 
-        if rec:
-            ts = datetime.fromtimestamp(last_agent_turn.timestamp, tz=timezone.utc).strftime("%H:%M:%S") if last_agent_turn.timestamp else "unknown"
-            return (
-                f"## LATEST AGENT RECOMMENDATION (from {last_agent_turn.actor}, "
-                f"turn {agent_idx + 1}/{len(event.conversation)}, at {ts})\n"
-                f"The following is from the most recent agent execution. "
-                f"You MUST address this before closing:\n\n{rec}"
-            )
-        return (
-            f"## AGENT RESULT WITHOUT RECOMMENDATION\n"
-            f"Agent '{last_agent_turn.actor}' returned findings but no explicit recommendation.\n"
-            f"Before deciding your next action, route back to the SAME agent with mode=investigate "
-            f"and ask: 'Based on your findings, what is your recommended next step?'\n"
-            f"Do NOT close the event or make assumptions without agent input."
+        logger.info(
+            f"Post-agent recall: {len(hits)} memory hits injected into SI for {event.id} "
+            f"(agent: {last_agent_turn.actor}, turn {agent_idx + 1})"
         )
+        return "\n".join(lines) + qe_gate
 
     @staticmethod
     def _extract_recommendation(text: str) -> str | None:
