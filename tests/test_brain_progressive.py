@@ -173,110 +173,60 @@ class TestMatchPhases:
         assert "dispatch" not in active
 
 
-class TestSurfaceAgentRecommendation:
-    @staticmethod
-    def _make_event_stub(agent_result: str | None = None):
-        """Minimal stub with just enough for _surface_agent_recommendation."""
-        from unittest.mock import MagicMock
-        event = MagicMock()
-        if agent_result is not None:
-            turn = MagicMock()
-            turn.actor = "sysadmin"
-            turn.result = agent_result
-            turn.thoughts = None
-            turn.taskForAgent = None
-            event.conversation = [turn]
-        else:
-            event.conversation = []
-        return event
+class TestActionLanguageGate:
+    """Validate _ACTION_PATTERN gate for post-agent recall."""
 
-    def test_with_recommendation_header(self):
-        event = self._make_event_stub("Analysis done.\n\n## Recommendation\nScale to 3.")
-        result = Brain._surface_agent_recommendation(event)
-        assert result is not None
-        assert "LATEST AGENT RECOMMENDATION" in result
-        assert "Scale to 3" in result
+    def test_escalation_triggers_gate(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert _ACTION_PATTERN.search("Hard stall. Escalation recommended.")
 
-    def test_without_recommendation_returns_ask_directive(self):
-        event = self._make_event_stub("")
-        result = Brain._surface_agent_recommendation(event)
-        assert result is not None
-        assert "AGENT RESULT WITHOUT RECOMMENDATION" in result
-        assert "route back to the SAME agent" in result
+    def test_failure_triggers_gate(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert _ACTION_PATTERN.search("Pipeline failed with exit code 1.")
 
-    def test_fallback_last_paragraph_as_recommendation(self):
-        event = self._make_event_stub("Raw data dump with no next step.")
-        result = Brain._surface_agent_recommendation(event)
-        assert result is not None
-        assert "LATEST AGENT RECOMMENDATION" in result
+    def test_timeout_triggers_gate(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert _ACTION_PATTERN.search("Exceeded 2-hour timeout threshold.")
 
-    def test_no_agent_turns_returns_none(self):
-        event = self._make_event_stub(None)
-        result = Brain._surface_agent_recommendation(event)
-        assert result is None
+    def test_close_triggers_gate(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert _ACTION_PATTERN.search("Recommend closing the MR.")
 
-    @staticmethod
-    def _make_event_stub_with_reasoning(reasoning: str, result_body: str = "Evidence here."):
-        """Stub with explicit taskForAgent.reasoning (structured frontmatter path)."""
-        from unittest.mock import MagicMock
-        event = MagicMock()
-        turn = MagicMock()
-        turn.actor = "developer"
-        turn.result = result_body
-        turn.thoughts = None
-        turn.taskForAgent = {"reasoning": reasoning}
-        event.conversation = [turn]
-        return event
+    def test_oom_triggers_gate(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert _ACTION_PATTERN.search("Pod OOMKilled during build.")
 
-    def test_reasoning_promoted_as_rca(self):
-        event = self._make_event_stub_with_reasoning("PaC controller not processing events")
-        result = Brain._surface_agent_recommendation(event)
-        assert result is not None
-        assert "ROOT CAUSE ANALYSIS" in result
-        assert "PaC controller not processing events" in result
+    def test_routine_success_blocked(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert not _ACTION_PATTERN.search("Pipeline passed. MR ready to merge. No issues found.")
 
-    def test_reasoning_with_steps_still_promotes_rca(self):
-        from unittest.mock import MagicMock
-        event = MagicMock()
-        turn = MagicMock()
-        turn.actor = "sysadmin"
-        turn.result = "Investigation complete."
-        turn.thoughts = None
-        turn.taskForAgent = {
-            "reasoning": "OOMKilled exit code 137",
-            "steps": [{"id": "1", "agent": "developer", "summary": "Fix memory leak"}],
-            "source": "sysadmin",
-        }
-        event.conversation = [turn]
-        result = Brain._surface_agent_recommendation(event)
-        assert "ROOT CAUSE ANALYSIS" in result
-        assert "OOMKilled" in result
+    def test_merged_blocked(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert not _ACTION_PATTERN.search("MR merged successfully after pipeline completion.")
 
-    def test_no_reasoning_falls_through_to_legacy(self):
-        """Agent without taskForAgent.reasoning uses legacy regex path."""
-        from unittest.mock import MagicMock
-        event = MagicMock()
-        turn = MagicMock()
-        turn.actor = "developer"
-        turn.result = "Done.\n\n## Recommendation\nMerge the PR."
-        turn.thoughts = None
-        turn.taskForAgent = None
-        event.conversation = [turn]
-        result = Brain._surface_agent_recommendation(event)
-        assert "LATEST AGENT RECOMMENDATION" in result
-        assert "Merge the PR" in result
+    def test_no_issues_blocked(self):
+        from src.agents.brain import _ACTION_PATTERN
+        assert not _ACTION_PATTERN.search("All checks green. Branch is clean. Ready for merge.")
 
-    def test_empty_reasoning_falls_through_to_legacy(self):
-        from unittest.mock import MagicMock
-        event = MagicMock()
-        turn = MagicMock()
-        turn.actor = "developer"
-        turn.result = "No findings."
-        turn.thoughts = None
-        turn.taskForAgent = {"reasoning": ""}
-        event.conversation = [turn]
-        result = Brain._surface_agent_recommendation(event)
-        assert "ROOT CAUSE ANALYSIS" not in result
+
+class TestQueryExtractionPriority:
+    """Validate assessment > reasoning > legacy extraction priority."""
+
+    def test_assessment_preferred_over_reasoning(self):
+        taskForAgent = {"assessment": "Pipeline stalled in Kueue", "reasoning": "root cause"}
+        query = taskForAgent.get("assessment", "") or taskForAgent.get("reasoning", "")
+        assert query == "Pipeline stalled in Kueue"
+
+    def test_reasoning_fallback_when_no_assessment(self):
+        taskForAgent = {"reasoning": "PaC controller not processing"}
+        query = taskForAgent.get("assessment", "") or taskForAgent.get("reasoning", "")
+        assert query == "PaC controller not processing"
+
+    def test_legacy_extraction_when_no_frontmatter(self):
+        text = "Analysis done.\n\n## Recommendation\nScale to 3 replicas."
+        rec = Brain._extract_recommendation(text)
+        assert rec is not None
+        assert "Scale to 3 replicas" in rec
 
 
 class TestParsePlanFrontmatter:

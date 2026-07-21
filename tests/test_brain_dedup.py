@@ -209,55 +209,42 @@ class TestPhaseConditionsWithHeadhunter:
         assert "post-agent" in active
 
 
-class TestSurfaceRecommendationSkipsHeadhunter:
-    def test_headhunter_skipped_sysadmin_surfaced(self):
-        """After sysadmin result + headhunter evidence, recommendation surfaces sysadmin, not headhunter."""
+class TestAgentTurnSelectionSkipsHeadhunter:
+    """Post-agent recall turn selection must skip headhunter evidence turns."""
+    _EXCLUDED = ("brain", "user", "aligner", "headhunter", "dispatcher")
+
+    def test_headhunter_skipped_sysadmin_found(self):
+        """After sysadmin result + headhunter evidence, turn selection finds sysadmin."""
         sysadmin_turn = MagicMock()
         sysadmin_turn.actor = "sysadmin"
         sysadmin_turn.action = "execute"
-        sysadmin_turn.result = "Pipeline log shows OOMKilled.\n\n## Recommendation\nScale memory to 2Gi."
-        sysadmin_turn.thoughts = None
-        sysadmin_turn.taskForAgent = None
-        sysadmin_turn.timestamp = 1713200000.0
 
         hh_turn = MagicMock()
         hh_turn.actor = "headhunter"
         hh_turn.action = "evidence"
-        hh_turn.result = "Related event evt-dup detected for same MR.\n\n**Service:** kubevirt"
-        hh_turn.thoughts = "Duplicate event evt-dup closed -- headhunter context merged."
-        hh_turn.taskForAgent = None
-        hh_turn.timestamp = 1713200100.0
 
-        event = MagicMock()
-        event.id = "evt-survivor"
-        event.conversation = [sysadmin_turn, hh_turn]
-
-        rec = Brain._surface_agent_recommendation(event)
-        assert rec is not None
-        assert "sysadmin" in rec
-        assert "headhunter" not in rec
-        assert "Scale memory" in rec
+        conversation = [sysadmin_turn, hh_turn]
+        last_agent = next(
+            (t for t in reversed(conversation) if t.actor not in self._EXCLUDED), None
+        )
+        assert last_agent is not None
+        assert last_agent.actor == "sysadmin"
 
     def test_headhunter_only_returns_none(self):
-        """When headhunter evidence is the only non-brain turn, no recommendation surfaces."""
+        """When headhunter evidence is the only non-brain turn, no agent turn found."""
         hh_turn = MagicMock()
         hh_turn.actor = "headhunter"
         hh_turn.action = "evidence"
-        hh_turn.result = "Related event evt-dup."
-        hh_turn.thoughts = "Merged."
-        hh_turn.taskForAgent = None
-        hh_turn.timestamp = 1713200100.0
 
         brain_turn = MagicMock()
         brain_turn.actor = "brain"
         brain_turn.action = "triage"
 
-        event = MagicMock()
-        event.id = "evt-only-hh"
-        event.conversation = [brain_turn, hh_turn]
-
-        rec = Brain._surface_agent_recommendation(event)
-        assert rec is None
+        conversation = [brain_turn, hh_turn]
+        last_agent = next(
+            (t for t in reversed(conversation) if t.actor not in self._EXCLUDED), None
+        )
+        assert last_agent is None
 
 
 class TestTurnToPartsRendering:

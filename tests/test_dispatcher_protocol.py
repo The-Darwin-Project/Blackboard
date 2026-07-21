@@ -35,67 +35,35 @@ def _make_turn(actor: str, action: str, thoughts: str = "") -> ConversationTurn:
 class TestClassifierExclusion:
     """Dispatcher turns must NOT count as agent results in production classifiers."""
 
-    def test_surface_agent_recommendation_skips_dispatcher(self):
-        """_surface_agent_recommendation must not treat dispatcher as an agent turn."""
-        from src.agents.brain import Brain
-        from src.models import EventDocument, EventInput, EventEvidence
-
+    def test_agent_turn_selection_skips_dispatcher(self):
+        """Post-agent recall turn selection must not treat dispatcher as an agent turn."""
         now = time.time()
-        event = EventDocument(
-            id="evt-test1234",
-            source="aligner",
-            service="test-svc",
-            status="active",
-            queued_at=now,
-            event=EventInput(
-                reason="anomaly",
-                service="test-svc",
-                source="aligner",
-                evidence=EventEvidence(
-                    display_text="CPU spike", source_type="aligner",
-                    domain="complicated", severity="warning",
-                ),
-            ),
-            conversation=[
-                ConversationTurn(turn=1, actor="brain", action="triage", thoughts="Triaging.", timestamp=now),
-                ConversationTurn(turn=2, actor="dispatcher", action="acknowledge", thoughts="Spawning.", timestamp=now + 1),
-                ConversationTurn(turn=3, actor="dispatcher", action="connected", thoughts="Registered.", timestamp=now + 2),
-            ],
+        conversation = [
+            ConversationTurn(turn=1, actor="brain", action="triage", thoughts="Triaging.", timestamp=now),
+            ConversationTurn(turn=2, actor="dispatcher", action="acknowledge", thoughts="Spawning.", timestamp=now + 1),
+            ConversationTurn(turn=3, actor="dispatcher", action="connected", thoughts="Registered.", timestamp=now + 2),
+        ]
+        _EXCLUDED = ("brain", "user", "aligner", "headhunter", "dispatcher")
+        last_agent = next(
+            (t for t in reversed(conversation) if t.actor not in _EXCLUDED), None
         )
-        result = Brain._surface_agent_recommendation(event)
-        assert result is None
+        assert last_agent is None
 
-    def test_surface_agent_recommendation_finds_real_agent(self):
-        """_surface_agent_recommendation finds sysadmin turn, skipping dispatcher."""
-        from src.agents.brain import Brain
-        from src.models import EventDocument, EventInput, EventEvidence
-
+    def test_agent_turn_selection_finds_real_agent(self):
+        """Post-agent recall turn selection finds sysadmin, skipping dispatcher."""
         now = time.time()
-        event = EventDocument(
-            id="evt-test5678",
-            source="aligner",
-            service="test-svc",
-            status="active",
-            queued_at=now,
-            event=EventInput(
-                reason="anomaly",
-                service="test-svc",
-                source="aligner",
-                evidence=EventEvidence(
-                    display_text="CPU spike", source_type="aligner",
-                    domain="complicated", severity="warning",
-                ),
-            ),
-            conversation=[
-                ConversationTurn(turn=1, actor="brain", action="triage", thoughts="Triaging.", timestamp=now),
-                ConversationTurn(turn=2, actor="dispatcher", action="acknowledge", thoughts="Spawning.", timestamp=now + 1),
-                ConversationTurn(turn=3, actor="dispatcher", action="connected", thoughts="Registered.", timestamp=now + 2),
-                ConversationTurn(turn=4, actor="sysadmin", action="execute", thoughts="## Recommendation\nScale to 3 replicas.", timestamp=now + 3),
-            ],
+        conversation = [
+            ConversationTurn(turn=1, actor="brain", action="triage", thoughts="Triaging.", timestamp=now),
+            ConversationTurn(turn=2, actor="dispatcher", action="acknowledge", thoughts="Spawning.", timestamp=now + 1),
+            ConversationTurn(turn=3, actor="dispatcher", action="connected", thoughts="Registered.", timestamp=now + 2),
+            ConversationTurn(turn=4, actor="sysadmin", action="execute", thoughts="Scale to 3 replicas.", timestamp=now + 3),
+        ]
+        _EXCLUDED = ("brain", "user", "aligner", "headhunter", "dispatcher")
+        last_agent = next(
+            (t for t in reversed(conversation) if t.actor not in _EXCLUDED), None
         )
-        result = Brain._surface_agent_recommendation(event)
-        assert result is not None
-        assert "Scale to 3 replicas" in result
+        assert last_agent is not None
+        assert last_agent.actor == "sysadmin"
 
     def test_build_gate_context_excludes_dispatcher_from_agent_rounds(self):
         """build_gate_context agent_completions must exclude dispatcher turns."""

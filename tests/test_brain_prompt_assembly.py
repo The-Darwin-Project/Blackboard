@@ -53,7 +53,7 @@ def _make_brain_stub(resolved_pairs, kargo_paths=None, kargo_bodies=None):
     brain = SimpleNamespace(
         _skill_loader=loader,
         _build_event_state_header=lambda event, ctx: "## EVENT STATE HEADER",
-        _surface_agent_recommendation=lambda event: None,
+        _post_agent_recall=lambda event: None,
         _format_recall_block=lambda event: None,
     )
     return brain
