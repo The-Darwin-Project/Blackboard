@@ -88,9 +88,10 @@ class ClaudeAdapter:
         kwargs: dict = {
             "model": self._model_name,
             "max_tokens": max_output_tokens,
-            "temperature": temperature,
             "messages": messages,
         }
+        if "sonnet-5" not in self._model_name:
+            kwargs["temperature"] = temperature
         if system_prompt:
             kwargs["system"] = system_prompt
         if tools is not None:
