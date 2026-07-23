@@ -222,7 +222,7 @@ class TestEventCreation:
         context = {"action_name": "assigned", "pipeline_status": "success"}
         plan = "---\nplan: test\nservice: general\ndomain: CLEAR\n---"
 
-        event_id = await hh.create_headhunter_event(todo, plan, "clear", context)
+        event_id = await hh.create_headhunter_event(todo, plan, context)
 
         assert event_id.startswith("evt-test-")
         assert len(bb.events) == 1
@@ -235,7 +235,7 @@ class TestEventCreation:
         todo = _make_todo(project_id=200, mr_iid=55)
         context = {"action_name": "assigned", "pipeline_status": "success"}
 
-        event_id = await hh.create_headhunter_event(todo, "plan", "clear", context)
+        event_id = await hh.create_headhunter_event(todo, "plan", context)
 
         assert event_id is not None
 
@@ -253,7 +253,7 @@ class TestEventCreation:
         todo = _make_todo(action_name="build_failed")
         context = {"action_name": "build_failed", "pipeline_status": "failed"}
 
-        await hh.create_headhunter_event(todo, "plan", "clear", context)
+        await hh.create_headhunter_event(todo, "plan", context)
 
         ev = captured_evidence[0]
         assert ev.gitlab_context["pipeline_status"] == "failed"
@@ -273,7 +273,7 @@ class TestEventCreation:
         todo["created_at"] = "2026-04-09T10:00:00Z"
         context = {"action_name": "assigned", "pipeline_status": "success"}
 
-        await hh.create_headhunter_event(todo, "plan", "clear", context)
+        await hh.create_headhunter_event(todo, "plan", context)
 
         ev = captured_evidence[0]
         assert ev.gitlab_context["todo_created_at"] == "2026-04-09T10:00:00Z"
@@ -322,22 +322,12 @@ class TestAnalysisFallback:
             "mr_title": "Fix CI",
             "project_path": "group/repo",
         }
-        plan, domain = await hh.analyze_and_plan(context, "test instruction")
+        plan = await hh.analyze_and_plan(context, "test instruction")
         assert plan.startswith("---")
         assert plan.endswith("---")
-        assert domain == "complicated"
         assert "agent: developer" in plan
-        assert "domain: COMPLICATED" in plan
         assert "reasoning:" in plan
         assert "!42" in plan
-
-    def test_extract_domain_from_plan(self):
-        plan = "---\nplan: test\ndomain: CLEAR\n---"
-        assert Headhunter._extract_domain(plan) == "clear"
-
-    def test_extract_domain_defaults_to_complicated(self):
-        plan = "---\nplan: test\n---"
-        assert Headhunter._extract_domain(plan) == "complicated"
 
 
 # =========================================================================
@@ -725,7 +715,7 @@ class TestPollIssuesAllInstallations:
         hh._github.poll_issues_all_installations = AsyncMock(return_value=[issue_a, issue_b])
         hh._github._load_issue_triage_instruction = AsyncMock(return_value=("SI", None))
         hh._github.create_issue_event = AsyncMock(side_effect=["evt-1", "evt-2"])
-        hh.analyze_and_plan = AsyncMock(return_value=("plan", "COMPLICATED"))
+        hh.analyze_and_plan = AsyncMock(return_value="plan")
         hh.check_flow_gate = AsyncMock(return_value=True)
 
         await hh._github_poll_issues()

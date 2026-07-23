@@ -58,7 +58,6 @@ a YAML frontmatter plan wrapped in --- delimiters. Nothing else.
 plan: "[Action verb] [target] in [repository]"
 service: [component name]
 repository: [GitLab project path]
-domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
 reasoning: "[One sentence -- include any constraints from MR description]"
 steps:
@@ -69,7 +68,7 @@ steps:
 ```
 
 Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain).
-Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
+Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 If the MR description contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
 
@@ -330,7 +329,6 @@ class GitLabPlatform:
         self,
         work_item: dict,
         plan_text: str,
-        domain: str,
         context: dict,
     ) -> str:
         """Push event to Brain queue with gitlab_context evidence."""
@@ -349,8 +347,8 @@ class GitLabPlatform:
             display_text=f"GitLab: {action_name} on !{target['iid']} in {project_path}",
             source_type="headhunter",
             triggered_by="gitlab-bot",
-            domain=domain,
-            domain_confidence="assessed",
+            domain="disorder",
+            domain_confidence="default",
             severity=severity,
             gitlab_context={
                 "todo_id": todo["id"],

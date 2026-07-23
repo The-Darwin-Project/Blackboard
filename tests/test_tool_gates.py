@@ -56,7 +56,7 @@ def _ctx(**overrides) -> GateContext:
         has_kargo_context=True,
         has_github_context=False,
         unread_notes=0,
-        refresh_budget=3,
+        refresh_budget=5,
         refresh_count=0,
         agent_completions=0,
         jarvis_already_waiting=False,
@@ -800,7 +800,7 @@ class TestBudgetConstruction:
             event=EventInput(reason="anomaly", evidence=evidence),
         )
         ctx = build_gate_context(event=event, brain_phase="dispatch", context_flags={})
-        assert ctx.refresh_budget == 3
+        assert ctx.refresh_budget == 5
 
     def test_budget_capped_at_10(self):
         from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput

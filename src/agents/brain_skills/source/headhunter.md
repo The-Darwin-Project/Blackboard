@@ -8,7 +8,7 @@ requires:
 
 ## Data Available
 
-Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes domain classification, risk assessment, and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts.
+Headhunter events carry an embedded work plan in the reason field and structured GitLab context in the evidence. The plan includes risk assessment and step assignments. The GitLab context includes MR/PR details, pipeline status, merge readiness, and maintainer contacts. Events arrive in disorder — you classify the domain during triage based on the evidence.
 
 The MR/PR description may contain structured DARWIN Instructions. FRIDAY processes
 these in a specific priority order:
@@ -35,9 +35,8 @@ WOULD happen, not what DID happen. Executing a pre-written action without
 validating against the actual failure state is the equivalent of following a
 map drawn before the earthquake: the terrain has changed.
 
-The embedded plan includes a domain classification -- treat it as a hypothesis,
-not a fact. The plan steps contain the specific instructions. DARWIN Instructions
-actions are also hypotheses -- validate against actual failure evidence before
+The embedded plan steps contain specific instructions. DARWIN Instructions
+actions are hypotheses -- validate against actual failure evidence before
 executing.
 
 Agent constraints (Rules section) are NOT hypotheses. They define the

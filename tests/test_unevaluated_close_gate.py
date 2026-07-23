@@ -57,7 +57,7 @@ def _ctx(**overrides) -> GateContext:
         has_kargo_context=True,
         has_github_context=False,
         unread_notes=0,
-        refresh_budget=3,
+        refresh_budget=5,
         refresh_count=0,
         agent_completions=0,
         jarvis_already_waiting=False,

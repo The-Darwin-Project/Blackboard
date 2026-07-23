@@ -22,7 +22,7 @@
 # 15. [Pattern]: close_reason sanitized via re.sub([<>@`])[:200] before posting to GitHub.
 # 16. [Pattern]: post_issue_feedback guards via is_feedback_sent() at entry (defense-in-depth dedup).
 # 17. [Pattern]: set_github_issue_processed called BEFORE label swap -- dedup survives label API failures.
-# 18. [Pattern]: domain_confidence is always "assessed" -- headhunter always runs LLM triage.
+# 18. [Pattern]: domain is always "disorder" -- FRIDAY classifies during triage, not headhunter.
 """
 GitHub Platform Adapter for Headhunter.
 
@@ -60,7 +60,6 @@ a YAML frontmatter plan wrapped in --- delimiters. Nothing else.
 plan: "[Action verb] [target] in [repository]"
 service: [component name]
 repository: [owner/repo]
-domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
 reasoning: "[One sentence -- include any constraints from PR description]"
 steps:
@@ -71,7 +70,7 @@ steps:
 ```
 
 Agents: sysadmin (k8s/gitops), developer (code/PR/CI), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/dependency audit/supply chain).
-Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
+Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 If the PR body contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
 
@@ -84,7 +83,6 @@ a YAML frontmatter plan wrapped in --- delimiters. Nothing else.
 plan: "[Action verb] [issue title summary]"
 service: [component name]
 repository: [owner/repo]
-domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
 reasoning: "[One sentence]"
 steps:
@@ -95,7 +93,7 @@ steps:
 ```
 
 Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify), architect (analysis/design), security_analyst (CVE/vulnerability/dependency audit/supply chain).
-Domain: CLEAR (known fix, 1-3 steps), COMPLICATED (needs analysis, 2-4 steps), COMPLEX (novel, 1-2 probes).
+Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 """
 
 # GitHub App slug for the bot (used in search queries)
@@ -684,7 +682,6 @@ class GitHubPlatform:
         self,
         work_item: dict,
         plan_text: str,
-        domain: str,
         context: dict,
     ) -> str:
         """Push event to Brain queue with github_context evidence."""
@@ -703,8 +700,8 @@ class GitHubPlatform:
             display_text=f"GitHub: {action} on #{pr_number} in {owner}/{repo}",
             source_type="headhunter",
             triggered_by="github-app",
-            domain=domain,
-            domain_confidence="assessed",
+            domain="disorder",
+            domain_confidence="default",
             severity=severity,
             github_context={
                 "owner": owner,
@@ -760,11 +757,10 @@ class GitHubPlatform:
         self,
         issue: dict,
         plan_text: str | None = None,
-        domain: str | None = None,
     ) -> str:
         """Create a Darwin event for a GitHub Issue (darwin-work label trigger).
 
-        plan_text/domain come from the orchestrator's analyze_and_plan call.
+        plan_text comes from the orchestrator's analyze_and_plan call.
         When omitted (legacy/emergency path), a stub plan is generated inline.
         Label ordering: ADD darwin-active BEFORE removing darwin-work (prevents orphan).
         Issue body truncated to 2000 chars with XML fence (prompt injection defense).
@@ -783,9 +779,6 @@ class GitHubPlatform:
         )
         # Warning string injected by _github_poll_issues when skill URL exceeded 10KB cap
         skill_size_warning: str | None = issue.get("_skill_size_warning")
-        # domain_confidence is always "assessed" -- headhunter always runs LLM triage
-        # (emergency inline stub is still a classification, per event-evidence-contract)
-        domain_confidence = "assessed"
         body_sanitized = (issue.get("body") or "")[:_DESC_SAFETY_CAP]
         # Sanitize before XML fence to prevent prompt injection via </issue_body> in body content
         body_sanitized = body_sanitized.replace("</issue_body>", "")
@@ -794,8 +787,8 @@ class GitHubPlatform:
             display_text=f"GitHub Issue #{number}: {issue.get('issue_title', '')} in {owner}/{repo}",
             source_type="headhunter",
             triggered_by="github-issue",
-            domain=domain or "complicated",
-            domain_confidence=domain_confidence,
+            domain="disorder",
+            domain_confidence="default",
             severity="info",
             github_issue_context={
                 "owner": owner,
@@ -815,13 +808,11 @@ class GitHubPlatform:
         )
 
         service = repo or "general"
-        if not domain:
-            domain = "complicated"
         if not plan_text:
             plan_text = (
                 f"---\nplan: Triage GitHub Issue #{number}: {issue.get('issue_title', '')}\n"
                 f"service: {service}\nrepository: {owner}/{repo}\n"
-                f"domain: COMPLICATED\nrisk: medium\n"
+                f"risk: medium\n"
                 f"reasoning: GitHub issue requires triage\n"
                 f"steps:\n  - id: \"1\"\n    agent: architect\n"
                 f"    summary: \"Analyse issue #{number} in {owner}/{repo}\"\n---"

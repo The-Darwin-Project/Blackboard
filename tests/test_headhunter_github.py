@@ -274,7 +274,7 @@ class TestLabelLifecycleHappyPath:
         platform.blackboard.get_active_events = AsyncMock(return_value=[])
 
         event_id = await platform.create_platform_event(
-            _make_work_item(), "plan text", "COMPLICATED",
+            _make_work_item(), "plan text",
             {"action": "review_requested", "check_status": "unknown",
              "pr_title": "Test", "pr_state": "open", "pr_url": "...",
              "head_sha": "abc123", "head_branch": "feat", "base_branch": "main",
@@ -333,7 +333,7 @@ class TestPartialFailure:
         ))
 
         event_id = await platform.create_platform_event(
-            _make_work_item(), "plan", "COMPLICATED",
+            _make_work_item(), "plan",
             {"action": "review_requested", "check_status": "unknown",
              "pr_title": "T", "pr_state": "open", "pr_url": "...",
              "head_sha": "a", "head_branch": "f", "base_branch": "m",
@@ -648,7 +648,7 @@ class TestMultiInstallationRouting:
         work_item["installation_id"] = "999"
 
         await platform.create_platform_event(
-            work_item, "plan text", "COMPLICATED",
+            work_item, "plan text",
             {"action": "review_requested", "check_status": "unknown",
              "pr_title": "Test", "pr_state": "open", "pr_url": "...",
              "head_sha": "abc123", "head_branch": "feat", "base_branch": "main",

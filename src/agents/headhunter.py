@@ -15,6 +15,8 @@
 # 12. [Pattern]: _github_pending zeroed when all new items are queued (avoids double-count in pending_count).
 # 13. [Pattern]: No input truncation on descriptions — full text flows to Flash (1M+ context).
 #     Output controlled by max_output_tokens. _COMMENT_LIMIT (default 2000) for aggregated notes only.
+# 14. [Pattern]: analyze_and_plan returns plan_text only (str). Domain classification removed —
+#     events land in disorder, FRIDAY classifies during triage.
 """
 Headhunter: VCS todo poller that analyzes assigned MRs/pipelines.
 
@@ -119,7 +121,7 @@ class Headhunter:
         adapter = await self._get_adapter()
         if not adapter:
             logger.warning(f"Emergency fallback plan for {context.get('mr_title', context.get('pr_title', '?'))}")
-            return self._emergency_plan(context), "complicated"
+            return self._emergency_plan(context)
 
         prompt = (
             self._build_issue_analysis_prompt(context)
@@ -137,12 +139,11 @@ class Headhunter:
             from .llm import record_token_usage
             record_token_usage("headhunter", response.usage)
             plan_text = response.text.strip()
-            domain = self._extract_domain(plan_text)
-            logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))} -> {domain}")
-            return plan_text, domain
+            logger.info(f"LLM analysis for {context.get('mr_title', context.get('pr_title', '?'))}")
+            return plan_text
         except Exception as e:
             logger.warning(f"LLM analysis failed, using emergency fallback: {e}")
-            return self._emergency_plan(context), "complicated"
+            return self._emergency_plan(context)
 
     @staticmethod
     def _emergency_plan(context: dict) -> str:
@@ -156,7 +157,7 @@ class Headhunter:
             f"---\nplan: Investigate {action} on {title}\n"
             f"service: {project.rsplit('/', 1)[-1]}\n"
             f"repository: {project}\n"
-            f"domain: COMPLICATED\nrisk: medium\n"
+            f"risk: medium\n"
             f"reasoning: LLM analysis unavailable -- manual triage needed\n"
             f"steps:\n  - id: \"1\"\n    agent: developer\n"
             f"    summary: \"Investigate {action} on {iid} "
@@ -223,15 +224,6 @@ class Headhunter:
             parts.append(f"Skill context: {context['skill_label']} routing")
         parts.append("\nProduce a YAML frontmatter work plan.")
         return "\n".join(parts)
-
-    @staticmethod
-    def _extract_domain(plan_text: str) -> str:
-        for line in plan_text.splitlines():
-            if line.strip().startswith("domain:"):
-                val = line.split(":", 1)[1].strip().lower()
-                if val in ("clear", "complicated", "complex"):
-                    return val
-        return "complicated"
 
     # =========================================================================
     # Flow Gate (platform-agnostic)
@@ -361,8 +353,8 @@ class Headhunter:
                 logger.info("Headhunter flow gate closed mid-cycle -- stopping")
                 break
             context = await self._gitlab.fetch_context(todo)
-            plan_text, domain = await self.analyze_and_plan(context, si)
-            await self._gitlab.create_platform_event(todo, plan_text, domain, context)
+            plan_text = await self.analyze_and_plan(context, si)
+            await self._gitlab.create_platform_event(todo, plan_text, context)
 
     async def _github_poll_and_process(self) -> None:
         """Single GitHub poll cycle: promote queued PRs, create events for new, poll issues.
@@ -408,8 +400,8 @@ class Headhunter:
             if not await self.check_flow_gate():
                 break
             context = await self._github.fetch_context(pr)
-            plan_text, domain = await self.analyze_and_plan(context, si)
-            await self._github.create_platform_event(pr, plan_text, domain, context)
+            plan_text = await self.analyze_and_plan(context, si)
+            await self._github.create_platform_event(pr, plan_text, context)
             remaining_queued.pop(0)
 
         # Phase B: Process new darwin-review PRs.
@@ -431,8 +423,8 @@ class Headhunter:
                     )
                 continue
             context = await self._github.fetch_context(pr)
-            plan_text, domain = await self.analyze_and_plan(context, si)
-            await self._github.create_platform_event(pr, plan_text, domain, context)
+            plan_text = await self.analyze_and_plan(context, si)
+            await self._github.create_platform_event(pr, plan_text, context)
 
         # Expose remaining queued for /headhunter/pending REST endpoint
         self._github._last_queued_prs = remaining_queued
@@ -474,10 +466,10 @@ class Headhunter:
             # Load label-specific SI then triage via LLM (same path as PR triage).
             # skill_warning is non-None when skill URL exceeded 10KB cap.
             si, skill_warning = await self._github._load_issue_triage_instruction(issue.get("labels", []))
-            plan_text, domain = await self.analyze_and_plan(issue, si)
+            plan_text = await self.analyze_and_plan(issue, si)
             if skill_warning:
                 issue = {**issue, "_skill_size_warning": skill_warning}
-            await self._github.create_issue_event(issue, plan_text, domain)
+            await self._github.create_issue_event(issue, plan_text)
 
     # =========================================================================
     # Feedback Loop (Signal + Poll Hybrid)
@@ -575,9 +567,9 @@ class Headhunter:
         """Delegate to GitLab adapter. Exposed for backward compatibility."""
         return await self._gitlab._resolve_service(project_path)
 
-    async def create_headhunter_event(self, todo: dict, plan_text: str, domain: str, context: dict) -> str:
+    async def create_headhunter_event(self, todo: dict, plan_text: str, context: dict) -> str:
         """Delegate to GitLab adapter. Called by tests and legacy code paths."""
-        return await self._gitlab.create_platform_event(todo, plan_text, domain, context)
+        return await self._gitlab.create_platform_event(todo, plan_text, context)
 
     async def poll_cycle(self) -> list[dict]:
         """Delegate to GitLab adapter. Exposed for backward compatibility."""

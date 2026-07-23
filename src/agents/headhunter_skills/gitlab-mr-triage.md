@@ -18,7 +18,6 @@ The `steps` array must match the FRIDAY's plan activation schema exactly:
 plan: "[Action verb] [target] in [repository]"
 service: [component name from the project path]
 repository: [GitLab project path]
-domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
 reasoning: "[One sentence: why this plan sequence]"
 steps:
@@ -31,23 +30,6 @@ steps:
 ---
 ```
 </output>
-
-<domain_classification>
-## Domain Classification
-
-Classify the MR situation using evidence from the context provided:
-
-| Domain | When | Plan shape |
-|---|---|---|
-| CLEAR | Bot MR with explicit instructions, image updates, pipeline retry, routine merge with no review requests | 1-3 steps, direct execution |
-| COMPLICATED | Human-authored MR with code changes, review instructions in description, test failures, merge conflicts, security findings | 2-4 steps, investigation/review then action |
-| COMPLEX | Novel or contradictory: never-seen error pattern, cascading failures across services | 1-2 probe steps (safe-to-fail investigation) |
-
-Human-authored MRs with code review instructions or "What to review" sections
-in the description are COMPLICATED even when the pipeline is passing. A green
-pipeline validates CI — it does not validate logic correctness, downstream
-impact, or behavioral changes described in the review instructions.
-</domain_classification>
 
 <agents>
 ## Available Agents

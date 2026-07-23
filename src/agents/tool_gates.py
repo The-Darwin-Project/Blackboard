@@ -811,7 +811,7 @@ def build_gate_context(
         if t.actor not in ("brain", "user", "aligner", "headhunter", "jarvis", "dispatcher")
         and t.action in ("execute", "plan")
     )
-    budget = min(3 + agent_completions, 10) - refresh_count
+    budget = min(5 + agent_completions, 10) - refresh_count
 
     return GateContext(
         brain_phase=brain_phase,

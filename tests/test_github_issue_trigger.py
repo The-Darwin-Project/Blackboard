@@ -219,7 +219,7 @@ async def test_promote_before_discover_ordering():
                 "pr_state": "open", "action": "review_requested",
                 "check_status": "success", "head_sha": "abc"}
 
-    async def mock_create_event(pr, plan, domain, ctx):
+    async def mock_create_event(pr, plan, ctx):
         processed_order.append(pr["number"])
         return f"evt-{pr['number']}"
 

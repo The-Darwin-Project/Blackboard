@@ -18,7 +18,6 @@ The `steps` array must match the FRIDAY's plan activation schema exactly:
 plan: "[Action verb] [target] in [repository]"
 service: [component name from the repo]
 repository: [owner/repo]
-domain: [CLEAR|COMPLICATED|COMPLEX]
 risk: [low|medium|high]
 reasoning: "[One sentence: why this plan sequence. Include any constraints from PR description.]"
 steps:
@@ -57,21 +56,6 @@ Assign each step to exactly one agent:
 | PR needs architecture review or design validation | architect | Design-first approach |
 | Deployment verification, smoke test needed | qe | Post-deploy validation |
 </routing_hints>
-
-<domain_classification>
-## Domain Classification
-
-| Domain | When to Use | Steps |
-|---|---|---|
-| `CLEAR` | Bot PR, automated dependency bump with green CI, routine merge with no review requests | 1-3 steps |
-| `COMPLICATED` | Human-authored PR with code changes, review instructions in description, failing checks, security findings | 2-4 steps |
-| `COMPLEX` | Novel issue, cascading failures, never-seen error pattern | 1-2 probe steps |
-
-Human-authored PRs with code review instructions or "What to review" sections
-are COMPLICATED even when checks are passing. Green CI validates tests — it
-does not validate logic correctness, downstream impact, or behavioral changes
-described in the review instructions.
-</domain_classification>
 
 <risk>
 ## Risk Assessment

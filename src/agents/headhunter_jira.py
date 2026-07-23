@@ -122,7 +122,6 @@ PLAN_TOOL_SCHEMA = {
             "plan": {"type": "string", "description": "One-line plan description"},
             "service": {"type": "string", "description": "Service or component name"},
             "repository": {"type": "string", "description": "Git repository URL"},
-            "domain": {"type": "string", "enum": ["CLEAR", "COMPLICATED", "COMPLEX"]},
             "risk": {"type": "string", "enum": ["low", "medium", "high"]},
             "steps": {
                 "type": "array",
@@ -138,7 +137,7 @@ PLAN_TOOL_SCHEMA = {
                 },
             },
         },
-        "required": ["plan", "service", "repository", "domain", "risk", "steps"],
+        "required": ["plan", "service", "repository", "risk", "steps"],
     },
 }
 
@@ -550,7 +549,6 @@ class HeadhunterJira:
             "plan": args.get("plan", ""),
             "service": args.get("service", ""),
             "repository": args.get("repository", ""),
-            "domain": args.get("domain", "COMPLICATED"),
             "risk": args.get("risk", "medium"),
             "steps": [
                 {
@@ -638,8 +636,8 @@ class HeadhunterJira:
             display_text=f"Jira QE mission: {key} - {summary}",
             source_type="headhunter",
             triggered_by="jira-bot",
-            domain="complicated",
-            domain_confidence="assessed",
+            domain="disorder",
+            domain_confidence="default",
             severity="info",
             jira_context={
                 "issue_key": key,
