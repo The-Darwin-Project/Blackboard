@@ -247,7 +247,7 @@ class HeadhunterJira:
         self._jira_token = os.getenv("JIRA_API_TOKEN", "")
         self._bot_account_id = os.getenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "")
         self._jira_label = os.getenv("HEADHUNTER_JIRA_LABEL", "darwin")
-        self._model = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-4-6")
+        self._model = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-5")
         self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
         self._claude_adapter = None
         # Label-driven skill selection: env HEADHUNTER_JIRA_SKILL_<LABEL>=<git raw url>

@@ -59,8 +59,8 @@ KNOWLEDGE_COLLECTION = "darwin_knowledge"
 VALID_SCOPES = {"convention", "ownership", "historical", "relationship"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
-ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.5-flash")
-EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-4-6")
+ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.6-flash")
+EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-5")
 # Separate output-token knobs per provider/call-shape (Goal 4, truncation-search-destroy):
 # LLM_MAX_TOKENS_ARCHIVIST stays Gemini-fallback-only (_archive_event_fallback).
 # Coupling Claude archive/extraction and the Gemini digest call under that one

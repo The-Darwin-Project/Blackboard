@@ -76,7 +76,7 @@ sidecars:
     cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin SysAdmin"
     gitUserEmail: "darwin-sysadmin@darwin-project.io"
-    modelName: "claude-sonnet-4-6" # Claude Sonnet 4.6 via Vertex AI
+    modelName: "claude-sonnet-5" # Claude Sonnet 5 via Vertex AI
     effortLevel: "medium" # Execution tasks are well-scoped; higher effort rarely helps
     permissionMode: "bypassPermissions" # Full access (implements plans)
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
@@ -96,7 +96,7 @@ sidecars:
     cliType: "claude"
     gitUserName: "Darwin QE"
     gitUserEmail: "darwin-qe@darwin-project.io"
-    modelName: "claude-sonnet-4-6"
+    modelName: "claude-sonnet-5"
     effortLevel: "high" # QE needs deep reasoning to find edge cases and write thorough tests
     permissionMode: "bypassPermissions"
     gcpSecret: ""
@@ -132,30 +132,30 @@ gcp:
       temperature: "0.8"
       maxOutputTokens: "65000"
     aligner:
-      model: "gemini-3.5-flash"
+      model: "gemini-3.6-flash"
       temperature: "0.3"
       thinkingLevel: "high"
       maxOutputTokens: "10000"
     archivist:
-      model: "gemini-3.5-flash" # Event summarization for deep memory
+      model: "gemini-3.6-flash" # Event summarization for deep memory
       temperature: "0.4"
       thinkingLevel: "high"
       maxOutputTokens: "32000" # Gemini fallback only (_archive_event_fallback)
       maxOutputTokensClaude: "16384" # Claude archive + lesson extraction calls
       maxOutputTokensDigest: "4096" # Gemini field-notes digest call
     lessonExtractor:
-      model: "claude-sonnet-4-6" # Claude via Vertex AI for lesson extraction from documents
+      model: "claude-sonnet-5" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
-      model: "gemini-3.5-flash" # MR triage and plan generation
+      model: "gemini-3.6-flash" # MR triage and plan generation
       temperature: "0.3"
       thinkingLevel: "low"
       maxOutputTokens: "10000"
     timekeeper:
-      model: "gemini-3.5-flash" # Instruction refinement (user-facing, fast)
+      model: "gemini-3.5-flash-lite" # Instruction refinement (lightweight, fast)
       temperature: "0.3"
       maxOutputTokens: "2048"
     nightwatcher:
-      model: "gemini-3.5-flash" # Shift consolidation (high thinking for clustering)
+      model: "gemini-3.6-flash" # Shift consolidation (high thinking for clustering)
       temperature: "0.5"
       thinkingLevel: "high"
       maxOutputTokens: "8192"
@@ -471,7 +471,7 @@ jira:
   existingSecret: "" # e.g., "darwin-jira-creds" (keys: email, api-token, bot-account-id)
   url: ""
   label: "darwin"
-  model: "claude-sonnet-4-6"
+  model: "claude-sonnet-5"
   skills: {} # label -> git raw URL map (e.g., qe_testing: "https://gitlab.../business-analyst.mdc")
   # --- Jira Incident Tracking (Nightwatcher + Brain escalation) ---
   incident:

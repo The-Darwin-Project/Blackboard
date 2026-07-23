@@ -98,7 +98,7 @@ class NightwatcherObserver:
                 from ..agents.llm import create_adapter
                 project = os.getenv("GCP_PROJECT", "")
                 location = os.getenv("GCP_LOCATION", "global")
-                model = os.getenv("LLM_MODEL_NIGHTWATCHER", "gemini-3-flash-preview")
+                model = os.getenv("LLM_MODEL_NIGHTWATCHER", "gemini-3.6-flash")
                 self._adapter = create_adapter("gemini", project, location, model)
                 logger.info("Nightwatcher LLM adapter: gemini/%s", model)
             except Exception as e:

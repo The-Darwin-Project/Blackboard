@@ -191,7 +191,7 @@ async def refine_instructions(
         try:
             from ..agents.llm import create_adapter
 
-            model = os.getenv("LLM_MODEL_TIMEKEEPER", os.getenv("LLM_MODEL_HEADHUNTER", "gemini-2.0-flash-lite"))
+            model = os.getenv("LLM_MODEL_TIMEKEEPER", os.getenv("LLM_MODEL_HEADHUNTER", "gemini-3.5-flash-lite"))
             adapter = create_adapter(
                 provider="gemini",
                 project=os.getenv("GCP_PROJECT", ""),
