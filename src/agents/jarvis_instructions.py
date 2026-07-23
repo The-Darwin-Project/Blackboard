@@ -814,6 +814,26 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "read_event_turns",
+        "description": (
+            "**Investigate** [Observer] — read full content of specific turns. "
+            "Returns thoughts, evidence, and tool context for a turn range. "
+            "Use after observing a pulse turn of interest. "
+            "NOTE: pulse turn:N fires before the tool_result is appended, "
+            "so the evidence is usually at N+1. Request a small range (N to N+2) "
+            "to capture the full context around a tool execution."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "from_turn": {"type": "integer", "description": "Start turn number (inclusive)"},
+                "to_turn": {"type": "integer", "description": "End turn number (inclusive)"},
+            },
+            "required": ["event_id", "from_turn", "to_turn"],
+        },
+    },
+    {
         "name": "get_neuron_details",
         "description": (
             "**Investigate** [Observer] — look up a lesson or memory neuron's full content: "

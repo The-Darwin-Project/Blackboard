@@ -91,6 +91,7 @@ _OPERATOR_PHASES = frozenset({"always", "dispatch", "post-agent", "source", "esc
 _TOOL_SKILL_MAP: dict[str, list[str]] = {
     "get_pulse_history":     ["observer-mode", "observer-constraints"],
     "view_event_blackboard": ["observer-mode"],
+    "read_event_turns":      ["observer-mode"],
     "get_neuron_details":    ["proactive-review"],
     "search_deep_memory":    ["proactive-review"],
     "send_event_message":    ["intervention-boundary", "shared-context"],
@@ -591,6 +592,12 @@ class LiveAPIAdapter:
                 return await self._tool_list_active_events()
             elif name == "view_event_blackboard":
                 return await self._tool_view_event_blackboard(args.get("event_id", ""))
+            elif name == "read_event_turns":
+                return await self._tool_read_event_turns(
+                    args.get("event_id", ""),
+                    args.get("from_turn"),
+                    args.get("to_turn"),
+                )
             elif name == "get_pulse_history":
                 return await self._tool_get_pulse_history(
                     args.get("event_id", ""),
@@ -671,11 +678,69 @@ class LiveAPIAdapter:
         recent = event.conversation[-10:]
         action_lines = []
         for t in recent:
+            content = t.thoughts or t.evidence or t.result or ''
             action_lines.append(
-                f"  [{t.actor}.{t.action}] {t.thoughts or t.result or ''}"
+                f"  [{t.actor}.{t.action}] {content[:300]}"
             )
         body = "\n".join(action_lines) if action_lines else "  (no turns)"
         return f"{header}\nLast {len(recent)} actions:\n{body}"
+
+    async def _tool_read_event_turns(self, event_id: str, raw_from: Any, raw_to: Any) -> str:
+        """Drill-down: full labeled content (thoughts + evidence) for a turn range.
+
+        Guard order is strict -- parse -> fetch -> empty check -> clamp bounds ->
+        validate range -> clamp window -> filter -> render. See plan for rationale.
+        """
+        if not event_id:
+            return "Error: event_id required"
+
+        try:
+            if raw_from is None or raw_to is None:
+                raise TypeError("from_turn and to_turn are required")
+            from_turn = int(raw_from)
+            to_turn = int(raw_to)
+        except (ValueError, TypeError):
+            return "Error: from_turn and to_turn must be integers"
+
+        event = await self._blackboard.get_event(event_id)
+        if not event:
+            return f"Event {event_id} not found"
+
+        conversation = event.conversation
+        if len(conversation) == 0:
+            return f"Event {event_id} has no conversation turns"
+
+        from_turn = max(1, from_turn)
+        to_turn = min(len(conversation), to_turn)
+
+        if from_turn > to_turn:
+            return (
+                f"Error: from_turn ({from_turn}) is after to_turn ({to_turn}) "
+                f"(conversation has {len(conversation)} turns)"
+            )
+
+        requested = to_turn - from_turn + 1
+        clamped = requested > 10
+        if clamped:
+            to_turn = from_turn + 9
+
+        turns = [t for t in conversation if from_turn <= t.turn <= to_turn]
+
+        blocks = []
+        for t in turns:
+            block = (
+                f"--- Turn {t.turn} [{t.actor}.{t.action}] tool={t.waitingFor or '-'} ---\n"
+                f"Thoughts: {t.thoughts or '(none)'}\n"
+                f"Evidence: {t.evidence or '(none)'}"
+            )
+            if len(block) > 2000:
+                block = block[:2000] + "...(truncated at 2000 chars)"
+            blocks.append(block)
+
+        body = "\n\n".join(blocks) if blocks else "(no turns in range)"
+        if clamped:
+            body += f"\n\n(showing first 10 of {requested} turns)"
+        return body
 
     async def _tool_get_pulse_history(self, event_id: str, last_n_minutes: int = 10) -> str:
         if not event_id:
