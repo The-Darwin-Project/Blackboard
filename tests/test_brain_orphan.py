@@ -74,9 +74,9 @@ class TestOrphanRequeue:
 
     @pytest.mark.asyncio
     async def test_requeue_blank_event_with_processing_started(self):
-        """Blank event older than 60s with processing_started_at triggers LPUSH."""
+        """Blank event older than 180s with processing_started_at triggers LPUSH."""
         brain = _make_brain()
-        event = _make_blank_event(processing_started_at=time.time() - 120)
+        event = _make_blank_event(processing_started_at=time.time() - 240)
 
         await brain._handle_orphan_blank_event("evt-orphan-1", event)
 
@@ -85,10 +85,10 @@ class TestOrphanRequeue:
 
     @pytest.mark.asyncio
     async def test_requeue_blank_event_with_queued_at_fallback(self):
-        """Blank event with processing_started_at=None but queued_at > 60s triggers LPUSH."""
+        """Blank event with processing_started_at=None but queued_at > 180s triggers LPUSH."""
         brain = _make_brain()
         event = _make_blank_event(processing_started_at=None)
-        event.queued_at = time.time() - 120
+        event.queued_at = time.time() - 240
 
         await brain._handle_orphan_blank_event("evt-orphan-1", event)
 
@@ -108,8 +108,8 @@ class TestOrphanRequeue:
         assert "evt-orphan-1" not in brain._orphan_requeue_count
 
     @pytest.mark.asyncio
-    async def test_skip_blank_event_under_60s(self):
-        """Blank event younger than 60s is NOT re-queued."""
+    async def test_skip_blank_event_under_180s(self):
+        """Blank event younger than 180s is NOT re-queued."""
         brain = _make_brain()
         event = _make_blank_event(processing_started_at=time.time() - 10)
 
@@ -121,7 +121,7 @@ class TestOrphanRequeue:
     async def test_cap_at_3_closes_as_error(self):
         """After 3 re-queue attempts, event is closed with error turn."""
         brain = _make_brain()
-        event = _make_blank_event(processing_started_at=time.time() - 120)
+        event = _make_blank_event(processing_started_at=time.time() - 240)
         brain._orphan_requeue_count["evt-orphan-1"] = 3
 
         brain.blackboard.get_event = AsyncMock(return_value=event)

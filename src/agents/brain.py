@@ -3948,7 +3948,7 @@ class Brain:
         if anchor is None:
             return
         age = time.time() - anchor
-        if age <= 60:
+        if age <= 180:
             return
         count = self._orphan_requeue_count.get(event_id, 0)
         if count < 3:
