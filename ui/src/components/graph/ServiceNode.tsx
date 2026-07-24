@@ -10,6 +10,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { HealthStatus, NodeType } from '../../api/types';
+import { ARGOCD_HEALTH_COLORS, SYNC_ICONS } from './constants';
 import './ArchitectureGraph.css';
 
 const HEALTH_COLORS: Record<HealthStatus, string> = {
@@ -17,19 +18,6 @@ const HEALTH_COLORS: Record<HealthStatus, string> = {
   warning: '#eab308',
   critical: '#ef4444',
   unknown: '#6b7280',
-};
-
-const ARGOCD_HEALTH_COLORS: Record<string, string> = {
-  Healthy: '#22c55e',
-  Progressing: '#eab308',
-  Degraded: '#ef4444',
-  Missing: '#6b7280',
-  Unknown: '#6b7280',
-};
-
-const SYNC_ICONS: Record<string, string> = {
-  Synced: '\u2713',
-  OutOfSync: '\u26a0',
 };
 
 const NODE_ICONS: Record<NodeType, string> = {

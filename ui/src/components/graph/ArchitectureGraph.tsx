@@ -31,11 +31,12 @@ import { useGraph } from '../../hooks';
 import type { GraphResponse } from '../../api/types';
 import ServiceNode from './ServiceNode';
 import TicketNode from './TicketNode';
+import AppNode from './AppNode';
 import NamespaceGroupNode from './NamespaceGroupNode';
 import DarwinEdge from './DarwinEdge';
 import './ArchitectureGraph.css';
 
-const nodeTypes = { service: ServiceNode, ticket: TicketNode, group: NamespaceGroupNode };
+const nodeTypes = { service: ServiceNode, ticket: TicketNode, app: AppNode, group: NamespaceGroupNode };
 const edgeTypes = { darwin: DarwinEdge };
 type LayoutType = 'dagre-tb' | 'dagre-lr' | 'grid';
 const LAYOUT_KEY = 'darwin:graph:layout';
@@ -51,9 +52,15 @@ function nodeWidth(type: string | undefined): number {
 
 function computeIdHash(data: GraphResponse, layout: LayoutType): string {
   const nIds = data.nodes.map((n) => n.id).sort().join(',');
-  const nsIds = Array.from(new Set(data.nodes.map((n) => n.metadata.namespace).filter(Boolean))).sort().join(',');
+  const aIds = (data.apps ?? []).map((a) => a.argocd_app).sort().join(',');
+  // Union namespaces from BOTH nodes AND apps (precision req #5)
+  const allNs = new Set([
+    ...data.nodes.map((n) => n.metadata.namespace).filter(Boolean),
+    ...(data.apps ?? []).map((a) => a.namespace).filter(Boolean),
+  ]);
+  const nsIds = Array.from(allNs).sort().join(',');
   const tIds = (data.tickets ?? []).map((t) => t.event_id).sort().join(',');
-  return `${layout}|${nIds}|${nsIds}|${tIds}`;
+  return `${layout}|${nIds}|${aIds}|${nsIds}|${tIds}`;
 }
 
 // --- Grid layout: groups laid out first (flow-wrapping row of boxes), then each
@@ -182,10 +189,12 @@ function buildGraph(data: GraphResponse, layout: LayoutType): { nodes: Node[]; e
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
-  // Namespace group (parent) nodes -- pushed first so React Flow renders/orders them
-  // before their service-node children.
+  // Namespace group (parent) nodes -- compute from BOTH service nodes AND config-only apps
   const namespaces = Array.from(
-    new Set(data.nodes.map((gn) => gn.metadata.namespace).filter((ns): ns is string => !!ns)),
+    new Set([
+      ...data.nodes.map((gn) => gn.metadata.namespace).filter((ns): ns is string => !!ns),
+      ...(data.apps ?? []).map((a) => a.namespace).filter((ns): ns is string => !!ns),
+    ]),
   ).sort();
 
   namespaces.forEach((ns) => {
@@ -208,6 +217,18 @@ function buildGraph(data: GraphResponse, layout: LayoutType): { nodes: Node[]; e
       position: { x: 0, y: 0 },
       ...(namespace ? { parentId: `group-${namespace}`, extent: 'parent' as const } : {}),
       data: { label: gn.label, type: gn.type, ...gn.metadata },
+    });
+  });
+
+  // Config-only ArgoCD app nodes (namespace-grouped via parentId, same as ServiceNode)
+  (data.apps ?? []).forEach((app) => {
+    const appId = `app-${app.argocd_app}`;
+    nodes.push({
+      id: appId,
+      type: 'app',
+      position: { x: 0, y: 0 },
+      ...(app.namespace ? { parentId: `group-${app.namespace}`, extent: 'parent' as const } : {}),
+      data: { ...app },
     });
   });
 
@@ -244,7 +265,7 @@ function ArchitectureGraphInner({ onNodeClick, onTicketClick }: Props) {
   const structureChangedRef = useRef(false);
 
   const { rfNodes, rfEdges } = useMemo(() => {
-    if (!data?.nodes?.length) return { rfNodes: [], rfEdges: [] };
+    if (!data?.nodes?.length && !data?.apps?.length) return { rfNodes: [], rfEdges: [] };
 
     const hash = computeIdHash(data, layout);
     structureChangedRef.current = hash !== prevHashRef.current;
@@ -273,6 +294,7 @@ function ArchitectureGraphInner({ onNodeClick, onTicketClick }: Props) {
 
   const handleNodeClick: NodeMouseHandler = useCallback((_event, node) => {
     if (node.type === 'group') return;
+    if (node.type === 'app') return;
     if (node.type === 'ticket') {
       const eventId = (node.data as { event_id?: string }).event_id;
       if (eventId) onTicketClick?.(eventId);

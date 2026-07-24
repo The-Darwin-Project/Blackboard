@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime
@@ -39,6 +40,7 @@ from typing import TYPE_CHECKING, List, Optional
 from redis.exceptions import ResponseError, WatchError
 
 from ..models import (
+    AppNode,
     ConversationMessage,
     ConversationTurn,
     ArchitectureEvent,
@@ -69,8 +71,9 @@ logger = logging.getLogger(__name__)
 CONVERSATION_TTL_SECONDS = 86400
 
 # Zombie detection: seconds without an ArgoCDObserver watch update before a
-# service's health collapses to "unknown" (3x observer tick to avoid flicker).
-ZOMBIE_THRESHOLD = 90.0
+# service's health collapses to "unknown". Must exceed ArgoCD's reconciliation
+# interval (typically 3-5 minutes) to avoid false "gray node" flapping.
+ZOMBIE_THRESHOLD = float(os.getenv("ARGOCD_ZOMBIE_THRESHOLD", "360"))
 
 
 def infer_node_type(service_name: str) -> NodeType:
@@ -154,12 +157,13 @@ class BlackboardState:
     """
     
     _LUA_CLEAR_ESCALATION = """
-local val = redis.call('HGET', KEYS[1], 'escalation_flag')
+local field = ARGV[2] or 'escalation_flag'
+local val = redis.call('HGET', KEYS[1], field)
 if not val or val == '' then return 0 end
 local delim = string.find(val, '|')
 local prefix = delim and string.sub(val, 1, delim - 1) or val
 if prefix == ARGV[1] then
-    redis.call('HDEL', KEYS[1], 'escalation_flag')
+    redis.call('HDEL', KEYS[1], field)
     return 1
 end
 return 0
@@ -493,6 +497,7 @@ return 0
                     "replicas_ready": metadata.replicas_ready if metadata else None,
                     "replicas_desired": metadata.replicas_desired if metadata else None,
                     "escalation_flag": metadata.escalation_flag if metadata else None,
+                    "escalation_scope": metadata.escalation_scope if metadata else None,
                     "icon": icon,
                 }
             ))
@@ -505,13 +510,16 @@ return 0
         # Build ticket nodes from active general/headhunter events
         ticket_nodes = await self._get_ticket_nodes()
 
+        # Build config-only ArgoCD app nodes (sibling pattern to ticket_nodes)
+        app_nodes = await self._get_app_nodes()
+
         logger.debug(
             f"Graph response: {len(nodes)} nodes, {len(edges)} edges, "
-            f"{len(ticket_nodes)} ticket nodes. "
+            f"{len(ticket_nodes)} ticket nodes, {len(app_nodes)} app nodes. "
             f"Node IDs: {[n.id for n in nodes]}"
         )
         
-        return GraphResponse(nodes=nodes, edges=edges, tickets=ticket_nodes)
+        return GraphResponse(nodes=nodes, edges=edges, tickets=ticket_nodes, apps=app_nodes)
     
     async def generate_mermaid(self) -> str:
         """
@@ -694,7 +702,11 @@ return 0
         await self.redis.hset(key, mapping=mapping)
     
     async def get_service(self, name: str) -> Optional[Service]:
-        """Get service metadata."""
+        """Get service metadata.
+
+        Synthesizes escalation_flag from scoped fields (priority: health → kargo → sync).
+        First non-None wins — deterministic, backward-compatible.
+        """
         key = f"darwin:service:{name}"
         data = await self.redis.hgetall(key)
         
@@ -707,7 +719,23 @@ return 0
             last_operations = json.loads(data.get("last_operations", "[]"))
         except (json.JSONDecodeError, TypeError):
             last_operations = []
-        
+
+        # Synthesize escalation_flag from per-scope fields (health → kargo → sync)
+        escalation_flag = None
+        escalation_scope = None
+        for scope in ("health", "kargo", "sync"):
+            val = data.get(f"escalation_flag:{scope}")
+            if val:
+                escalation_flag = val
+                escalation_scope = scope
+                break
+        # Backward compat: fall back to legacy unscoped field
+        if not escalation_flag:
+            legacy = data.get("escalation_flag")
+            if legacy:
+                escalation_flag = legacy
+                escalation_scope = "health"
+
         return Service(
             name=name,
             version=data.get("version", "unknown"),
@@ -724,7 +752,8 @@ return 0
             gitops_config_path=data.get("gitops_config_path"),
             replicas_ready=int(data["replicas_ready"]) if data.get("replicas_ready") else None,
             replicas_desired=int(data["replicas_desired"]) if data.get("replicas_desired") else None,
-            escalation_flag=data.get("escalation_flag"),
+            escalation_flag=escalation_flag,
+            escalation_scope=escalation_scope,
             namespace=data.get("namespace"),
             health_status=data.get("health_status"),
             sync_status=data.get("sync_status"),
@@ -748,33 +777,118 @@ return 0
     # Escalation Flag (Service-level suppression)
     # =========================================================================
 
-    async def get_escalation_flag(self, service: str) -> Optional[str]:
-        """Targeted HGET for escalation flag — cheaper than full get_service()."""
-        return await self.redis.hget(f"darwin:service:{service}", "escalation_flag")
+    async def get_escalation_flag(self, service: str, scope: str = "health") -> Optional[str]:
+        """Targeted HGET for scoped escalation flag — cheaper than full get_service().
 
-    async def set_escalation_flag(self, service: str, event_id: str, reason: str) -> None:
-        """Set escalation suppression flag on a service HASH."""
+        Falls back to legacy unscoped `escalation_flag` field for ANY scope during rolling deploy.
+        Once all pods are upgraded, legacy field is never written — fallback becomes a no-op.
+        """
+        key = f"darwin:service:{service}"
+        field = f"escalation_flag:{scope}"
+        val = await self.redis.hget(key, field)
+        if val:
+            return val
+        # Backward compat: legacy data uses unscoped `escalation_flag` for ALL scopes.
+        # During rolling deploy, old pods still write the unscoped field regardless of subject_type.
+        # Conservative: suppress across all scopes until legacy data is cleared by recovery/NW.
+        return await self.redis.hget(key, "escalation_flag")
+
+    async def set_escalation_flag(
+        self, service: str, event_id: str, reason: str, scope: str = "health",
+    ) -> None:
+        """Set escalation suppression flag on a scoped HASH field."""
         safe_reason = reason.replace('\n', ' ').replace('\r', '').replace('|', '-')[:100]
         value = f"{event_id}|{safe_reason}"
-        await self.redis.hset(f"darwin:service:{service}", "escalation_flag", value)
-        logger.info(f"Escalation flag SET for {service}: {event_id}")
+        field = f"escalation_flag:{scope}"
+        await self.redis.hset(f"darwin:service:{service}", field, value)
+        logger.info(f"Escalation flag SET for {service} scope={scope}: {event_id}")
 
     async def clear_escalation_flag(
-        self, service: str, expected_event_id: str | None = None,
+        self, service: str, scope: str = "health", expected_event_id: str | None = None,
     ) -> int:
-        """Clear escalation flag. Atomic compare-and-delete when expected_event_id given."""
+        """Clear scoped escalation flag. Atomic compare-and-delete when expected_event_id given.
+
+        Also clears the legacy unscoped `escalation_flag` field to prevent permanently sticky
+        flags from pre-migration data surviving indefinitely.
+        """
         key = f"darwin:service:{service}"
+        field = f"escalation_flag:{scope}"
         if expected_event_id:
             result = await self._clear_escalation_script(
-                keys=[key], args=[expected_event_id],
+                keys=[key], args=[expected_event_id, field],
             )
         else:
-            result = await self.redis.hdel(key, "escalation_flag")
+            result = await self.redis.hdel(key, field)
+        # Also clear legacy unscoped field (rolling deploy compat: prevents sticky pre-migration flags)
+        await self.redis.hdel(key, "escalation_flag")
         logger.info(
-            f"Escalation flag CLEAR for {service}: "
+            f"Escalation flag CLEAR for {service} scope={scope}: "
             f"expected={expected_event_id}, result={result}"
         )
         return int(result)
+
+    # =========================================================================
+    # Config-Only ArgoCD Apps (sibling node list)
+    # =========================================================================
+
+    async def get_config_only_apps(self) -> list[dict]:
+        """Read all config-only ArgoCD app entries from Redis SET + pipeline HGETALL."""
+        app_keys = await self.redis.smembers("darwin:argocd_apps")
+        if not app_keys:
+            return []
+        pipe = self.redis.pipeline(transaction=False)
+        for app_key in app_keys:
+            pipe.hgetall(f"darwin:argocd_app:{app_key}")
+        results = await pipe.execute()
+        apps = []
+        for app_key, data in zip(app_keys, results):
+            if data:
+                data["argocd_app"] = app_key
+                apps.append(data)
+        return apps
+
+    async def cleanup_stale_services(self) -> int:
+        """Remove orphan entries from darwin:services and darwin:argocd_apps.
+
+        Targets entries without `argocd_app` field AND stale `last_seen` beyond ZOMBIE_THRESHOLD.
+        Called during ArgoCD observer _initial_sync().
+        """
+        removed = 0
+        now = time.time()
+
+        # Clean stale services
+        service_names = await self.redis.smembers("darwin:services")
+        for name in service_names:
+            data = await self.redis.hgetall(f"darwin:service:{name}")
+            if not data:
+                await self.remove_service(name)
+                removed += 1
+                continue
+            has_argocd = bool(data.get("argocd_app"))
+            last_seen = float(data.get("last_seen", 0))
+            if not has_argocd and (now - last_seen) > ZOMBIE_THRESHOLD:
+                logger.info(f"Removing orphan service: {name} (no argocd_app, stale {now - last_seen:.0f}s)")
+                await self.remove_service(name)
+                removed += 1
+
+        # Clean stale config-only apps
+        app_keys = await self.redis.smembers("darwin:argocd_apps")
+        for app_key in app_keys:
+            data = await self.redis.hgetall(f"darwin:argocd_app:{app_key}")
+            if not data:
+                await self.redis.srem("darwin:argocd_apps", app_key)
+                removed += 1
+                continue
+            last_seen = float(data.get("last_seen", 0))
+            if (now - last_seen) > ZOMBIE_THRESHOLD:
+                logger.info(f"Removing stale config-only app: {app_key} (stale {now - last_seen:.0f}s)")
+                await self.redis.srem("darwin:argocd_apps", app_key)
+                await self.redis.delete(f"darwin:argocd_app:{app_key}")
+                removed += 1
+
+        if removed:
+            logger.info(f"cleanup_stale_services: removed {removed} orphan entries")
+        return removed
 
     # =========================================================================
     # Architecture Events (for correlation)
@@ -1574,6 +1688,31 @@ return 0
             if defer_started_at > defer_until:
                 defer_started_at = max(defer_until - float(self.MIN_DEFER_DELAY), 0.0)
         return defer_until, defer_started_at
+
+    async def _get_app_nodes(self) -> list[AppNode]:
+        """Load config-only ArgoCD app entries as AppNode objects (mirrors _get_ticket_nodes pattern).
+
+        Applies same ZOMBIE_THRESHOLD last_seen filter as calculate_health_from_argocd().
+        """
+        apps_raw = await self.get_config_only_apps()
+        if not apps_raw:
+            return []
+
+        now = time.time()
+        nodes: list[AppNode] = []
+        for data in apps_raw:
+            last_seen = float(data.get("last_seen", 0))
+            if (now - last_seen) > ZOMBIE_THRESHOLD:
+                continue
+            nodes.append(AppNode(
+                name=data.get("name", ""),
+                health=data.get("health", "Unknown"),
+                sync_status=data.get("sync_status", "Unknown"),
+                namespace=data.get("namespace", ""),
+                argocd_app=data.get("argocd_app", ""),
+                last_seen=last_seen,
+            ))
+        return nodes
 
     async def _get_ticket_nodes(self) -> list[TicketNode]:
         """Batch-load active general/headhunter events as ticket nodes.

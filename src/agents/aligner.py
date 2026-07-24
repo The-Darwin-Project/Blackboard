@@ -32,6 +32,8 @@ import os
 import time
 from typing import TYPE_CHECKING, Optional
 
+from ..models import ESCALATION_SCOPE_MAP
+
 # AIR GAP ENFORCEMENT: Only these imports allowed
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
@@ -269,7 +271,7 @@ class Aligner:
                 await self._notify_active_events(service, msg)
             finally:
                 try:
-                    await self.blackboard.clear_escalation_flag(service)
+                    await self.blackboard.clear_escalation_flag(service, scope="health")
                 except Exception as ce:
                     logger.warning(f"Failed to clear escalation flag on recovery for {service}: {ce}")
             return
@@ -288,6 +290,7 @@ class Aligner:
         await self._trigger_architect(
             service, f"argocd_health_{new_health.lower()}", display_text,
             domain="complicated", severity_level=severity,
+            argocd_app=argocd_app,
         )
 
     async def handle_sync_drift(
@@ -321,7 +324,7 @@ class Aligner:
         await self._trigger_architect(
             argocd_app, "argocd_sync_drift", display_text,
             domain="clear", severity_level="warning",
-            subject_type="system",
+            subject_type="system", argocd_app=argocd_app,
         )
 
     async def _has_active_event_for(self, service: str) -> bool:
@@ -333,10 +336,27 @@ class Aligner:
                 return True
         return False
 
+    async def _check_escalation_gate(self, service: str, scope: str) -> bool:
+        """Layer 3 escalation suppression gate — direct HGET, not get_service().
+
+        Returns True if an escalation flag exists for the given scope (= suppress event).
+        Uses direct get_escalation_flag() which works for both real service keys AND
+        synthetic argocd_app keys (unlike get_service() which returns None for synthetics).
+        """
+        try:
+            flag = await self.blackboard.get_escalation_flag(service, scope=scope)
+        except Exception:
+            flag = None
+        if flag:
+            flag_eid = flag.split('|')[0]
+            logger.info(f"Escalation gate: suppressing {service} scope={scope} (pending {flag_eid})")
+            return True
+        return False
+
     async def _trigger_architect(
         self, service: str, anomaly_type: str, display_text: str,
         domain: str = "complicated", severity_level: str = "warning",
-        subject_type: str = "service",
+        subject_type: str = "service", argocd_app: str = "",
     ) -> None:
         """
         Create an event for the Brain to process -- with three-layer deduplication.
@@ -377,19 +397,10 @@ class Aligner:
             )
             return
 
-        # Layer 3: escalation suppression (flag set by Brain on report_incident).
-        # get_service() returns None for synthetic keys like argocd_app -- the
-        # check is null-safe and simply skips for those (real service names only).
-        try:
-            svc = await self.blackboard.get_service(service)
-        except Exception:
-            svc = None
-        if svc and svc.escalation_flag:
-            flag_eid = svc.escalation_flag.split('|')[0]
-            logger.info(
-                f"Skipping event for {service} ({anomaly_type}): "
-                f"escalation pending ({flag_eid})"
-            )
+        # Layer 3: escalation suppression (flag set by Brain on report_incident)
+        scope = ESCALATION_SCOPE_MAP.get(subject_type, "health")
+        if await self._check_escalation_gate(service, scope):
+            logger.info(f"Skipping event for {service} ({anomaly_type}): escalation gate (scope={scope})")
             return
 
         from ..models import EventEvidence
@@ -401,6 +412,7 @@ class Aligner:
             domain_confidence="assessed",
             severity=severity_level,
             metrics=None,
+            argocd_app=argocd_app or None,
         )
 
         await self.blackboard.create_event(
@@ -500,14 +512,8 @@ class Aligner:
             logger.info(f"Skipping Kargo event for {service}: cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s)")
             return None
 
-        # Layer 3: escalation suppression
-        try:
-            flag = await self.blackboard.get_escalation_flag(service)
-        except Exception:
-            flag = None
-        if flag:
-            flag_eid = flag.split('|')[0]
-            logger.info(f"Skipping Kargo event for {service}: escalation pending ({flag_eid})")
+        # Layer 3: escalation suppression (kargo scope)
+        if await self._check_escalation_gate(service, "kargo"):
             return None
 
         from ..models import EventEvidence
@@ -554,7 +560,7 @@ class Aligner:
             await self._notify_active_events(service, msg)
         finally:
             try:
-                await self.blackboard.clear_escalation_flag(service)
+                await self.blackboard.clear_escalation_flag(service, scope="kargo")
             except Exception as ce:
                 logger.warning(f"Failed to clear escalation flag on Kargo recovery for {service}: {ce}")
 

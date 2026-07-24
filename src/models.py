@@ -21,6 +21,24 @@ from .event_types import EventSource
 
 
 # =============================================================================
+# Escalation Scope Mapping (Domain constant — hexagonal boundary safe)
+# =============================================================================
+
+ESCALATION_SCOPE_MAP: dict[str, str] = {
+    "kargo_stage": "kargo",
+    "service": "health",
+    "system": "sync",
+    "jira": "health",
+    "github_issue": "health",
+}
+"""Maps subject_type -> escalation scope field suffix.
+
+Used by: handlers_dispatch (set), aligner (gate check), nightwatcher (clear).
+Storage: HASH field `escalation_flag:{scope}` on `darwin:service:{name}`.
+"""
+
+
+# =============================================================================
 # Service State (Metadata Layer)
 # =============================================================================
 
@@ -46,7 +64,8 @@ class Service(BaseModel):
     gitops_config_path: Optional[str] = Field(None, description="Config path within gitops repo (e.g., helm/values.yaml, kustomize/overlays)")
     replicas_ready: Optional[int] = Field(None, description="Number of ready replicas from K8s")
     replicas_desired: Optional[int] = Field(None, description="Desired replica count from K8s")
-    escalation_flag: Optional[str] = Field(None, description="Escalation suppression: event_id|reason")
+    escalation_flag: Optional[str] = Field(None, description="Escalation suppression: event_id|reason (synthesized from scoped fields)")
+    escalation_scope: Optional[str] = Field(None, description="Which scope produced escalation_flag: health, kargo, or sync")
     namespace: Optional[str] = Field(None, description="K8s namespace of the owning Deployment (from ArgoCD resource entry)")
     health_status: Optional[str] = Field(None, description="ArgoCD resource health.status: Healthy, Progressing, Degraded, Missing, Unknown")
     sync_status: Optional[str] = Field(None, description="ArgoCD resource sync status: Synced, OutOfSync, Unknown")
@@ -109,11 +128,22 @@ class TicketNode(BaseModel):
     resolved_service: str | None = None
 
 
+class AppNode(BaseModel):
+    """A config-only ArgoCD Application node (zero workload resources)."""
+    name: str = Field(..., description="ArgoCD Application name (from app key)")
+    health: str = Field(..., description="ArgoCD app-level health: Healthy, Degraded, Missing, Unknown")
+    sync_status: str = Field(..., description="ArgoCD sync status: Synced, OutOfSync, Unknown")
+    namespace: str = Field(..., description="ArgoCD Application namespace")
+    argocd_app: str = Field(..., description="Full app key: namespace/name")
+    last_seen: Optional[float] = Field(None, description="Unix timestamp of last observer tick")
+
+
 class GraphResponse(BaseModel):
     """Response for /topology/graph endpoint."""
     nodes: list[GraphNode] = Field(default_factory=list)
     edges: list[GraphEdge] = Field(default_factory=list)
     tickets: list[TicketNode] = Field(default_factory=list, description="Active event tickets as ephemeral nodes")
+    apps: list[AppNode] = Field(default_factory=list, description="Config-only ArgoCD Application nodes")
 
 
 # =============================================================================
@@ -229,6 +259,7 @@ class EventEvidence(BaseModel):
     github_issue_context: Optional[dict] = Field(
         None, description="GitHub Issue context: owner, repo, issue_number, title, body, labels, assignees, html_url, state, author, created_at, skill_label"
     )
+    argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key (namespace/name) for evidence-based icon resolution")
     brain_domain: Optional[str] = Field(None, description="Brain-assessed Cynefin domain (overrides source domain when set)")
     brain_severity: Optional[str] = Field(None, description="Brain-assessed severity (overrides source severity when set)")
     domain_confidence: Literal["assessed", "default"] = Field("default", description="Whether source did real triage or used a fallback")
@@ -527,6 +558,7 @@ class StagedEscalation(BaseModel):
     source: str = Field(..., description="Event source: aligner | headhunter | timekeeper")
     reason: str = Field(..., description="Original event reason")
     summary: str = Field(..., max_length=200, description="Brain's report_incident summary")
+    scope: str = Field("health", description="Escalation scope for clear targeting (health, kargo, sync)")
     platform: str = Field("", description="Affected platform (Konflux, Kargo, etc.)")
     priority: str = Field("Normal", description="Normal | Major | Critical")
     description: str = Field("", description="Brain's report_incident description")

@@ -99,7 +99,7 @@ def _stub_brain(bb):
 @pytest.mark.asyncio
 async def test_gate_blocks_when_flag_set():
     bb = _mock_blackboard()
-    bb.get_service.return_value = _svc(flag="evt-old|high cpu")
+    bb.get_escalation_flag.return_value = "evt-old|high cpu"
     aligner = _make_aligner(bb)
     await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_not_called()
@@ -112,7 +112,7 @@ async def test_gate_blocks_when_flag_set():
 @pytest.mark.asyncio
 async def test_gate_allows_when_no_flag():
     bb = _mock_blackboard()
-    bb.get_service.return_value = _svc(flag=None)
+    bb.get_escalation_flag.return_value = None
     aligner = _make_aligner(bb)
     await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_called_once()
@@ -136,7 +136,7 @@ async def test_brain_sets_flag_on_staging_success():
             response_parts=None,
         )
 
-    bb.set_escalation_flag.assert_called_once_with("svc-a", "evt-1", "high cpu")
+    bb.set_escalation_flag.assert_called_once_with("svc-a", "evt-1", "high cpu", scope="health")
 
 
 # =========================================================================
@@ -185,7 +185,7 @@ async def test_recovery_clears_flag():
 
     await aligner.handle_health_change("svc-a", "Degraded", "Healthy", {"argocd_app": "ns/app"})
 
-    bb.clear_escalation_flag.assert_called_once_with("svc-a")
+    bb.clear_escalation_flag.assert_called_once_with("svc-a", scope="health")
 
 
 # =========================================================================
@@ -226,7 +226,7 @@ async def test_lua_atomic_no_clear_on_mismatch():
     result = await bb.clear_escalation_flag("svc-a", expected_event_id="evt-wrong")
     assert result == 0
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-a"], args=["evt-wrong"],
+        keys=["darwin:service:svc-a"], args=["evt-wrong", "escalation_flag:health"],
     )
 
 
@@ -278,14 +278,16 @@ async def test_escalation_flag_lifecycle():
     lua_script.return_value = 1
 
     assert await bb.get_escalation_flag("svc-new") is None
+    # Backward compat: checks scoped field first, then falls back to legacy
+    redis.hget.assert_any_call("darwin:service:svc-new", "escalation_flag:health")
     redis.hget.assert_called_with("darwin:service:svc-new", "escalation_flag")
 
     await bb.set_escalation_flag("svc-new", "evt-1", "test reason")
-    redis.hset.assert_called_with("darwin:service:svc-new", "escalation_flag", "evt-1|test reason")
+    redis.hset.assert_called_with("darwin:service:svc-new", "escalation_flag:health", "evt-1|test reason")
 
     await bb.clear_escalation_flag("svc-new", expected_event_id="evt-1")
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-new"], args=["evt-1"],
+        keys=["darwin:service:svc-new"], args=["evt-1", "escalation_flag:health"],
     )
 
 
@@ -297,7 +299,7 @@ async def test_escalation_flag_lifecycle():
 async def test_health_change_respects_escalation_flag():
     """handle_health_change does not create a duplicate event while escalation is pending."""
     bb = _mock_blackboard()
-    bb.get_service.return_value = _svc(flag="evt-old|argocd health degraded")
+    bb.get_escalation_flag.return_value = "evt-old|argocd health degraded"
     aligner = _make_aligner(bb)
 
     await aligner.handle_health_change("svc-a", "Healthy", "Degraded", {"argocd_app": "ns/app"})
@@ -318,7 +320,7 @@ async def test_multi_escalation_latest_wins():
 
     calls = redis.hset.call_args_list
     assert len(calls) == 2
-    assert calls[-1].args == ("darwin:service:svc-a", "escalation_flag", "evt-2|second escalation")
+    assert calls[-1].args == ("darwin:service:svc-a", "escalation_flag:health", "evt-2|second escalation")
 
 
 # =========================================================================
@@ -332,7 +334,7 @@ async def test_malformed_flag_no_delimiter():
 
     result = await bb.clear_escalation_flag("svc-a", expected_event_id="evt-nopipe")
     lua_script.assert_called_once_with(
-        keys=["darwin:service:svc-a"], args=["evt-nopipe"],
+        keys=["darwin:service:svc-a"], args=["evt-nopipe", "escalation_flag:health"],
     )
     assert result == 1
 
@@ -394,3 +396,104 @@ async def test_nw_clear_loop_resilience():
                 pass
 
     assert call_count == 3
+
+
+# =========================================================================
+# 16. Cross-scope no suppression: Kargo flag → health event NOT suppressed
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_cross_scope_no_suppression():
+    """Kargo-scoped flag does NOT suppress a health-scoped event."""
+    bb = _mock_blackboard()
+    # get_escalation_flag returns None for health scope (only kargo is set)
+    async def scope_aware_get(service, scope="health"):
+        if scope == "kargo":
+            return "evt-old|kargo promo"
+        return None
+    bb.get_escalation_flag.side_effect = scope_aware_get
+    aligner = _make_aligner(bb)
+    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    bb.create_event.assert_called_once()
+
+
+# =========================================================================
+# 17. Same-scope suppression: health flag → health event IS suppressed
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_same_scope_suppression():
+    """Health-scoped flag DOES suppress a health-scoped event."""
+    bb = _mock_blackboard()
+    bb.get_escalation_flag.return_value = "evt-old|health flag"
+    aligner = _make_aligner(bb)
+    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    bb.create_event.assert_not_called()
+
+
+# =========================================================================
+# 18. Recovery clears own scope only
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_recovery_clears_own_scope_only():
+    """Health recovery clears scope=health, not scope=kargo."""
+    bb = _mock_blackboard()
+    bb.get_active_events.return_value = []
+    aligner = _make_aligner(bb)
+    await aligner.handle_health_change("svc-a", "Degraded", "Healthy", {})
+    bb.clear_escalation_flag.assert_called_once_with("svc-a", scope="health")
+
+
+# =========================================================================
+# 19. Backward compat: legacy flag (no scope) treated as health
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_backward_compat_legacy_flag():
+    """BlackboardState.get_escalation_flag falls back to legacy unscoped field for health scope."""
+    bb_real, redis_mock, _ = _make_blackboard_state()
+    # Scoped field empty, legacy field has value
+    async def hget_side(key, field):
+        if field == "escalation_flag:health":
+            return None
+        if field == "escalation_flag":
+            return "evt-legacy|old reason"
+        return None
+    redis_mock.hget.side_effect = hget_side
+    result = await bb_real.get_escalation_flag("svc-a", scope="health")
+    assert result == "evt-legacy|old reason"
+
+
+# =========================================================================
+# 20. Nightwatcher clear uses StagedEscalation.scope
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_nightwatcher_clear_uses_scope():
+    """NW clear passes scope from StagedEscalation to clear_escalation_flag."""
+    bb = _mock_blackboard()
+    esc = StagedEscalation(
+        event_id="evt-1", service="svc-a", source="aligner",
+        reason="kargo promo", summary="failed", scope="kargo",
+    )
+    # Simulate the NW clear loop
+    await bb.clear_escalation_flag(esc.service, scope=esc.scope or "health", expected_event_id=esc.event_id)
+    bb.clear_escalation_flag.assert_called_once_with("svc-a", scope="kargo", expected_event_id="evt-1")
+
+
+# =========================================================================
+# 21. Sync-drift gate uses direct HGET (works for synthetic argocd_app keys)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_sync_drift_gate_uses_direct_hget():
+    """_check_escalation_gate uses get_escalation_flag (direct HGET) not get_service()."""
+    bb = _mock_blackboard()
+    bb.get_escalation_flag.return_value = "evt-old|sync drift"
+    aligner = _make_aligner(bb)
+    result = await aligner._check_escalation_gate("openshift-gitops/argocd-app", "sync")
+    assert result is True
+    bb.get_escalation_flag.assert_called_once_with("openshift-gitops/argocd-app", scope="sync")
+    # Importantly: get_service was NOT called (it returns None for synthetic keys)
+    bb.get_service.assert_not_called()

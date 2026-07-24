@@ -427,7 +427,8 @@ class NightwatcherObserver:
             if esc and esc.service:
                 try:
                     await self.blackboard.clear_escalation_flag(
-                        esc.service, expected_event_id=eid,
+                        esc.service, scope=esc.scope or "health",
+                        expected_event_id=eid,
                     )
                 except Exception:
                     logger.warning(

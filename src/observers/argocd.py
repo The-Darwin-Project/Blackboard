@@ -193,6 +193,13 @@ class ArgoCDObserver:
                 f"ArgoCDObserver initial sync: rv={self._resource_version}, "
                 f"apps={len(self._application_states)}"
             )
+            # Clean orphan entries without ArgoCD metadata or stale last_seen
+            try:
+                removed = await self.blackboard.cleanup_stale_services()
+                if removed:
+                    logger.info(f"ArgoCDObserver initial sync: cleaned {removed} orphan entries")
+            except Exception as cleanup_err:
+                logger.warning(f"ArgoCDObserver cleanup_stale_services failed: {cleanup_err}")
         except Exception as e:
             logger.error(f"ArgoCDObserver initial sync failed (previous state preserved): {e}")
 
@@ -332,12 +339,43 @@ class ArgoCDObserver:
 
         last_operations = self._extract_last_operations(status)
 
+        # Config-only app registration runs OUTSIDE the fingerprint gate (precision req #1)
+        # Ensures last_seen stays fresh every tick — zombie filter needs it.
+        now_str = str(time.time())
+        if not workloads:
+            await self.blackboard.redis.sadd("darwin:argocd_apps", app_key)
+            await self.blackboard.redis.hset(f"darwin:argocd_app:{app_key}", mapping={
+                "name": app_name,
+                "health": app_health,
+                "sync_status": app_sync,
+                "namespace": app_ns,
+                "last_seen": now_str,
+            })
+            # Transition: app lost its workloads — remove old services
+            if prev_resource_health:
+                for svc_name in prev_resource_health:
+                    try:
+                        await self.blackboard.remove_service(svc_name)
+                    except Exception as e:
+                        logger.warning(f"ArgoCDObserver: failed removing transitioned service {svc_name}: {e}")
+        else:
+            # Workload-bearing: unconditionally deregister from config-only (no-op if absent)
+            await self.blackboard.redis.srem("darwin:argocd_apps", app_key)
+            await self.blackboard.redis.delete(f"darwin:argocd_app:{app_key}")
+
         if is_new_app or fingerprint != prev_fingerprint:
             resource_health = await self._extract_and_update(
                 app_key, app_ns, workloads, prev_resource_health,
                 last_operations, suppress_callbacks,
                 version, gitops_repo_url, gitops_config_path,
             )
+            # Clean up services removed from the application (partial workload removal)
+            removed_services = set(prev_resource_health.keys()) - set(resource_health.keys())
+            for svc_name in removed_services:
+                try:
+                    await self.blackboard.remove_service(svc_name)
+                except Exception as e:
+                    logger.warning(f"ArgoCDObserver: failed removing orphaned service {svc_name}: {e}")
         else:
             resource_health = prev_resource_health
             await self._touch_last_seen(resource_health)
@@ -429,12 +467,15 @@ class ArgoCDObserver:
                 logger.debug(f"ArgoCDObserver last_seen touch failed for {service_name}: {e}")
 
     async def _process_deleted(self, app: dict) -> None:
-        """Application removed from cluster -- clean up topology membership for its services."""
+        """Application removed from cluster -- clean up topology and config-only app entries."""
         meta = app.get("metadata") or {}
         app_ns = meta.get("namespace", "")
         app_name = meta.get("name", "")
         app_key = f"{app_ns}/{app_name}"
         prev = self._application_states.pop(app_key, None)
+        # Clean config-only app entries regardless of prev state
+        await self.blackboard.redis.srem("darwin:argocd_apps", app_key)
+        await self.blackboard.redis.delete(f"darwin:argocd_app:{app_key}")
         if not prev:
             return
         for service_name in prev.get("resource_health", {}):

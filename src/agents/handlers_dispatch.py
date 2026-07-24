@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from ..models import ConversationTurn, EventType
+from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventType
 from ..utils.event_markdown import event_to_markdown
 
 if TYPE_CHECKING:
@@ -382,12 +382,14 @@ async def handle_report_incident(
             workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
             slack_thread_url = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
         evidence = event_doc.event.evidence
+        esc_scope = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
         staged = StagedEscalation(
             event_id=event_id,
             service=event_doc.service,
             source=event_doc.source,
             reason=event_doc.event.reason,
             summary=args.get("summary", "")[:200],
+            scope=esc_scope,
             platform=args.get("platform", ""),
             priority=args.get("priority", "Normal"),
             description=args.get("description", ""),
@@ -402,6 +404,7 @@ async def handle_report_incident(
                     await bb.set_escalation_flag(
                         event_doc.service, event_id,
                         args.get("summary", "escalated")[:100],
+                        scope=esc_scope,
                     )
                 except Exception as ef:
                     logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
@@ -445,10 +448,12 @@ async def handle_report_incident(
                 result = await adapter.create_incident(fields)
                 ctx.mark_incident_created(event_id)
                 if event_doc.service:
+                    esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
                     try:
                         await bb.set_escalation_flag(
                             event_doc.service, event_id,
                             args.get("summary", "escalated")[:100],
+                            scope=esc_scope_jira,
                         )
                     except Exception as ef:
                         logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")

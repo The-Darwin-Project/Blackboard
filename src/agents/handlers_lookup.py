@@ -69,7 +69,8 @@ async def handle_lookup_service(
         if svc.argocd_app:
             rows.append(f"| ArgoCD App | {svc.argocd_app} |")
         if svc.escalation_flag:
-            rows.append(f"| Escalation | {svc.escalation_flag} |")
+            scope_label = f" ({svc.escalation_scope})" if svc.escalation_scope else ""
+            rows.append(f"| Escalation | Escalated{scope_label}: {svc.escalation_flag} |")
         result_text = f"## Service: {service_name}\n\n| Field | Value |\n|---|---|\n" + "\n".join(rows)
     else:
         known = await bb.get_services()

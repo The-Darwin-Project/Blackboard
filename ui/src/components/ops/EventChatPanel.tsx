@@ -143,7 +143,7 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
             <div className="flex items-center gap-2.5 min-w-0">
               {isDemoMode && <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold flex-shrink-0">DEMO</span>}
               <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: STATUS_COLORS[doc.status]?.border || '#3b82f6' }} />
-              <SourceIcon source={doc.source} evidence={doc.event?.evidence as unknown as Record<string, unknown> | undefined} size={16} />
+              <SourceIcon source={doc.source} subjectType={doc.subject_type} evidence={doc.event?.evidence as unknown as Record<string, unknown> | undefined} size={16} />
               <span className="text-[13px] font-mono truncate flex-1" style={{ color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>{eventId}</span>
               <span className="text-[11px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
                 style={{ background: STATUS_COLORS[doc.status]?.bg || '#1e293b', color: STATUS_COLORS[doc.status]?.text || '#93c5fd' }}>
@@ -187,7 +187,7 @@ export default function EventChatPanel({ eventId, onClose }: EventChatPanelProps
           )}
           <CollapsibleSection title="Details">
             <div className="space-y-1.5 text-[13px] text-text-muted">
-              <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} evidence={doc.event?.evidence as unknown as Record<string, unknown> | undefined} size={18} />{doc.source}</span></div>
+              <div className="flex justify-between"><span>Source</span><span className="flex items-center gap-1"><SourceIcon source={doc.source} subjectType={doc.subject_type} evidence={doc.event?.evidence as unknown as Record<string, unknown> | undefined} size={18} />{doc.source}</span></div>
               <div className="flex justify-between"><span>{doc.subject_type === 'kargo_stage' ? 'Stage' : 'Service'}</span><span className="text-text-secondary">{doc.service}</span></div>
               {doc.event?.evidence?.triggered_by && (
                 <div className="flex justify-between"><span>User</span><span className="text-text-secondary">{doc.event.evidence.triggered_by}</span></div>

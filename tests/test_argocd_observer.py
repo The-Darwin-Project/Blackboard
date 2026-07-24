@@ -453,3 +453,60 @@ async def test_non_deployment_resources_ignored():
     await obs._process_application(app, suppress_callbacks=True)
 
     obs.blackboard.add_service.assert_called_once_with("ai-insights")
+
+
+# =========================================================================
+# Test 10: Zero-workload app registered as config-only
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_zero_workload_app_registered_to_redis():
+    """Application with 0 workloads is registered in darwin:argocd_apps SET."""
+    obs = _make_observer()
+    resources = [
+        {"version": "v1", "kind": "ConfigMap", "namespace": "argocd", "name": "my-config", "status": "Synced"},
+    ]
+    app = _make_application(name="config-app", resources=resources)
+
+    await obs._process_application(app, suppress_callbacks=True)
+
+    obs.blackboard.redis.sadd.assert_any_call("darwin:argocd_apps", "openshift-gitops/config-app")
+
+
+# =========================================================================
+# Test 11: Config-only to workload transition
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_config_only_to_workload_transition():
+    """App that gains workloads is deregistered from darwin:argocd_apps."""
+    obs = _make_observer()
+    resources_none = [{"version": "v1", "kind": "ConfigMap", "namespace": "argocd", "name": "cfg", "status": "Synced"}]
+    app_config = _make_application(name="transitioning-app", resources=resources_none)
+    await obs._process_application(app_config, suppress_callbacks=True)
+
+    app_with_workload = _make_application(name="transitioning-app", resources=[_deployment_resource(name="my-svc")])
+    await obs._process_application(app_with_workload, suppress_callbacks=True)
+
+    obs.blackboard.redis.srem.assert_any_call("darwin:argocd_apps", "openshift-gitops/transitioning-app")
+    obs.blackboard.redis.delete.assert_any_call("darwin:argocd_app:openshift-gitops/transitioning-app")
+
+
+# =========================================================================
+# Test 12: Config-only app last_seen refreshed on unchanged tick (precision #10)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_config_only_app_last_seen_refreshed_on_unchanged_tick():
+    """Two _process_application() calls with identical zero-workload payload both write last_seen."""
+    obs = _make_observer()
+    resources_none = [{"version": "v1", "kind": "ConfigMap", "namespace": "ns", "name": "c", "status": "Synced"}]
+    app = _make_application(name="stable-config-app", resources=resources_none)
+
+    await obs._process_application(app, suppress_callbacks=True)
+    first_hset_count = obs.blackboard.redis.hset.call_count
+
+    await obs._process_application(app, suppress_callbacks=True)
+    second_hset_count = obs.blackboard.redis.hset.call_count
+
+    assert second_hset_count > first_hset_count

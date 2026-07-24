@@ -3,6 +3,7 @@
 // 1. [Constraint]: Pure presentational -- no external icon libs, inline SVG only.
 // 2. [Pattern]: Unknown sources get a generic circle-dot fallback.
 // 3. [Gotcha]: Each SVG must include aria-hidden + wrapper title for tooltip a11y.
+// 4. [Pattern]: ArgoCD icon resolved via evidence.argocd_app (NOT via SUBJECT_ICON_MAP system entry — JARVIS collision).
 
 interface SourceIconProps {
   source: string;
@@ -100,6 +101,17 @@ function KargoIcon({ size }: { size: number }) {
   );
 }
 
+function ArgoCDIcon({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="7" stroke="#EF7B4D" strokeWidth="1.2" />
+      <path d="M5 8.5C5 6 6.5 4 8 4C9.5 4 11 6 11 8.5" stroke="#EF7B4D" strokeWidth="1.3" strokeLinecap="round" fill="none" />
+      <path d="M6.5 9L5 11M9.5 9L11 11" stroke="#EF7B4D" strokeWidth="1.1" strokeLinecap="round" />
+      <circle cx="8" cy="8.5" r="1.5" fill="#EF7B4D" />
+    </svg>
+  );
+}
+
 function FallbackIcon({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -117,6 +129,7 @@ const ICON_MAP: Record<string, React.FC<{ size: number }>> = {
   chat: ChatIcon,
   aligner: AlignerIcon,
   timekeeper: TimeKeeperIcon,
+  argocd: ArgoCDIcon,
 };
 
 const SUBJECT_ICON_MAP: Record<string, React.FC<{ size: number }>> = {
@@ -128,6 +141,10 @@ export default function SourceIcon({ source, subjectType, evidence, size = 16 }:
   let resolvedSource = source.toLowerCase();
   if (resolvedSource === 'headhunter' && evidence?.github_context) {
     resolvedSource = 'github';
+  }
+  // Evidence-based ArgoCD icon: aligner events with argocd_app context
+  if (resolvedSource === 'aligner' && evidence?.argocd_app) {
+    resolvedSource = 'argocd';
   }
   const Icon = (subjectType && SUBJECT_ICON_MAP[subjectType]) || ICON_MAP[resolvedSource] || FallbackIcon;
 

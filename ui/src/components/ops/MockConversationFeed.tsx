@@ -25,7 +25,7 @@ export default function MockConversationFeed() {
             <span style={{ fontSize: 12, color: '#64748b', fontFamily: 'monospace' }}>{evt.id}</span>
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <SourceIcon source={evt.source} size={14} />
+            <SourceIcon source={evt.source} subjectType={evt.subject_type} size={14} />
             <span style={{ fontSize: 12, color: '#64748b' }}>{evt.source} | {evt.conversation.length} turns</span>
           </div>
         </div>

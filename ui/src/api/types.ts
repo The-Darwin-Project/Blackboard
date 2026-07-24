@@ -123,6 +123,7 @@ export interface GraphNode {
     replicas_ready?: number;
     replicas_desired?: number;
     escalation_flag?: string;
+    escalation_scope?: string;
     icon?: string;
   };
 }
@@ -149,10 +150,20 @@ export interface TicketNode {
   resolved_service: string | null;
 }
 
+export interface AppNode {
+  name: string;
+  health: string;
+  sync_status: string;
+  namespace: string;
+  argocd_app: string;
+  last_seen?: number | null;
+}
+
 export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
   tickets: TicketNode[];
+  apps?: AppNode[];
 }
 
 // =============================================================================
@@ -183,6 +194,7 @@ export interface EventEvidence {
   severity: 'info' | 'warning' | 'critical';
   metrics?: EventMetrics;
   kargo_context?: Record<string, string>;
+  argocd_app?: string | null;
 }
 
 /** List-level event summary returned by /queue/active and /queue/closed/list. */
