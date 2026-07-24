@@ -56,6 +56,7 @@ jobs:
           CLAUDE_CODE_USE_VERTEX: "1"
           GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
           GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'us-central1' }}
+          CLOUD_ML_REGION: ${{ vars.CLOUD_ML_REGION || 'global' }}
           GOOGLE_APPLICATION_CREDENTIALS: "/tmp/vertex-sa.json"
           CI_MERGE_REQUEST_TARGET_BRANCH_NAME: ${{ github.base_ref }}
           # CI_MERGE_REQUEST_SOURCE_BRANCH_NAME intentionally omitted —
