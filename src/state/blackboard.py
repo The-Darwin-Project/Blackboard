@@ -481,7 +481,7 @@ return 0
             nodes.append(GraphNode(
                 id=service_name,
                 type=node_type,
-                label=service_name,
+                label=service_name.split("/")[-1] if "/" in service_name else service_name,
                 metadata={
                     "version": version,
                     "health": health,

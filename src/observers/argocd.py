@@ -416,8 +416,9 @@ class ArgoCDObserver:
             raw_name = resource.get("name", "")
             if not raw_name:
                 continue
-            service_name = self._name_mapping.get(raw_name, raw_name)
             svc_ns = resource.get("namespace") or app_ns
+            mapped_name = self._name_mapping.get(raw_name, raw_name)
+            service_name = f"{svc_ns}/{mapped_name}"
             r_health = (resource.get("health") or {}).get("status") or "Unknown"
             r_sync = resource.get("status") or "Unknown"
             resource_health[service_name] = r_health
