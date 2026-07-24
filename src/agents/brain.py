@@ -1902,14 +1902,8 @@ class Brain:
             flags["_cached_recent_closed"] = recent_closed
             flags["has_recent_closed"] = bool(recent_closed)
 
-            mermaid = ""
-            if getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
-                try:
-                    mermaid = await self.blackboard.generate_mermaid()
-                except Exception:
-                    pass
-            flags["_cached_mermaid"] = mermaid
-            flags["has_graph_edges"] = bool(mermaid and "-->" in mermaid)
+            flags["_cached_mermaid"] = ""
+            flags["has_graph_edges"] = False
 
         flags["has_aligner_turns"] = any(
             t.actor == "aligner" for t in event.conversation
@@ -2423,14 +2417,6 @@ class Brain:
             svc = await self.blackboard.get_service(event.service)
 
         mermaid = ""
-        if event.source != "headhunter":
-            if context_cache and "_cached_mermaid" in context_cache:
-                mermaid = context_cache["_cached_mermaid"]
-            else:
-                try:
-                    mermaid = await self.blackboard.generate_mermaid()
-                except Exception as e:
-                    logger.warning(f"Failed to generate mermaid for Brain prompt: {e}")
 
         if context_cache and "_cached_active_ids" in context_cache:
             active_event_ids = context_cache["_cached_active_ids"]
@@ -4225,11 +4211,6 @@ class Brain:
 
         service_meta = await self.blackboard.get_service(event.service)
         mermaid = ""
-        if event.source not in ("headhunter", "jarvis") and getattr(event, "subject_type", "service") not in ("kargo_stage", "system"):
-            try:
-                mermaid = await self.blackboard.generate_mermaid()
-            except Exception as e:
-                logger.warning(f"Failed to generate mermaid for event MD: {e}")
 
         base_path = VOLUME_PATHS.get(agent_name)
         if not base_path:
