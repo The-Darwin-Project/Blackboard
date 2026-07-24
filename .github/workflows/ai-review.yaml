@@ -64,7 +64,7 @@ jobs:
           CI_MERGE_REQUEST_IID: ${{ github.event.pull_request.number }}
           CI_PROJECT_DIR: ${{ github.workspace }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL || 'claude-sonnet-4-6' }}
+          AI_REVIEW_MODEL: "claude-sonnet-5"
           AI_REVIEW_EFFORT: ${{ vars.AI_REVIEW_EFFORT || 'medium' }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '15' }}
           AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '3.50' }}
