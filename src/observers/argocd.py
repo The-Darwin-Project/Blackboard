@@ -44,6 +44,8 @@ ARGOCD_GROUP = "argoproj.io"
 ARGOCD_VERSION = "v1alpha1"
 ARGOCD_PLURAL = "applications"
 
+_WORKLOAD_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job"})
+
 
 def _load_name_mapping() -> dict[str, str]:
     """Parse ARGOCD_NAME_MAPPING (JSON string) into a raw-resource-name -> service-name dict.
@@ -316,10 +318,10 @@ class ArgoCDObserver:
         version = self._first_image_tag(images)
 
         resources = status.get("resources") or []
-        deployments = [r for r in resources if r.get("kind") == "Deployment"]
+        workloads = [r for r in resources if r.get("kind") in _WORKLOAD_KINDS]
         fingerprint = frozenset(
             (r.get("name", ""), (r.get("health") or {}).get("status", ""), r.get("status", ""))
-            for r in deployments
+            for r in workloads
         )
 
         prev = self._application_states.get(app_key, {})
@@ -332,7 +334,7 @@ class ArgoCDObserver:
 
         if is_new_app or fingerprint != prev_fingerprint:
             resource_health = await self._extract_and_update(
-                app_key, app_ns, deployments, prev_resource_health,
+                app_key, app_ns, workloads, prev_resource_health,
                 last_operations, suppress_callbacks,
                 version, gitops_repo_url, gitops_config_path,
             )
