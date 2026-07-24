@@ -7,6 +7,7 @@ They run independently of the request/response cycle.
 """
 from .kubernetes import KubernetesObserver
 from .kargo import KargoObserver
+from .argocd import ArgoCDObserver
 from .flow_collector import FlowCollector
 
-__all__ = ["KubernetesObserver", "KargoObserver", "FlowCollector"]
+__all__ = ["KubernetesObserver", "KargoObserver", "ArgoCDObserver", "FlowCollector"]
