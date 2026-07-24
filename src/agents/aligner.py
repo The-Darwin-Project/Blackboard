@@ -1,27 +1,30 @@
 # BlackBoard/src/agents/aligner.py
 # @ai-rules:
-# 1. [Pattern]: Analysis interval is 120s. Hard failures (CrashLoop, OOM, ImagePull) bypass buffer entirely.
+# 1. [Pattern]: Deterministic event-driven state transitions -- NO LLM in the health/sync loop.
+#    handle_health_change/handle_sync_drift decide escalation via fixed rules, not Flash reasoning.
 # 2. [Pattern]: Last-write-wins: updates pending confirm evidence via update_turn_evidence() instead of skipping when previous confirm still SENT/DELIVERED.
 # 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
 # 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (via LLM_MAX_TOKENS_ALIGNER or per-call override).
-# 6. [Pattern]: Aligner uses GeminiAdapter (model from LLM_MODEL_ALIGNER, thinking from LLM_THINKING_ALIGNER). Provider hardcoded to "gemini".
+# 6. [Pattern]: Aligner uses GeminiAdapter (model from LLM_MODEL_ALIGNER) ONLY for configure_filter() NLP
+#    parsing. Flash is no longer in the health/sync escalation path (see rule 1).
 """
 Agent 1: The Aligner (The Listener)
 
-Role: Truth Maintenance & Noise Filtering
-Nature: Hybrid Daemon (Python + Gemini LLM via google-genai for configuration)
+Role: Truth Maintenance & Deterministic Health/Sync Escalation
+Nature: Hybrid Daemon (Python + Gemini LLM via google-genai for filter configuration only)
 
-The Aligner processes incoming telemetry and updates the Blackboard layers.
-It can be configured via natural language (e.g., "Ignore errors for 1h").
+The Aligner reacts to ArgoCDObserver health/sync state transitions and creates
+events for the Brain -- deterministically, not via LLM judgment. It can still be
+configured via natural language (e.g., "Ignore errors for 1h") for noise filtering.
 
-CLOSED-LOOP: The Aligner detects anomalies and creates events for the
-Brain to process, completing the observation → triage loop.
+CLOSED-LOOP: The Aligner detects state transitions and creates events for the
+Brain to process, completing the observation -> triage loop.
 
-AIR GAP: This module may import google-genai (for Aligner LLM) but NOT kubernetes or git.
+AIR GAP: This module may import google-genai (for configure_filter) but NOT kubernetes or git.
 """
-# NOTE: Aligner uses GeminiAdapter via .llm subpackage (model from LLM_MODEL_ALIGNER).
-# Independent of Brain's Pro model. Always uses "gemini" provider.
+# NOTE: Aligner uses GeminiAdapter via .llm subpackage (model from LLM_MODEL_ALIGNER),
+# used exclusively by configure_filter(). Independent of Brain's Pro model.
 from __future__ import annotations
 
 import logging
@@ -33,82 +36,13 @@ from typing import TYPE_CHECKING, Optional
 # import kubernetes  # FORBIDDEN
 # import git  # FORBIDDEN
 
-from ..models import EventType
-
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
 
-# Anomaly thresholds (configurable via env) -- used by Flash LLM prompt context
-CPU_THRESHOLD = float(os.getenv("ALIGNER_CPU_THRESHOLD", "80.0"))
-MEMORY_THRESHOLD = float(os.getenv("ALIGNER_MEMORY_THRESHOLD", "85.0"))
-ERROR_RATE_THRESHOLD = float(os.getenv("ALIGNER_ERROR_RATE_THRESHOLD", "5.0"))
-
-# ---------------------------------------------------------------------------
-# Aligner System Prompt -- guides Flash's reasoning and tool usage
-# ---------------------------------------------------------------------------
-ALIGNER_SYSTEM_PROMPT = """You are the Aligner -- the eyes and ears of the Darwin autonomous operations system.
-
-Your job is to OBSERVE service metrics and REPORT anomalies to the Brain.
-You do NOT fix problems. You detect them and describe what you see.
-
-## Your Personality
-- Precise and evidence-based
-- First person: "I detected...", "I observed...", "I noticed..."
-- Always include the numbers: actual values, thresholds, trend direction
-- Be honest about uncertainty: "The CPU dropped briefly but may spike again"
-
-## Thresholds (for reference, not rigid rules)
-- CPU warning: {cpu_threshold}%
-- Memory warning: {memory_threshold}%
-- Error rate critical: {error_rate_threshold}%
-- Over-provisioned: multiple replicas with CPU < 10% and MEM < 20%
-
-## Cynefin Sense-Making Framework
-When creating events, classify the situation into a domain. This tells the Brain HOW to respond:
-
-| Domain      | Meaning                          | You see...                                                    | Response pattern              |
-|-------------|----------------------------------|---------------------------------------------------------------|-------------------------------|
-| complicated | Known unknowns, needs analysis   | Intermittent errors, gradual degradation, multiple symptoms    | sense-analyze-respond         |
-| complex     | Unknown unknowns, novel          | Contradictory data, never-seen-before pattern, unclear cause   | probe-sense-respond           |
-| chaotic     | Sustained saturation or crisis   | CPU/memory >= 90% sustained, pods crashing, service degraded  | act-sense-respond             |
-
-Domain classification:
-- "chaotic": Sustained metric saturation (CPU >= 90% or memory >= 90% across the window). Act immediately.
-- "complicated": Elevated metrics that need expert analysis (intermittent spikes, gradual degradation).
-- "complex": Unknown cause, contradictory signals, needs investigation.
-
-## When to call create_event
-- Sustained metrics above threshold across multiple observations (not a single spike)
-- A pattern that requires investigation or action
-- Set severity: warning (degraded but functional) or critical (service impacted)
-
-## When to call update_active_event
-- New metric data relevant to an event the Brain is already handling
-- Metrics getting worse or changing character (e.g. CPU resolved but error rate climbing)
-
-## When to call report_recovery
-- Metrics have dropped BELOW thresholds and stabilized
-- ONLY when the LATEST readings are clearly normal, not just trending down
-- A drop from 100% to 95% is NOT recovery -- still above the 80% threshold
-
-## When to do nothing (return text only)
-- Metrics are normal, nothing noteworthy
-- Transient blip that already normalized within the observation window
-- The ops journal shows this exact issue was JUST resolved (within the last 5 minutes) -- it is a residual alert, not a new incident
-
-## Ops Journal Context
-Your prompt may include recent ops journal entries for the service. Use this temporal context:
-- If the journal shows "closed in N turns" for the same anomaly type within the last few minutes, this is likely a residual alert from the same incident. Do NOT create a new event.
-- If the journal shows repeated closures of the same pattern (3+ times), consider escalating with a different reason that highlights the recurrence.
-- The journal gives you memory across analysis cycles -- use it to avoid alert fatigue.
-""".format(
-    cpu_threshold=CPU_THRESHOLD,
-    memory_threshold=MEMORY_THRESHOLD,
-    error_rate_threshold=ERROR_RATE_THRESHOLD,
-)
-
+# Sync drift dwell-time debounce -- Application must stay OutOfSync this long before escalating
+SYNC_DRIFT_DWELL_SECONDS = 60
 
 
 class FilterRule:
@@ -143,15 +77,14 @@ class FilterRule:
 
 class Aligner:
     """
-    The Aligner agent - observes K8s metrics and maintains truth.
+    The Aligner agent - reacts to ArgoCD health/sync transitions and maintains truth.
     
     Responsibilities:
-    - Buffer K8s Observer metrics (120s sliding window)
     - Apply filter rules for noise reduction
-    - LLM-based anomaly analysis via Gemini Flash (every 120s)
-    - Detect anomalies and create events for Brain (closed-loop)
+    - Deterministic escalation on ArgoCD health/sync state transitions (no LLM)
+    - Detect state transitions and create events for Brain (closed-loop)
     - Provide check_state() for Brain inline verification
-    - Configurable via natural language (Gemini Flash via LLM adapter)
+    - Configurable via natural language (Gemini Flash via LLM adapter, filter config only)
     """
     
     def __init__(self, blackboard: "BlackboardState"):
@@ -159,20 +92,16 @@ class Aligner:
         self.filter_rules: list[FilterRule] = []
         self._adapter = None
         
-        # LLM config -- Aligner always uses Gemini (model from LLM_MODEL_ALIGNER)
+        # LLM config -- Aligner uses Gemini (model from LLM_MODEL_ALIGNER) for configure_filter() only
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE_ALIGNER", "0.3"))
         
         # Closed-loop state tracking
         self._known_services: set[str] = set()
         self._service_versions: dict[str, str] = {}  # service -> last known version
-        # Unified metrics signal buffer for LLM-based anomaly analysis
-        # Buffer is RETAINED across analysis windows (120s trim handles old entries).
-        # This gives Flash continuity: each analysis sees up to 120s of data,
-        # so sustained patterns aren't misclassified as transient.
-        self._metrics_buffer: dict[str, list[dict]] = {}  # service -> [{timestamp, cpu, memory, error_rate, replicas}]
-        self._metrics_analysis_pending: dict[str, bool] = {}  # service -> analysis scheduled
-        self._last_analysis_time: dict[str, float] = {}  # service -> last analysis trigger time
+
+        # Sync drift dwell-time tracking -- argocd_app -> first-seen-OutOfSync timestamp
+        self._sync_drift_first_seen: dict[str, float] = {}
         
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
@@ -323,275 +252,78 @@ class Aligner:
         
         return False
     
-    def _buffer_metric(self, service: str, now: float, cpu: float, memory: float,
-                       error_rate: float, replicas: str) -> None:
+    async def handle_health_change(
+        self, service: str, old_health: str, new_health: str, resources_summary: dict,
+    ) -> None:
+        """Deterministic escalation on ArgoCD health transitions -- no LLM in the loop.
+
+        Called by ArgoCDObserver whenever a Deployment's health.status changes.
+        Degraded or Missing always creates an event: these states directly indicate
+        replica/pod failure, unlike Progressing (normal deploy transient) or Healthy.
+        Recovering to Healthy from a failed state notifies active events and clears
+        any pending escalation flag -- the deterministic analog of the old report_recovery path.
         """
-        Add a metric observation to the buffer, merging with existing entries
-        in the same 5s time bucket (max wins).
-        
-        K8s observer (container-level CPU/memory) feeds this buffer.
-        Merging into time buckets with max() ensures the highest reading
-        wins when multiple observations arrive in the same 5s window.
-        """
-        if service not in self._metrics_buffer:
-            self._metrics_buffer[service] = []
-
-        # Bucket key: round timestamp to nearest 5s
-        bucket_ts = round(now / 5) * 5
-        buffer = self._metrics_buffer[service]
-
-        # Check if a bucket already exists for this time window
-        for entry in buffer:
-            if abs(entry["timestamp"] - bucket_ts) < 3:  # Within same bucket
-                # Merge: max of each metric (highest reading wins)
-                entry["cpu"] = max(entry["cpu"], cpu)
-                entry["memory"] = max(entry["memory"], memory)
-                entry["error_rate"] = max(entry["error_rate"], error_rate)
-                if replicas != "unknown":
-                    entry["replicas"] = replicas
-                return
-
-        # New bucket
-        buffer.append({
-            "timestamp": bucket_ts,
-            "cpu": cpu,
-            "memory": memory,
-            "error_rate": error_rate,
-            "replicas": replicas,
-        })
-
-    async def _check_anomalies(self, payload) -> None:
-        """
-        Buffer metrics observations and use Flash to analyze patterns.
-        
-        Instead of firing on every threshold breach, collects data continuously
-        then asks Flash every 120s: is this a sustained issue, a transient spike,
-        or noise? Buffer is retained across analysis windows so Flash sees up to
-        120s of history for pattern continuity.
-        """
-        service = payload.service
-        now = time.time()
-
-        # Get replica info for context
-        svc = await self.blackboard.get_service(service)
-        replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
-
-        # Buffer the observation (merged with K8s data in same time bucket)
-        self._buffer_metric(service, now, payload.metrics.cpu, payload.metrics.memory,
-                            payload.metrics.error_rate, replicas)
-
-        # Trim buffer to last 120s max (sliding window, not reset)
-        cutoff = now - 120
-        self._metrics_buffer[service] = [
-            m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
-        ]
-
-        # Trigger analysis every 120s
-        if service not in self._last_analysis_time:
-            self._last_analysis_time[service] = now
-        time_since_analysis = now - self._last_analysis_time[service]
-        if time_since_analysis >= 120 and not self._metrics_analysis_pending.get(service):
-            self._metrics_analysis_pending[service] = True
-            await self._analyze_metrics_signals(service)
-    
-    async def _analyze_metrics_signals(self, service: str) -> None:
-        """
-        Use Flash to analyze buffered metrics and determine what's happening.
-        
-        Replaces hardcoded threshold checks with LLM reasoning over a 120s window.
-        Flash interprets patterns: sustained anomaly, transient spike, recovery, 
-        over-provisioning, or normal operation.
-        
-        Pre-filter: skip Flash entirely when all metrics are below thresholds
-        AND no active event exists for the service. Saves ~7 LLM calls/minute
-        during normal operation across 15 healthy services.
-        """
-        buffer = self._metrics_buffer.get(service, [])
-        if not buffer:
-            self._metrics_analysis_pending[service] = False
+        if new_health == "Healthy" and old_health in ("Degraded", "Missing"):
+            msg = f"ArgoCD health recovered: {old_health} -> {new_health} for {service}"
+            try:
+                await self._notify_active_events(service, msg)
+            finally:
+                try:
+                    await self.blackboard.clear_escalation_flag(service)
+                except Exception as ce:
+                    logger.warning(f"Failed to clear escalation flag on recovery for {service}: {ce}")
             return
 
-        # Pre-filter: skip Flash if all metrics are healthy
-        max_cpu = max(m["cpu"] for m in buffer)
-        max_mem = max(m["memory"] for m in buffer)
-        max_err = max(m["error_rate"] for m in buffer)
-        has_active = await self._has_active_event_for(service)
-
-        if (max_cpu < CPU_THRESHOLD * 0.7
-            and max_mem < MEMORY_THRESHOLD * 0.7
-            and max_err < ERROR_RATE_THRESHOLD * 0.5
-            and not has_active):
-            logger.info(f"Aligner pre-filter: {service} normal (CPU={max_cpu:.1f}% MEM={max_mem:.1f}% ERR={max_err:.2f}%), skipping Flash")
-            self._last_analysis_time[service] = time.time()
-            self._metrics_analysis_pending[service] = False
+        if new_health not in ("Degraded", "Missing"):
+            logger.debug(f"ArgoCD health change for {service}: {old_health} -> {new_health} (no escalation)")
             return
 
-        logger.info(f"Aligner analysis triggered for {service}: max_cpu={max_cpu:.1f}% max_mem={max_mem:.1f}% max_err={max_err:.2f}% buffer_size={len(buffer)} has_active={has_active}")
-
-        # Format observations for Flash
-        observations = "\n".join(
-            f"  {time.strftime('%H:%M:%S', time.localtime(m['timestamp']))}: "
-            f"CPU={m['cpu']:.1f}% MEM={m['memory']:.1f}% ERR={m['error_rate']:.2f}% "
-            f"Replicas={m['replicas']}"
-            for m in buffer
+        argocd_app = resources_summary.get("argocd_app", "")
+        namespace = resources_summary.get("namespace", "")
+        severity = "critical" if new_health == "Degraded" else "warning"
+        display_text = (
+            f"ArgoCD health: {old_health} -> {new_health} "
+            f"(service={service}, namespace={namespace}, app={argocd_app})"
+        )
+        await self._trigger_architect(
+            service, f"argocd_health_{new_health.lower()}", display_text,
+            domain="complicated", severity_level=severity,
         )
 
-        # Compute simple stats for context
-        avg_cpu = sum(m["cpu"] for m in buffer) / len(buffer)
-        avg_mem = sum(m["memory"] for m in buffer) / len(buffer)
-        avg_err = sum(m["error_rate"] for m in buffer) / len(buffer)
-        max_cpu = max(m["cpu"] for m in buffer)
-        max_err = max(m["error_rate"] for m in buffer)
-        latest = buffer[-1]
+    async def handle_sync_drift(
+        self, argocd_app: str, old_sync: Optional[str], new_sync: str,
+    ) -> None:
+        """Deterministic escalation on sustained ArgoCD sync drift (dwell-time debounced).
 
-        # has_active already computed in pre-filter above -- reuse to save Redis roundtrip
+        Called by ArgoCDObserver once per Application per watch tick -- already gated
+        on spec.syncPolicy.automated existing (manual-sync apps never reach here).
+        Escalates only after the Application has stayed OutOfSync for
+        SYNC_DRIFT_DWELL_SECONDS -- avoids alerting on transient drift during a normal
+        deploy cycle. Clears the dwell timer as soon as the Application reports Synced.
+        """
+        now = time.time()
+        if new_sync == "Synced":
+            self._sync_drift_first_seen.pop(argocd_app, None)
+            return
 
-        # Temporal context: recent ops journal entries for this service
-        # Prevents re-escalating events that were just closed (residual alerts)
-        journal_context = ""
-        try:
-            journal_entries = await self.blackboard.get_journal(service)
-            if journal_entries:
-                # Last 5 entries, newest last
-                recent = journal_entries[-5:]
-                journal_context = (
-                    f"\nRecent ops journal for {service}:\n"
-                    + "\n".join(f"  {entry}" for entry in recent)
-                    + "\n"
-                )
-        except Exception:
-            pass  # Journal unavailable is not fatal
+        first_seen = self._sync_drift_first_seen.get(argocd_app)
+        if first_seen is None:
+            self._sync_drift_first_seen[argocd_app] = now
+            return
 
-        # Escalation flag context for Flash awareness
-        escalation_context = ""
-        try:
-            escalation_flag = await self.blackboard.get_escalation_flag(service)
-            if escalation_flag:
-                escalation_context = (
-                    f"\nEscalation pending for {service}: {escalation_flag}\n"
-                    f"Do not create new events while escalation is pending.\n"
-                )
-        except Exception as e:
-            logger.debug(f"Escalation flag read failed for {service} (non-fatal): {e}")
+        if now - first_seen < SYNC_DRIFT_DWELL_SECONDS:
+            return
 
-        try:
-            adapter = await self._get_adapter()
-            if adapter:
-                from .llm import ALIGNER_TOOL_SCHEMAS
+        display_text = (
+            f"ArgoCD sync: {old_sync or 'unknown'} -> {new_sync} for {argocd_app} "
+            f"(out of sync {SYNC_DRIFT_DWELL_SECONDS}s+, auto-sync enabled)"
+        )
+        await self._trigger_architect(
+            argocd_app, "argocd_sync_drift", display_text,
+            domain="clear", severity_level="warning",
+            subject_type="system",
+        )
 
-                # Build context prompt -- Flash reasons freely about the data
-                prompt = (
-                    f"Service '{service}' metrics over the last 30+ seconds:\n"
-                    f"{observations}\n\n"
-                    f"Stats: avg_cpu={avg_cpu:.1f}% max_cpu={max_cpu:.1f}% avg_mem={avg_mem:.1f}% "
-                    f"avg_err={avg_err:.2f}% max_err={max_err:.2f}% replicas={latest['replicas']}\n"
-                    f"Latest reading: CPU={latest['cpu']:.1f}% MEM={latest['memory']:.1f}% ERR={latest['error_rate']:.2f}%\n"
-                    f"Active event exists for this service: {'yes' if has_active else 'no'}\n"
-                    f"{journal_context}{escalation_context}\n"
-                    f"Analyze this data. If the ops journal shows this issue was JUST resolved (within the last few minutes), "
-                    f"do NOT create a new event -- it is likely a residual alert. Use your tools to report what you observe, "
-                    f"or return text only if everything is normal or recently resolved."
-                )
-
-                response = await adapter.generate(
-                    system_prompt=ALIGNER_SYSTEM_PROMPT,
-                    contents=prompt,
-                    tools=ALIGNER_TOOL_SCHEMAS,
-                    temperature=self.temperature,
-                    max_output_tokens=int(os.getenv("LLM_MAX_TOKENS_ALIGNER", "4096")),
-                    thinking_level=os.getenv("LLM_THINKING_ALIGNER", "low"),
-                )
-                from .llm import record_token_usage
-                record_token_usage("aligner", response.usage)
-
-                # Handle function calls from Flash
-                if response.function_call:
-                    func_name = response.function_call.name
-                    args = response.function_call.args
-                    observation = args.get("observation", "")
-
-                    logger.info(f"Flash {func_name} for {service}: {observation[:150]}")
-
-                    if func_name == "create_event":
-                        severity = args.get("severity", "warning")
-                        domain = args.get("domain", "complicated")
-                        execution_mode = args.get("execution_mode", "")
-                        metrics = args.get("metrics", {})
-
-                        # Record to Blackboard timeline -- Flash's full structured analysis
-                        await self.blackboard.record_event(
-                            EventType.ALIGNER_OBSERVATION,
-                            {
-                                "service": service,
-                                "severity": severity,
-                                "domain": domain,
-                                "execution_mode": execution_mode,
-                                "metrics": metrics,
-                            },
-                            narrative=observation,
-                        )
-                        # Notify active events if one exists (dual path for ongoing investigations)
-                        if has_active:
-                            await self._notify_active_events(service, observation)
-                        await self._trigger_architect(
-                            service, f"{severity}_{domain}",
-                            domain=domain, severity_level=severity,
-                        )
-
-                    elif func_name == "update_active_event":
-                        await self._notify_active_events(service, observation)
-
-                    elif func_name == "report_recovery":
-                        # Hard guard: verify metrics are ACTUALLY below thresholds
-                        # Flash may still call report_recovery when values are borderline
-                        still_hot = (
-                            latest["cpu"] >= CPU_THRESHOLD
-                            or latest["memory"] >= MEMORY_THRESHOLD
-                            or latest["error_rate"] >= ERROR_RATE_THRESHOLD
-                        )
-                        if still_hot:
-                            logger.warning(
-                                f"Flash called report_recovery but metrics still above threshold: "
-                                f"CPU={latest['cpu']:.1f}%, MEM={latest['memory']:.1f}%, "
-                                f"ERR={latest['error_rate']:.1f}%. Ignoring recovery signal."
-                            )
-                        else:
-                            await self.blackboard.record_event(
-                                EventType.ANOMALY_RESOLVED,
-                                {"service": service},
-                                narrative=observation,
-                            )
-                            try:
-                                await self._notify_active_events(service, observation)
-                            finally:
-                                try:
-                                    await self.blackboard.clear_escalation_flag(service)
-                                except Exception as ce:
-                                    logger.warning(f"Failed to clear escalation flag on recovery for {service}: {ce}")
-
-                elif response.text:
-                    # Flash returned text only (no function call) -- normal state, log and skip
-                    logger.debug(f"Flash observation for {service}: {response.text.strip()}")
-
-            else:
-                # Flash not available -- fallback to simple threshold check
-                if max_cpu >= CPU_THRESHOLD:
-                    logger.warning(f"HIGH CPU (fallback): {service} at {max_cpu:.1f}%")
-                    await self._trigger_architect(service, "high_cpu")
-                elif max_err >= ERROR_RATE_THRESHOLD:
-                    logger.warning(f"HIGH ERROR (fallback): {service} at {max_err:.2f}%")
-                    await self._trigger_architect(service, "high_error_rate")
-
-        except Exception as e:
-            logger.error(f"Metrics analysis failed for {service}: {e}")
-
-        finally:
-            # DON'T clear the buffer -- retain it for continuity across analysis
-            # windows. The 120s trim in check_anomalies_for_service() handles old entries.
-            # This ensures Flash sees a sliding 120s window, not isolated slices.
-            self._last_analysis_time[service] = time.time()
-            self._metrics_analysis_pending[service] = False
-    
     async def _has_active_event_for(self, service: str) -> bool:
         """Check if an active event exists for this service."""
         active_ids = await self.blackboard.get_active_events()
@@ -602,16 +334,19 @@ class Aligner:
         return False
 
     async def _trigger_architect(
-        self, service: str, anomaly_type: str,
+        self, service: str, anomaly_type: str, display_text: str,
         domain: str = "complicated", severity_level: str = "warning",
+        subject_type: str = "service",
     ) -> None:
         """
-        Create an event for the Brain to process -- with two-layer deduplication.
+        Create an event for the Brain to process -- with three-layer deduplication.
         
         Layer 1 (active-event check): skip if an event is already being worked on.
         Layer 2 (time-based cooldown): skip if we recently created an event for
-        this service, even if it was closed fast. Prevents rapid event churn
-        during oscillation cycles (scale up -> over-provisioned -> scale down).
+        this key, even if it was closed fast. Prevents rapid event churn during
+        oscillation cycles (e.g. flapping health/sync states).
+        Layer 3 (escalation suppression): skip while Brain's report_incident flag
+        is pending on the target service.
         """
         # Layer 1: check if an active event already exists for this service
         active_ids = await self.blackboard.get_active_events()
@@ -642,8 +377,9 @@ class Aligner:
             )
             return
 
-        # Layer 3: escalation suppression (flag set by Brain on report_incident)
-        from ..models import EventEvidence, EventMetrics
+        # Layer 3: escalation suppression (flag set by Brain on report_incident).
+        # get_service() returns None for synthetic keys like argocd_app -- the
+        # check is null-safe and simply skips for those (real service names only).
         try:
             svc = await self.blackboard.get_service(service)
         except Exception:
@@ -656,34 +392,23 @@ class Aligner:
             )
             return
 
-        evidence_parts = [f"Service: {service}", f"Anomaly: {anomaly_type}"]
-        if svc:
-            evidence_parts.append(f"CPU: {svc.metrics.cpu:.1f}%")
-            evidence_parts.append(f"Memory: {svc.metrics.memory:.1f}%")
-            evidence_parts.append(f"Error Rate: {svc.metrics.error_rate:.2f}%")
-            if svc.replicas_ready is not None:
-                evidence_parts.append(f"Replicas: {svc.replicas_ready}/{svc.replicas_desired}")
+        from ..models import EventEvidence
         evidence_obj = EventEvidence(
-            display_text=", ".join(evidence_parts),
+            display_text=display_text,
             source_type="aligner",
             triggered_by="system",
             domain=domain,
             domain_confidence="assessed",
             severity=severity_level,
-            metrics=EventMetrics(
-                cpu=svc.metrics.cpu if svc else 0.0,
-                memory=svc.metrics.memory if svc else 0.0,
-                error_rate=svc.metrics.error_rate if svc else 0.0,
-                replicas=(f"{svc.replicas_ready}/{svc.replicas_desired}"
-                          if svc and svc.replicas_ready is not None else "unknown"),
-            ),
+            metrics=None,
         )
-        
+
         await self.blackboard.create_event(
             source="aligner",
             service=service,
             reason=anomaly_type.replace("_", " "),
             evidence=evidence_obj,
+            subject_type=subject_type,
         )
         self._last_event_creation[service] = now
         # Persist to Redis so cooldown survives pod restarts (TTL = cooldown + buffer)
@@ -691,88 +416,7 @@ class Aligner:
             f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
         )
         logger.info(f"Created event for {service} ({anomaly_type})")
-    
-    async def check_anomalies_for_service(
-        self,
-        service: str,
-        cpu: float,
-        memory: float,
-        source: str = "kubernetes",
-        error_rate: float = 0.0,
-    ) -> None:
-        """
-        Feed K8s Observer metrics into the unified buffer for LLM analysis.
-        
-        Called by the KubernetesObserver with metrics from metrics-server.
-        Instead of instant hardcoded threshold checks, feeds the 120s
-        metrics buffer and triggers _analyze_metrics_signals() for
-        LLM-based assessment.
-        
-        Args:
-            service: Service name
-            cpu: CPU usage percentage
-            memory: Memory usage percentage
-            source: Metrics source (for logging)
-            error_rate: Error rate percentage (elevated when K8s warning events detected)
-        """
-        now = time.time()
 
-        if cpu >= 70:
-            logger.info(f"Aligner ENTRY [{service}]: cpu={cpu:.1f}% mem={memory:.1f}% err={error_rate:.1f}%")
-
-        # Get replica info for context
-        svc = await self.blackboard.get_service(service)
-        replicas = f"{svc.replicas_ready}/{svc.replicas_desired}" if svc and svc.replicas_ready is not None else "unknown"
-
-        # Buffer the observation
-        self._buffer_metric(service, now, cpu, memory, error_rate, replicas)
-
-        # Trim buffer to last 120s max
-        cutoff = now - 120
-        self._metrics_buffer[service] = [
-            m for m in self._metrics_buffer[service] if m["timestamp"] > cutoff
-        ]
-
-        # Trigger analysis every 120s
-        if service not in self._last_analysis_time:
-            self._last_analysis_time[service] = now
-        time_since_analysis = now - self._last_analysis_time[service]
-        pending = self._metrics_analysis_pending.get(service, False)
-        if time_since_analysis >= 120 and not pending:
-            self._metrics_analysis_pending[service] = True
-            await self._analyze_metrics_signals(service)
-    
-    async def handle_unhealthy_pod(self, service: str, pod_name: str, reason: str) -> None:
-        """
-        Handle unhealthy pod detected by K8s observer.
-        
-        Called for ImagePullBackOff, CrashLoopBackOff, OOMKilled, etc.
-        Records event and creates an event for Brain triage.
-        """
-        # Map pod state reasons to anomaly types
-        if "OOMKilled" in reason:
-            anomaly_type = "oom_killed"
-        elif "ImagePull" in reason:
-            anomaly_type = "image_pull_error"
-        elif "CrashLoop" in reason:
-            anomaly_type = "crash_loop"
-        else:
-            anomaly_type = "pod_unhealthy"
-        
-        await self.blackboard.record_event(
-            EventType.HIGH_ERROR_RATE_DETECTED,
-            {
-                "service": service,
-                "pod": pod_name,
-                "reason": reason,
-                "anomaly_type": anomaly_type,
-            },
-            narrative=f"Detected unhealthy pod {pod_name} for service {service}: {reason}. Triggering investigation.",
-        )
-        logger.warning(f"Unhealthy pod detected: {pod_name} ({service}): {reason}")
-        
-        await self._trigger_architect(service, anomaly_type)
-    
     async def _notify_active_events(self, service: str, message: str) -> None:
         """Append an aligner.confirm turn to any active events for this service.
 
@@ -820,9 +464,9 @@ class Aligner:
             return {"service": service, "status": "not_found"}
         return {
             "service": service,
-            "cpu": svc.metrics.cpu,
-            "memory": svc.metrics.memory,
-            "error_rate": svc.metrics.error_rate,
+            "health_status": svc.health_status,
+            "sync_status": svc.sync_status,
+            "argocd_app": svc.argocd_app,
             "replicas_ready": svc.replicas_ready,
             "replicas_desired": svc.replicas_desired,
             "version": svc.version,

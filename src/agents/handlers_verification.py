@@ -111,8 +111,9 @@ async def handle_re_trigger_aligner(
         action="confirm",
         evidence=(
             f"Service: {state['service']}, "
-            f"CPU: {state.get('cpu', 0):.1f}%, "
-            f"Memory: {state.get('memory', 0):.1f}%, "
+            f"Health: {state.get('health_status', 'unknown')}, "
+            f"Sync: {state.get('sync_status', 'unknown')}, "
+            f"App: {state.get('argocd_app', '?')}, "
             f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
         ),
     )
@@ -145,8 +146,9 @@ async def handle_wait_for_verification(
             action="confirm",
             evidence=(
                 f"Service: {state['service']}, "
-                f"CPU: {state.get('cpu', 0):.1f}%, "
-                f"Memory: {state.get('memory', 0):.1f}%, "
+                f"Health: {state.get('health_status', 'unknown')}, "
+                f"Sync: {state.get('sync_status', 'unknown')}, "
+                f"App: {state.get('argocd_app', '?')}, "
                 f"Replicas: {state.get('replicas_ready', '?')}/{state.get('replicas_desired', '?')}"
             ),
             waitingFor="wait_for_verification",

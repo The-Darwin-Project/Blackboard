@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from src.agents.brain import Brain
-from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput
+from src.models import ConversationTurn, EventDocument, EventEvidence, EventInput, Service
 
 
 def _make_event(*turns: ConversationTurn) -> EventDocument:
@@ -155,3 +155,36 @@ def test_aligner_service_default_label():
     ev = _make_typed_event(source="aligner", service="darwin-store")
     md = Brain._event_to_markdown(ev)
     assert "**Service:** darwin-store" in md
+
+
+# ---------------------------------------------------------------------------
+# Service metadata rendering (ArgoCD health/sync, not CPU/Memory)
+# ---------------------------------------------------------------------------
+
+def test_service_metadata_renders_health_and_sync():
+    """service_meta block renders Health/Sync/App, not the old CPU/Memory/Error Rate."""
+    ev = _make_typed_event(source="aligner", service="darwin-store")
+    svc = Service(
+        name="darwin-store",
+        version="1.2.3",
+        health_status="Degraded",
+        sync_status="OutOfSync",
+        argocd_app="openshift-gitops/darwin-store",
+    )
+    md = Brain._event_to_markdown(ev, service_meta=svc)
+    assert "**Health:** Degraded" in md
+    assert "**Sync:** OutOfSync" in md
+    assert "**App:** openshift-gitops/darwin-store" in md
+    assert "**CPU:**" not in md
+    assert "**Memory:**" not in md
+    assert "**Error Rate:**" not in md
+
+
+def test_service_metadata_defaults_to_unknown():
+    """Missing health/sync fields (old Redis data) render as 'unknown', not a crash."""
+    ev = _make_typed_event(source="aligner", service="darwin-store")
+    svc = Service(name="darwin-store", version="1.0.0")
+    md = Brain._event_to_markdown(ev, service_meta=svc)
+    assert "**Health:** unknown" in md
+    assert "**Sync:** unknown" in md
+    assert "**App:** ?" in md
