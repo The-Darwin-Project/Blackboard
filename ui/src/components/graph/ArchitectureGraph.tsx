@@ -69,12 +69,12 @@ function computeIdHash(data: GraphResponse, layout: LayoutType): string {
 const GROUP_PADDING = 36;
 const GROUP_HEADER = 34;
 const GROUP_GAP = 40;
-const MAX_ROW_WIDTH = 1400;
+const MAX_ROW_WIDTH = 4000;
 const CELL_W = 264;
 const CELL_H = 150;
 
 function layoutGroupChildren(children: Node[]): { nodes: Node[]; width: number; height: number } {
-  const cols = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(children.length))));
+  const cols = Math.max(1, Math.min(6, Math.ceil(Math.sqrt(children.length))));
   const rows = Math.max(1, Math.ceil(children.length / cols));
   const positioned = children.map((n, i) => ({
     ...n,
