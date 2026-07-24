@@ -311,6 +311,26 @@ spec:
               value: {{ .Values.ephemeralAgents.stallTimeoutSec | quote }}
             - name: EPHEMERAL_INFRA_DEFER_SEC
               value: {{ .Values.ephemeralAgents.infraDeferSec | quote }}
+            - name: EPHEMERAL_MODEL_ARCHITECT
+              value: {{ .Values.ephemeralAgents.roleModels.architect | quote }}
+            - name: EPHEMERAL_MODEL_SYSADMIN
+              value: {{ .Values.ephemeralAgents.roleModels.sysadmin | quote }}
+            - name: EPHEMERAL_MODEL_DEVELOPER
+              value: {{ .Values.ephemeralAgents.roleModels.developer | quote }}
+            - name: EPHEMERAL_MODEL_QE
+              value: {{ .Values.ephemeralAgents.roleModels.qe | quote }}
+            - name: EPHEMERAL_MODEL_SECURITY
+              value: {{ .Values.ephemeralAgents.roleModels.security_analyst | quote }}
+            - name: EPHEMERAL_EFFORT_ARCHITECT
+              value: {{ .Values.ephemeralAgents.roleEffort.architect | quote }}
+            - name: EPHEMERAL_EFFORT_SYSADMIN
+              value: {{ .Values.ephemeralAgents.roleEffort.sysadmin | quote }}
+            - name: EPHEMERAL_EFFORT_DEVELOPER
+              value: {{ .Values.ephemeralAgents.roleEffort.developer | quote }}
+            - name: EPHEMERAL_EFFORT_QE
+              value: {{ .Values.ephemeralAgents.roleEffort.qe | quote }}
+            - name: EPHEMERAL_EFFORT_SECURITY
+              value: {{ .Values.ephemeralAgents.roleEffort.security_analyst | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

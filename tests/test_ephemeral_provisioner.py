@@ -783,3 +783,83 @@ class TestInstallationIdPropagation:
                 await prov.ensure_agent("evt-install002")
 
         assert captured["json"]["installation_id"] == ""
+
+
+class TestModelPropagation:
+    """ensure_agent forwards `model` to the TaskRun POST body -- conditionally.
+
+    An empty string must NOT be sent: it would override the TriggerTemplate's
+    Helm-configured default (see ephemeral-model-routing plan, Step 6).
+    """
+
+    @staticmethod
+    def _fake_client(captured: dict):
+        class _FakeResponse:
+            status_code = 202
+            def raise_for_status(self):
+                pass
+
+        class _FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def post(self, url, json):
+                captured["json"] = json
+                return _FakeResponse()
+
+        return _FakeAsyncClient()
+
+    @pytest.mark.asyncio
+    async def test_model_included_when_non_empty(self):
+        """(a) ensure_agent(event_id, model="claude-opus-4-6[1m]") -> POST body includes model."""
+        prov, registry = _make_provisioner()
+        registry.get_ephemeral = AsyncMock(return_value=None)
+        captured = {}
+
+        with patch("httpx.AsyncClient", return_value=self._fake_client(captured)):
+            with patch.object(prov, "_wait_for_registration", new_callable=AsyncMock) as mock_wait:
+                mock_wait.return_value = MagicMock()
+                await prov.ensure_agent("evt-model001", model="claude-opus-4-6[1m]")
+
+        assert captured["json"]["model"] == "claude-opus-4-6[1m]"
+
+    @pytest.mark.asyncio
+    async def test_model_omitted_when_empty(self):
+        """(b) ensure_agent(event_id) with no model -> "model" key absent from POST body
+        (so the TriggerTemplate's Helm default takes effect instead of an empty override)."""
+        prov, registry = _make_provisioner()
+        registry.get_ephemeral = AsyncMock(return_value=None)
+        captured = {}
+
+        with patch("httpx.AsyncClient", return_value=self._fake_client(captured)):
+            with patch.object(prov, "_wait_for_registration", new_callable=AsyncMock) as mock_wait:
+                mock_wait.return_value = MagicMock()
+                await prov.ensure_agent("evt-model002")
+
+        assert "model" not in captured["json"]
+
+    @pytest.mark.asyncio
+    async def test_retry_path_passes_model(self):
+        """(c) retry after a transient failure still forwards model to the second POST."""
+        prov, registry = _make_provisioner()
+        registry.get_ephemeral = AsyncMock(return_value=None)
+
+        call_count = 0
+        captured_calls = []
+
+        async def flaky_trigger(event_id, installation_id="", model=""):
+            nonlocal call_count
+            call_count += 1
+            captured_calls.append(model)
+            if call_count == 1:
+                raise httpx.HTTPError("transient")
+
+        with patch.object(prov, "_trigger_taskrun", side_effect=flaky_trigger):
+            with patch.object(prov, "_cancel_taskrun", new_callable=AsyncMock):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    with patch.object(prov, "_wait_for_registration", new_callable=AsyncMock) as mock_wait:
+                        mock_wait.return_value = MagicMock()
+                        await prov.ensure_agent("evt-model003", model="claude-sonnet-5")
+
+        assert captured_calls == ["claude-sonnet-5", "claude-sonnet-5"]

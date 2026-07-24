@@ -121,7 +121,7 @@ class ToolContext(Protocol):
     async def run_agent_task(
         self, event_id: str, agent_name: str, agent: object | None,
         task: str, event_md_path: str, routing_turn_num: int,
-        mode: str = "", parallel: bool = False,
+        mode: str = "", parallel: bool = False, effort: str = "",
     ) -> None: ...
 
     async def dispatch_handler(

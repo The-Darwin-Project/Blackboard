@@ -291,7 +291,9 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
     try:
         from ..agents.ephemeral_provisioner import INFRA_SENTINEL
         from ..agents.dispatch import dispatch_to_agent
-        agent = await ctx.provisioner.ensure_agent(sweep_event_id)
+        model = os.environ.get("EPHEMERAL_MODEL_SYSADMIN", "claude-sonnet-5")
+        effort = os.environ.get("EPHEMERAL_EFFORT_SYSADMIN", "medium")
+        agent = await ctx.provisioner.ensure_agent(sweep_event_id, model=model)
         if agent == INFRA_SENTINEL:
             return f"Ephemeral agent unavailable (Tekton infra). Skipping investigation for {service}."
         if not agent:
@@ -299,7 +301,7 @@ async def _handle_dispatch_investigation(args: dict, ctx: NightwatcherContext) -
         result_text, _ = await dispatch_to_agent(
             ctx.registry, ctx.bridge, "sysadmin", sweep_event_id,
             task_prompt, agent_id=agent.agent_id, mode="investigate",
-            on_progress=on_progress,
+            on_progress=on_progress, effort=effort,
         )
     except Exception as e:
         result_text = f"Investigation dispatch failed: {e}"

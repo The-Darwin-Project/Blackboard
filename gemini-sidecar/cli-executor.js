@@ -9,6 +9,9 @@
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
 // 8. [Pattern]: is400SessionError detects Claude thinking-block corruption on --resume. executeCLIStreaming retries once without session (_retryWithoutSession flag prevents loops).
+// 9. [Pattern]: options.model/effort/role override env (AGENT_MODEL/AGENT_EFFORT_LEVEL/AGENT_ROLE) at the per-task level.
+//    Stored on state.getCurrentTask() (model/role) so resolveResult -> requestFindings can read them without threading
+//    extra params through the whole call chain -- mirrors the existing sessionId bridging pattern.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -34,14 +37,17 @@ function buildCLICommand(prompt, options = {}) {
             args.push('--dangerously-skip-permissions');
         }
         args.push('--output-format', 'stream-json', '--verbose');
-        args.push('--model', AGENT_MODEL || 'claude-opus-4-6');
-        if (AGENT_EFFORT_LEVEL) {
-            args.push('--effort', AGENT_EFFORT_LEVEL);
+        const model = options.model || AGENT_MODEL || 'claude-opus-4-6';
+        args.push('--model', model);
+        const effort = options.effort || AGENT_EFFORT_LEVEL;
+        if (effort) {
+            args.push('--effort', effort);
         }
         if (options.sessionId) {
             args.push('--resume', options.sessionId);
         }
-        const ultrathinkPrefix = AGENT_ROLE === 'architect' ? 'ultrathink ' : '';
+        const effectiveRole = options.role || AGENT_ROLE;
+        const ultrathinkPrefix = effectiveRole === 'architect' ? 'ultrathink ' : '';
         args.push('-p', ultrathinkPrefix + prompt);
         return { binary: 'claude', args };
     }
@@ -120,7 +126,10 @@ async function resolveResult(opts) {
     }
 
     console.log(`[${new Date().toISOString()}] No findings, requesting report from agent`);
-    const retryFindings = await requestFindings(workDir, autoApprove);
+    const task = state.getCurrentTask();
+    const model = task?.model || '';
+    const role = task?.role || '';
+    const retryFindings = await requestFindings(workDir, autoApprove, model, role);
     if (retryFindings) {
         return { output: retryFindings, source: 'findings' };
     }
@@ -128,11 +137,11 @@ async function resolveResult(opts) {
     return { output: stdoutFallback(effectiveOutput), source: 'stdout' };
 }
 
-async function requestFindings(workDir, autoApprove) {
+async function requestFindings(workDir, autoApprove, model, role) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
-    const { binary, args } = buildCLICommand(prompt, { autoApprove });
+    const { binary, args } = buildCLICommand(prompt, { autoApprove, model, role });
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {
@@ -211,7 +220,12 @@ function watchResultsDir(workDir) {
 
 async function executeCLI(prompt, options = {}) {
     return new Promise((resolve, reject) => {
-        const { binary, args } = buildCLICommand(prompt, { autoApprove: options.autoApprove });
+        const { binary, args } = buildCLICommand(prompt, {
+            autoApprove: options.autoApprove,
+            model: options.model,
+            effort: options.effort,
+            role: options.role,
+        });
 
         console.log(`[${new Date().toISOString()}] Executing: ${AGENT_CLI} (prompt length: ${prompt.length})`);
 
@@ -296,6 +310,9 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
             sessionId: options.sessionId,
+            model: options.model,
+            effort: options.effort,
+            role: options.role,
         });
 
         console.log(`[${new Date().toISOString()}] Streaming exec: ${AGENT_CLI} (prompt: ${prompt.length} chars)`);
@@ -318,8 +335,10 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
         if (existing) {
             existing.child = child;
             existing.eventId = eventId;
+            existing.model = options.model || '';
+            existing.role = options.role || '';
         } else {
-            state.setCurrentTask({ eventId, child });
+            state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '' });
         }
 
         let stdout = '';

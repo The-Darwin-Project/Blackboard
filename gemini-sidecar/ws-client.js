@@ -5,6 +5,7 @@
 // 3. [Pattern]: Per-task timeout timer resets on progress. SIGTERM/SIGKILL on expiry.
 // 4. [Pattern]: Reconnect backoff: 1s, 2s, 4s, 8s, max 30s. Re-register after reconnect.
 // 5. [Constraint]: state.setCurrentTask includes ws + taskId + mode (fixes pre-existing bug from legacy mode).
+//    Also includes model/effort/role (per-task overrides) -- read from the WS task msg, default '' / AGENT_ROLE.
 // 6. [Pattern]: proactive_message from Brain -> pushInboundMessage. Messages during WS disconnect are lost.
 // 7. [Pattern]: 429 retry loop wraps executeCLIStreaming. Conditions: failed + is429Error + no callback result. resetTimer before/after backoff wait.
 // 8. [Pattern]: _activeWs tracks live WS connection. tryWake() resumes idle agents on teammate messages via handleTask(_activeWs, ...). Wake tasks behave like Brain-dispatched tasks (huddle, results, progress all work). wake_register WS includes same `mode` as synthetic task (Brain handle_wake_task / WAKE_REGISTER_MODES).
@@ -160,6 +161,8 @@ async function handleTask(ws, msg) {
   const autoApprove = msg.autoApprove || false;
   const sessionId = msg.session_id || null;
   const role = msg.role || AGENT_ROLE;
+  const model = msg.model || '';
+  const effort = msg.effort || '';
 
   if (!role) {
     sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'No role specified' });
@@ -242,7 +245,7 @@ async function handleTask(ws, msg) {
   try {
     // Set full task state BEFORE execution so callbacks (sendResults, sendMessage)
     // can access ws + taskId immediately. executeCLIStreaming will overwrite the child field.
-    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null, mode });
+    state.setCurrentTask({ eventId, ws, taskId, cwd: workDir, child: null, mode, model, effort, role });
     resetTimer();
 
     restoreAllSkills();
@@ -292,7 +295,7 @@ async function handleTask(ws, msg) {
 
       try {
         result = await executeCLIStreaming(wsProxy, eventId, prompt, {
-          autoApprove, cwd: workDir, sessionId,
+          autoApprove, cwd: workDir, sessionId, model, effort, role,
         });
       } catch (spawnErr) {
         if (attempt < CLI_429_MAX_RETRIES) {

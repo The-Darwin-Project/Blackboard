@@ -4,6 +4,8 @@
 // 2. [Pattern]: All shared state via state.js. Concurrency guard — rejects task if getCurrentTask() already set.
 // 3. [Pattern]: Credentials (GitHub, GitLab, ArgoCD, Kargo) set up per task before executeCLIStreaming.
 // 4. [Gotcha]: On ws.close, kills orphaned child process (SIGTERM then SIGKILL after 5s) and clears currentTask.
+// 5. [Pattern]: model/effort/role read from the task msg and threaded to executeCLIStreaming. `model` is
+//    typically empty for local sidecars (they use their Deployment-configured AGENT_MODEL env).
 
 const { executeCLIStreaming } = require('./cli-executor');
 const {
@@ -54,6 +56,9 @@ function setupWSServer(wss) {
         const workDir = msg.cwd || DEFAULT_WORK_DIR;
         const autoApprove = msg.autoApprove || false;
         const sessionId = msg.session_id || null;
+        const model = msg.model || '';
+        const effort = msg.effort || '';
+        const role = msg.role || '';
 
         if (!prompt) {
           ws.send(JSON.stringify({ type: 'error', event_id: eventId, message: 'Missing prompt' }));
@@ -101,7 +106,9 @@ function setupWSServer(wss) {
         // Both CLIs use -p (headless) + -o stream-json. Session IDs from the init event
         // enable --resume for follow-ups. No PTY needed -- env vars handle auth in headless.
         try {
-          const result = await executeCLIStreaming(ws, eventId, prompt, { autoApprove, cwd: workDir, sessionId });
+          const result = await executeCLIStreaming(ws, eventId, prompt, {
+            autoApprove, cwd: workDir, sessionId, model, effort, role,
+          });
           wsSend(ws, {
             type: 'result',
             event_id: eventId,
