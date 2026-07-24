@@ -67,6 +67,8 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: GCP_LOCATION
+            - name: CLOUD_ML_REGION
+              value: "{{ .Values.gcp.location }}"
             # LLM configuration (per-component)
             - name: LLM_PROVIDER
               valueFrom:
