@@ -1,46 +1,64 @@
 ---
-description: Darwin pod annotation schema for K8s Observer passive service discovery
+description: ArgoCD Application-based service discovery (replaces K8s Observer annotation scanning)
 alwaysApply: true
 ---
 
-# Darwin Annotation Schema
+# ArgoCD-Based Service Discovery
 
-## Annotation Contract
+## Discovery Contract
 
-The K8s Observer discovers services by scanning pod annotations in configured namespaces. This is the **only** supported discovery mechanism (the `/telemetry` push endpoint returns HTTP 410).
+`ArgoCDObserver` (`src/observers/argocd.py`) is the **only** supported discovery, health,
+and sync mechanism. It watches ArgoCD Application CRs cluster-wide via the K8s Watch API
+(`argoproj.io/v1alpha1/applications`) -- the `/telemetry` push endpoint returns HTTP 410,
+and the old `darwin.io/*` pod-annotation scanning (`KubernetesObserver`) has been removed.
 
-| Annotation | Required | Value | Example |
-|---|---|---|---|
-| `darwin.io/monitored` | Yes | `"true"` | `"true"` |
-| `darwin.io/service-name` | Yes | Unique service identifier | `"kubevirt"`, `"hco"` |
-| `darwin.io/source-repo` | Yes | Source code repository URL | `"source repo URL"` |
-| `darwin.io/gitops-repo` | Yes | GitOps config repository URL | `"GitOps config repo URL"` |
-| `darwin.io/config-path` | Yes | Path to Helm chart or Kustomize dir in gitops repo | `"sync-controller/chart"` |
+## Extraction Model
 
-## Discovery Behavior
+Each ArgoCD Application explodes into N Darwin services -- one per `Deployment` entry in
+`status.resources[]`:
 
-- Observer polls every 5 seconds across all namespaces in `K8S_OBSERVER_NAMESPACE` (comma-separated).
-- Only pods with `darwin.io/monitored: "true"` are registered.
-- Pods are grouped by `darwin.io/service-name` for replica counting.
-- First pod per service wins for metadata (source-repo, gitops-repo, config-path).
-- Covers all workload types (Deployment, StatefulSet, DaemonSet, Job, bare pods).
-- Reconciliation cycle runs every 12 polls (~60s) to remove stale services.
+| Source Field | Darwin Service Field | Notes |
+|---|---|---|
+| `resource.name` | `Service.name` | Direct match; `ARGOCD_NAME_MAPPING` env var reserved for mismatches |
+| `resource.namespace` (or Application namespace) | `Service.namespace` | |
+| `resource.health.status` | `Service.health_status` | Healthy, Progressing, Degraded, Missing, Unknown |
+| `resource.status` | `Service.sync_status` | Synced, OutOfSync, Unknown |
+| `spec.source.repoURL` | `Service.gitops_repo_url` | Application-level -- shared by every exploded service |
+| `spec.source.path` | `Service.gitops_config_path` | Application-level |
+| `status.summary.images[0]` (tag) | `Service.version` | First image tag; coarse-grained by design |
+| `status.operationState` + `status.history[]` | `Service.last_operations` | Current op + last 5 history entries |
 
-## Integration Patterns
+**Accepted limitation (from probe):** replica counts are NOT available in
+`status.resources[]` -- graceful degradation via ArgoCD `health.status=Degraded` (which
+implicitly covers "replicas not ready") instead of a separate replica-count signal.
 
-1. **Direct chart annotations** -- Add `podAnnotations` to `values.yaml` (simple, single instance).
-2. **ApplicationSet Helm params** -- Inject via `podAnnotations.darwin\.io/*` parameters (multi-instance, used by sync-controller).
-3. **Kustomize overlay** -- Patch pod template annotations (external charts without `podAnnotations` support).
+## Health Model
+
+`calculate_health_from_argocd(health_status, sync_status, last_seen)` in `blackboard.py`
+is the sole health calculation:
+
+- `Healthy`/`Progressing` + `Synced` -> `healthy`
+- `Healthy`/`Progressing` + `OutOfSync` -> `warning`
+- `Degraded` -> `critical`
+- `Missing`/`Unknown`, or `last_seen` beyond `ZOMBIE_THRESHOLD` (90s) -> `unknown`
+
+## OutOfSync Alerting Gate
+
+Aligner (`handle_sync_drift`) only escalates OutOfSync when `spec.syncPolicy.automated`
+exists on the Application AND the drift persists beyond a 60s dwell time. Applications
+without `automated` sync are expected to sit OutOfSync (manual workflow) -- never alert.
 
 ## Constants (source of truth)
 
-Defined in `observers/kubernetes.py` lines 35-40:
+Defined in `src/observers/argocd.py`:
 
-- `DARWIN_ANNOTATION_PREFIX = "darwin.io/"`
-- `DARWIN_MONITORED`, `DARWIN_SERVICE_NAME`, `DARWIN_SOURCE_REPO`, `DARWIN_GITOPS_REPO`, `DARWIN_CONFIG_PATH`
+- `ARGOCD_OBSERVER_ENABLED`, `ARGOCD_GROUP`, `ARGOCD_VERSION`, `ARGOCD_PLURAL`
+- `ARGOCD_NAME_MAPPING` (env var, JSON string) -- resource-name -> service-name overrides
 
 ## Consumed By
 
-- `KubernetesObserver._discover_from_pod_annotations()` -- feeds the Blackboard service registry
-- Blackboard topology graph -- builds service dependency map from registered metadata
-- Aligner anomaly detection -- monitors registered services for metric deviations
+- `ArgoCDObserver._extract_and_update()` -- writes `Service.health_status`/`sync_status`/
+  `namespace`/`argocd_app`/`last_operations` (via `update_service_argocd_status()`) and
+  `version`/`gitops_repo_url`/`gitops_config_path` (via `update_service_discovery()`)
+- Blackboard topology graph (`get_graph_data()`) -- namespace-grouped nodes, no dependency edges
+- Aligner (`handle_health_change`, `handle_sync_drift`) -- deterministic escalation, no LLM in the loop

@@ -101,7 +101,7 @@ async def test_gate_blocks_when_flag_set():
     bb = _mock_blackboard()
     bb.get_service.return_value = _svc(flag="evt-old|high cpu")
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu")
+    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_not_called()
 
 
@@ -114,7 +114,7 @@ async def test_gate_allows_when_no_flag():
     bb = _mock_blackboard()
     bb.get_service.return_value = _svc(flag=None)
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu")
+    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_called_once()
 
 
@@ -168,40 +168,23 @@ async def test_brain_skips_flag_when_service_none():
 
 
 # =========================================================================
-# 5. Recovery-clear: metrics below threshold → clear called
+# 5. Recovery-clear: ArgoCD health recovers → notify + clear escalation flag
 # =========================================================================
 
 @pytest.mark.asyncio
 async def test_recovery_clears_flag():
+    """handle_health_change(Degraded -> Healthy) notifies active events and clears the flag."""
     bb = _mock_blackboard()
-    bb.record_event.return_value = None
     bb.get_journal.return_value = []
-    # Active event exists → bypasses pre-filter (metrics healthy = recovery scenario)
+    # Active event exists so the recovery notification has somewhere to land
     active_evt = _make_event(event_id="evt-active", service="svc-a")
     bb.get_active_events.return_value = ["evt-active"]
     bb.get_event.return_value = active_evt
 
     aligner = _make_aligner(bb)
-    aligner._metrics_buffer["svc-a"] = [
-        {"timestamp": time.time(), "cpu": 10.0, "memory": 20.0, "error_rate": 0.1, "replicas": "1/1"},
-    ]
-    aligner._metrics_analysis_pending["svc-a"] = True
 
-    class MockFunctionCall:
-        name = "report_recovery"
-        args = {"observation": "recovered"}
+    await aligner.handle_health_change("svc-a", "Degraded", "Healthy", {"argocd_app": "ns/app"})
 
-    class MockResponse:
-        function_call = MockFunctionCall()
-        text = ""
-        raw_parts = None
-        usage = None
-
-    mock_adapter = AsyncMock()
-    mock_adapter.generate.return_value = MockResponse()
-    aligner._adapter = mock_adapter
-
-    await aligner._analyze_metrics_signals("svc-a")
     bb.clear_escalation_flag.assert_called_once_with("svc-a")
 
 
@@ -307,43 +290,19 @@ async def test_escalation_flag_lifecycle():
 
 
 # =========================================================================
-# 11. Flash prompt injection: flag value → escalation context in prompt
+# 11. Escalation gate: pending flag → handle_health_change skips create_event
 # =========================================================================
 
 @pytest.mark.asyncio
-async def test_flash_prompt_includes_escalation_context():
+async def test_health_change_respects_escalation_flag():
+    """handle_health_change does not create a duplicate event while escalation is pending."""
     bb = _mock_blackboard()
-    bb.get_escalation_flag.return_value = "evt-old|high cpu sustained"
-    bb.get_journal.return_value = []
-
+    bb.get_service.return_value = _svc(flag="evt-old|argocd health degraded")
     aligner = _make_aligner(bb)
-    aligner._metrics_buffer["svc-a"] = [
-        {"timestamp": time.time(), "cpu": 85.0, "memory": 50.0, "error_rate": 0.1, "replicas": "2/2"},
-    ]
-    aligner._metrics_analysis_pending["svc-a"] = True
 
-    captured_prompt = None
+    await aligner.handle_health_change("svc-a", "Healthy", "Degraded", {"argocd_app": "ns/app"})
 
-    class MockResponse:
-        function_call = None
-        text = "normal"
-        raw_parts = None
-        usage = None
-
-    async def capture_generate(**kwargs):
-        nonlocal captured_prompt
-        captured_prompt = kwargs.get("contents", "")
-        return MockResponse()
-
-    mock_adapter = AsyncMock()
-    mock_adapter.generate = capture_generate
-    aligner._adapter = mock_adapter
-
-    await aligner._analyze_metrics_signals("svc-a")
-
-    assert captured_prompt is not None
-    assert "Escalation pending for svc-a" in captured_prompt
-    assert "evt-old|high cpu sustained" in captured_prompt
+    bb.create_event.assert_not_called()
 
 
 # =========================================================================

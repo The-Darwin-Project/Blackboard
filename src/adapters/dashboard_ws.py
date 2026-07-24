@@ -7,6 +7,8 @@
 # 5. [Pattern]: KargoObserver injected post-init via set_kargo_observer(). Null-guarded for KARGO_OBSERVER_ENABLED=false.
 # 6. [Pattern]: Initial kargo_stages_update sent on every new WS connection. create_kargo_event delegates to Brain.
 # 7. [Pattern]: _handle_chat passes user.email as created_by_email for multi-tenant event ownership.
+# 8. [Pattern]: ArgoCDObserver injected post-init via set_argocd_observer(), same shape as Kargo. No UI
+#    consumer sends argocd_health_update yet (v1 dead wire) -- no _send_initial_argocd_state needed.
 """Dashboard WebSocket adapter -- manages UI client connections and broadcast."""
 from __future__ import annotations
 
@@ -39,10 +41,15 @@ class DashboardWSAdapter:
         self._auth_enabled = auth_enabled
         self._clients: set[WebSocket] = set()
         self._kargo_observer = None
+        self._argocd_observer = None
 
     def set_kargo_observer(self, observer) -> None:
         """Inject KargoObserver after initialization (observer starts after adapter)."""
         self._kargo_observer = observer
+
+    def set_argocd_observer(self, observer) -> None:
+        """Inject ArgoCDObserver after initialization (observer starts after adapter)."""
+        self._argocd_observer = observer
 
     @property
     def client_count(self) -> int:

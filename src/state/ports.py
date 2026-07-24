@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
     from ..models import (
         ArchitectureEvent,
-        ChartData,
         ConversationMessage,
         ConversationTurn,
         EventDocument,
@@ -30,11 +29,9 @@ if TYPE_CHECKING:
         EventType,
         GraphResponse,
         MessageStatus,
-        MetricPoint,
         ScheduledEvent,
         Service,
         Snapshot,
-        TelemetryPayload,
         TopologySnapshot,
     )
 
@@ -131,26 +128,12 @@ class ObservationRepository(Protocol):
 
 @runtime_checkable
 class MetricsRepository(Protocol):
-    """Port for metrics time-series, architecture events, and flow observability.
+    """Port for architecture events and flow observability.
 
-    Cross-domain: get_chart_data internally calls get_events_in_range
-    (architecture event correlation). get_flow_metrics references Event Queue keys.
+    CPU/memory time-series methods (record_metric, get_metric_history,
+    get_current_metrics, get_chart_data) were removed when KubernetesObserver
+    was replaced by ArgoCDObserver -- health/sync is now the sole health source.
     """
-
-    async def record_metric(
-        self, service: str, metric: str, value: float, source: str = "self-reported",
-    ) -> None: ...
-
-    async def get_metric_history(
-        self,
-        service: str,
-        metric: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
-        interpolate: bool = True,
-    ) -> List[MetricPoint]: ...
-
-    async def get_current_metrics(self, service: str) -> dict[str, float]: ...
 
     async def record_event(
         self, event_type: EventType, details: dict, narrative: Optional[str] = None,
@@ -171,13 +154,6 @@ class MetricsRepository(Protocol):
         limit: int = 200,
     ) -> List[ArchitectureEvent]: ...
 
-    async def get_chart_data(
-        self,
-        services: List[str],
-        metrics: Optional[List[str]] = None,
-        range_seconds: int = 3600,
-    ) -> ChartData: ...
-
     async def get_flow_metrics(self) -> dict: ...
 
     async def persist_flow_snapshot(self, snapshot: object) -> None: ...
@@ -193,8 +169,7 @@ class MetricsRepository(Protocol):
 class TopologyRepository(Protocol):
     """Port for service topology graph, service metadata, and discovery.
 
-    18 methods, 8 consumers (K8s observer, aligner, routes/topology, routes/telemetry, etc.).
-    Cross-domain: get_graph_data calls get_current_metrics (MetricsRepository).
+    Consumers: ArgoCDObserver, aligner, routes/topology, routes/telemetry, etc.
     get_snapshot combines topology + service metadata.
     """
 
@@ -229,19 +204,6 @@ class TopologyRepository(Protocol):
 
     async def generate_mermaid(self) -> str: ...
 
-    async def update_service_metadata(
-        self,
-        name: str,
-        cpu: float = 0.0,
-        memory: float = 0.0,
-        error_rate: Optional[float] = None,
-        version: Optional[str] = None,
-        source_repo_url: Optional[str] = None,
-        gitops_repo: Optional[str] = None,
-        gitops_repo_url: Optional[str] = None,
-        gitops_config_path: Optional[str] = None,
-    ) -> None: ...
-
     async def update_service_discovery(
         self,
         name: str,
@@ -253,8 +215,14 @@ class TopologyRepository(Protocol):
         icon: Optional[str] = None,
     ) -> None: ...
 
-    async def update_service_replicas(
-        self, name: str, ready: int, desired: int,
+    async def update_service_argocd_status(
+        self,
+        name: str,
+        health_status: str,
+        sync_status: str,
+        argocd_app: str,
+        namespace: str,
+        last_operations: Optional[list] = None,
     ) -> None: ...
 
     async def get_service(self, name: str) -> Optional[Service]: ...

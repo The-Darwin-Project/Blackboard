@@ -28,7 +28,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_kargo_observer, set_pulse_tracker, set_registry_and_bridge
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_argocd_observer, set_kargo_observer, set_pulse_tracker, set_registry_and_bridge
 from .models import FlowMetricsResponse, FlowSnapshot, HealthResponse
 from .routes import (
     chat_router,
@@ -40,7 +40,6 @@ from .routes import (
     jira_router,
     journal_router,
     kargo_router,
-    metrics_router,
     notebook_router,
     observations_router,
     observations_global_router,
@@ -54,8 +53,8 @@ from .routes import (
 from .auth import DEX_ENABLED, TRUSTED_PROXY_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
-from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
 from .observers.kargo import KargoObserver, KARGO_OBSERVER_ENABLED
+from .observers.argocd import ArgoCDObserver, ARGOCD_OBSERVER_ENABLED
 from .observers.timekeeper import TimeKeeperObserver, TIMEKEEPER_ENABLED
 from .agents.agent_registry import AgentRegistry
 from .agents.task_bridge import TaskBridge
@@ -314,37 +313,6 @@ async def lifespan(app: FastAPI):
             else:
                 logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false)")
         
-        # === KUBERNETES OBSERVER ===
-        # External observation for CPU/memory metrics
-        k8s_observer = None
-        if K8S_OBSERVER_ENABLED:
-            # Create anomaly callback that calls Aligner's threshold check
-            async def k8s_anomaly_callback(
-                service: str, cpu: float, memory: float, source: str,
-                error_rate: float = 0.0,
-            ) -> None:
-                """Called by K8sObserver with metrics from metrics-server."""
-                await aligner.check_anomalies_for_service(
-                    service, cpu, memory, source, error_rate=error_rate,
-                )
-            
-            # Pod health callback for unhealthy states (ImagePullBackOff, CrashLoopBackOff, etc.)
-            async def k8s_pod_health_callback(
-                service: str, pod_name: str, reason: str
-            ) -> None:
-                """Called by K8sObserver when unhealthy pod states are detected."""
-                await aligner.handle_unhealthy_pod(service, pod_name, reason)
-            
-            k8s_observer = KubernetesObserver(
-                blackboard=blackboard,
-                anomaly_callback=k8s_anomaly_callback,
-                pod_health_callback=k8s_pod_health_callback,
-            )
-            await k8s_observer.start()
-            logger.info("KubernetesObserver started for external metrics observation")
-        else:
-            logger.info("KubernetesObserver disabled (K8S_OBSERVER_ENABLED=false)")
-        
         # === KARGO OBSERVER ===
         kargo_observer = None
         if KARGO_OBSERVER_ENABLED:
@@ -373,7 +341,42 @@ async def lifespan(app: FastAPI):
             logger.info("KargoObserver started for promotion state watching")
         else:
             logger.info("KargoObserver disabled (KARGO_OBSERVER_ENABLED=false)")
-        
+
+        # === ARGOCD OBSERVER ===
+        # Sole discovery, health, and sync source -- replaces KubernetesObserver.
+        argocd_observer = None
+        if ARGOCD_OBSERVER_ENABLED:
+            async def argocd_health_callback(
+                service: str, old_health: str, new_health: str, resources_summary: dict,
+            ) -> None:
+                await aligner.handle_health_change(service, old_health, new_health, resources_summary)
+
+            async def argocd_sync_callback(
+                argocd_app: str, old_sync: str | None, new_sync: str,
+            ) -> None:
+                await aligner.handle_sync_drift(argocd_app, old_sync, new_sync)
+
+            async def argocd_broadcast_callback() -> None:
+                # Deferred -- no UI consumer this iteration. Dead wire kept for future WS support.
+                await brain.broadcast({
+                    "type": "argocd_health_update",
+                    "applications": argocd_observer.get_degraded_applications(),
+                })
+
+            argocd_observer = ArgoCDObserver(
+                blackboard=blackboard,
+                health_change_callback=argocd_health_callback,
+                sync_change_callback=argocd_sync_callback,
+                broadcast_callback=argocd_broadcast_callback,
+            )
+            brain.agents["_argocd_observer"] = argocd_observer
+            await argocd_observer.start()
+            dashboard_adapter.set_argocd_observer(argocd_observer)
+            set_argocd_observer(argocd_observer)
+            logger.info("ArgoCDObserver started for Application health/sync watching")
+        else:
+            logger.info("ArgoCDObserver disabled (ARGOCD_OBSERVER_ENABLED=false)")
+
         # === TIMEKEEPER OBSERVER ===
         timekeeper_observer = None
         if DEX_ENABLED and TIMEKEEPER_ENABLED:
@@ -480,15 +483,15 @@ async def lifespan(app: FastAPI):
         headhunter_task.cancel()
         logger.info("Headhunter task cancelled")
     
+    # Stop ArgoCD observer
+    if redis and argocd_observer:
+        await argocd_observer.stop()
+        logger.info("ArgoCDObserver stopped")
+
     # Stop Kargo observer
     if redis and kargo_observer:
         await kargo_observer.stop()
         logger.info("KargoObserver stopped")
-    
-    # Stop K8s observer
-    if redis and K8S_OBSERVER_ENABLED and k8s_observer:
-        await k8s_observer.stop()
-        logger.info("KubernetesObserver stopped")
     
     # Stop TimeKeeper observer
     if redis and timekeeper_observer:
@@ -776,7 +779,6 @@ app.include_router(observations_router)
 app.include_router(observations_global_router)
 app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
-app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)
 app.include_router(feedback_router)
@@ -824,10 +826,6 @@ async def api_info() -> dict:
                 "list": "GET /topology/",
                 "graph": "GET /topology/graph",
                 "mermaid": "GET /topology/mermaid",
-            },
-            "metrics": {
-                "current": "GET /metrics/{service}",
-                "chart": "GET /metrics/chart",
             },
             "flow": {
                 "overview": "GET /flow",

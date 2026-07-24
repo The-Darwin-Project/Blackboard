@@ -67,12 +67,13 @@ async def get_graph_data(
     blackboard: BlackboardState = Depends(get_blackboard),
 ) -> GraphResponse:
     """
-    Get topology as rich graph data for Cytoscape.js visualization.
+    Get topology as rich graph data for the React Flow visualization.
     
-    Returns nodes with health status, edges with protocol metadata,
-    and ticket nodes for active events.
+    Returns nodes with ArgoCD health/sync status and namespace metadata,
+    ticket nodes for active events, and an always-empty edges list
+    (namespace grouping replaces the old env-var dependency heuristic).
     
-    This is the Architecture Graph (Visualization #1) - Cytoscape format.
+    This is the Architecture Graph (Visualization #1).
     """
     return await blackboard.get_graph_data()
 

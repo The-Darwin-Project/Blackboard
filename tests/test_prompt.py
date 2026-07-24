@@ -71,6 +71,9 @@ def _service_meta(name: str = "darwin-store") -> Service:
         gitops_repo_url="https://github.com/org/darwin-store",
         replicas_ready=3,
         replicas_desired=3,
+        health_status="Healthy",
+        sync_status="Synced",
+        argocd_app="openshift-gitops/darwin-store",
     )
 
 
@@ -189,8 +192,8 @@ class TestAlignerMetricsEvent:
         svc = _service_meta("darwin-store")
         header = build_event_header(ev, service_meta=svc)
         assert "Service: darwin-store (K8s Deployment)" in header
-        assert "CPU: 12.4%" in header
-        assert "Memory: 45.6%" in header
+        assert "Health: Healthy" in header
+        assert "Sync: Synced" in header
         assert "Replicas: 3/3" in header
 
     def test_aligner_no_registry_preserves_service_name(self):

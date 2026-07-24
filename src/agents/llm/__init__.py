@@ -18,7 +18,6 @@ import os
 _logger = logging.getLogger(__name__)
 
 from .types import (
-    ALIGNER_TOOL_SCHEMAS,
     BRAIN_TOOL_SCHEMAS,
     NIGHTWATCHER_TOOL_SCHEMAS,
     FunctionCall,
@@ -40,7 +39,6 @@ __all__ = [
     "LLMPort",
     "TokenUsage",
     "BRAIN_TOOL_SCHEMAS",
-    "ALIGNER_TOOL_SCHEMAS",
     "NIGHTWATCHER_TOOL_SCHEMAS",
     "QuotaTracker",
     "QuotaExhaustedError",

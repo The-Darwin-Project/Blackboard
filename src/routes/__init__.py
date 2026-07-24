@@ -5,7 +5,6 @@ from .events import router as events_router
 from .feedback import router as feedback_router
 from .journal import router as journal_router
 from .kargo import router as kargo_router
-from .metrics import router as metrics_router
 from .queue import router as queue_router
 from .reports import router as reports_router
 from .shifts import router as shifts_router
@@ -28,7 +27,6 @@ __all__ = [
     "incidents_router",
     "journal_router",
     "kargo_router",
-    "metrics_router",
     "notebook_router",
     "observations_router",
     "observations_global_router",

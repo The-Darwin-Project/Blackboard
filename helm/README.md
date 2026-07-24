@@ -60,7 +60,7 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Registry Pull (runtime) | `registry.enabled: true` | `registry.existingSecret` (dockerconfigjson for agent CLIs) |
 | Remote Clusters (MCP) | `remoteClusters.<name>.enabled: true` | Per-cluster kubeconfig Secret |
 | Trusted Proxy (BFF) | Env only | Set `TRUSTED_PROXY_ENABLED` + `TRUSTED_PROXY_SECRET` via extra env/Secret (see [deployment.md](../docs/deployment.md)) |
-| K8s Observer | `observer.enabled: true` | Pod ServiceAccount |
+| ArgoCD Observer | `argocdObserver.enabled: true` | Requires `observer.enabled: true` (shared RBAC) |
 
 ## Networking
 
@@ -96,7 +96,7 @@ Four background observers can be enabled independently:
 
 | Observer | Purpose | Enable Flag |
 | :--- | :--- | :--- |
-| Kubernetes | Pod health, metrics-server, darwin.io annotations | `observer.enabled: true` |
+| ArgoCD | Application health/sync discovery -- sole health source | `argocdObserver.enabled: true` |
 | Kargo | Promotion failure/recovery detection | `kargoObserver.enabled: true` |
 | TimeKeeper | Scheduled task execution | `timekeeper.enabled: true` |
 | Nightwatcher | Shift consolidation (cron-based) | `nightwatcher.enabled: true` |

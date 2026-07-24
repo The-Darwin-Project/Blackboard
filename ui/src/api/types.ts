@@ -58,12 +58,33 @@ export interface Dependency {
   env_var: string | null;
 }
 
+export interface ArgoCDOperation {
+  type: 'current' | 'history';
+  phase?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  revision?: string;
+  deployedAt?: string;
+}
+
 export interface Service {
   name: string;
   version: string;
   metrics: Metrics;
   dependencies: string[];
   last_seen: number;
+  namespace?: string | null;
+  health_status?: string | null;
+  sync_status?: string | null;
+  argocd_app?: string | null;
+  last_operations?: ArgoCDOperation[] | null;
+  source_repo_url?: string | null;
+  gitops_repo?: string | null;
+  gitops_repo_url?: string | null;
+  gitops_config_path?: string | null;
+  replicas_ready?: number | null;
+  replicas_desired?: number | null;
+  escalation_flag?: string | null;
 }
 
 export interface TopologySnapshot {
@@ -90,16 +111,19 @@ export interface GraphNode {
   metadata: {
     version: string;
     health: HealthStatus;
-    cpu: number;
-    memory: number;
-    error_rate: number;
+    health_status?: string | null;
+    sync_status?: string | null;
+    namespace?: string | null;
+    argocd_app?: string | null;
     last_seen: number;
+    source_repo_url?: string | null;
     gitops_repo?: string;
     gitops_repo_url?: string;
     gitops_config_path?: string;
     replicas_ready?: number;
     replicas_desired?: number;
     escalation_flag?: string;
+    icon?: string;
   };
 }
 
@@ -243,21 +267,6 @@ export interface EventDocument {
 }
 
 // =============================================================================
-// Metrics History
-// =============================================================================
-
-export interface MetricPoint {
-  timestamp: number;
-  value: number;
-}
-
-export interface MetricSeries {
-  service: string;
-  metric: string;
-  data: MetricPoint[];
-}
-
-// =============================================================================
 // Architecture Events
 // =============================================================================
 
@@ -266,15 +275,6 @@ export interface ArchitectureEvent {
   timestamp: number;
   details: Record<string, unknown>;
   narrative?: string;  // Human-readable explanation of the event
-}
-
-// =============================================================================
-// Chart Data
-// =============================================================================
-
-export interface ChartData {
-  series: MetricSeries[];
-  events: ArchitectureEvent[];
 }
 
 // =============================================================================

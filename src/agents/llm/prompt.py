@@ -191,8 +191,8 @@ def _build_subject_block(
             lines.append(f"  Config Path: {service_meta.gitops_config_path}")
         if service_meta.replicas_ready is not None:
             lines.append(f"  Replicas: {service_meta.replicas_ready}/{service_meta.replicas_desired}")
-        lines.append(f"  CPU: {service_meta.metrics.cpu:.1f}%")
-        lines.append(f"  Memory: {service_meta.metrics.memory:.1f}%")
+        lines.append(f"  Health: {service_meta.health_status or 'unknown'}")
+        lines.append(f"  Sync: {service_meta.sync_status or 'unknown'}")
 
     elif event.service in ("general", "system", ""):
         lines.append(f"Topic: {event.event.reason}")
