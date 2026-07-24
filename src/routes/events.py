@@ -55,11 +55,5 @@ async def get_event_document(
     if not event:
         raise HTTPException(404, f"Event {event_id} not found")
     service_meta = await blackboard.get_service(event.service)
-    mermaid = ""
-    if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
-        try:
-            mermaid = await blackboard.generate_mermaid()
-        except Exception:
-            pass
-    content = event_to_markdown(event, service_meta, mermaid)
+    content = event_to_markdown(event, service_meta, "")
     return PlainTextResponse(content=content, media_type="text/markdown")

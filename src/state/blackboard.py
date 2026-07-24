@@ -2284,11 +2284,6 @@ return 0
                 service_meta = await self.get_service(event.service)
             except Exception:
                 pass
-            if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
-                try:
-                    mermaid = await self.generate_mermaid()
-                except Exception:
-                    pass
 
             from ..utils.event_markdown import event_to_markdown
             markdown = event_to_markdown(event, service_meta, mermaid)

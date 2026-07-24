@@ -383,15 +383,9 @@ async def get_event_report(
         raise HTTPException(status_code=404, detail="Event not found")
 
     service_meta = await blackboard.get_service(event.service)
-    mermaid = ""
-    if event.source != "headhunter" and getattr(event, "subject_type", "service") != "kargo_stage":
-        try:
-            mermaid = await blackboard.generate_mermaid()
-        except Exception:
-            pass
 
     from ..utils.event_markdown import event_to_markdown
-    content = event_to_markdown(event, service_meta, mermaid)
+    content = event_to_markdown(event, service_meta, "")
 
     # Add journal context
     journal = await blackboard.get_journal(event.service)
