@@ -23,6 +23,7 @@ async def main():
 
     project = os.getenv("GCP_PROJECT", "")
     region = os.getenv("GCP_LOCATION", "global")
+    os.environ.setdefault("CLOUD_ML_REGION", region)
     model_name = "claude-opus-4-6"
 
     import anthropic

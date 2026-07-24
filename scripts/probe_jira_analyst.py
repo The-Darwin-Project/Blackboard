@@ -33,6 +33,7 @@ JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
 GCP_PROJECT = os.getenv("GCP_PROJECT", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "global")
+os.environ.setdefault("CLOUD_ML_REGION", GCP_LOCATION)
 MODEL = os.getenv("LLM_MODEL_HEADHUNTER_JIRA", "claude-sonnet-4-6")
 
 BUSINESS_ANALYST_SYSTEM_PROMPT = """You are a QE Business Analyst for the KubeVirt OpenShift Console Plugin test automation team.

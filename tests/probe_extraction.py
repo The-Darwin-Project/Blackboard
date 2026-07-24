@@ -14,6 +14,7 @@ import time
 
 os.environ.setdefault("GCP_PROJECT", "cnv-ai-insights")
 os.environ.setdefault("GCP_LOCATION", "global")
+os.environ.setdefault("CLOUD_ML_REGION", os.environ["GCP_LOCATION"])
 
 SA_KEY = os.path.join(os.path.dirname(__file__), "..", "..", "cnv-ai-insights-8502f29094a2.json")
 if os.path.exists(SA_KEY) and "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:

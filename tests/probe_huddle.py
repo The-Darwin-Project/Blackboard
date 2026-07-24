@@ -52,6 +52,7 @@ GCP_SA_KEY = os.getenv(
 )
 GCP_PROJECT = os.getenv("GCP_PROJECT", "")
 GCP_LOCATION = os.getenv("GCP_LOCATION", "global")
+os.environ.setdefault("CLOUD_ML_REGION", GCP_LOCATION)
 
 # Set credentials for google-genai SDK (Flash Manager runs in this process)
 os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", GCP_SA_KEY)
