@@ -54,6 +54,27 @@ async def handle_lookup_service(
         return False
 
     svc = await bb.get_service(service_name)
+    if not svc and "/" not in service_name:
+        known = await bb.get_services()
+        matches = [k for k in known if k.endswith(f"/{service_name}")]
+        if len(matches) == 1:
+            service_name = matches[0]
+            svc = await bb.get_service(service_name)
+        elif matches:
+            result_text = (
+                f"## Service: {service_name}\n\n"
+                f"Ambiguous — found in {len(matches)} namespaces:\n"
+                + "\n".join(f"- `{m}`" for m in sorted(matches))
+                + "\n\nSpecify the full `namespace/name` to disambiguate."
+            )
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="lookup_service", evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return False
     if svc:
         rows = [f"| Version | {svc.version} |"]
         if svc.gitops_repo:
