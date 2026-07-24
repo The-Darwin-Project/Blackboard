@@ -437,7 +437,7 @@ ephemeralAgents:
   roleEffort:
     architect: "high"
     sysadmin: "medium"
-    developer: "low"
+    developer: "high"
     qe: "high"
     security_analyst: "high"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
