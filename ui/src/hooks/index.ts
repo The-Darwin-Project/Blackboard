@@ -7,7 +7,6 @@ export { useConfig } from './useConfig';
 export { useEvents } from './useEvents';
 export { useGraph } from './useGraph';
 export { useKargoStages, useKargoStagesInvalidation } from './useKargo';
-export { useMetrics } from './useMetrics';
 export { useObservations } from './useObservations';
 export { useActiveEvents, useEventDocument, useQueueInvalidation } from './useQueue';
 export { useResizablePanel } from './useResizablePanel';

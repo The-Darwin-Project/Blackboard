@@ -3,8 +3,14 @@
 // 1. [Pattern]: Layout memoized by node/edge ID hash + layout type. Data-only updates don't trigger relayout.
 // 2. [Pattern]: Custom nodeTypes/edgeTypes registered at module scope to avoid React Flow re-mount.
 // 3. [Constraint]: Container must have explicit dimensions for React Flow.
-// 4. [Pattern]: Three layouts: dagre-TB, dagre-LR, grid. Persisted in localStorage.
+// 4. [Pattern]: Three layouts: dagre-TB, dagre-LR, grid. Persisted in localStorage. Grid is the
+//    default -- edges are always empty now (namespace grouping replaced them), so dagre's
+//    rank-based layout degrades to a single row/column; grid is the reliable default.
 // 5. [Pattern]: Uses useNodesState/useEdgesState for proper React Flow controlled state.
+// 6. [Pattern]: Namespace group nodes (type: 'group') are pushed into the nodes array BEFORE
+//    their service-node children -- React Flow requires parents to precede children for
+//    correct z-index and coordinate-system resolution. Child positions are always RELATIVE
+//    to the parent group's position (React Flow's `parentId` contract), never absolute.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
@@ -25,10 +31,11 @@ import { useGraph } from '../../hooks';
 import type { GraphResponse } from '../../api/types';
 import ServiceNode from './ServiceNode';
 import TicketNode from './TicketNode';
+import NamespaceGroupNode from './NamespaceGroupNode';
 import DarwinEdge from './DarwinEdge';
 import './ArchitectureGraph.css';
 
-const nodeTypes = { service: ServiceNode, ticket: TicketNode };
+const nodeTypes = { service: ServiceNode, ticket: TicketNode, group: NamespaceGroupNode };
 const edgeTypes = { darwin: DarwinEdge };
 type LayoutType = 'dagre-tb' | 'dagre-lr' | 'grid';
 const LAYOUT_KEY = 'darwin:graph:layout';
@@ -44,37 +51,126 @@ function nodeWidth(type: string | undefined): number {
 
 function computeIdHash(data: GraphResponse, layout: LayoutType): string {
   const nIds = data.nodes.map((n) => n.id).sort().join(',');
-  const eIds = data.edges.map((e) => `${e.source}-${e.target}`).sort().join(',');
+  const nsIds = Array.from(new Set(data.nodes.map((n) => n.metadata.namespace).filter(Boolean))).sort().join(',');
   const tIds = (data.tickets ?? []).map((t) => t.event_id).sort().join(',');
-  return `${layout}|${nIds}|${eIds}|${tIds}`;
+  return `${layout}|${nIds}|${nsIds}|${tIds}`;
 }
 
-function applyDagreLayout(nodes: Node[], edges: Edge[], rankdir: 'TB' | 'LR'): Node[] {
-  const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir, nodesep: 80, ranksep: rankdir === 'LR' ? 200 : 100, marginx: 40, marginy: 40 });
+// --- Grid layout: groups laid out first (flow-wrapping row of boxes), then each
+// group's children positioned in a mini-grid RELATIVE to that group's origin. ---
 
-  nodes.forEach((n) => g.setNode(n.id, { width: nodeWidth(n.type), height: 120 }));
-  edges.forEach((e) => g.setEdge(e.source, e.target));
-  Dagre.layout(g);
+const GROUP_PADDING = 36;
+const GROUP_HEADER = 34;
+const GROUP_GAP = 40;
+const MAX_ROW_WIDTH = 1400;
+const CELL_W = 264;
+const CELL_H = 150;
 
-  return nodes.map((n) => {
-    const pos = g.node(n.id);
-    return { ...n, position: { x: pos.x - nodeWidth(n.type) / 2, y: pos.y - 60 } };
-  });
+function layoutGroupChildren(children: Node[]): { nodes: Node[]; width: number; height: number } {
+  const cols = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(children.length))));
+  const rows = Math.max(1, Math.ceil(children.length / cols));
+  const positioned = children.map((n, i) => ({
+    ...n,
+    position: {
+      x: GROUP_PADDING + (i % cols) * CELL_W,
+      y: GROUP_HEADER + Math.floor(i / cols) * CELL_H,
+    },
+  }));
+  const width = GROUP_PADDING * 2 + cols * CELL_W - (CELL_W - 240);
+  const height = GROUP_HEADER + GROUP_PADDING + rows * CELL_H - (CELL_H - 120);
+  return { nodes: positioned, width, height };
 }
 
 function applyGridLayout(nodes: Node[]): Node[] {
   const tickets = nodes.filter((n) => n.type === 'ticket');
-  const services = nodes.filter((n) => n.type !== 'ticket');
-  const cols = Math.max(3, Math.ceil(Math.sqrt(services.length)));
+  const groups = nodes.filter((n) => n.type === 'group');
+  const services = nodes.filter((n) => n.type !== 'ticket' && n.type !== 'group');
   const result: Node[] = [];
 
   tickets.forEach((n, i) => result.push({ ...n, position: { x: i * 210, y: 0 } }));
   const yOff = tickets.length > 0 ? 160 : 0;
-  services.forEach((n, i) => {
-    result.push({ ...n, position: { x: (i % cols) * 280, y: yOff + Math.floor(i / cols) * 160 } });
+
+  if (groups.length === 0) {
+    // No namespace metadata available -- fall back to a flat grid (legacy behavior).
+    const cols = Math.max(3, Math.ceil(Math.sqrt(services.length)));
+    services.forEach((n, i) => {
+      result.push({ ...n, position: { x: (i % cols) * 280, y: yOff + Math.floor(i / cols) * 160 } });
+    });
+    return result;
+  }
+
+  let cursorX = 0;
+  let cursorY = yOff;
+  let rowHeight = 0;
+
+  groups.forEach((group) => {
+    const children = services.filter((s) => s.parentId === group.id);
+    const { nodes: laidOutChildren, width, height } = layoutGroupChildren(children);
+
+    if (cursorX > 0 && cursorX + width > MAX_ROW_WIDTH) {
+      cursorX = 0;
+      cursorY += rowHeight + GROUP_GAP;
+      rowHeight = 0;
+    }
+
+    result.push({ ...group, position: { x: cursorX, y: cursorY }, style: { width, height } });
+    laidOutChildren.forEach((child) => result.push(child));
+
+    cursorX += width + GROUP_GAP;
+    rowHeight = Math.max(rowHeight, height);
   });
+
+  // Ungrouped services (no namespace) render below all groups, flat grid.
+  const ungrouped = services.filter((s) => !s.parentId);
+  if (ungrouped.length > 0) {
+    const cols = Math.max(3, Math.ceil(Math.sqrt(ungrouped.length)));
+    const ungroupedY = cursorY + rowHeight + (rowHeight > 0 ? GROUP_GAP : 0);
+    ungrouped.forEach((n, i) => {
+      result.push({ ...n, position: { x: (i % cols) * 280, y: ungroupedY + Math.floor(i / cols) * 160 } });
+    });
+  }
+
   return result;
+}
+
+// --- Dagre layout: kept as an option. Without edges, dagre has no ranking signal, so
+// this degrades to compound-only positioning (groups sized around their children). ---
+
+function applyDagreLayout(nodes: Node[], edges: Edge[], rankdir: 'TB' | 'LR'): Node[] {
+  const g = new Dagre.graphlib.Graph({ compound: true }).setDefaultEdgeLabel(() => ({}));
+  g.setGraph({ rankdir, nodesep: 80, ranksep: rankdir === 'LR' ? 200 : 100, marginx: 40, marginy: 40 });
+
+  const groups = nodes.filter((n) => n.type === 'group');
+  const nonGroups = nodes.filter((n) => n.type !== 'group');
+
+  groups.forEach((gr) => g.setNode(gr.id, { width: 10, height: 10 }));
+  nonGroups.forEach((n) => g.setNode(n.id, { width: nodeWidth(n.type), height: 120 }));
+  nonGroups.forEach((n) => {
+    if (n.parentId) g.setParent(n.id, n.parentId);
+  });
+  edges.forEach((e) => g.setEdge(e.source, e.target));
+  Dagre.layout(g);
+
+  const positionedGroups = groups.map((gr) => {
+    const pos = g.node(gr.id);
+    return { ...gr, position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 }, style: { width: pos.width, height: pos.height } };
+  });
+
+  const positionedNodes = nonGroups.map((n) => {
+    const pos = g.node(n.id);
+    const parent = n.parentId ? g.node(n.parentId) : null;
+    // Dagre returns absolute coordinates; React Flow requires child positions
+    // relative to the parent when `parentId` is set.
+    const x = parent
+      ? pos.x - (parent.x - parent.width / 2) - nodeWidth(n.type) / 2
+      : pos.x - nodeWidth(n.type) / 2;
+    const y = parent
+      ? pos.y - (parent.y - parent.height / 2) - 60
+      : pos.y - 60;
+    return { ...n, position: { x, y } };
+  });
+
+  return [...positionedGroups, ...positionedNodes];
 }
 
 function applyLayout(nodes: Node[], edges: Edge[], layout: LayoutType): Node[] {
@@ -86,22 +182,38 @@ function buildGraph(data: GraphResponse, layout: LayoutType): { nodes: Node[]; e
   const nodes: Node[] = [];
   const edges: Edge[] = [];
 
+  // Namespace group (parent) nodes -- pushed first so React Flow renders/orders them
+  // before their service-node children.
+  const namespaces = Array.from(
+    new Set(data.nodes.map((gn) => gn.metadata.namespace).filter((ns): ns is string => !!ns)),
+  ).sort();
+
+  namespaces.forEach((ns) => {
+    nodes.push({
+      id: `group-${ns}`,
+      type: 'group',
+      position: { x: 0, y: 0 },
+      data: { label: ns },
+      style: { width: 300, height: 200 },
+      selectable: false,
+    });
+  });
+
   data.nodes.forEach((gn) => {
     if (!gn.id) return;
+    const namespace = gn.metadata.namespace;
     nodes.push({
-      id: gn.id, type: 'service', position: { x: 0, y: 0 },
+      id: gn.id,
+      type: 'service',
+      position: { x: 0, y: 0 },
+      ...(namespace ? { parentId: `group-${namespace}`, extent: 'parent' as const } : {}),
       data: { label: gn.label, type: gn.type, ...gn.metadata },
     });
   });
 
-  data.edges.forEach((ge, idx) => {
-    if (!ge.source || !ge.target) return;
-    edges.push({
-      id: `edge-${idx}`, source: ge.source, target: ge.target,
-      type: 'darwin', data: { async: ge.type === 'async' },
-    });
-  });
-
+  // Backend edges are always empty now (namespace grouping replaced the env-var
+  // dependency heuristic). Ticket->resolved_service edges below are the only
+  // remaining edge source (currently dormant -- resolved_service is always null).
   (data.tickets ?? []).forEach((ticket) => {
     const tid = `ticket-${ticket.event_id}`;
     nodes.push({ id: tid, type: 'ticket', position: { x: 0, y: 0 }, data: { ...ticket } });
@@ -160,6 +272,7 @@ function ArchitectureGraphInner({ onNodeClick, onTicketClick }: Props) {
   }, []);
 
   const handleNodeClick: NodeMouseHandler = useCallback((_event, node) => {
+    if (node.type === 'group') return;
     if (node.type === 'ticket') {
       const eventId = (node.data as { event_id?: string }).event_id;
       if (eventId) onTicketClick?.(eventId);

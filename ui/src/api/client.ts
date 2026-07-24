@@ -18,7 +18,6 @@ import type {
   ArchitectureEvent,
   ChatEventRequest,
   ChatEventResponse,
-  ChartData,
   EventDocument,
   FlowMetrics,
   FlowSnapshot,
@@ -138,35 +137,12 @@ export async function getTopology(): Promise<TopologyResponse> {
   return fetchApi<TopologyResponse>('/topology/');
 }
 
-export async function getServices(): Promise<string[]> {
-  return fetchApi<string[]>('/topology/services');
-}
-
 export async function getService(name: string): Promise<Service> {
   return fetchApi<Service>(`/topology/service/${encodeURIComponent(name)}`);
 }
 
 export async function getGraphData(): Promise<GraphResponse> {
   return fetchApi<GraphResponse>('/topology/graph');
-}
-
-// =============================================================================
-// Metrics API
-// =============================================================================
-
-export async function getChartData(
-  services: string[],
-  rangeSeconds = 3600
-): Promise<ChartData> {
-  const params = new URLSearchParams();
-  services.forEach(s => params.append('services', s));
-  params.append('range_seconds', rangeSeconds.toString());
-  
-  return fetchApi<ChartData>(`/metrics/chart?${params.toString()}`);
-}
-
-export async function getCurrentMetrics(service: string): Promise<Record<string, number>> {
-  return fetchApi<Record<string, number>>(`/metrics/${encodeURIComponent(service)}`);
 }
 
 // =============================================================================

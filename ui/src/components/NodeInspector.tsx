@@ -1,11 +1,14 @@
 // BlackBoard/ui/src/components/NodeInspector.tsx
+// @ai-rules:
+// 1. [Pattern]: Status section (Health/Sync/Namespace/Last Operation) replaces the old
+//    CPU/Memory/Error-Rate MetricBar section -- ArgoCD is the sole health source now.
 /**
  * Slide-over drawer for service details.
- * Shows metrics, dependencies, and recent events.
+ * Shows ArgoCD health/sync status, dependencies, and recent events.
  */
-import { X, Activity, Cpu, HardDrive, AlertTriangle, Clock, GitBranch, Zap } from 'lucide-react';
+import { X, Activity, HeartPulse, RefreshCw, Layers, Clock, GitBranch, Zap } from 'lucide-react';
 import { useService, useEvents } from '../hooks';
-import type { ArchitectureEvent } from '../api/types';
+import type { ArchitectureEvent, ArgoCDOperation } from '../api/types';
 
 // Event type to human-readable label mapping
 const EVENT_LABELS: Record<string, string> = {
@@ -82,30 +85,35 @@ function NodeInspector({ serviceName, onClose, inline }: NodeInspectorProps) {
                 </span>
               </div>
 
-              {/* Metrics */}
+              {/* Status */}
               <div className="space-y-2">
-                <h4 className="text-sm font-medium text-text-secondary">Metrics</h4>
+                <h4 className="text-sm font-medium text-text-secondary">Status</h4>
                 <div className="grid grid-cols-1 gap-2">
-                  <MetricBar
-                    icon={<Cpu className="w-4 h-4" />}
-                    label="CPU"
-                    value={service.metrics.cpu}
-                    color="text-blue-400"
+                  <StatusRow
+                    icon={<HeartPulse className="w-4 h-4" />}
+                    label="Health"
+                    value={service.health_status || 'Unknown'}
+                    tone={healthTone(service.health_status)}
                   />
-                  <MetricBar
-                    icon={<HardDrive className="w-4 h-4" />}
-                    label="Memory"
-                    value={service.metrics.memory}
-                    color="text-purple-400"
+                  <StatusRow
+                    icon={<RefreshCw className="w-4 h-4" />}
+                    label="Sync"
+                    value={service.sync_status || 'Unknown'}
+                    tone={syncTone(service.sync_status)}
                   />
-                  <MetricBar
-                    icon={<AlertTriangle className="w-4 h-4" />}
-                    label="Error Rate"
-                    value={service.metrics.error_rate}
-                    color="text-red-400"
-                    threshold={5}
-                  />
+                  {service.namespace && (
+                    <StatusRow
+                      icon={<Layers className="w-4 h-4" />}
+                      label="Namespace"
+                      value={service.namespace}
+                    />
+                  )}
                 </div>
+                {lastOperationSummary(service.last_operations) && (
+                  <p className="text-xs text-text-muted px-2">
+                    {lastOperationSummary(service.last_operations)}
+                  </p>
+                )}
               </div>
 
               {/* Dependencies */}
@@ -151,35 +159,51 @@ function NodeInspector({ serviceName, onClose, inline }: NodeInspectorProps) {
   );
 }
 
-interface MetricBarProps {
-  icon: React.ReactNode;
-  label: string;
-  value: number;
-  color: string;
-  threshold?: number;
+type StatusTone = 'healthy' | 'warning' | 'critical' | 'neutral';
+
+const TONE_COLORS: Record<StatusTone, string> = {
+  healthy: 'text-status-healthy',
+  warning: 'text-status-warning',
+  critical: 'text-status-critical',
+  neutral: 'text-text-primary',
+};
+
+function healthTone(healthStatus?: string | null): StatusTone {
+  if (healthStatus === 'Healthy') return 'healthy';
+  if (healthStatus === 'Progressing') return 'warning';
+  if (healthStatus === 'Degraded') return 'critical';
+  return 'neutral';
 }
 
-function MetricBar({ icon, label, value, color, threshold }: MetricBarProps) {
-  const isAboveThreshold = threshold !== undefined && value > threshold;
-  const barColor = isAboveThreshold ? 'bg-status-critical' : 'bg-accent';
+function syncTone(syncStatus?: string | null): StatusTone {
+  if (syncStatus === 'Synced') return 'healthy';
+  if (syncStatus === 'OutOfSync') return 'warning';
+  return 'neutral';
+}
 
+function lastOperationSummary(operations?: ArgoCDOperation[] | null): string | null {
+  const current = operations?.find((op) => op.type === 'current');
+  if (!current) return null;
+  const when = current.finishedAt || current.startedAt;
+  const whenText = when ? new Date(when).toLocaleString() : 'unknown time';
+  return `Last sync: ${current.phase || 'unknown'} at ${whenText}`;
+}
+
+interface StatusRowProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  tone?: StatusTone;
+}
+
+function StatusRow({ icon, label, value, tone = 'neutral' }: StatusRowProps) {
   return (
-    <div className="bg-bg-primary rounded-lg p-2">
-      <div className="flex items-center justify-between mb-1">
-        <div className={`flex items-center gap-2 ${color}`}>
-          {icon}
-          <span className="text-xs">{label}</span>
-        </div>
-        <span className={`text-xs font-mono ${isAboveThreshold ? 'text-status-critical' : 'text-text-primary'}`}>
-          {value.toFixed(1)}%
-        </span>
+    <div className="bg-bg-primary rounded-lg p-2 flex items-center justify-between">
+      <div className="flex items-center gap-2 text-text-muted">
+        {icon}
+        <span className="text-xs">{label}</span>
       </div>
-      <div className="h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
-        <div
-          className={`h-full ${barColor} transition-all duration-300`}
-          style={{ width: `${Math.min(value, 100)}%` }}
-        />
-      </div>
+      <span className={`text-xs font-mono ${TONE_COLORS[tone]}`}>{value}</span>
     </div>
   );
 }
