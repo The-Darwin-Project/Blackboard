@@ -257,6 +257,16 @@ class TopologyRepository(Protocol):
         self, name: str, ready: int, desired: int,
     ) -> None: ...
 
+    async def update_service_argocd_status(
+        self,
+        name: str,
+        health_status: str,
+        sync_status: str,
+        argocd_app: str,
+        namespace: str,
+        last_operations: Optional[list] = None,
+    ) -> None: ...
+
     async def get_service(self, name: str) -> Optional[Service]: ...
 
     async def get_all_services(self) -> dict[str, Service]: ...

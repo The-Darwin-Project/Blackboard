@@ -148,6 +148,51 @@ def calculate_health_status(
     return "healthy"
 
 
+def calculate_health_from_argocd(
+    argocd_health: Optional[str],
+    argocd_sync: Optional[str],
+    last_seen: float = 0.0,
+) -> str:
+    """
+    Calculate health status from ArgoCD resource health + sync status.
+
+    Replaces calculate_health_status() (CPU/memory-based) as the sole health
+    source for the topology graph and Mermaid diagram.
+
+    Mapping:
+        Healthy + Synced   -> healthy
+        Progressing        -> healthy   (normal deploy transient, not an alert condition)
+        Degraded           -> critical
+        OutOfSync+Healthy  -> warning   (drifted but the running workload is fine)
+        Missing/Unknown    -> unknown
+        zombie (stale last_seen) -> unknown (overrides all other signals)
+
+    Args:
+        argocd_health: ArgoCD resource health.status (Healthy, Progressing, Degraded, Missing, Unknown)
+        argocd_sync: ArgoCD resource sync status (Synced, OutOfSync, Unknown)
+        last_seen: Unix timestamp of last ArgoCD watch update for this service
+
+    Returns:
+        'healthy', 'warning', 'critical', or 'unknown'
+    """
+    # Zombie check takes precedence -- ArgoCDObserver has stopped reporting this service
+    if last_seen and (time.time() - last_seen) > ZOMBIE_THRESHOLD:
+        return "unknown"
+
+    if not argocd_health or argocd_health in ("Missing", "Unknown"):
+        return "unknown"
+
+    if argocd_health == "Degraded":
+        return "critical"
+
+    if argocd_health in ("Healthy", "Progressing"):
+        if argocd_sync == "OutOfSync":
+            return "warning"
+        return "healthy"
+
+    return "unknown"
+
+
 class BlackboardState:
     """
     Repository for Blackboard state operations.
@@ -454,15 +499,13 @@ return 0
             if not self._should_include_service(service_name, metadata):
                 logger.debug(f"Skipping filtered service node: {service_name}")
                 continue
-            metrics = await self.get_current_metrics(service_name)
-            
-            cpu = metrics.get("cpu", 0)
-            memory = metrics.get("memory", 0)
-            error_rate = metrics.get("error_rate", 0)
+
             last_seen = metadata.last_seen if metadata else 0
             version = metadata.version if metadata else "unknown"
-            
-            health = calculate_health_status(cpu, memory, error_rate, last_seen)
+            health_status = metadata.health_status if metadata else None
+            sync_status = metadata.sync_status if metadata else None
+
+            health = calculate_health_from_argocd(health_status, sync_status, last_seen)
             node_type = infer_node_type(service_name)
             
             # Log any service that resolves to "unknown" -- helps debug gray nodes
@@ -471,7 +514,7 @@ return 0
                 logger.warning(
                     f"Gray node detected: {service_name} health=unknown, "
                     f"last_seen={last_seen:.0f} (age={age:.0f}s), "
-                    f"cpu={cpu}, memory={memory}, error_rate={error_rate}"
+                    f"health_status={health_status}, sync_status={sync_status}"
                 )
             
             icon = await self.redis.hget(f"darwin:service:{service_name}", "icon")
@@ -483,9 +526,9 @@ return 0
                 metadata={
                     "version": version,
                     "health": health,
-                    "cpu": cpu,
-                    "memory": memory,
-                    "error_rate": error_rate,
+                    "health_status": health_status,
+                    "sync_status": sync_status,
+                    "argocd_app": metadata.argocd_app if metadata else None,
                     "last_seen": last_seen,
                     "source_repo_url": metadata.source_repo_url if metadata else None,
                     "gitops_repo": metadata.gitops_repo if metadata else None,
@@ -567,8 +610,8 @@ return 0
         bare ports, IPs, Brain, externals) never appear in Mermaid output.
         
         Returns a graph TD syntax string with:
-        - Node labels showing service name and version
-        - Node colors based on CPU/memory load (green/yellow/red)
+        - Node labels showing service name, version, and ArgoCD health/sync
+        - Node colors based on ArgoCD health status (green/yellow/red/gray)
         """
         topology = await self.get_topology()
         
@@ -588,19 +631,17 @@ return 0
                 continue
             
             filtered_services.add(service)
-            metrics = await self.get_current_metrics(service)
             version = metadata.version if metadata else "?"
-            
-            cpu = metrics.get("cpu", 0)
-            memory = metrics.get("memory", 0)
-            error_rate = metrics.get("error_rate", 0)
+
+            health_status = metadata.health_status if metadata else None
+            sync_status = metadata.sync_status if metadata else None
             last_seen = metadata.last_seen if metadata else 0
-            status = calculate_health_status(cpu, memory, error_rate, last_seen)
+            status = calculate_health_from_argocd(health_status, sync_status, last_seen)
             
             service_data[service] = {
                 "version": version,
-                "cpu": cpu,
-                "memory": memory,
+                "health_status": health_status or "?",
+                "sync_status": sync_status or "?",
                 "status": status,
             }
         
@@ -613,13 +654,11 @@ return 0
         defined_nodes: set[str] = set()
         
         def get_node_def(service: str) -> str:
-            """Generate node definition with version and metrics."""
+            """Generate node definition with version and ArgoCD health/sync."""
             svc_id = service.replace("-", "_")
-            data = service_data.get(service, {"version": "?", "cpu": 0, "memory": 0, "status": "healthy"})
+            data = service_data.get(service, {"version": "?", "health_status": "?", "sync_status": "?", "status": "unknown"})
             version = data["version"]
-            cpu = data["cpu"]
-            memory = data["memory"]
-            label = f"{service}<br/>v{version}<br/>CPU:{cpu:.0f}% MEM:{memory:.0f}%"
+            label = f"{service}<br/>v{version}<br/>{data.get('health_status', '?')}/{data.get('sync_status', '?')}"
             return f"{svc_id}[\"{label}\"]"
         
         # ── Add edges -- only where both source and target are included ──
@@ -765,6 +804,31 @@ return 0
             "replicas_ready": str(ready),
             "replicas_desired": str(desired),
         })
+
+    async def update_service_argocd_status(
+        self,
+        name: str,
+        health_status: str,
+        sync_status: str,
+        argocd_app: str,
+        namespace: str,
+        last_operations: Optional[list] = None,
+    ) -> None:
+        """Update service health/sync state from ArgoCDObserver. Also refreshes last_seen.
+
+        last_operations is JSON-serialized -- Redis HASH values are strings only.
+        """
+        key = f"darwin:service:{name}"
+        mapping: dict[str, str] = {
+            "health_status": health_status,
+            "sync_status": sync_status,
+            "argocd_app": argocd_app,
+            "namespace": namespace,
+            "last_seen": str(time.time()),
+        }
+        if last_operations is not None:
+            mapping["last_operations"] = json.dumps(last_operations)
+        await self.redis.hset(key, mapping=mapping)
     
     async def get_service(self, name: str) -> Optional[Service]:
         """Get service metadata."""
@@ -775,6 +839,11 @@ return 0
             return None
         
         deps = await self.get_edges(name)
+
+        try:
+            last_operations = json.loads(data.get("last_operations", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            last_operations = []
         
         return Service(
             name=name,
@@ -793,6 +862,11 @@ return 0
             replicas_ready=int(data["replicas_ready"]) if data.get("replicas_ready") else None,
             replicas_desired=int(data["replicas_desired"]) if data.get("replicas_desired") else None,
             escalation_flag=data.get("escalation_flag"),
+            namespace=data.get("namespace"),
+            health_status=data.get("health_status"),
+            sync_status=data.get("sync_status"),
+            argocd_app=data.get("argocd_app"),
+            last_operations=last_operations,
         )
     
     async def get_all_services(self) -> dict[str, Service]:

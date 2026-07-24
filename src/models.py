@@ -88,6 +88,11 @@ class Service(BaseModel):
     replicas_ready: Optional[int] = Field(None, description="Number of ready replicas from K8s")
     replicas_desired: Optional[int] = Field(None, description="Desired replica count from K8s")
     escalation_flag: Optional[str] = Field(None, description="Escalation suppression: event_id|reason")
+    namespace: Optional[str] = Field(None, description="K8s namespace of the owning Deployment (from ArgoCD resource entry)")
+    health_status: Optional[str] = Field(None, description="ArgoCD resource health.status: Healthy, Progressing, Degraded, Missing, Unknown")
+    sync_status: Optional[str] = Field(None, description="ArgoCD resource sync status: Synced, OutOfSync, Unknown")
+    argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key: '{namespace}/{name}'")
+    last_operations: Optional[list] = Field(None, description="Recent ArgoCD operation history (current + last 5 sync history entries)")
 
 
 # =============================================================================
