@@ -233,30 +233,17 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_TPM_LIMIT
-            # Kubernetes Observer configuration
-            {{- if .Values.observer.enabled }}
-            - name: K8S_OBSERVER_ENABLED
+            # ArgoCD Application Observer (sole discovery, health, and sync source)
+            {{- if .Values.argocdObserver.enabled }}
+            - name: ARGOCD_OBSERVER_ENABLED
               value: "true"
-            - name: K8S_OBSERVER_NAMESPACE
-              value: "{{ join "," .Values.observer.namespaces }}"
-            - name: K8S_OBSERVER_INTERVAL
-              value: "{{ .Values.observer.interval }}"
-            - name: K8S_OBSERVER_LABEL_SELECTOR
-              value: "{{ .Values.observer.labelSelector }}"
+            - name: ARGOCD_NAME_MAPPING
+              value: {{ .Values.argocdObserver.nameMapping | default "" | quote }}
             {{- end }}
             # Kargo Stage Observer
             {{- if .Values.kargoObserver.enabled }}
             - name: KARGO_OBSERVER_ENABLED
               value: "true"
-            {{- end }}
-            # Aligner anomaly thresholds (configurable via Helm)
-            {{- if .Values.aligner }}
-            - name: ALIGNER_CPU_THRESHOLD
-              value: "{{ .Values.aligner.thresholds.cpu }}"
-            - name: ALIGNER_MEMORY_THRESHOLD
-              value: "{{ .Values.aligner.thresholds.memory }}"
-            - name: ALIGNER_ERROR_RATE_THRESHOLD
-              value: "{{ .Values.aligner.thresholds.errorRate }}"
             {{- end }}
             {{- if .Values.headhunter }}
             # Headhunter (GitLab todo poller)
