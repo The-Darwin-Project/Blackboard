@@ -14,8 +14,8 @@ from src.observers.argocd import ArgoCDObserver
 
 
 def _deployment_resource(
-    name: str = "ai-insights",
-    namespace: str = "cnv-fbc-konflux",
+    name: str = "my-service",
+    namespace: str = "test-namespace",
     health_status: str = "Healthy",
     sync_status: str = "Synced",
 ) -> dict:
@@ -30,8 +30,8 @@ def _deployment_resource(
 
 
 def _make_application(
-    namespace: str = "openshift-gitops",
-    name: str = "release-app-services",
+    namespace: str = "argocd",
+    name: str = "test-app",
     app_health: str = "Healthy",
     app_sync: str = "Synced",
     resources: list[dict] | None = None,
@@ -83,12 +83,12 @@ async def test_null_health_guard_skips_processing():
     """Application with no status.health is skipped (freshly-created / ApplicationSet child)."""
     health_cb = AsyncMock()
     obs = _make_observer(health_cb=health_cb)
-    app = {"metadata": {"namespace": "openshift-gitops", "name": "new-app"}, "status": {}}
+    app = {"metadata": {"namespace": "argocd", "name": "new-app"}, "status": {}}
 
     await obs._process_application(app)
 
     health_cb.assert_not_called()
-    assert "openshift-gitops/new-app" not in obs._application_states
+    assert "argocd/new-app" not in obs._application_states
 
 
 @pytest.mark.asyncio
@@ -100,7 +100,7 @@ async def test_null_sync_guard_skips_processing():
     obs = _make_observer()
     await obs._process_application(app)
 
-    assert "openshift-gitops/release-app-services" not in obs._application_states
+    assert "argocd/test-app" not in obs._application_states
 
 
 @pytest.mark.asyncio
@@ -118,18 +118,18 @@ async def test_missing_app_name_skipped():
 @pytest.mark.asyncio
 async def test_initial_extraction_registers_service():
     obs = _make_observer()
-    app = _make_application(resources=[_deployment_resource(name="ai-insights")])
+    app = _make_application(resources=[_deployment_resource(name="my-service")])
 
     await obs._process_application(app, suppress_callbacks=True)
 
-    obs.blackboard.add_service.assert_called_once_with("ai-insights")
+    obs.blackboard.add_service.assert_called_once_with("test-namespace/my-service")
     obs.blackboard.update_service_argocd_status.assert_called_once()
     kwargs = obs.blackboard.update_service_argocd_status.call_args.kwargs
-    assert kwargs["name"] == "ai-insights"
+    assert kwargs["name"] == "test-namespace/my-service"
     assert kwargs["health_status"] == "Healthy"
     assert kwargs["sync_status"] == "Synced"
-    assert kwargs["argocd_app"] == "openshift-gitops/release-app-services"
-    assert kwargs["namespace"] == "cnv-fbc-konflux"
+    assert kwargs["argocd_app"] == "argocd/test-app"
+    assert kwargs["namespace"] == "test-namespace"
     assert len(kwargs["last_operations"]) == 3  # 1 current + 2 history
 
 
@@ -143,8 +143,8 @@ async def test_initial_sync_suppresses_health_callback():
     await obs._process_application(app, suppress_callbacks=True)
 
     health_cb.assert_not_called()
-    assert obs._application_states["openshift-gitops/release-app-services"]["resource_health"] == {
-        "ai-insights": "Healthy",
+    assert obs._application_states["argocd/test-app"]["resource_health"] == {
+        "test-namespace/my-service": "Healthy",
     }
 
 
@@ -168,8 +168,8 @@ async def test_health_transition_fires_callback():
     await obs._process_application(degraded_app)
 
     health_cb.assert_called_once_with(
-        "ai-insights", "Healthy", "Degraded",
-        {"argocd_app": "openshift-gitops/release-app-services", "namespace": "cnv-fbc-konflux"},
+        "test-namespace/my-service", "Healthy", "Degraded",
+        {"argocd_app": "argocd/test-app", "namespace": "test-namespace"},
     )
 
 
@@ -211,7 +211,7 @@ async def test_fingerprint_unchanged_skips_extraction():
     # last_seen is still touched for known services
     assert obs.blackboard.redis.hset.await_count == 1
     call_args = obs.blackboard.redis.hset.call_args
-    assert call_args.args[0] == "darwin:service:ai-insights"
+    assert call_args.args[0] == "darwin:service:test-namespace/my-service"
     assert call_args.args[1] == "last_seen"
 
 
@@ -258,7 +258,7 @@ async def test_sync_drift_fires_once_for_multi_service_app():
     await obs._process_application(out_of_sync_app)
 
     sync_cb.assert_called_once_with(
-        "openshift-gitops/release-app-services", "Synced", "OutOfSync",
+        "argocd/test-app", "Synced", "OutOfSync",
     )
 
 
@@ -308,9 +308,9 @@ async def test_deleted_removes_tracked_services():
     await obs._process_deleted(app)
 
     assert obs.blackboard.remove_service.await_count == 2
-    obs.blackboard.remove_service.assert_any_call("svc-a")
-    obs.blackboard.remove_service.assert_any_call("svc-b")
-    assert "openshift-gitops/release-app-services" not in obs._application_states
+    obs.blackboard.remove_service.assert_any_call("test-namespace/svc-a")
+    obs.blackboard.remove_service.assert_any_call("test-namespace/svc-b")
+    assert "argocd/test-app" not in obs._application_states
 
 
 @pytest.mark.asyncio
@@ -328,14 +328,14 @@ async def test_deleted_unknown_app_is_noop():
 @pytest.mark.asyncio
 async def test_name_mapping_translates_resource_name(monkeypatch):
     import json as _json
-    monkeypatch.setenv("ARGOCD_NAME_MAPPING", _json.dumps({"raw-deploy-name": "darwin-service-name"}))
+    monkeypatch.setenv("ARGOCD_NAME_MAPPING", _json.dumps({"raw-deploy-name": "mapped-name"}))
 
     obs = ArgoCDObserver(blackboard=AsyncMock())
     app = _make_application(resources=[_deployment_resource(name="raw-deploy-name")])
 
     await obs._process_application(app, suppress_callbacks=True)
 
-    obs.blackboard.add_service.assert_called_once_with("darwin-service-name")
+    obs.blackboard.add_service.assert_called_once_with("test-namespace/mapped-name")
 
 
 # =========================================================================
@@ -379,14 +379,14 @@ def test_extract_last_operations_empty_status():
 @pytest.mark.asyncio
 async def test_extracts_gitops_source_and_version():
     obs = _make_observer()
-    app = _make_application(resources=[_deployment_resource(name="ai-insights")])
+    app = _make_application(resources=[_deployment_resource(name="my-service")])
     app["spec"]["source"] = {"repoURL": "https://github.com/org/repo.git", "path": "helm"}
     app["status"]["summary"] = {"images": ["quay.io/org/image:1784816083-29211b5"]}
 
     await obs._process_application(app, suppress_callbacks=True)
 
     obs.blackboard.update_service_discovery.assert_called_once_with(
-        name="ai-insights",
+        name="test-namespace/my-service",
         version="1784816083-29211b5",
         gitops_repo_url="https://github.com/org/repo.git",
         gitops_config_path="helm",
@@ -397,12 +397,12 @@ async def test_extracts_gitops_source_and_version():
 async def test_gitops_source_missing_defaults_to_unknown_version():
     """No spec.source or status.summary -- version falls back to 'unknown', repo/path stay None."""
     obs = _make_observer()
-    app = _make_application(resources=[_deployment_resource(name="ai-insights")])
+    app = _make_application(resources=[_deployment_resource(name="my-service")])
 
     await obs._process_application(app, suppress_callbacks=True)
 
     obs.blackboard.update_service_discovery.assert_called_once_with(
-        name="ai-insights",
+        name="test-namespace/my-service",
         version="unknown",
         gitops_repo_url=None,
         gitops_config_path=None,
@@ -444,15 +444,15 @@ def test_first_image_tag(images, expected):
 async def test_non_deployment_resources_ignored():
     obs = _make_observer()
     resources = [
-        _deployment_resource(name="ai-insights"),
-        {"version": "v1", "kind": "Service", "namespace": "cnv-fbc-konflux", "name": "ai-insights-svc", "status": "Synced", "health": {"status": "Healthy"}},
-        {"version": "v1", "kind": "ConfigMap", "namespace": "cnv-fbc-konflux", "name": "ai-insights-config", "status": "Synced"},
+        _deployment_resource(name="my-service"),
+        {"version": "v1", "kind": "Service", "namespace": "test-namespace", "name": "other-svc", "status": "Synced", "health": {"status": "Healthy"}},
+        {"version": "v1", "kind": "ConfigMap", "namespace": "test-namespace", "name": "other-config", "status": "Synced"},
     ]
     app = _make_application(resources=resources)
 
     await obs._process_application(app, suppress_callbacks=True)
 
-    obs.blackboard.add_service.assert_called_once_with("ai-insights")
+    obs.blackboard.add_service.assert_called_once_with("test-namespace/my-service")
 
 
 # =========================================================================
@@ -470,7 +470,7 @@ async def test_zero_workload_app_registered_to_redis():
 
     await obs._process_application(app, suppress_callbacks=True)
 
-    obs.blackboard.redis.sadd.assert_any_call("darwin:argocd_apps", "openshift-gitops/config-app")
+    obs.blackboard.redis.sadd.assert_any_call("darwin:argocd_apps", "argocd/config-app")
 
 
 # =========================================================================
@@ -488,8 +488,8 @@ async def test_config_only_to_workload_transition():
     app_with_workload = _make_application(name="transitioning-app", resources=[_deployment_resource(name="my-svc")])
     await obs._process_application(app_with_workload, suppress_callbacks=True)
 
-    obs.blackboard.redis.srem.assert_any_call("darwin:argocd_apps", "openshift-gitops/transitioning-app")
-    obs.blackboard.redis.delete.assert_any_call("darwin:argocd_app:openshift-gitops/transitioning-app")
+    obs.blackboard.redis.srem.assert_any_call("darwin:argocd_apps", "argocd/transitioning-app")
+    obs.blackboard.redis.delete.assert_any_call("darwin:argocd_app:argocd/transitioning-app")
 
 
 # =========================================================================
