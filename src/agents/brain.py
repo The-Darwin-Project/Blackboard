@@ -168,6 +168,13 @@
 #     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
 #     NOT expanded — safety net: if LLM ignores, user turn stays DELIVERED for next scan cycle.
 #     response_emitted + _response_emitted_for reset on interrupt (fresh response cycle).
+# 45. [Pattern]: _ROLE_MODEL_MAP/_ROLE_EFFORT_MAP (module-level, env-backed) resolve per-role model/effort
+#     for EPHEMERAL dispatch only -- local sidecars keep their Deployment-configured model. Gate at the
+#     dispatch_to_agent() call site is `agent_id_override is not None`, NOT is_ephemeral_dispatch (the
+#     latter is set early and diverges from reality on circuit-breaker fallback / MMC overflow). Always
+#     use .get(agent_name, default) -- never bracket access -- so an out-of-vocabulary role fails safe.
+#     `effort` (FRIDAY's optional select_agent param) passes through for BOTH local + ephemeral dispatch
+#     and never invalidates --resume (unlike mode, which does on change).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -488,10 +495,10 @@ class _BrainToolContext:
     async def close_and_broadcast(self, event_id: str, summary: str, close_reason: str | None = None) -> None:
         await self._b._close_and_broadcast(event_id, summary, close_reason=close_reason)
 
-    async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False) -> None:
+    async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False, effort="") -> None:
         task_coro = self._b._run_agent_task(
             event_id, agent_name, agent, task, event_md_path,
-            routing_turn_num=routing_turn_num, mode=mode,
+            routing_turn_num=routing_turn_num, mode=mode, effort=effort,
         )
         t = asyncio.create_task(task_coro)
         if not parallel:
@@ -534,6 +541,25 @@ _ACLOSE_TIMEOUT = 5.0
 # turn so one oversized message can't blow the model context window.
 _CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 _FULL_TIER_MAX_CHARS = int(os.getenv("BRAIN_FULL_TIER_MAX_CHARS", "100000"))
+
+# Ephemeral-only model/effort routing (scoped to Tekton-spawned pods -- local
+# sidecars keep their Deployment-configured model, never read these maps).
+# Use .get(agent_name, default) everywhere -- never bracket access -- so an
+# out-of-vocabulary agent_name degrades to the safe default instead of KeyError.
+_ROLE_MODEL_MAP = {
+    "architect": os.getenv("EPHEMERAL_MODEL_ARCHITECT", "claude-opus-4-6[1m]"),
+    "sysadmin": os.getenv("EPHEMERAL_MODEL_SYSADMIN", "claude-sonnet-5"),
+    "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5"),
+    "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
+    "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
+}
+_ROLE_EFFORT_MAP = {
+    "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
+    "sysadmin": os.getenv("EPHEMERAL_EFFORT_SYSADMIN", "medium"),
+    "developer": os.getenv("EPHEMERAL_EFFORT_DEVELOPER", "low"),
+    "qe": os.getenv("EPHEMERAL_EFFORT_QE", "high"),
+    "security_analyst": os.getenv("EPHEMERAL_EFFORT_SECURITY", "high"),
+}
 
 
 class Brain:
@@ -3127,6 +3153,7 @@ class Brain:
         routing_turn_num: int = 0,
         mode: str = "",
         parallel: bool = False,
+        effort: str = "",
     ) -> None:
         """
         Run agent.process() with progress streaming. Non-blocking via create_task.
@@ -3304,7 +3331,9 @@ class Brain:
                         _ctx = (getattr(evidence, "github_context", None)
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
-                        provision_result = await self._ephemeral_provisioner.ensure_agent(event_id, _install_id)
+                        provision_result = await self._ephemeral_provisioner.ensure_agent(
+                            event_id, _install_id, model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5"),
+                        )
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:
                                 self._ephemeral_provisioner.record_dispatch_circuit_break()
@@ -3391,6 +3420,19 @@ class Brain:
                     if agent_id_override is None:
                         await self.write_event_to_volume(event_id, agent_name)
 
+                    # Ground truth for the model/effort gate is agent_id_override, NOT
+                    # is_ephemeral_dispatch -- the latter is computed early (L3203) and
+                    # diverges from reality after circuit-breaker fallback (flag=True but
+                    # dispatch goes to local sidecar) or MMC overflow (flag=False but
+                    # dispatch is genuinely ephemeral). agent_id_override is only set
+                    # above on successful ephemeral registration.
+                    if agent_id_override is not None:
+                        dispatch_model = _ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5")
+                        dispatch_effort = effort or _ROLE_EFFORT_MAP.get(agent_name, "")
+                    else:
+                        dispatch_model = ""
+                        dispatch_effort = effort
+
                     result, session_id = await dispatch_to_agent(
                         registry=registry,
                         bridge=bridge,
@@ -3403,6 +3445,8 @@ class Brain:
                         session_id=resume_session_id,
                         event_md_path=event_md_path,
                         mode=mode,
+                        model=dispatch_model,
+                        effort=dispatch_effort,
                     )
                 else:
                     logger.warning(f"Registry/Bridge not available, falling back to legacy for {agent_name}")

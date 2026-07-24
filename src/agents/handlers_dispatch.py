@@ -97,6 +97,7 @@ async def handle_select_agent(
     agent_name = args.get("agent_name", "")
     task = args.get("task_instruction", "") or args.get("question", "")
     mode = args.get("mode", "")
+    effort = args.get("effort", "")
 
     if ctx.is_task_running(event_id):
         logger.info(f"Task already active for {event_id}, skipping dispatch")
@@ -141,7 +142,7 @@ async def handle_select_agent(
         waitingFor="select_agent",
         thoughts=f"Routing to {agent_name}: {task}",
         selectedAgents=[agent_name],
-        taskForAgent={"agent": agent_name, "instruction": task, "mode": mode},
+        taskForAgent={"agent": agent_name, "instruction": task, "mode": mode, "effort": effort},
         response_parts=response_parts,
     )
     await ctx.append_and_broadcast(event_id, turn)
@@ -170,7 +171,7 @@ async def handle_select_agent(
         event_md_path = f"./events/event-{event_id}.md"
         await ctx.run_agent_task(
             event_id, agent_name, agent, task, event_md_path,
-            routing_turn_num=turn.turn, mode=mode,
+            routing_turn_num=turn.turn, mode=mode, effort=effort,
         )
     else:
         logger.error(f"Agent '{agent_name}' not found in agents dict")

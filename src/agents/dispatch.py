@@ -11,6 +11,8 @@
 # 7. [Pattern]: `mode` is forwarded on the task WS JSON for sidecar MCP/stop-hook (e.g. message vs implement).
 # 8. [Pattern]: Unknown non-empty mode values log a warning; dispatch still proceeds (fail-open).
 # 9. [Pattern]: WAKE_REGISTER_MODES — allowed `mode` on wake_register WS from sidecar (see handle_wake_task).
+# 10. [Pattern]: `model`/`effort` mirror the `mode` forwarding pattern (rules 7-8). `model` is only
+#     non-empty for ephemeral dispatches (gated by caller); `effort` passes through for all dispatches.
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
@@ -48,6 +50,8 @@ KNOWN_AGENT_MODES = frozenset({
     "message", "implement", "execute", "investigate", "test",
     "plan", "review", "rollback", "analyze",
 })
+
+KNOWN_EFFORT_LEVELS = frozenset({"low", "medium", "high", "max"})
 
 # Modes the sidecar may send on wake_register (subset of task modes; extend if tryWake diversifies).
 WAKE_REGISTER_MODES = frozenset({"implement"})
@@ -92,12 +96,19 @@ async def dispatch_to_agent(
     event_md_path: str = "",
     cwd: str = "",
     mode: str = "",
+    model: str = "",
+    effort: str = "",
 ) -> tuple[str, str | None]:
     """Send task to an available agent via persistent WS, return (result, session_id)."""
     if mode and mode not in KNOWN_AGENT_MODES:
         logger.warning(
             "dispatch_to_agent: unknown mode %r for role=%s event=%s",
             mode, role, event_id,
+        )
+    if effort and effort not in KNOWN_EFFORT_LEVELS:
+        logger.warning(
+            "dispatch_to_agent: unknown effort %r for role=%s event=%s",
+            effort, role, event_id,
         )
     prompt = _build_prompt(task, event_md_path)
     _check_security(prompt)
@@ -136,6 +147,8 @@ async def dispatch_to_agent(
             "autoApprove": True,
             "session_id": session_id,
             "mode": mode,
+            "model": model,
+            "effort": effort,
         })
         await registry.mark_busy(agent_conn.agent_id, event_id, task_id, role=role)
 

@@ -321,6 +321,17 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "If the task needs both action AND investigation, split into separate dispatches with different modes."
                     ),
                 },
+                "effort": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "max"],
+                    "description": (
+                        "Optional reasoning-depth override for this dispatch. Each agent has a "
+                        "baseline effort tuned to its typical workload. Override only when this "
+                        "task's complexity diverges from that baseline — ambiguous scope or "
+                        "high-stakes analysis warrants raising it; a narrow well-defined action "
+                        "warrants lowering it. Omit to use the agent's configured default."
+                    ),
+                },
             },
             "required": ["agent_name", "task_instruction"],
         },

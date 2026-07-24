@@ -20,6 +20,9 @@ spec:
     - name: installation_id
       description: GitHub App installation ID (empty for non-GitHub events)
       default: ""
+    - name: model
+      description: Per-role model override from Brain (falls back to the Helm default when omitted)
+      default: {{ .Values.ephemeralAgents.model | quote }}
   resourcetemplates:
     - apiVersion: tekton.dev/v1
       kind: TaskRun
@@ -69,7 +72,7 @@ spec:
                 - name: AGENT_CLI
                   value: {{ .Values.ephemeralAgents.cli | quote }}
                 - name: AGENT_MODEL
-                  value: {{ .Values.ephemeralAgents.model | quote }}
+                  value: $(tt.params.model)
                 - name: AGENT_PERMISSION_MODE
                   value: {{ .Values.ephemeralAgents.permissionMode | quote }}
                 - name: IDLE_TIMEOUT_MS
@@ -88,8 +91,10 @@ spec:
                   value: {{ .Values.gcp.project | quote }}
                 - name: CLOUD_ML_REGION
                   value: {{ .Values.gcp.location | quote }}
+                # ANTHROPIC_MODEL is technically dead weight (the CLI --model flag takes precedence),
+                # but kept in sync with AGENT_MODEL to avoid confusion for future readers.
                 - name: ANTHROPIC_MODEL
-                  value: {{ .Values.ephemeralAgents.model | quote }}
+                  value: $(tt.params.model)
                 {{- if .Values.ephemeralAgents.effortLevel }}
                 - name: AGENT_EFFORT_LEVEL
                   value: {{ .Values.ephemeralAgents.effortLevel | quote }}
@@ -291,6 +296,8 @@ spec:
       value: $(body.event_id)
     - name: installation_id
       value: $(body.installation_id)
+    - name: model
+      value: $(body.model)
 ---
 apiVersion: triggers.tekton.dev/v1beta1
 kind: EventListener

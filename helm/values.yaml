@@ -421,9 +421,25 @@ ephemeralAgents:
   idleTimeoutMs: "3600000" # 1h -- agent self-terminates after no tasks
   taskRunTimeout: "24h0m0s" # Hard ceiling. Must exceed idleTimeoutMs.
   cli: "claude" # CLI binary for ephemeral agents
-  model: "claude-opus-4-6[1m]" # Single model for all role switches + 1M context window
-  effortLevel: "high" # On-call investigations benefit from deep reasoning
+  model: "claude-sonnet-5" # TriggerTemplate spawn-time default (safe fallback; per-role model below overrides via Brain)
+  effortLevel: "medium" # Spawn-time default; FRIDAY's select_agent effort param overrides per-task
   permissionMode: "bypassPermissions"
+  # Per-role model/effort -- Brain reads these via EPHEMERAL_MODEL_*/EPHEMERAL_EFFORT_* env vars
+  # (injected in deployment.yaml) to resolve the model/effort for each ephemeral dispatch.
+  # claude-sonnet-5 does NOT use the "[1m]" context-window suffix -- that modifier is Opus/Vertex-specific;
+  # Sonnet 5 has native 200K context.
+  roleModels:
+    architect: "claude-opus-4-6[1m]" # Architect keeps Opus for deep strategic planning
+    sysadmin: "claude-sonnet-5"
+    developer: "claude-sonnet-5"
+    qe: "claude-sonnet-5"
+    security_analyst: "claude-sonnet-5"
+  roleEffort:
+    architect: "high"
+    sysadmin: "medium"
+    developer: "low"
+    qe: "high"
+    security_analyst: "high"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
   pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup
