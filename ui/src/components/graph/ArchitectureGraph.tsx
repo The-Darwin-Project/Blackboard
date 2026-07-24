@@ -69,12 +69,11 @@ function computeIdHash(data: GraphResponse, layout: LayoutType): string {
 const GROUP_PADDING = 36;
 const GROUP_HEADER = 34;
 const GROUP_GAP = 40;
-const MAX_ROW_WIDTH = 4000;
 const CELL_W = 264;
 const CELL_H = 150;
 
 function layoutGroupChildren(children: Node[]): { nodes: Node[]; width: number; height: number } {
-  const cols = Math.max(1, Math.min(6, Math.ceil(Math.sqrt(children.length))));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(children.length)));
   const rows = Math.max(1, Math.ceil(children.length / cols));
   const positioned = children.map((n, i) => ({
     ...n,
@@ -110,11 +109,21 @@ function applyGridLayout(nodes: Node[]): Node[] {
   let cursorY = yOff;
   let rowHeight = 0;
 
-  groups.forEach((group) => {
+  // Smart row width: target a squarish overall grid of groups.
+  // Compute average group width, then derive how many groups per row
+  // gives an approximately square overall layout.
+  const groupSizes = groups.map((group) => {
     const children = services.filter((s) => s.parentId === group.id);
-    const { nodes: laidOutChildren, width, height } = layoutGroupChildren(children);
+    return layoutGroupChildren(children);
+  });
+  const avgWidth = groupSizes.reduce((s, g) => s + g.width, 0) / Math.max(1, groupSizes.length);
+  const groupCols = Math.max(1, Math.ceil(Math.sqrt(groups.length)));
+  const maxRowWidth = groupCols * (avgWidth + GROUP_GAP);
 
-    if (cursorX > 0 && cursorX + width > MAX_ROW_WIDTH) {
+  groups.forEach((group, idx) => {
+    const { nodes: laidOutChildren, width, height } = groupSizes[idx];
+
+    if (cursorX > 0 && cursorX + width > maxRowWidth) {
       cursorX = 0;
       cursorY += rowHeight + GROUP_GAP;
       rowHeight = 0;
