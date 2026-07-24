@@ -40,7 +40,6 @@ from .routes import (
     jira_router,
     journal_router,
     kargo_router,
-    metrics_router,
     notebook_router,
     observations_router,
     observations_global_router,
@@ -54,7 +53,6 @@ from .routes import (
 from .auth import DEX_ENABLED, TRUSTED_PROXY_ENABLED, set_oidc_adapter
 from .state.blackboard import BlackboardState
 from .state.redis_client import RedisClient, close_redis
-from .observers.kubernetes import KubernetesObserver, K8S_OBSERVER_ENABLED
 from .observers.kargo import KargoObserver, KARGO_OBSERVER_ENABLED
 from .observers.argocd import ArgoCDObserver, ARGOCD_OBSERVER_ENABLED
 from .observers.timekeeper import TimeKeeperObserver, TIMEKEEPER_ENABLED
@@ -315,21 +313,6 @@ async def lifespan(app: FastAPI):
             else:
                 logger.info("Headhunter disabled (HEADHUNTER_ENABLED=false)")
         
-        # === KUBERNETES OBSERVER ===
-        # Superseded by ArgoCDObserver for health/discovery. Callbacks disconnected --
-        # kept running only until Step 10 removes the module entirely (writes are inert).
-        k8s_observer = None
-        if K8S_OBSERVER_ENABLED:
-            k8s_observer = KubernetesObserver(
-                blackboard=blackboard,
-                anomaly_callback=None,
-                pod_health_callback=None,
-            )
-            await k8s_observer.start()
-            logger.info("KubernetesObserver started for external metrics observation")
-        else:
-            logger.info("KubernetesObserver disabled (K8S_OBSERVER_ENABLED=false)")
-        
         # === KARGO OBSERVER ===
         kargo_observer = None
         if KARGO_OBSERVER_ENABLED:
@@ -509,11 +492,6 @@ async def lifespan(app: FastAPI):
     if redis and kargo_observer:
         await kargo_observer.stop()
         logger.info("KargoObserver stopped")
-    
-    # Stop K8s observer
-    if redis and K8S_OBSERVER_ENABLED and k8s_observer:
-        await k8s_observer.stop()
-        logger.info("KubernetesObserver stopped")
     
     # Stop TimeKeeper observer
     if redis and timekeeper_observer:
@@ -801,7 +779,6 @@ app.include_router(observations_router)
 app.include_router(observations_global_router)
 app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
-app.include_router(metrics_router)
 app.include_router(chat_router)
 app.include_router(events_router)
 app.include_router(feedback_router)
@@ -849,10 +826,6 @@ async def api_info() -> dict:
                 "list": "GET /topology/",
                 "graph": "GET /topology/graph",
                 "mermaid": "GET /topology/mermaid",
-            },
-            "metrics": {
-                "current": "GET /metrics/{service}",
-                "chart": "GET /metrics/chart",
             },
             "flow": {
                 "overview": "GET /flow",

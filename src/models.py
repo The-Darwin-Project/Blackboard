@@ -21,58 +21,17 @@ from .event_types import EventSource
 
 
 # =============================================================================
-# Telemetry Protocol (matches DESIGN.md lines 94-107)
+# Service State (Metadata Layer)
 # =============================================================================
 
-class Dependency(BaseModel):
-    """A service dependency (edge in the topology graph)."""
-    target: str = Field(..., description="Target service name")
-    type: str = Field(..., description="Dependency type: db, http, cache, etc.")
-    env_var: Optional[str] = Field(None, description="Environment variable name for this dependency")
-
-
 class Metrics(BaseModel):
-    """Runtime metrics for a service."""
+    """Runtime metrics for a service. Legacy zero-value default -- no active writer
+    (KubernetesObserver removed; ArgoCD health/sync is the sole health source)."""
     # Note: CPU can exceed 100% on multi-core systems or due to K8s metrics timing
     # Memory can briefly exceed 100% with swap. No upper bound enforced.
     cpu: float = Field(0.0, ge=0.0, description="CPU usage percentage")
     memory: float = Field(0.0, ge=0.0, description="Memory usage percentage")
     error_rate: float = Field(0.0, ge=0.0, description="Error rate percentage")
-
-
-class Topology(BaseModel):
-    """Service topology information."""
-    dependencies: list[Dependency] = Field(default_factory=list)
-
-
-class GitOpsMetadata(BaseModel):
-    """
-    GitOps coordinates for self-describing services.
-    
-    Allows SysAdmin to discover where to make changes for this service.
-    """
-    repo: Optional[str] = Field(None, description="GitHub repo (e.g., 'The-Darwin-Project/Store')")
-    repo_url: Optional[str] = Field(None, description="Full clone URL (e.g., 'https://github.com/The-Darwin-Project/Store.git')")
-    helm_path: Optional[str] = Field(None, description="Path to Helm values.yaml within repo")
-
-
-class TelemetryPayload(BaseModel):
-    """
-    Telemetry payload from self-aware applications.
-    
-    Schema defined in DESIGN.md section 4.1.
-    """
-    service: str = Field(..., description="Service name (e.g., inventory-api)")
-    version: str = Field("unknown", description="Service version (e.g., v2.0)")
-    metrics: Metrics = Field(default_factory=Metrics)
-    topology: Topology = Field(default_factory=Topology)
-    gitops: Optional[GitOpsMetadata] = Field(default=None, description="GitOps coordinates for this service")
-    pod_ips: list[str] = Field(default_factory=list, description="Pod IP addresses for IP-to-name correlation")
-
-
-# =============================================================================
-# Service State (Metadata Layer)
-# =============================================================================
 
 class Service(BaseModel):
     """A service in the Blackboard state."""
@@ -93,23 +52,6 @@ class Service(BaseModel):
     sync_status: Optional[str] = Field(None, description="ArgoCD resource sync status: Synced, OutOfSync, Unknown")
     argocd_app: Optional[str] = Field(None, description="Owning ArgoCD Application key: '{namespace}/{name}'")
     last_operations: Optional[list] = Field(None, description="Recent ArgoCD operation history (current + last 5 sync history entries)")
-
-
-# =============================================================================
-# Metrics History (Time-Series Layer)
-# =============================================================================
-
-class MetricPoint(BaseModel):
-    """A single metric data point."""
-    timestamp: float
-    value: float
-
-
-class MetricSeries(BaseModel):
-    """Time-series data for a metric."""
-    service: str
-    metric: str  # cpu, memory, error_rate
-    data: list[MetricPoint] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -139,7 +81,7 @@ class GraphNode(BaseModel):
     label: str = Field(..., description="Display label")
     metadata: dict[str, Any] = Field(
         default_factory=dict,
-        description="Additional data: version, health, cpu, memory, replicas"
+        description="Additional data: version, health, health_status, sync_status, namespace, replicas"
     )
 
 
@@ -227,16 +169,6 @@ class Snapshot(BaseModel):
     """
     topology: TopologySnapshot = Field(default_factory=TopologySnapshot)
     services: dict[str, Service] = Field(default_factory=dict, description="service_name -> Service")
-
-
-# =============================================================================
-# Chart Data (for Resources Consumption visualization)
-# =============================================================================
-
-class ChartData(BaseModel):
-    """Aggregated data for resources consumption chart."""
-    series: list[MetricSeries] = Field(default_factory=list)
-    events: list[ArchitectureEvent] = Field(default_factory=list)
 
 
 # =============================================================================

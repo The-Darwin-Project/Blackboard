@@ -64,8 +64,10 @@ async def handle_lookup_service(
             rows.append(f"| Config Path | {svc.gitops_config_path} |")
         if svc.replicas_ready is not None:
             rows.append(f"| Replicas | {svc.replicas_ready}/{svc.replicas_desired} |")
-        rows.append(f"| CPU | {svc.metrics.cpu:.1f}% |")
-        rows.append(f"| Memory | {svc.metrics.memory:.1f}% |")
+        rows.append(f"| Health | {svc.health_status or 'unknown'} |")
+        rows.append(f"| Sync | {svc.sync_status or 'unknown'} |")
+        if svc.argocd_app:
+            rows.append(f"| ArgoCD App | {svc.argocd_app} |")
         if svc.escalation_flag:
             rows.append(f"| Escalation | {svc.escalation_flag} |")
         result_text = f"## Service: {service_name}\n\n| Field | Value |\n|---|---|\n" + "\n".join(rows)

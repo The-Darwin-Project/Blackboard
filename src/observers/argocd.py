@@ -13,6 +13,10 @@
 #    blackboard.remove_service() -- keeps topology membership in sync with cluster state.
 # 7. [Pattern]: get_degraded_applications() is the on-demand read path for dashboard broadcast
 #    (mirrors KargoObserver.get_failed_stages()).
+# 8. [Pattern]: GitOps repo/path (spec.source.repoURL/.path) and version (first
+#    status.summary.images[] tag) are Application-level fields shared by every service
+#    exploded from that Application -- written via update_service_discovery() (never
+#    overwrites cpu/memory/error_rate). Coarse-grained by design: accepted per probe outcome.
 """
 ArgoCD Application Observer -- watches Application CRs via K8s Watch API.
 
@@ -305,6 +309,12 @@ class ArgoCDObserver:
         spec = app.get("spec") or {}
         automated = "automated" in (spec.get("syncPolicy") or {})
 
+        source = spec.get("source") or {}
+        gitops_repo_url = source.get("repoURL") or ""
+        gitops_config_path = source.get("path") or ""
+        images = (status.get("summary") or {}).get("images") or []
+        version = self._first_image_tag(images)
+
         resources = status.get("resources") or []
         deployments = [r for r in resources if r.get("kind") == "Deployment"]
         fingerprint = frozenset(
@@ -324,6 +334,7 @@ class ArgoCDObserver:
             resource_health = await self._extract_and_update(
                 app_key, app_ns, deployments, prev_resource_health,
                 last_operations, suppress_callbacks,
+                version, gitops_repo_url, gitops_config_path,
             )
         else:
             resource_health = prev_resource_health
@@ -355,6 +366,9 @@ class ArgoCDObserver:
         prev_resource_health: dict[str, str],
         last_operations: list[dict],
         suppress_callbacks: bool,
+        version: str,
+        gitops_repo_url: str,
+        gitops_config_path: str,
     ) -> dict[str, str]:
         """Map Deployment resources to Darwin services, write state, fire per-service health callbacks."""
         resource_health: dict[str, str] = {}
@@ -377,6 +391,12 @@ class ArgoCDObserver:
                     argocd_app=app_key,
                     namespace=svc_ns,
                     last_operations=last_operations,
+                )
+                await self.blackboard.update_service_discovery(
+                    name=service_name,
+                    version=version,
+                    gitops_repo_url=gitops_repo_url or None,
+                    gitops_config_path=gitops_config_path or None,
                 )
             except Exception as e:
                 logger.error(f"ArgoCDObserver failed to update service {service_name}: {e}")
@@ -422,6 +442,25 @@ class ArgoCDObserver:
                 logger.error(f"ArgoCDObserver remove_service failed for {service_name}: {e}")
         logger.info(f"ArgoCDObserver: Application {app_key} deleted, removed {len(prev.get('resource_health', {}))} services")
         await self._fire_broadcast()
+
+    @staticmethod
+    def _first_image_tag(images: list[str]) -> str:
+        """Extract the tag from the first status.summary.images[] entry.
+
+        Handles 'repo:tag' and 'repo@sha256:digest' forms. One Application can
+        explode into N services -- all share this version (accepted per probe
+        outcome: graceful degradation over per-Deployment image tracking).
+        """
+        if not images:
+            return "unknown"
+        first = images[0]
+        if "@" in first:
+            return first.rsplit("@", 1)[-1]
+        if ":" in first:
+            candidate = first.rsplit(":", 1)[-1]
+            if "/" not in candidate:
+                return candidate
+        return first
 
     @staticmethod
     def _extract_last_operations(status: dict) -> list[dict]:

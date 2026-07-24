@@ -22,8 +22,8 @@ Redis Schema (Flat Keys - PoC Simple):
     darwin:services                     SET     [service names]
     darwin:edges:{service}              SET     [dependency names]
     darwin:edge:{source}:{target}       HASH    {protocol, type, env_var, created_at}
-    darwin:service:{name}               HASH    {version, cpu, memory, error_rate, last_seen}
-    darwin:metrics:{service}:{metric}   ZSET    {timestamp: value}
+    darwin:service:{name}               HASH    {version, health_status, sync_status,
+                                                  argocd_app, namespace, last_operations, last_seen}
     darwin:events                       ZSET    {timestamp: event_json}
     darwin:ip:{ip_address}              STRING  {service_name}  TTL=60s
 """
@@ -42,7 +42,6 @@ from ..models import (
     ConversationMessage,
     ConversationTurn,
     ArchitectureEvent,
-    ChartData,
     EventDocument,
     EventEvidence,
     EventInput,
@@ -53,12 +52,9 @@ from ..models import (
     GraphResponse,
     HealthStatus,
     MessageStatus,
-    MetricPoint,
-    MetricSeries,
     NodeType,
     Service,
     Snapshot,
-    TelemetryPayload,
     TicketNode,
     TopologySnapshot,
     _resolve_phase,
@@ -69,19 +65,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Retention period for metrics history (1 hour for PoC)
-METRICS_RETENTION_SECONDS = 3600
-
 # Conversation TTL (24 hours)
 CONVERSATION_TTL_SECONDS = 86400
 
-# Health thresholds
-CPU_WARNING = 60.0
-CPU_CRITICAL = 80.0
-MEMORY_WARNING = 70.0
-MEMORY_CRITICAL = 85.0
-ERROR_CRITICAL = 5.0
-ZOMBIE_THRESHOLD = 90.0  # seconds without telemetry (3x observer interval to avoid flicker)
+# Zombie detection: seconds without an ArgoCDObserver watch update before a
+# service's health collapses to "unknown" (3x observer tick to avoid flicker).
+ZOMBIE_THRESHOLD = 90.0
 
 
 def infer_node_type(service_name: str) -> NodeType:
@@ -113,41 +102,6 @@ def infer_node_type(service_name: str) -> NodeType:
     return NodeType.SERVICE
 
 
-def calculate_health_status(
-    cpu: float,
-    memory: float,
-    error_rate: float = 0.0,
-    last_seen: float = 0.0,
-) -> str:
-    """
-    Calculate health status from metrics.
-    
-    Shared utility used by both Mermaid and Cytoscape graph generation.
-    
-    Args:
-        cpu: CPU usage percentage (0-100)
-        memory: Memory usage percentage (0-100)
-        error_rate: Error rate percentage (0-100)
-        last_seen: Unix timestamp of last telemetry
-    
-    Returns:
-        'healthy', 'warning', 'critical', or 'unknown'
-    """
-    # Check for zombie (no recent telemetry)
-    if last_seen and (time.time() - last_seen) > ZOMBIE_THRESHOLD:
-        return "unknown"
-    
-    # Critical conditions
-    if cpu >= CPU_CRITICAL or memory >= MEMORY_CRITICAL or error_rate >= ERROR_CRITICAL:
-        return "critical"
-    
-    # Warning conditions
-    if cpu >= CPU_WARNING or memory >= MEMORY_WARNING:
-        return "warning"
-    
-    return "healthy"
-
-
 def calculate_health_from_argocd(
     argocd_health: Optional[str],
     argocd_sync: Optional[str],
@@ -156,8 +110,7 @@ def calculate_health_from_argocd(
     """
     Calculate health status from ArgoCD resource health + sync status.
 
-    Replaces calculate_health_status() (CPU/memory-based) as the sole health
-    source for the topology graph and Mermaid diagram.
+    Sole health source for the topology graph and Mermaid diagram.
 
     Mapping:
         Healthy + Synced   -> healthy
@@ -476,15 +429,17 @@ return 0
     
     async def get_graph_data(self) -> GraphResponse:
         """
-        Get topology as rich graph data for Cytoscape.js visualization.
+        Get topology as rich graph data for React Flow visualization.
         
         Combines:
-        - Services with health status and metadata
-        - Edges with protocol information
+        - Services with ArgoCD health/sync status and namespace metadata
         - Ticket nodes from active events
         
+        Edges are always empty -- namespace (from node metadata) replaces the
+        env-var dependency heuristic as the UI's grouping mechanism.
+        
         Returns:
-            GraphResponse with nodes, edges, and ticket nodes
+            GraphResponse with nodes, empty edges, and ticket nodes
         """
         topology = await self.get_topology()
         
@@ -528,6 +483,7 @@ return 0
                     "health": health,
                     "health_status": health_status,
                     "sync_status": sync_status,
+                    "namespace": metadata.namespace if metadata else None,
                     "argocd_app": metadata.argocd_app if metadata else None,
                     "last_seen": last_seen,
                     "source_repo_url": metadata.source_repo_url if metadata else None,
@@ -541,54 +497,10 @@ return 0
                 }
             ))
         
-        # Build edges with protocol metadata
-        # Only include edges where both source and target are actual services (not IPs)
+        # Dependency edges are no longer sourced from the env-var heuristic --
+        # namespace grouping (via node metadata) replaces the graph's edge layer.
+        # Always empty; the field stays on the response for backward compat.
         edges: list[GraphEdge] = []
-        known_service_ids = {n.id for n in nodes}  # Set of valid service node IDs
-        
-        for source, targets in topology.edges.items():
-            # Skip empty source -- prevents Cytoscape empty ID crash
-            if not source or not source.strip():
-                logger.debug("Skipping edge with empty source in graph edge loop")
-                continue
-            # Skip edges from IP addresses
-            if self._is_ip_address(source):
-                logger.debug(f"Skipping edge from IP address: {source}")
-                continue
-            # Only include edge if source exists as a node in the graph
-            if source not in known_service_ids:
-                logger.debug(f"Skipping edge from filtered-out source: {source}")
-                continue
-            
-            for target in targets:
-                if not target or not target.strip():
-                    logger.debug("Skipping edge with empty target in graph edge loop")
-                    continue
-                # Resolve IP to service name if possible
-                resolved_target = await self.resolve_ip_to_service(target)
-                
-                # Skip empty resolved targets -- prevents Cytoscape empty ID crash
-                if not resolved_target or not resolved_target.strip():
-                    logger.debug(f"Skipping edge with empty resolved target for: {target}")
-                    continue
-                
-                # Skip edges to IP addresses that couldn't be resolved
-                if self._is_ip_address(resolved_target):
-                    logger.debug(f"Skipping edge to unresolved IP address: {resolved_target}")
-                    continue
-                
-                # Only include edge if target exists as a node in the graph
-                if resolved_target not in known_service_ids:
-                    logger.debug(f"Skipping edge to unknown service: {source} -> {resolved_target}")
-                    continue
-                
-                edge_meta = await self.get_edge_metadata(source, target)
-                edges.append(GraphEdge(
-                    source=source,
-                    target=resolved_target,  # Use resolved name
-                    protocol=edge_meta.get("protocol", "HTTP"),
-                    type=edge_meta.get("type", "hard"),
-                ))
         
         # Build ticket nodes from active general/headhunter events
         ticket_nodes = await self._get_ticket_nodes()
@@ -722,42 +634,6 @@ return 0
     # Metadata Layer (Service Health)
     # =========================================================================
     
-    async def update_service_metadata(
-        self,
-        name: str,
-        cpu: float = 0.0,
-        memory: float = 0.0,
-        error_rate: Optional[float] = None,
-        version: Optional[str] = None,
-        source_repo_url: Optional[str] = None,
-        gitops_repo: Optional[str] = None,
-        gitops_repo_url: Optional[str] = None,
-        gitops_config_path: Optional[str] = None,
-    ) -> None:
-        """Update service metadata in Redis hash. Version and error_rate only written when provided."""
-        key = f"darwin:service:{name}"
-        mapping: dict[str, str] = {
-            "cpu": str(cpu),
-            "memory": str(memory),
-            "last_seen": str(time.time()),
-        }
-        if error_rate is not None:
-            mapping["error_rate"] = str(error_rate)
-        if version is not None:
-            mapping["version"] = version
-        
-        # Add GitOps metadata if provided
-        if source_repo_url:
-            mapping["source_repo_url"] = source_repo_url
-        if gitops_repo:
-            mapping["gitops_repo"] = gitops_repo
-        if gitops_repo_url:
-            mapping["gitops_repo_url"] = gitops_repo_url
-        if gitops_config_path:
-            mapping["gitops_config_path"] = gitops_config_path
-        
-        await self.redis.hset(key, mapping=mapping)
-    
     async def update_service_discovery(
         self,
         name: str,
@@ -768,11 +644,11 @@ return 0
         gitops_config_path: Optional[str] = None,
         icon: Optional[str] = None,
     ) -> None:
-        """Update service discovery metadata WITHOUT overwriting metrics.
-        
-        Used by the K8s observer's annotation discovery cycle. Only writes
-        version, repo URLs, and config path. Leaves cpu/memory/error_rate
-        untouched so the metrics poll values are never clobbered.
+        """Update service discovery metadata WITHOUT overwriting health/sync state.
+
+        Called by ArgoCDObserver alongside update_service_argocd_status() to write
+        the Application-level GitOps repo/path (spec.source) and version (first
+        status.summary.images[] tag) without touching health_status/sync_status.
         """
         key = f"darwin:service:{name}"
         mapping: dict[str, str] = {
@@ -791,19 +667,6 @@ return 0
             mapping["icon"] = icon
         
         await self.redis.hset(key, mapping=mapping)
-
-    async def update_service_replicas(
-        self,
-        name: str,
-        ready: int,
-        desired: int,
-    ) -> None:
-        """Update service replica count in Redis hash."""
-        key = f"darwin:service:{name}"
-        await self.redis.hset(key, mapping={
-            "replicas_ready": str(ready),
-            "replicas_desired": str(desired),
-        })
 
     async def update_service_argocd_status(
         self,
@@ -913,189 +776,6 @@ return 0
         )
         return int(result)
 
-    # =========================================================================
-    # Metrics History Layer (Time-Series)
-    # =========================================================================
-    
-    async def record_metric(
-        self,
-        service: str,
-        metric: str,
-        value: float,
-        source: str = "self-reported",
-    ) -> None:
-        """
-        Record a metric value with automatic retention trimming.
-        
-        Uses ZSET with timestamp as score for time-series queries.
-        
-        Args:
-            service: Service name
-            metric: Metric name (cpu, memory, error_rate)
-            value: Metric value
-            source: Data source ("self-reported" or "kubernetes")
-        """
-        key = f"darwin:metrics:{service}:{metric}"
-        now = time.time()
-        
-        # Add new value (score=timestamp, member="{timestamp}:{value}:{source}")
-        # Using timestamp in member to ensure uniqueness
-        await self.redis.zadd(key, {f"{now}:{value}:{source}": now})
-        
-        # Trim old values (older than retention window)
-        cutoff = now - METRICS_RETENTION_SECONDS
-        await self.redis.zremrangebyscore(key, "-inf", cutoff)
-    
-    async def get_metric_history(
-        self,
-        service: str,
-        metric: str,
-        start_time: Optional[float] = None,
-        end_time: Optional[float] = None,
-        interpolate: bool = True,
-    ) -> List[MetricPoint]:
-        """
-        Get metric history within time range.
-        
-        Merges data from multiple sources (self-reported, kubernetes) and
-        optionally interpolates to fill gaps larger than expected interval.
-        """
-        key = f"darwin:metrics:{service}:{metric}"
-        
-        start = start_time if start_time else 0
-        end = end_time if end_time else time.time()
-        
-        # Get values with scores (timestamps)
-        results = await self.redis.zrangebyscore(
-            key, start, end, withscores=True
-        )
-        
-        # Parse all points, separating by source.
-        # Format: "{timestamp}:{value}:{source}" or legacy "{timestamp}:{value}"
-        self_reported: dict[float, float] = {}  # timestamp -> value
-        kubernetes: dict[float, float] = {}     # timestamp -> value
-        
-        for member, score in results:
-            parts = member.split(":")
-            if len(parts) >= 2:
-                value = float(parts[1])
-                source = parts[2] if len(parts) >= 3 else "self-reported"
-                timestamp = round(score, 1)  # Round to 100ms for deduplication
-                
-                if source == "self-reported":
-                    self_reported[timestamp] = value
-                else:
-                    kubernetes[timestamp] = value
-        
-        # Source selection: if self-reported data exists, use it exclusively.
-        # Interleaving K8s metrics-server averages with instantaneous app values
-        # creates sawtooth spikes (K8s reports low averages between high app samples).
-        # Fall back to K8s data only when no self-reported data is available.
-        if self_reported:
-            raw_points = self_reported
-        elif kubernetes:
-            raw_points = kubernetes
-        else:
-            raw_points = {}
-        
-        # Sort by timestamp
-        sorted_timestamps = sorted(raw_points.keys())
-        
-        if not sorted_timestamps:
-            return []
-        
-        points = []
-        expected_interval = 10.0  # Expected interval between telemetry samples
-        max_gap = expected_interval * 3  # Fill gaps up to 3x expected interval
-        
-        for i, ts in enumerate(sorted_timestamps):
-            value = raw_points[ts]
-            points.append(MetricPoint(timestamp=ts, value=value))
-            
-            # Fill gaps with step-hold (carry last value forward).
-            # Sampled metrics represent "this was the value at sample time" --
-            # the correct assumption is the value held until the next sample,
-            # NOT that it linearly moved to the next value.
-            if interpolate and i < len(sorted_timestamps) - 1:
-                next_ts = sorted_timestamps[i + 1]
-                gap = next_ts - ts
-                
-                if gap > max_gap:
-                    # Step-hold: repeat current value at regular intervals
-                    num_fill = int(gap / expected_interval) - 1
-                    for j in range(1, min(num_fill + 1, 10)):
-                        fill_ts = ts + (j * expected_interval)
-                        if fill_ts < next_ts:
-                            points.append(MetricPoint(timestamp=fill_ts, value=value))
-        
-        # Sort final points by timestamp
-        points.sort(key=lambda p: p.timestamp)
-        
-        return points
-    
-    async def get_current_metrics(self, service: str) -> dict[str, float]:
-        """
-        Get current metrics for a service using peak-over-30s with source priority.
-        
-        Returns the peak value from the last 30s of self-reported data (preferred)
-        or kubernetes data (fallback). This aligns the graph health color with what
-        Flash sees in the 30s analysis window -- if CPU peaked at 99.9% recently,
-        the node shows yellow/red, not green from a single low K8s reading.
-        """
-        metrics = {}
-        now = time.time()
-        cutoff = now - 30  # 30s window matching the Aligner analysis interval
-        
-        for metric_name in ["cpu", "memory", "error_rate"]:
-            key = f"darwin:metrics:{service}:{metric_name}"
-            # Get last 30s of data (score = timestamp)
-            results = await self.redis.zrangebyscore(
-                key, cutoff, now, withscores=True
-            )
-            
-            if not results:
-                # No data in the last 30s. Fall back to latest entry, but only
-                # if it's within the zombie threshold (90s). Beyond that, stale
-                # ZSET data creates a visual inconsistency: graph shows "CPU:2%"
-                # but health is "unknown" (gray) because last_seen is stale.
-                fallback = await self.redis.zrevrange(key, 0, 0, withscores=True)
-                if fallback:
-                    entry_ts = fallback[0][1]  # score = timestamp
-                    if (now - entry_ts) <= 90:  # Within zombie threshold
-                        parts = fallback[0][0].split(":")
-                        metrics[metric_name] = float(parts[1]) if len(parts) >= 2 else 0.0
-                    else:
-                        metrics[metric_name] = 0.0  # Stale data -- don't mislead the graph
-                else:
-                    metrics[metric_name] = 0.0
-                continue
-            
-            # Separate by source, find peak value per source
-            self_reported_peak = 0.0
-            kubernetes_peak = 0.0
-            has_self_reported = False
-            
-            for member, _score in results:
-                parts = member.split(":")
-                if len(parts) < 2:
-                    continue
-                value = float(parts[1])
-                source = parts[2] if len(parts) >= 3 else "self-reported"
-                
-                if source == "self-reported":
-                    has_self_reported = True
-                    self_reported_peak = max(self_reported_peak, value)
-                else:
-                    kubernetes_peak = max(kubernetes_peak, value)
-            
-            # Prefer self-reported; fall back to kubernetes
-            if has_self_reported:
-                metrics[metric_name] = self_reported_peak
-            else:
-                metrics[metric_name] = kubernetes_peak
-        
-        return metrics
-    
     # =========================================================================
     # Architecture Events (for correlation)
     # =========================================================================
@@ -1216,105 +896,6 @@ return 0
             topology=topology,
             services=services,
         )
-    
-    # =========================================================================
-    # Chart Data (for Resources visualization)
-    # =========================================================================
-    
-    async def get_chart_data(
-        self,
-        services: List[str],
-        metrics: Optional[List[str]] = None,
-        range_seconds: int = 3600,
-    ) -> ChartData:
-        """
-        Get aggregated data for resources consumption chart.
-        
-        Returns metric series plus architecture events for correlation.
-        """
-        if metrics is None:
-            metrics = ["cpu", "memory", "error_rate"]
-        
-        end_time = time.time()
-        start_time = end_time - range_seconds
-        
-        logger.debug(f"get_chart_data called for services: {services}, range: {range_seconds}s")
-        
-        series = []
-        for service in services:
-            for metric in metrics:
-                points = await self.get_metric_history(
-                    service, metric, start_time, end_time
-                )
-                if points:
-                    series.append(MetricSeries(
-                        service=service,
-                        metric=metric,
-                        data=points,
-                    ))
-                    logger.debug(f"Chart data: {service}/{metric} has {len(points)} points")
-                else:
-                    logger.debug(f"Chart data: {service}/{metric} has NO points")
-        
-        events = await self.get_events_in_range(start_time, end_time)
-        
-        return ChartData(series=series, events=events)
-    
-    # =========================================================================
-    # Telemetry Processing (DEPRECATED -- no active callers)
-    # =========================================================================
-    
-    async def process_telemetry(self, payload: TelemetryPayload) -> None:
-        """
-        DEPRECATED: Process incoming telemetry and update all layers.
-        
-        Previously called by Aligner.process_telemetry() which was removed.
-        DarwinClient telemetry push is deprecated in favor of K8s Observer
-        annotations (darwin.io/*). Kept for reference -- contains IP registration,
-        topology edge creation, and metadata update logic that may be reused.
-        """
-        # Register this service's IPs for IP-to-name correlation
-        # (before processing dependencies so other services can resolve us)
-        if payload.pod_ips:
-            await self.register_service_ips(payload.service, payload.pod_ips)
-        
-        # Update Structure Layer
-        await self.add_service(payload.service)
-        
-        for dep in payload.topology.dependencies:
-            # Resolve IP to service name if mapping exists
-            resolved_target = await self.resolve_ip_to_service(dep.target)
-            await self.add_service(resolved_target)
-            # Store edge with full metadata for rich graph visualization
-            await self.add_edge_with_metadata(
-                source=payload.service,
-                target=resolved_target,  # Use resolved name
-                protocol=self._infer_protocol_from_type(dep.type),
-                dep_type="hard" if dep.type in ["db", "http"] else "async",
-                env_var=dep.env_var,
-            )
-        
-        # Update Metadata Layer (including GitOps coordinates if provided)
-        await self.update_service_metadata(
-            name=payload.service,
-            version=payload.version,
-            cpu=payload.metrics.cpu,
-            memory=payload.metrics.memory,
-            error_rate=payload.metrics.error_rate,
-            gitops_repo=payload.gitops.repo if payload.gitops else None,
-            gitops_repo_url=payload.gitops.repo_url if payload.gitops else None,
-            gitops_config_path=payload.gitops.helm_path if payload.gitops else None,
-        )
-        
-        # Update Metrics History Layer
-        await self.record_metric(payload.service, "cpu", payload.metrics.cpu)
-        await self.record_metric(payload.service, "memory", payload.metrics.memory)
-        await self.record_metric(payload.service, "error_rate", payload.metrics.error_rate)
-        
-        # Record telemetry event (low frequency, only for significant changes)
-        # Skip for now to avoid event spam
-        
-        logger.debug(f"Processed telemetry from {payload.service}")
     
     # =========================================================================
     # Conversation History Layer

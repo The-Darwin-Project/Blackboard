@@ -373,6 +373,70 @@ def test_extract_last_operations_empty_status():
 
 
 # =========================================================================
+# Test 10: GitOps repo/path + version extraction (Step 6)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_extracts_gitops_source_and_version():
+    obs = _make_observer()
+    app = _make_application(resources=[_deployment_resource(name="ai-insights")])
+    app["spec"]["source"] = {"repoURL": "https://github.com/org/repo.git", "path": "helm"}
+    app["status"]["summary"] = {"images": ["quay.io/org/image:1784816083-29211b5"]}
+
+    await obs._process_application(app, suppress_callbacks=True)
+
+    obs.blackboard.update_service_discovery.assert_called_once_with(
+        name="ai-insights",
+        version="1784816083-29211b5",
+        gitops_repo_url="https://github.com/org/repo.git",
+        gitops_config_path="helm",
+    )
+
+
+@pytest.mark.asyncio
+async def test_gitops_source_missing_defaults_to_unknown_version():
+    """No spec.source or status.summary -- version falls back to 'unknown', repo/path stay None."""
+    obs = _make_observer()
+    app = _make_application(resources=[_deployment_resource(name="ai-insights")])
+
+    await obs._process_application(app, suppress_callbacks=True)
+
+    obs.blackboard.update_service_discovery.assert_called_once_with(
+        name="ai-insights",
+        version="unknown",
+        gitops_repo_url=None,
+        gitops_config_path=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_gitops_fields_skipped_when_fingerprint_unchanged():
+    obs = _make_observer()
+    app = _make_application(resource_version="1")
+    await obs._process_application(app, suppress_callbacks=True)
+    obs.blackboard.update_service_discovery.reset_mock()
+
+    same_app = _make_application(resource_version="2")  # only resourceVersion differs
+    await obs._process_application(same_app)
+
+    obs.blackboard.update_service_discovery.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "images,expected",
+    [
+        ([], "unknown"),
+        (["quay.io/org/image:1784816083-29211b5"], "1784816083-29211b5"),
+        (["registry:5000/org/image:v1.2.3"], "v1.2.3"),
+        (["quay.io/org/image@sha256:abcdef123456"], "sha256:abcdef123456"),
+        (["quay.io/org/image"], "quay.io/org/image"),
+    ],
+)
+def test_first_image_tag(images, expected):
+    assert ArgoCDObserver._first_image_tag(images) == expected
+
+
+# =========================================================================
 # Test 9: Non-Deployment resources are ignored
 # =========================================================================
 
