@@ -926,8 +926,9 @@ async def headhunter_pending_todos():
     # Append GitHub queued PRs from agent cached state (single event loop, no lock needed)
     try:
         brain = await get_brain()
-        if brain and brain.headhunter and brain.headhunter._github:
-            for idx, pr in enumerate(brain.headhunter._github.queued_prs, start=1):
+        hh = brain.agents.get("_headhunter") if brain else None
+        if hh and getattr(hh, "_github", None):
+            for idx, pr in enumerate(hh._github.queued_prs, start=1):
                 result.append({
                     "platform": "github",
                     "pr_number": pr.get("number"),
