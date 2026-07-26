@@ -5,6 +5,7 @@
 # 3. [Invariant]: _release_task_state MUST run before any bookkeeping await after turn delivery.
 # 4. [Gotcha]: _active_tasks is set by the dispatcher, not inside _run_agent_task. Pre-set in tests.
 # 5. [Gotcha]: Error path mocks must NOT swallow exceptions -- agent.process raises, except block catches.
+# 6. [Pattern]: T-6a/T-6b inject CancelledError via side_effect, expect pytest.raises + state cleanup.
 """Verify _release_task_state runs before bookkeeping awaits (TOCTOU prevention).
 
 Production evidence: evt-8758be1b, 68.3s delay, 4 GATE rejections caused by
@@ -207,4 +208,79 @@ class TestTaskLifecycleOrdering:
         _assert_release_before_bookkeeping(call_log)
         assert "append_and_broadcast" not in call_log, (
             "Message-mode no-deliverable path must NOT write a result turn"
+        )
+
+
+class TestWakeTaskCancellationCleanup:
+    """T-6a, T-6b: CancelledError during handle_wake_task triggers cleanup via finally."""
+
+    @pytest.mark.asyncio
+    async def test_wake_task_consume_cancellation_cleanup(self):
+        """T-6a: CancelledError during consume_wake_task → finally cleans up state."""
+        brain = _make_brain()
+
+        mock_registry = MagicMock()
+        mock_registry.mark_idle = AsyncMock()
+        mock_bridge = MagicMock()
+
+        with patch(
+            "src.dependencies.get_registry_and_bridge",
+            return_value=(mock_registry, mock_bridge),
+        ), patch(
+            "src.agents.dispatch.consume_wake_task",
+            new_callable=AsyncMock,
+            side_effect=asyncio.CancelledError,
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await brain.handle_wake_task(
+                    data={
+                        "event_id": "evt-test",
+                        "role": "sysadmin",
+                        "task_id": "task-1",
+                        "mode": "implement",
+                    },
+                    agent_id="sysadmin-1",
+                )
+
+        assert brain._active_tasks.get("evt-test") is None, (
+            "finally must clear _active_tasks on CancelledError"
+        )
+        assert brain._active_agent_for_event.get("evt-test") is None, (
+            "finally must clear _active_agent_for_event on CancelledError"
+        )
+
+    @pytest.mark.asyncio
+    async def test_wake_task_broadcast_cancellation_cleanup(self):
+        """T-6b: CancelledError during _broadcast → finally cleans up state.
+
+        After the try: scope fix, _broadcast is inside the try block.
+        CancelledError during broadcast is caught by finally, not lost.
+        """
+        brain = _make_brain()
+        brain._broadcast = AsyncMock(side_effect=asyncio.CancelledError)
+
+        mock_registry = MagicMock()
+        mock_registry.mark_idle = AsyncMock()
+        mock_bridge = MagicMock()
+
+        with patch(
+            "src.dependencies.get_registry_and_bridge",
+            return_value=(mock_registry, mock_bridge),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await brain.handle_wake_task(
+                    data={
+                        "event_id": "evt-test",
+                        "role": "sysadmin",
+                        "task_id": "task-1",
+                        "mode": "implement",
+                    },
+                    agent_id="sysadmin-1",
+                )
+
+        assert brain._active_tasks.get("evt-test") is None, (
+            "finally must clear _active_tasks on broadcast CancelledError"
+        )
+        assert brain._active_agent_for_event.get("evt-test") is None, (
+            "finally must clear _active_agent_for_event on broadcast CancelledError"
         )

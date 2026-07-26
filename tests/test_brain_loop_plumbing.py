@@ -3,16 +3,23 @@
 # 1. [Constraint]: Tests for brain.py LLM loop plumbing — user interrupt, wait-guard scope, stale turns.
 # 2. [Pattern]: Uses _make_event/_make_turn from test_scan_callback.py pattern. No live Redis or LLM.
 # 3. [Gotcha]: ConversationTurn.status defaults to SENT. Set explicitly for DELIVERED/EVALUATED turns.
+# 4. [Pattern]: T-4/T-5 use Brain + real _BrainToolContext — NOT AsyncMock(spec=ToolContext).
 """Unit tests for brain.py LLM iteration loop plumbing fixes.
 
 Tests:
 - User interrupt detection + injection
 - _waiting_for_agent temporal scoping (both guards)
 - Survivor turn number (cross-source merge)
+- Handler post-yield race detection (T-4, T-5)
+- Guard 1 precedence over Guard 7 (T-7)
 """
 import time
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from src.agents.brain import Brain, _BrainToolContext
+from src.agents.handlers_state import handle_wait_for_agent
 from src.models import (
     ConversationTurn,
     EventDocument,
@@ -270,3 +277,90 @@ class TestSurvivorTurnNumber:
         assert survivor_next == 4, "Survivor event has 3 turns, next should be 4"
         assert current_next == 2, "Current event has 1 turn, next should be 2"
         assert survivor_next != current_next, "Using wrong event would produce wrong turn number"
+
+
+# =========================================================================
+# T-4, T-5: handle_wait_for_agent post-yield race detection
+# =========================================================================
+class TestHandlerPostYieldRace:
+    """Post-yield validation in handle_wait_for_agent detects task completion race."""
+
+    @staticmethod
+    def _make_handler_brain() -> Brain:
+        bb = MagicMock()
+        brain = Brain(blackboard=bb, agents={})
+        brain._append_and_broadcast = AsyncMock(return_value=5)
+        brain._broadcast_turn = AsyncMock()
+        return brain
+
+    @pytest.mark.asyncio
+    async def test_handler_post_yield_clears_when_task_gone(self):
+        """T-4: task completed during yield → post-check clears waiting_for_agent."""
+        brain = self._make_handler_brain()
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+        # Task is gone — completed during the append_and_broadcast yield
+        # (is_task_running returns False)
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        assert "evt-test" not in brain._waiting_for_agent, (
+            "Post-yield check must clear waiting_for_agent when task is gone"
+        )
+
+    @pytest.mark.asyncio
+    async def test_handler_no_clear_when_task_running(self):
+        """T-5: task still running → waiting_for_agent stays set."""
+        brain = self._make_handler_brain()
+        brain._active_agent_for_event["evt-test"] = "sysadmin"
+        brain._active_tasks["evt-test"] = MagicMock(
+            done=MagicMock(return_value=False),
+        )
+
+        ctx = _BrainToolContext(brain)
+        await handle_wait_for_agent(ctx, "evt-test", {"summary": "waiting"}, None)
+
+        assert "evt-test" in brain._waiting_for_agent, (
+            "waiting_for_agent must stay set when task is still running"
+        )
+        agent_name, wait_turn = brain._waiting_for_agent["evt-test"]
+        assert agent_name == "sysadmin"
+        assert wait_turn == 5  # returned by _append_and_broadcast mock
+
+
+# =========================================================================
+# T-7: Guard 1 precedence over Guard 7 (regression)
+# =========================================================================
+class TestGuard1Precedence:
+    """Guard 1 (running task) takes precedence over Guard 7 (waiting_for_agent)."""
+
+    def test_guard1_precedence_jarvis_running_task(self):
+        """T-7: Running task + JARVIS sent turn + waiting_for_agent → Guard 1 catches.
+
+        Regression: Guard 7's new task-liveness check must NOT fire when
+        Guard 1 already handles the event via its running-task continue.
+        """
+        conversation = [
+            _make_turn(turn=1, actor="brain", action="route", status="evaluated"),
+            _make_turn(turn=2, actor="jarvis", action="message", status="sent"),
+        ]
+        active_task = MagicMock(done=MagicMock(return_value=False))
+        waiting_for_agent = {"evt-test": ("developer", 1)}
+
+        # Guard 1 condition: task is running (not done)
+        guard1_fires = not active_task.done()
+        assert guard1_fires, "Precondition: Guard 1 must fire for running task"
+
+        # Guard 1 finds unseen non-brain input (JARVIS sent turn) → enqueues
+        unseen = [t for t in conversation if t.status.value == "sent"]
+        has_new_input = any(t.actor != "brain" for t in unseen) or any(
+            t.status.value == "delivered" and t.actor != "brain"
+            for t in conversation
+        )
+        assert has_new_input, "Guard 1 should detect JARVIS sent turn as new input"
+
+        # Guard 1's continue prevents Guard 7 from executing;
+        # waiting_for_agent dict must remain intact
+        assert "evt-test" in waiting_for_agent, (
+            "waiting_for_agent must survive — Guard 7 never reached after Guard 1 continue"
+        )

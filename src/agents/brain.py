@@ -29,10 +29,11 @@
 # 14. [Pattern]: cancel_active_task() is the single kill path. Cancels asyncio.Task -> CancelledError in base_client -> WS close -> SIGTERM.
 # 15. [Pattern]: _active_tasks + _active_agent_for_event track which agent is running per event. Populated in _run_agent_task, cleaned immediately after turn delivery (via _release_task_state) to prevent TOCTOU race with is_intermediate gate evaluation. Ordering invariant: _release_task_state MUST run before any await after turn delivery. Also cleaned in finally + cancel + close.
 # 15b. [Pattern]: _waiting_for_agent (dict[str, tuple[str, int]]) blocks process_event re-entry after
-#     wait_for_agent. Value: (agent_name, wait_turn_number). Cleared when a non-brain DELIVERED turn
-#     arrives AFTER the wait was set (scoped to conversation[wait_turn:]). _process_event_inner guard
-#     uses delivered-only level-triggered check. Scan Guard 7 additionally wakes on fresh unseen (sent)
-#     non-brain turns (edge-triggered fast-path). Also cleared in _release_task_state + _close_and_broadcast.
+#     wait_for_agent. Value: (agent_name, wait_turn_number). Guard 7 PRIMARY path: task-liveness check
+#     (task None or done → stale race, clear and enqueue). FALLBACK path: participant-input check
+#     (level-triggered delivered + edge-triggered sent) retained for concurrent wake_register
+#     interleaving. Handler post-yield re-check (handlers_state.py) is the deterministic fix.
+#     Also cleared in _release_task_state + _close_and_broadcast.
 # 16. [Pattern]: _agent_sessions + _agent_session_modes: session resume is mode-aware. Same mode = resume (e.g., investigate->investigate). Cross-mode (investigate->execute) = fresh session to avoid Claude thinking-block corruption.
 # 17. [Pattern]: _broadcast() fans out to _broadcast_targets list. register_channel() adds targets (e.g., Slack).
 # 27. [Pattern]: event_status_changed broadcast fires after successful status transitions (new->active, active->deferred, deferred->active). Broadcasts at call sites, NOT inside transition_event_status() (Hexagonal boundary). Defer path is defense-in-depth (turn broadcast already fires via _append_and_broadcast).
@@ -3050,19 +3051,20 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
 
-        self._active_tasks[event_id] = asyncio.current_task()
+        current_task = asyncio.current_task()
+        self._active_tasks[event_id] = current_task
         self._active_agent_for_event[event_id] = role
 
-        await self._broadcast({
-            "type": "progress",
-            "event_id": event_id,
-            "actor": role,
-            "message": f"{role} waking (teammate message)...",
-            "event_source": event_source,
-            "subject_type": subject_type,
-        })
-
         try:
+            await self._broadcast({
+                "type": "progress",
+                "event_id": event_id,
+                "actor": role,
+                "message": f"{role} waking (teammate message)...",
+                "event_source": event_source,
+                "subject_type": subject_type,
+            })
+
             result, session_id = await consume_wake_task(
                 bridge=bridge, registry=registry,
                 agent_id=agent_id, task_id=task_id,
@@ -3128,6 +3130,11 @@ class Brain:
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)
+        finally:
+            # Safety net — same pattern as _run_agent_task finally.
+            # Catches CancelledError (BaseException, not caught by except Exception).
+            if self._active_tasks.get(event_id) is current_task:
+                self._release_task_state(event_id)
 
     async def _run_agent_task(
         self,
@@ -4649,8 +4656,32 @@ class Brain:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
-            # Guard 7: waiting_for_agent -- bypass on participant input
+            # Guard 7: waiting_for_agent
             if eid in self._waiting_for_agent:
+                # Race detection: task completed but wait was set after cleanup.
+                # By construction: Guard 1 already continued for running tasks,
+                # so task is ALWAYS done/missing here. Also defends against
+                # concurrent wake_register setting _active_tasks[eid] between
+                # Guard 1 and Guard 7 within the same scan iteration.
+                # Safe: process_event's wait guard prevents new dispatch while
+                # stale wait exists — no risk of clobbering a new agent.
+                task = self._active_tasks.get(eid)
+                if task is None or task.done():
+                    agent_name, _ = self._waiting_for_agent.pop(eid, (None, None))
+                    # Defensive no-op: _release_task_state already cleared this
+                    # if task completed normally
+                    self._active_agent_for_event.pop(eid, None)
+                    logger.warning(
+                        f"Cleared stale _waiting_for_agent for {eid}: "
+                        f"task {'missing' if task is None else 'done'} (agent={agent_name})"
+                    )
+                    to_enqueue.append(eid)
+                    continue
+
+                # Fallback: existing level-triggered + edge-triggered checks
+                # retained for concurrent wake_register interleaving — a new
+                # running task set between Guard 1 and Guard 7 within the same
+                # scan iteration still needs participant-input gating.
                 _, wait_turn = self._waiting_for_agent[eid]
                 # Edge-triggered: fresh sent turns from this scan cycle
                 has_participant_input = any(t.actor != "brain" for t in unseen)

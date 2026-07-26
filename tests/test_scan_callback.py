@@ -371,8 +371,13 @@ class TestIntermediateProcessing:
         assert "evt-1" in result
 
     @pytest.mark.asyncio
-    async def test_waiting_for_agent_stays_parked_on_brain_only_unseen(self):
-        """Waiting-for-agent does NOT bypass when only brain turns are unseen (negative test)."""
+    async def test_waiting_for_agent_stale_race_enqueues(self):
+        """Stale waiting_for_agent with no running task IS enqueued (race detection).
+
+        Previously asserted the deadlock behavior as correct. After the
+        task-liveness fix, active_tasks={} + waiting_for_agent set means
+        the task completed during the handler yield — stale race → enqueue.
+        """
         turns = [
             _make_turn(actor="brain", action="wait", status="evaluated"),
             _make_turn(actor="brain", action="thoughts", status="sent"),
@@ -388,7 +393,7 @@ class TestIntermediateProcessing:
             last_processed={},
             waiting_for_agent={"evt-1": ("developer", 1)},
         )
-        assert "evt-1" not in result
+        assert "evt-1" in result
 
     @pytest.mark.asyncio
     async def test_active_task_no_input_stays_skipped(self):
@@ -455,6 +460,77 @@ class TestIntermediateProcessing:
             waiting_for_agent={},
         )
         assert "evt-1" in result
+
+
+class TestGuard7StaleRaceDetection:
+    """T-1, T-2, T-3: Guard 7 task-liveness check detects stale races."""
+
+    @pytest.mark.asyncio
+    async def test_guard7_clears_stale_wait_task_missing(self):
+        """T-1: waiting_for_agent set but task NOT in _active_tasks → enqueue."""
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+            _make_turn(actor="sysadmin", action="result", status="delivered"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": ("sysadmin", 1)},
+        )
+        assert "evt-1" in result, (
+            "Stale wait with missing task must enqueue (race: task completed during yield)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard7_clears_stale_wait_task_done(self):
+        """T-2: waiting_for_agent set and task.done()=True → enqueue."""
+        done_task = MagicMock(done=MagicMock(return_value=True))
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={"evt-1": done_task},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": ("developer", 1)},
+        )
+        assert "evt-1" in result, (
+            "Stale wait with done task must enqueue (task finished, wait was set late)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_catches_running_task_before_guard7(self):
+        """T-3: Running task + waiting_for_agent → Guard 1 continues, Guard 7 never fires."""
+        running_task = MagicMock(done=MagicMock(return_value=False))
+        turns = [
+            _make_turn(actor="brain", action="wait", status="evaluated"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks={"evt-1": running_task},
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={"evt-1": ("developer", 1)},
+        )
+        assert "evt-1" not in result, (
+            "Running task with no new non-brain input: Guard 1 continues, "
+            "Guard 7's task-liveness check must NOT fire"
+        )
 
 
 def _scan_logic(
@@ -531,6 +607,15 @@ def _scan_logic(
 
         # Guard 7: Waiting-for-agent -- bypass on participant input
         if eid in waiting_for_agent:
+            # Task-liveness check: if task is done/missing, this is a stale
+            # race (handler set wait AFTER _release_task_state already ran).
+            # Guard 1 already continued for running tasks, so by construction
+            # task is always done/missing here.
+            task = active_tasks.get(eid)
+            if task is None or task.done():
+                to_enqueue.append(eid)
+                continue
+
             _, wait_turn = waiting_for_agent[eid]
             # Edge-triggered: fresh sent turns from this scan cycle
             has_participant_input = any(t.actor != "brain" for t in unseen)

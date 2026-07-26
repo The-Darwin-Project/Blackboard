@@ -132,6 +132,15 @@ async def handle_wait_for_agent(
     if assigned == 0:
         return False
     ctx.mark_waiting_for_agent(event_id, agent_name, assigned)
+    # Post-yield race guard: if task completed during the append_and_broadcast
+    # yield, _release_task_state already ran (popping an empty dict). Clear
+    # the just-set wait immediately to avoid deadlock.
+    if not ctx.is_task_running(event_id):
+        ctx.clear_waiting_for_agent(event_id)
+        logger.info(
+            "wait_for_agent race detected: task completed during yield for %s, "
+            "clearing wait immediately", event_id
+        )
     return False
 
 
