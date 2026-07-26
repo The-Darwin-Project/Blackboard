@@ -1575,6 +1575,17 @@ class Brain:
                 self._response_emitted_for.add(event_id)
 
             valid_tool_names = {t["name"] for t in active_tools}
+            # SILENT_PARK invalidation: if we just flushed a brain.response above,
+            # wait_for_user is now valid (the gate's "no response after user message"
+            # premise was satisfied by the flush). Re-admit to prevent false rejection
+            # that causes duplicate text generation on the next iteration.
+            if (
+                function_call.name == "wait_for_user"
+                and "wait_for_user" not in valid_tool_names
+                and event_id in self._response_emitted_for
+            ):
+                valid_tool_names.add("wait_for_user")
+
             if function_call.name not in valid_tool_names:
                 from .tool_gates import diagnose_rejection
                 all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
