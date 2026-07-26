@@ -398,6 +398,8 @@ slack:
     infrastructure: "" # Channel ID for #darwin-infra (e.g., "C0XXXXXXX")
     mrFallback: "" # Channel ID for MR notifications (e.g., "C0YYYYYYY")
   workspaceDomain: "" # Slack workspace domain for permalink URLs (e.g., "myteam.slack.com"). Defaults to "app.slack.com/client"
+  streaming:
+    enabled: false # Toggle chat_stream streaming (Phase 2). When false, falls back to Block Kit.
   userMapping:
     method: "email" # "email" (auto-lookup via Slack API) or "static"
 # =============================================================================

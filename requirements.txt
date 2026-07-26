@@ -40,9 +40,9 @@ websockets>=14.0
 # Kubernetes client (for K8s metrics observer)
 kubernetes>=31.0.0
 
-# Slack integration (Socket Mode, async handlers, Assistant + streaming)
-slack-bolt[async]>=1.22.0
-slack-sdk>=3.35.0
+# Slack integration (Socket Mode, async handlers, agent_view + streaming)
+slack-bolt[async]>=1.30.0
+slack-sdk>=3.37.0
 aiohttp>=3.11.0
 
 # TimeKeeper (cron expression parsing for scheduled tasks)

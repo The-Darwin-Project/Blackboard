@@ -1,32 +1,44 @@
 # BlackBoard/src/channels/slack.py
 # @ai-rules:
 # 1. [Constraint]: Single Socket Mode connection. If Brain scales, only one replica enables Slack.
-# 2. [Pattern]: Events from Slack via /darwin (channels), @mention (join existing threads), or Assistant split-pane (DMs). Non-threaded bare DMs still ignored.
+# 2. [Pattern]: agent_view model. DMs arrive as message.im events. Top-level DMs (no thread_ts) create events;
+#    threaded replies map to existing events. No AsyncAssistant middleware — all routing is in on_dm_message.
 # 3. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
-# 4. [Pattern]: broadcast_handler routes by message["type"]. Assistant threads: brain_thinking -> setStatus, turn -> Block Kit (same as legacy). Legacy: brain_thinking -> emoji, turn -> Block Kit.
+# 4. [Pattern]: broadcast_handler routes by message["type"]. DM threads: brain_thinking -> setStatus + streaming,
+#    turn -> Block Kit (dedup guard skips if stream delivered). Legacy: brain_thinking -> emoji, turn -> Block Kit.
 # 5. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
 # 6. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
-# 7. [Pattern]: _assistant_context stores {channel, thread_ts, user_id, team_id} per event for setStatus calls and DM routing. Populated in user_message, consumed by broadcast_handler.
+# 7. [Pattern]: _dm_context stores {channel, thread_ts, user_id, team_id, _last_status_at} per event for setStatus
+#    calls, DM routing, and streaming recipient resolution. Populated in on_dm_message create branch,
+#    handle_create_event_modal, and open_dm_thread. Self-heals on reply if missing (restart recovery).
+#    Lazy hydration via _ensure_dm_context() in broadcast_handler (protects against BRPOP race).
 # 8. [Pattern]: _INTERNAL_TURNS (actor, action) frozenset prevents internal turns from leaking into
 #    user Slack threads. Applied in _handle_legacy_turn via tuple matching. Extensible for non-brain
 #    actors (e.g., system.notification). The is_quiet whitelist is the inverse for infra threads.
 #    tool_result is handled separately: _USER_VISIBLE_TOOL_RESULTS whitelist + slack_thread_ts gate.
 # 9. [Pattern]: SlackAccessGate (OCP Group-based) gates 8 entry points via _gate_check helper.
-#    Intentionally ungated: handle_feedback (feedback on rejection messages), on_thread_started (info only).
+#    Intentionally ungated: handle_feedback (feedback on rejection messages).
 #    Home tab forks to access-denied view for unauthorized users.
 # 10. [Gotcha]: chat.postMessage(channel=user_id) returns the real DM channel_id in result["channel"].
-#    Always use result["channel"] for mappings, never user_id — Slack delivers follow-up events
-#    with the DM channel_id, not the user_id.
+#    Always use result["channel"] for mappings, never user_id.
+# 11. [Pattern]: Streaming via chat_stream (feature-flagged via SLACK_STREAMING_ENABLED). Coalescing:
+#    500-char primary, 1s secondary. Circuit breaker: _stream_eligible[eid]=False on failure.
+#    _SLACK_API_TIMEOUT (5s) on all Slack API calls in broadcast path. Broken pill recovery
+#    via chat_delete on stream.stop failure. _cleanup_stream in event_closed, stop(), and error paths.
+# 12. [Pattern]: _ensure_dm_context lazy hydration: if _dm_context missing at broadcast time,
+#    queries blackboard for DM channel events (source=slack, channel starts with "D").
+#    Protects against Brain BRPOP race consuming event before on_dm_message dict assignment.
 """SlackChannel adapter -- bidirectional Slack integration via Socket Mode."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import time
 from typing import TYPE_CHECKING, Any
 
-from slack_bolt.async_app import AsyncApp, AsyncAssistant
+from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from .formatter import (
@@ -60,6 +72,8 @@ _USER_VISIBLE_TOOL_RESULTS = frozenset({
     "review_notes", "list_observations",
 })
 
+_SLACK_API_TIMEOUT = 5.0
+
 
 class SlackChannel:
     """Adapter wrapping Slack Bolt AsyncApp with Socket Mode."""
@@ -73,6 +87,7 @@ class SlackChannel:
         blackboard: "BlackboardState",
         brain: "Brain",
         access_gate: "SlackAccessGate | None" = None,
+        streaming_enabled: bool = False,
     ) -> None:
         self._app_token = app_token
         self._access_gate = access_gate
@@ -85,13 +100,19 @@ class SlackChannel:
         self._user_email_cache: dict[str, str] = {}
         self._USER_CACHE_TTL = 3600
         self._thinking_msg: dict[str, tuple[str, str]] = {}  # event_id -> (channel, msg_ts)
-        self._assistant_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id}
+        self._dm_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id, _last_status_at}
         self._quiet_events: set[str] = set()  # events from @mention -- suppress noise, show only results
 
+        # Phase 2: Streaming state
+        self._active_streams: dict[str, Any] = {}  # event_id -> AsyncChatStream
+        self._stream_eligible: dict[str, bool] = {}  # event_id -> cached eligibility
+        self._stream_delivered: dict[str, bool] = {}  # event_id -> True if stream had content this cycle
+        self._coalesce_buffer: dict[str, str] = {}  # event_id -> buffered text pending flush
+        self._coalesce_last_flush: dict[str, float] = {}  # event_id -> last flush timestamp
+        self._stream_ts: dict[str, str] = {}  # event_id -> message ts for broken pill recovery
+        self._streaming_enabled: bool = streaming_enabled
+
         self._app = AsyncApp(token=bot_token)
-        self._assistant = AsyncAssistant()
-        self._register_assistant_handlers()
-        self._app.use(self._assistant)
         self._register_handlers()
 
     async def _resolve_display_name(self, client: Any, user_id: str) -> str:
@@ -209,129 +230,6 @@ class SlackChannel:
         )
         await self._blackboard.append_turn(new_event_id, user_turn)
         return new_event_id
-
-    def _register_assistant_handlers(self) -> None:
-        """Register Assistant middleware handlers for split-pane AI experience."""
-
-        @self._assistant.thread_started
-        async def on_thread_started(say: Any, set_suggested_prompts: Any, context: dict, client: Any) -> None:
-            try:
-                prompts: list[dict[str, str]] = []
-                user_id = context.get("user_id", "")
-                authorized = await self._gate_check(client, user_id) if user_id else not self._access_gate
-                if authorized:
-                    event_ids = await self._blackboard.get_active_events()
-                    if event_ids:
-                        prompts.append({
-                            "title": f"What's happening with {event_ids[0]}?",
-                            "message": f"Give me a full status update on event {event_ids[0]} -- current phase, what agents have done, and what's pending.",
-                        })
-                prompts.append({
-                    "title": "Run a pipeline retest",
-                    "message": "Retest the latest failed pipeline on this MR: <paste MR URL>",
-                })
-                prompts.append({
-                    "title": "Investigate a failure",
-                    "message": "Investigate why this service is failing: <paste service name or error>",
-                })
-                await set_suggested_prompts(prompts=prompts)
-                await say("How can I help you?")
-            except Exception as e:
-                logger.warning(f"Assistant thread_started failed: {e}")
-                await say("How can I help you?")
-
-        @self._assistant.user_message
-        async def on_user_message(
-            payload: dict, client: Any, set_status: Any, set_title: Any, say: Any,
-        ) -> None:
-            try:
-                channel_id = payload["channel"]
-                team_id = payload.get("team", "")
-                thread_ts = payload["thread_ts"]
-                user_id = payload["user"]
-                text = payload.get("text", "")
-
-                if not await self._gate_check(client, user_id):
-                    await say(":lock: You don't have access to Darwin. Contact the app maintainer to be added.")
-                    return
-
-                await set_status("FRIDAY is thinking...")
-
-                event_id = await self._blackboard.get_event_by_slack_thread(channel_id, thread_ts)
-
-                if not event_id:
-                    display_name = await self._resolve_display_name(client, user_id)
-                    user_email = self._get_cached_email(user_id)
-                    # Pre-register assistant context BEFORE create_event to avoid
-                    # race: Brain can process the event before context is set.
-                    # event_id is not known yet, so we register after creation
-                    # but Slack context is passed atomically via create_event.
-                    event_id = await self._blackboard.create_event(
-                        source="slack",
-                        service="general",
-                        reason=text,
-                        evidence=EventEvidence(
-                            display_text=text,
-                            source_type="slack",
-                            triggered_by=display_name,
-                            domain="disorder",
-                            severity="info",
-                        ),
-                        created_by_email=user_email or None,
-                        slack_channel_id=channel_id,
-                        slack_thread_ts=thread_ts,
-                        slack_user_id=user_id,
-                    )
-                    await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_id)
-                    await set_title(f"{event_id}: {text[:50]}")
-                    logger.info(f"Assistant: new event {event_id} by {user_id}")
-                else:
-                    from ..models import ConversationTurn
-                    event_doc = await self._blackboard.get_event(event_id)
-                    if not event_doc:
-                        await say(":warning: Event not found.")
-                        return
-                    display_name = await self._resolve_display_name(client, user_id)
-
-                    if event_doc.status == "closed":
-                        event_id = await self._create_followup_event(
-                            event_doc, event_id, text, channel_id, thread_ts, user_id, display_name,
-                        )
-                        await set_title(f"{event_id}: {text[:50]}")
-                        logger.info(f"Assistant: smart-routed to new event {event_id} (original was closed)")
-                    else:
-                        from ..models import ConversationTurn
-                        turn = ConversationTurn(
-                            turn=len(event_doc.conversation) + 1,
-                            actor="user", action="message",
-                            thoughts=text, source="slack",
-                            user_name=display_name,
-                        )
-                        await self._blackboard.append_turn(event_id, turn)
-                        logger.info(f"Assistant: reply on {event_id} from {display_name}")
-
-                    if event_doc.status != "closed" and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel_id:
-                        try:
-                            workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                            ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                            thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
-                            await say(f":white_check_mark: Message received. :point_right: <{thread_link}|Continue in #darwin-infra>")
-                        except Exception as e:
-                            logger.warning(f"Assistant DM ack failed for {event_id}: {e}")
-
-                self._assistant_context[event_id] = {
-                    "channel": channel_id, "thread_ts": thread_ts,
-                    "user_id": user_id, "team_id": team_id,
-                }
-                self._brain.clear_waiting(event_id)
-                await self._brain.resume_if_parked(event_id)
-            except Exception as e:
-                logger.exception(f"Assistant user_message failed: {e}")
-                await say(f":warning: Something went wrong ({e})")
-
-        @self._assistant.thread_context_changed
-        async def on_context_changed() -> None:
-            pass
 
     def _register_handlers(self) -> None:
         """Register Slack event listeners on the Bolt app."""
@@ -475,15 +373,75 @@ class SlackChannel:
                 return
 
             thread_ts = event.get("thread_ts")
+            is_top_level_dm = False
+
             if thread_ts is None:
-                return
+                if channel_type != "im":
+                    return
+                thread_ts = event["ts"]
+                is_top_level_dm = True
 
             user = event["user"]
 
             if not await self._gate_check(client, user):
+                if is_top_level_dm:
+                    await client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=":lock: You don't have access to Darwin.",
+                    )
                 return
 
             event_id = await self._blackboard.get_event_by_slack_thread(channel, thread_ts)
+
+            # Widened create gate: top-level DMs AND cutover window where message.im
+            # arrives WITH thread_ts for threads we haven't mapped yet.
+            if not event_id and channel_type == "im":
+                display_name = await self._resolve_display_name(client, user)
+                user_email = self._get_cached_email(user)
+                team_id = event.get("team", "")
+
+                try:
+                    await client.assistant_threads_setStatus(
+                        channel_id=channel, thread_ts=thread_ts,
+                        status="FRIDAY is thinking...",
+                    )
+                except Exception as e:
+                    logger.debug(f"setStatus failed (non-fatal): {e}")
+
+                event_id = await self._blackboard.create_event(
+                    source="slack",
+                    service="general",
+                    reason=text,
+                    evidence=EventEvidence(
+                        display_text=text,
+                        source_type="slack",
+                        triggered_by=display_name,
+                        domain="disorder",
+                        severity="info",
+                    ),
+                    created_by_email=user_email or None,
+                    slack_channel_id=channel,
+                    slack_thread_ts=thread_ts,
+                    slack_user_id=user,
+                )
+                self._dm_context[event_id] = {
+                    "channel": channel, "thread_ts": thread_ts,
+                    "user_id": user, "team_id": team_id,
+                    "_last_status_at": time.time(),
+                }
+                await self._blackboard.set_slack_mapping(channel, thread_ts, event_id)
+
+                try:
+                    await client.assistant_threads_setTitle(
+                        channel_id=channel, thread_ts=thread_ts,
+                        title=f"{event_id}: {text[:50]}",
+                    )
+                except Exception as e:
+                    logger.debug(f"setTitle failed for {event_id}: {e}")
+
+                logger.info(f"agent_view DM: new event {event_id} by {user}")
+                return
+
             if not event_id:
                 return
 
@@ -492,47 +450,67 @@ class SlackChannel:
                 return
 
             display_name = await self._resolve_display_name(client, user)
+            team_id = event.get("team", "")
+
+            # Hydrate _dm_context on EVERY reply (self-healing after restart/legacy events)
+            if channel_type == "im" and event_id not in self._dm_context:
+                self._dm_context[event_id] = {
+                    "channel": channel, "thread_ts": thread_ts,
+                    "user_id": user, "team_id": team_id,
+                    "_last_status_at": 0,
+                }
 
             if event_doc.status == "closed":
                 new_event_id = await self._create_followup_event(
                     event_doc, event_id, text, channel, thread_ts, user, display_name,
                 )
+                if channel_type == "im":
+                    self._dm_context[new_event_id] = {
+                        "channel": channel, "thread_ts": thread_ts,
+                        "user_id": user, "team_id": team_id,
+                        "_last_status_at": 0,
+                    }
+                try:
+                    await client.assistant_threads_setTitle(
+                        channel_id=channel, thread_ts=thread_ts,
+                        title=f"{new_event_id}: {text[:50]}",
+                    )
+                except Exception:
+                    pass
                 await self._safe_react(client, channel, event["ts"], "brain")
-                logger.info(f"Slack DM reply: smart-routed to new event {new_event_id} (original {event_id} was closed)")
+                logger.info(f"DM reply: follow-up {new_event_id} (original {event_id} closed)")
                 return
 
             is_channel_thread = channel_type != "im"
 
-            await self._safe_react(client, channel, event["ts"], "eyes")
-
             from ..models import ConversationTurn
             turn = ConversationTurn(
                 turn=len(event_doc.conversation) + 1,
-                actor="user",
-                action="message",
-                thoughts=text,
-                source="slack",
+                actor="user", action="message",
+                thoughts=text, source="slack",
                 user_name=display_name,
             )
             await self._blackboard.append_turn(event_id, turn)
+
             if is_channel_thread:
-                logger.info(f"Slack infra thread context: appended turn on {event_id} from {display_name} (observe-only, no Brain eval)")
+                await self._safe_react(client, channel, event["ts"], "eyes")
+                logger.info(f"Infra thread reply on {event_id} from {display_name}")
             else:
                 self._brain.clear_waiting(event_id)
                 await self._brain.resume_if_parked(event_id)
-            if not is_channel_thread and event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
-                try:
-                    workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
-                    ts_nodot = event_doc.slack_thread_ts.replace(".", "")
-                    thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
-                    await client.chat_postMessage(
-                        channel=channel, thread_ts=thread_ts,
-                        text=f":white_check_mark: Message received. :point_right: <{thread_link}|Continue in #darwin-infra>",
-                    )
-                except Exception as e:
-                    logger.warning(f"DM ack failed for {event_id}: {e}")
-            if not is_channel_thread:
-                logger.info(f"Slack DM reply on {event_id} from {display_name} ({user})")
+                await self._safe_react(client, channel, event["ts"], "eyes")
+                if event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
+                    try:
+                        workspace = os.environ.get("SLACK_WORKSPACE_DOMAIN", "app.slack.com/client")
+                        ts_nodot = event_doc.slack_thread_ts.replace(".", "")
+                        thread_link = f"https://{workspace}/archives/{event_doc.slack_channel_id}/p{ts_nodot}"
+                        await client.chat_postMessage(
+                            channel=channel, thread_ts=thread_ts,
+                            text=f":white_check_mark: Message received. :point_right: <{thread_link}|Continue in #darwin-infra>",
+                        )
+                    except Exception as e:
+                        logger.warning(f"DM ack failed for {event_id}: {e}")
+                logger.info(f"DM reply on {event_id} from {display_name}")
 
         @self._app.action("darwin_approve")
         async def handle_approve(ack: Any, body: dict, client: Any) -> None:
@@ -607,9 +585,38 @@ class SlackChannel:
 
         @self._app.event("app_home_opened")
         async def handle_app_home_opened(event: dict, client: Any) -> None:
-            if event.get("tab") != "home":
-                return
+            tab = event.get("tab")
             user_id = event["user"]
+
+            if tab == "messages":
+                try:
+                    prompts: list[dict[str, str]] = []
+                    authorized = await self._gate_check(client, user_id)
+                    if authorized:
+                        event_ids = await self._blackboard.get_active_events()
+                        if event_ids:
+                            prompts.append({
+                                "title": f"What's happening with {event_ids[0]}?",
+                                "message": f"Give me a full status update on event {event_ids[0]} -- current phase, what agents have done, and what's pending.",
+                            })
+                    prompts.append({
+                        "title": "Run a pipeline retest",
+                        "message": "Retest the latest failed pipeline on this MR: <paste MR URL>",
+                    })
+                    prompts.append({
+                        "title": "Investigate a failure",
+                        "message": "Investigate why this service is failing: <paste service name or error>",
+                    })
+                    await client.assistant_threads_setSuggestedPrompts(
+                        channel_id=event.get("channel", ""),
+                        prompts=prompts,
+                    )
+                except Exception as e:
+                    logger.debug(f"setSuggestedPrompts failed: {e}")
+                return
+
+            if tab != "home":
+                return
             try:
                 await self._publish_home_tab(client, user_id)
             except Exception as e:
@@ -681,6 +688,11 @@ class SlackChannel:
                 event_id, dm_channel, thread_ts, user_id,
             )
             await self._blackboard.set_slack_mapping(dm_channel, thread_ts, event_id)
+            self._dm_context[event_id] = {
+                "channel": dm_channel, "thread_ts": thread_ts,
+                "user_id": user_id, "team_id": "",
+                "_last_status_at": 0,
+            }
             logger.info(f"Home tab create event: {event_id} by {user_id} in {dm_channel} (thread={thread_ts})")
 
         @self._app.action("darwin_home_open_dashboard")
@@ -756,31 +768,72 @@ class SlackChannel:
         """Route Brain broadcasts to Block Kit path for all thread types."""
         msg_type = message.get("type")
         event_id = message.get("event_id", "")
-        is_assistant = event_id in self._assistant_context
-
+        is_dm = await self._ensure_dm_context(event_id)
         is_quiet = event_id in self._quiet_events
 
         if msg_type == "brain_thinking":
+            text = message.get("text", "")
+            is_thought = message.get("is_thought", False)
+
+            # Clear stale dedup flag + circuit breaker on new cycle start
+            if not text:
+                self._stream_delivered.pop(event_id, None)
+                self._stream_eligible.pop(event_id, None)
+
             if is_quiet:
                 if event_id not in self._thinking_msg:
                     await self._handle_legacy_thinking(event_id, message)
                 return
-            if is_assistant:
-                await self._handle_assistant_thinking(event_id, message)
+
+            if is_dm:
+                await self._refresh_thinking_status(event_id)
+                # Stream non-thought output text (feature-flagged)
+                if text and not is_thought and self._should_stream(event_id):
+                    buf = self._coalesce_buffer.get(event_id, "") + text
+                    self._coalesce_buffer[event_id] = buf
+                    last_flush = self._coalesce_last_flush.get(event_id, 0)
+                    now = time.time()
+
+                    if len(buf) >= 500 or (now - last_flush) >= 1.0:
+                        stream = self._active_streams.get(event_id)
+                        if not stream:
+                            stream = await self._start_stream(event_id)
+                            if stream:
+                                self._active_streams[event_id] = stream
+                        if stream:
+                            try:
+                                await asyncio.wait_for(stream.append(markdown_text=buf), timeout=_SLACK_API_TIMEOUT)
+                                self._coalesce_buffer[event_id] = ""
+                                self._coalesce_last_flush[event_id] = now
+                            except Exception as e:
+                                logger.warning(f"Stream append failed for {event_id}: {e}")
+                                self._stream_eligible[event_id] = False
+                                await self._cleanup_stream(event_id)
             else:
                 await self._handle_legacy_thinking(event_id, message)
             return
 
         if msg_type == "brain_thinking_done":
-            ctx = self._assistant_context.get(event_id)
-            if ctx:
-                try:
-                    await self._app.client.assistant_threads_setStatus(
-                        channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
-                        status="",
-                    )
-                except Exception as e:
-                    logger.debug(f"Clear setStatus failed for {event_id}: {e}")
+            # Stream finalization (DM only)
+            if self._should_stream(event_id):
+                buf = self._coalesce_buffer.pop(event_id, "")
+                stream = self._active_streams.get(event_id)
+                if stream and buf:
+                    try:
+                        await asyncio.wait_for(stream.append(markdown_text=buf), timeout=_SLACK_API_TIMEOUT)
+                    except Exception:
+                        pass
+                if stream:
+                    try:
+                        await asyncio.wait_for(stream.stop(), timeout=_SLACK_API_TIMEOUT)
+                    except Exception as e:
+                        logger.warning(f"Stream stop failed for {event_id}: {e}")
+                    self._active_streams.pop(event_id, None)
+                    self._stream_delivered[event_id] = True
+                self._coalesce_last_flush.pop(event_id, None)
+
+            if is_dm:
+                await self._clear_thinking_status(event_id)
             return
 
         if msg_type == "turn":
@@ -792,6 +845,7 @@ class SlackChannel:
             await self._handle_legacy_turn(event_id, message)
 
         elif msg_type == "event_closed":
+            await self._cleanup_stream(event_id)
             event_doc = await self._blackboard.get_event(event_id)
             if event_doc and event_doc.slack_thread_ts:
                 summary = message.get("summary", "Event closed.")
@@ -807,37 +861,128 @@ class SlackChannel:
                 await self._blackboard.delete_slack_mapping(
                     event_doc.slack_channel_id, event_doc.slack_thread_ts,
                 )
-            self._assistant_context.pop(event_id, None)
+            self._dm_context.pop(event_id, None)
+            self._stream_eligible.pop(event_id, None)
+            self._stream_delivered.pop(event_id, None)
+            self._stream_ts.pop(event_id, None)
+            self._thinking_msg.pop(event_id, None)
             self._quiet_events.discard(event_id)
 
     # =========================================================================
-    # Assistant status path (split-pane DM threads — status only, turns via legacy)
+    # DM status path (agent_view — setStatus debounce + streaming helpers)
     # =========================================================================
 
-    async def _handle_assistant_thinking(self, event_id: str, message: dict) -> None:
-        """Set status indicator for Assistant threads. Refreshes periodically to prevent Slack timeout."""
-        text = message.get("text", "")
-        is_thought = message.get("is_thought", False)
-
-        ctx = self._assistant_context.get(event_id)
+    async def _refresh_thinking_status(self, event_id: str) -> None:
+        """Refresh setStatus for DM events with 20s debounce."""
+        ctx = self._dm_context.get(event_id)
         if not ctx:
-            logger.debug(f"No assistant context for {event_id}, skipping setStatus")
             return
-
-        if not text or is_thought:
-            now = time.time()
-            last_set = ctx.get("_last_status_at", 0)
-            if now - last_set < 20:
-                return
-            try:
-                await self._app.client.assistant_threads_setStatus(
+        now = time.time()
+        if now - ctx.get("_last_status_at", 0) < 20:
+            return
+        ctx["_last_status_at"] = now
+        try:
+            await asyncio.wait_for(
+                self._app.client.assistant_threads_setStatus(
                     channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
                     status="FRIDAY is thinking...",
-                )
-                ctx["_last_status_at"] = now
-            except Exception as e:
-                logger.warning(f"setStatus failed for {event_id}: {e}")
+                ),
+                timeout=_SLACK_API_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning(f"setStatus refresh failed for {event_id}: {e}")
+
+    async def _clear_thinking_status(self, event_id: str) -> None:
+        """Clear setStatus for DM events."""
+        ctx = self._dm_context.get(event_id)
+        if not ctx:
             return
+        try:
+            await asyncio.wait_for(
+                self._app.client.assistant_threads_setStatus(
+                    channel_id=ctx["channel"], thread_ts=ctx["thread_ts"],
+                    status="",
+                ),
+                timeout=_SLACK_API_TIMEOUT,
+            )
+        except Exception as e:
+            logger.debug(f"Clear setStatus failed for {event_id}: {e}")
+
+    def _should_stream(self, event_id: str) -> bool:
+        """Check if event is eligible for streaming. Cached per event_id."""
+        if not self._streaming_enabled:
+            return False
+        cached = self._stream_eligible.get(event_id)
+        if cached is not None:
+            return cached
+        ctx = self._dm_context.get(event_id)
+        eligible = ctx is not None and bool(ctx.get("thread_ts"))
+        self._stream_eligible[event_id] = eligible
+        return eligible
+
+    async def _ensure_dm_context(self, event_id: str) -> bool:
+        """Lazily hydrate _dm_context from event document if missing. Returns True if DM."""
+        if event_id in self._dm_context:
+            return True
+        event_doc = await self._blackboard.get_event(event_id)
+        if not event_doc:
+            return False
+        ch = event_doc.slack_channel_id or ""
+        if event_doc.source == "slack" and ch.startswith("D"):
+            self._dm_context[event_id] = {
+                "channel": ch,
+                "thread_ts": event_doc.slack_thread_ts or "",
+                "user_id": event_doc.slack_user_id or "",
+                "team_id": "",
+                "_last_status_at": 0,
+            }
+            return True
+        return False
+
+    async def _start_stream(self, event_id: str) -> Any:
+        """Start a chat stream for the event. Returns stream object or None on failure."""
+        ctx = self._dm_context.get(event_id)
+        if not ctx:
+            return None
+        try:
+            stream = await asyncio.wait_for(
+                self._app.client.chat_stream(
+                    channel=ctx["channel"],
+                    thread_ts=ctx["thread_ts"],
+                    recipient_user_id=ctx["user_id"],
+                    recipient_team_id=ctx.get("team_id") or None,
+                    buffer_size=0,
+                ),
+                timeout=_SLACK_API_TIMEOUT,
+            )
+            self._stream_ts[event_id] = getattr(stream, "ts", None) or ""
+            logger.info(f"Stream started for {event_id}")
+            return stream
+        except Exception as e:
+            logger.warning(f"chat_stream start failed for {event_id}: {e}")
+            self._stream_eligible[event_id] = False
+            self._coalesce_buffer.pop(event_id, None)
+            return None
+
+    async def _cleanup_stream(self, event_id: str) -> None:
+        """Stop and remove an active stream. Safe to call multiple times."""
+        stream = self._active_streams.pop(event_id, None)
+        stream_ts = self._stream_ts.pop(event_id, None)
+        if stream:
+            try:
+                await asyncio.wait_for(stream.stop(), timeout=_SLACK_API_TIMEOUT)
+            except Exception:
+                if stream_ts:
+                    ctx = self._dm_context.get(event_id)
+                    if ctx:
+                        try:
+                            await self._app.client.chat_delete(
+                                channel=ctx["channel"], ts=stream_ts,
+                            )
+                        except Exception:
+                            pass
+        self._coalesce_buffer.pop(event_id, None)
+        self._coalesce_last_flush.pop(event_id, None)
 
     # =========================================================================
     # Legacy path (channel threads, infra threads, all turn delivery)
@@ -861,12 +1006,18 @@ class SlackChannel:
             logger.warning(f"Slack thinking indicator failed: {e}")
 
     async def _handle_legacy_turn(self, event_id: str, message: dict) -> None:
-        """Post turn via Block Kit for all thread types (Assistant + legacy)."""
+        """Post turn via Block Kit for all thread types (DM + legacy)."""
         event_doc = await self._blackboard.get_event(event_id)
         if not event_doc:
             return
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
+
+        # Dedup: if stream already delivered this response text, skip Block Kit
+        if turn.actor == "brain" and turn.action == "response":
+            if self._stream_delivered.pop(event_id, False):
+                logger.debug(f"Skipping Block Kit for {event_id} — stream delivered")
+                return
 
         if turn.actor == "brain" and turn.action == "thoughts":
             return
@@ -1065,6 +1216,11 @@ class SlackChannel:
                 event_doc.id, channel_id, thread_ts, slack_user_id,
             )
             await self._blackboard.set_slack_mapping(channel_id, thread_ts, event_doc.id)
+            self._dm_context[event_doc.id] = {
+                "channel": channel_id, "thread_ts": thread_ts,
+                "user_id": slack_user_id, "team_id": "",
+                "_last_status_at": 0,
+            }
         except Exception as e:
             logger.warning(f"DM thread open failed: {e}")
 
@@ -1080,6 +1236,8 @@ class SlackChannel:
 
     async def stop(self) -> None:
         """Graceful shutdown."""
+        for eid in list(self._active_streams.keys()):
+            await self._cleanup_stream(eid)
         if self._handler:
             await self._handler.close_async()
             logger.info("Slack Socket Mode disconnected")
