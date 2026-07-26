@@ -68,7 +68,7 @@ jobs:
           AI_REVIEW_EFFORT: ${{ vars.AI_REVIEW_EFFORT || 'medium' }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '15' }}
           AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '3.50' }}
-          AI_REVIEW_MAX_DIFF_LINES: ${{ vars.AI_REVIEW_MAX_DIFF_LINES || '5000' }}
+          AI_REVIEW_MAX_DIFF_LINES: ${{ vars.AI_REVIEW_MAX_DIFF_LINES || '10000' }}
         run: node /app/entrypoint/dist/index.js
 
       - name: Post failure notice
