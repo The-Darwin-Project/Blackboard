@@ -333,6 +333,7 @@ export interface FlowMetrics {
   token_total_60s: number;
   token_calls_60s: number;
   snapshot_timestamp: number | null;
+  wip_by_source: Record<string, number>;
   agents_by_role: Record<string, { busy: number; idle: number }>;
   staleness_guards: Array<Record<string, unknown>>;
 }

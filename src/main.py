@@ -606,6 +606,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
     hh_pending = 0
     wip_used = 0
     wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+    wip_by_source: dict[str, int] = {}
     try:
         brain = await get_brain()
         hh = brain.agents.get("_headhunter") if brain else None
@@ -613,6 +614,11 @@ async def get_flow_metrics() -> FlowMetricsResponse:
             hh_pending = hh.pending_count
         if brain:
             wip_used = await brain.count_global_wip()
+    except Exception:
+        pass
+    try:
+        if _blackboard is not None:
+            wip_by_source = await _blackboard.get_wip_by_source()
     except Exception:
         pass
     wip_utilization_pct = (wip_used / wip_cap * 100) if wip_cap > 0 else 0.0
@@ -632,6 +638,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         wip_cap=wip_cap,
         wip_utilization_pct=round(wip_utilization_pct, 1),
         wip_available=wip_available,
+        wip_by_source=wip_by_source,
         avg_reconcile_ms=latest.avg_reconcile_ms if latest else 0.0,
         token_total_60s=latest.token_total_delta if latest else 0,
         token_calls_60s=latest.token_calls_delta if latest else 0,

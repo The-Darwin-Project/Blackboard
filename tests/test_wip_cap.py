@@ -171,6 +171,66 @@ class TestHeadhunterFlowGate:
         assert await hh.check_flow_gate() is False
 
 
+class TestAlignerFlowGate:
+    @pytest.fixture
+    def aligner_stub(self, monkeypatch):
+        monkeypatch.setenv("MAX_ACTIVE_EVENTS", "5")
+        from src.agents.aligner import Aligner
+        bb = MagicMock()
+        bb.redis = MagicMock()
+        aligner = Aligner(bb)
+        return aligner
+
+    @pytest.mark.asyncio
+    async def test_allows_below_cap(self, aligner_stub):
+        aligner_stub.blackboard.get_active_events = AsyncMock(return_value=[])
+        aligner_stub.blackboard.get_active_events_with_status = AsyncMock(return_value={
+            "evt-1": "active",
+            "evt-2": "deferred",
+        })
+        aligner_stub.blackboard.redis.get = AsyncMock(return_value=None)
+        aligner_stub.blackboard.get_escalation_flag = AsyncMock(return_value=None)
+        aligner_stub.blackboard.create_event = AsyncMock(return_value="evt-new")
+        aligner_stub.blackboard.redis.set = AsyncMock()
+
+        await aligner_stub._create_brain_event("test-svc", "test_anomaly", "test text")
+        aligner_stub.blackboard.create_event.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_blocks_at_cap(self, aligner_stub):
+        aligner_stub.blackboard.get_active_events = AsyncMock(return_value=[])
+        aligner_stub.blackboard.get_active_events_with_status = AsyncMock(return_value={
+            "evt-1": "active",
+            "evt-2": "deferred",
+            "evt-3": "new",
+            "evt-4": "active",
+            "evt-5": "new",
+        })
+        aligner_stub.blackboard.redis.get = AsyncMock(return_value=None)
+        aligner_stub.blackboard.get_escalation_flag = AsyncMock(return_value=None)
+        aligner_stub.blackboard.create_event = AsyncMock(return_value="evt-new")
+
+        await aligner_stub._create_brain_event("test-svc", "test_anomaly", "test text")
+        aligner_stub.blackboard.create_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_counts_new_in_wip(self, aligner_stub):
+        """Aligner counts NEW events too (prevents queue flooding)."""
+        aligner_stub._wip_cap = 3
+        aligner_stub.blackboard.get_active_events = AsyncMock(return_value=[])
+        aligner_stub.blackboard.get_active_events_with_status = AsyncMock(return_value={
+            "evt-1": "new",
+            "evt-2": "new",
+            "evt-3": "new",
+        })
+        aligner_stub.blackboard.redis.get = AsyncMock(return_value=None)
+        aligner_stub.blackboard.get_escalation_flag = AsyncMock(return_value=None)
+        aligner_stub.blackboard.create_event = AsyncMock(return_value="evt-new")
+
+        await aligner_stub._create_brain_event("test-svc", "test_anomaly", "test text")
+        aligner_stub.blackboard.create_event.assert_not_called()
+
+
 class TestBrainAdmissionGate:
     """Integration tests for the Brain.process_event admission path."""
 

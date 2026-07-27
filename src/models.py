@@ -635,6 +635,7 @@ class FlowMetricsResponse(BaseModel):
     token_total_60s: int = 0
     token_calls_60s: int = 0
     snapshot_timestamp: float | None = None
+    wip_by_source: dict[str, int] = Field(default_factory=dict)
     agents_by_role: dict[str, dict[str, int]] = Field(default_factory=dict)
     staleness_guards: list[dict] = Field(default_factory=list)
 

@@ -46,6 +46,7 @@ def _make_event(event_id="evt-1", service="svc-a", source="aligner", status=Even
 def _mock_blackboard():
     bb = AsyncMock(spec=BlackboardState)
     bb.get_active_events.return_value = []
+    bb.get_active_events_with_status.return_value = {}
     bb.get_event.return_value = None
     bb.get_service.return_value = None
     bb.get_escalation_flag.return_value = None
@@ -54,6 +55,7 @@ def _mock_blackboard():
     bb.create_event.return_value = "evt-new"
     bb.redis = AsyncMock()
     bb.redis.get.return_value = None
+    bb.redis.set.return_value = None
     return bb
 
 
@@ -93,7 +95,7 @@ def _stub_brain(bb):
 
 
 # =========================================================================
-# 1. Gate: Service with flag → _trigger_architect returns without create
+# 1. Gate: Service with flag → _create_brain_event returns without create
 # =========================================================================
 
 @pytest.mark.asyncio
@@ -101,7 +103,7 @@ async def test_gate_blocks_when_flag_set():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = "evt-old|high cpu"
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
+    await aligner._create_brain_event("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_not_called()
 
 
@@ -114,7 +116,7 @@ async def test_gate_allows_when_no_flag():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = None
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
+    await aligner._create_brain_event("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_called_once()
 
 
@@ -413,7 +415,7 @@ async def test_cross_scope_no_suppression():
         return None
     bb.get_escalation_flag.side_effect = scope_aware_get
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    await aligner._create_brain_event("svc-a", "high_cpu", "ArgoCD health: Degraded")
     bb.create_event.assert_called_once()
 
 
@@ -427,7 +429,7 @@ async def test_same_scope_suppression():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = "evt-old|health flag"
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    await aligner._create_brain_event("svc-a", "high_cpu", "ArgoCD health: Degraded")
     bb.create_event.assert_not_called()
 
 

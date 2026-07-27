@@ -1498,6 +1498,29 @@ return 0
                 continue
         return status_map
 
+    async def get_wip_by_source(self) -> dict[str, int]:
+        """Count WIP events (new+active+deferred) grouped by source. O(N) pipeline."""
+        members = list(await self.redis.smembers(self.EVENT_ACTIVE))
+        if not members:
+            return {}
+        pipe = self.redis.pipeline(transaction=False)
+        for eid in members:
+            pipe.get(f"{self.EVENT_PREFIX}{eid}")
+        results = await pipe.execute()
+        counts: dict[str, int] = {}
+        for raw in results:
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            status = data.get("status", "active")
+            if status in ("new", "active", "deferred"):
+                src = data.get("source", "unknown")
+                counts[src] = counts.get(src, 0) + 1
+        return counts
+
     async def find_active_event_by_source(self, source: str) -> str | None:
         """Find an active event by source. Returns event_id or None."""
         for eid in await self.redis.smembers(self.EVENT_ACTIVE):

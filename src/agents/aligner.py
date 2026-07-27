@@ -8,6 +8,8 @@
 # 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (via LLM_MAX_TOKENS_ALIGNER or per-call override).
 # 6. [Pattern]: Aligner uses GeminiAdapter (model from LLM_MODEL_ALIGNER) ONLY for configure_filter() NLP
 #    parsing. Flash is no longer in the health/sync escalation path (see rule 1).
+# 7. [Pattern]: _create_brain_event Layer 4 — global WIP flow gate. Mirrors Headhunter.check_flow_gate():
+#    counts NEW+ACTIVE+DEFERRED against MAX_ACTIVE_EVENTS. Prevents queue flooding when system is at capacity.
 """
 Agent 1: The Aligner (The Listener)
 
@@ -107,6 +109,9 @@ class Aligner:
         
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
+
+        # Global WIP cap -- same env var as Headhunter/Brain for consistency
+        self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
     
     async def _get_adapter(self):
         """Lazy-load LLM adapter (always Gemini for Aligner, model from LLM_MODEL_ALIGNER)."""
@@ -287,7 +292,7 @@ class Aligner:
             f"ArgoCD health: {old_health} -> {new_health} "
             f"(service={service}, namespace={namespace}, app={argocd_app})"
         )
-        await self._trigger_architect(
+        await self._create_brain_event(
             service, f"argocd_health_{new_health.lower()}", display_text,
             domain="complicated", severity_level=severity,
             argocd_app=argocd_app,
@@ -321,7 +326,7 @@ class Aligner:
             f"ArgoCD sync: {old_sync or 'unknown'} -> {new_sync} for {argocd_app} "
             f"(out of sync {SYNC_DRIFT_DWELL_SECONDS}s+, auto-sync enabled)"
         )
-        await self._trigger_architect(
+        await self._create_brain_event(
             argocd_app, "argocd_sync_drift", display_text,
             domain="clear", severity_level="warning",
             subject_type="system", argocd_app=argocd_app,
@@ -353,13 +358,13 @@ class Aligner:
             return True
         return False
 
-    async def _trigger_architect(
+    async def _create_brain_event(
         self, service: str, anomaly_type: str, display_text: str,
         domain: str = "complicated", severity_level: str = "warning",
         subject_type: str = "service", argocd_app: str = "",
     ) -> None:
         """
-        Create an event for the Brain to process -- with three-layer deduplication.
+        Create an event for the Brain to process -- with four-layer deduplication.
         
         Layer 1 (active-event check): skip if an event is already being worked on.
         Layer 2 (time-based cooldown): skip if we recently created an event for
@@ -367,6 +372,8 @@ class Aligner:
         oscillation cycles (e.g. flapping health/sync states).
         Layer 3 (escalation suppression): skip while Brain's report_incident flag
         is pending on the target service.
+        Layer 4 (WIP flow gate): skip if global WIP (NEW+ACTIVE+DEFERRED) >= cap.
+        Mirrors Headhunter.check_flow_gate() to prevent queue flooding.
         """
         # Layer 1: check if an active event already exists for this service
         active_ids = await self.blackboard.get_active_events()
@@ -401,6 +408,16 @@ class Aligner:
         scope = ESCALATION_SCOPE_MAP.get(subject_type, "health")
         if await self._check_escalation_gate(service, scope):
             logger.info(f"Skipping event for {service} ({anomaly_type}): escalation gate (scope={scope})")
+            return
+
+        # Layer 4: global WIP flow gate (mirrors Headhunter.check_flow_gate)
+        status_map = await self.blackboard.get_active_events_with_status()
+        wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+        if wip_used >= self._wip_cap:
+            logger.info(
+                "Skipping event for %s (%s): WIP gate (%d/%d)",
+                service, anomaly_type, wip_used, self._wip_cap,
+            )
             return
 
         from ..models import EventEvidence

@@ -71,7 +71,7 @@ export default function FlowHealthWidget() {
         )}
       </div>
 
-      {/* WIP breakdown: processing vs deferred */}
+      {/* WIP breakdown: processing vs deferred + per-source */}
       <div className="flex items-center gap-3 text-[10px] text-text-muted">
         <span>{activeProcessing} processing</span>
         {(data.deferred_events ?? 0) > 0 && (
@@ -84,6 +84,26 @@ export default function FlowHealthWidget() {
           <span>{data.headhunter_pending} HH pending</span>
         )}
       </div>
+
+      {/* Per-source WIP breakdown */}
+      {data.wip_by_source && Object.keys(data.wip_by_source).length > 0 && (
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-text-muted">
+          {Object.entries(data.wip_by_source)
+            .sort(([, a], [, b]) => b - a)
+            .map(([source, count]) => (
+              <span key={source} className="flex items-center gap-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  source === 'aligner' ? 'bg-yellow-400'
+                  : source === 'headhunter' ? 'bg-blue-400'
+                  : source === 'chat' || source === 'slack' ? 'bg-status-healthy'
+                  : 'bg-text-muted'
+                }`} />
+                {source}
+                <span className="text-text-secondary">{count}</span>
+              </span>
+          ))}
+        </div>
+      )}
 
       {/* Per-role breakdown */}
       {roles.length > 0 && (
