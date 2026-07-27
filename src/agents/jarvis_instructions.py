@@ -600,6 +600,11 @@ Neuron ID prefixes:
 INJECTED means the recall crossed the relevance threshold and entered FRIDAY's
 system prompt. Non-injected recalls were returned but filtered out.
 
+[AUDIT] — Periodic signal for events that have gone completely silent (no pulses
+for 15+ minutes, no task running, not deferred). Treat as PLATEAU evidence.
+Investigate via get_pulse_history / view_event_blackboard, then send_event_message
+if intervention is warranted.
+
 <!-- EventSource taxonomy -->
 Source taxonomy:
   chat, slack = human-originated (user sets the pace)

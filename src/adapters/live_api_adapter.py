@@ -161,6 +161,7 @@ class LiveAPIAdapter:
         self._collecting_handoff = False
         self._handoff_buffer: list[str] = []
         self._resumption_handle: str | None = None
+        self._last_audit_sent: dict[str, float] = {}
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -1276,10 +1277,84 @@ class LiveAPIAdapter:
             self._meta_event_parked_set = frozenset()
             logger.info("Adapter meta-event state cleared for %s", event_id)
 
+    async def _check_silent_events(self) -> None:
+        """Send [AUDIT] to JARVIS for events that went pulse-silent beyond threshold."""
+        if not self._session or not self._brain:
+            return
+        if self._collecting_handoff or self._go_away_received or self._generating_report:
+            return
+
+        threshold = float(os.getenv("SYSTEM2_SILENT_AUDIT_SECONDS", "900"))
+        now = time.time()
+
+        try:
+            active_ids = await self._blackboard.get_active_events()
+        except Exception:
+            return
+
+        non_jarvis = [eid for eid in active_ids if eid != self._active_meta_event_id]
+        self._last_audit_sent = {k: v for k, v in self._last_audit_sent.items() if k in active_ids}
+
+        audit_lines: list[str] = []
+        audit_event_ids: list[str] = []
+
+        for eid in non_jarvis:
+            if self._brain.is_task_running(eid):
+                continue
+            last_processed = self._brain.last_processed_time(eid)
+            silence = now - last_processed
+            if silence < threshold:
+                continue
+            last_sent = self._last_audit_sent.get(eid, 0)
+            if (now - last_sent) < threshold:
+                continue
+            try:
+                event = await self._blackboard.get_event(eid)
+            except Exception:
+                continue
+            if not event:
+                continue
+            if event.status.value == "deferred":
+                continue
+            domain = (
+                event.event.evidence.brain_domain
+                or event.event.evidence.domain
+                or ""
+            ).lower() if event.event and event.event.evidence else ""
+            if domain == "casual":
+                continue
+
+            phase = event.brain_phase or "unknown"
+            last_actor = event.conversation[-1].actor if event.conversation else "none"
+            age_min = (now - (event.queued_at or now)) / 60
+            audit_lines.append(
+                f"  - {eid}: silent {silence / 60:.0f}m. Phase: {phase}. "
+                f"Last actor: {last_actor}. Age: {age_min:.0f}m. Status: {event.status.value}."
+            )
+            audit_event_ids.append(eid)
+
+        if not audit_lines:
+            return
+
+        audit_msg = "[AUDIT] Events with no pulse beyond threshold:\n" + "\n".join(audit_lines)
+
+        try:
+            self._last_pulse_event_id = audit_event_ids[-1]
+            await self._session.send_client_content(
+                turns={"role": "user", "parts": [{"text": audit_msg}]},
+                turn_complete=True,
+            )
+            for eid in audit_event_ids:
+                self._last_audit_sent[eid] = now
+            logger.info("Silent-event audit sent for %d events", len(audit_event_ids))
+        except Exception as e:
+            logger.warning("Silent-event audit send failed: %s", e)
+
     async def _idle_watchdog(self) -> None:
         """Two paths: meta-event (events active) or shift-end (no events)."""
         while self._running and self._session:
             await asyncio.sleep(60)
+            await self._check_silent_events()
             idle_threshold = int(os.getenv("SYSTEM2_IDLE_SECONDS", "120"))
             if not self._last_pulse_time or (time.time() - self._last_pulse_time) <= idle_threshold:
                 continue
@@ -1560,6 +1635,7 @@ class LiveAPIAdapter:
             self._session_ctx = None
         self._seen_neurons.clear()
         self._text_buffer.clear()
+        self._last_audit_sent.clear()
         self._last_was_watching = False
         self._last_status_broadcast = 0
         self._generating_report = False
