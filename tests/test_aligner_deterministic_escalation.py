@@ -17,12 +17,14 @@ from src.agents.aligner import Aligner, SYNC_DRIFT_DWELL_SECONDS
 def _mock_blackboard():
     bb = AsyncMock()
     bb.get_active_events.return_value = []
+    bb.get_active_events_with_status.return_value = {}
     bb.get_event.return_value = None
     bb.get_service.return_value = None
     bb.get_escalation_flag.return_value = None
     bb.create_event.return_value = "evt-new"
     bb.redis = AsyncMock()
     bb.redis.get.return_value = None
+    bb.redis.set.return_value = None
     return bb
 
 
