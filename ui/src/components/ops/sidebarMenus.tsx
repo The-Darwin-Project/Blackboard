@@ -4,6 +4,7 @@
 // 2. [Constraint]: Pure functions returning ContextMenuItem arrays. No hooks, no state.
 // 3. [Pattern]: Each menu item has an icon (lucide), label, color, and optional danger flag.
 // 4. [Pattern]: kargoStageMenuItems sends create_kargo_event WS command. Conditional MR link.
+// 5. [Pattern]: alignerPendingMenuItems — Copy only (Create Event deferred to v2, needs full WS+Brain chain).
 import {
   Focus, Info, Copy, MessageSquare, ListChecks, Check,
   Square, ExternalLink, PlusCircle, FileText, RefreshCw, XCircle, CheckCircle2, RotateCcw,
@@ -70,6 +71,12 @@ export function hhMenuItems(todo: HeadhunterTodo): ContextMenuItem[] {
     { id: 'open', label: 'Open MR in GitLab', icon: <ExternalLink size={18} />, color: '#f59e0b', onClick: () => safeOpen(todo.target_url) },
     { id: 'sep1', label: '', icon: null, separator: true, onClick: () => {} },
     { id: 'copy', label: 'Copy MR URL', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(todo.target_url) },
+  ];
+}
+
+export function alignerPendingMenuItems(item: { target: string; key: string }): ContextMenuItem[] {
+  return [
+    { id: 'copy-target', label: 'Copy Service Name', icon: <Copy size={18} />, color: '#64748b', onClick: () => navigator.clipboard.writeText(item.target) },
   ];
 }
 

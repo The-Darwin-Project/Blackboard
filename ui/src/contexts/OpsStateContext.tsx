@@ -4,7 +4,8 @@
 // 2. [Pattern]: selectedEventId with full sessionStorage lifecycle (hydrate/set/clear).
 // 3. [Pattern]: Agent registry 10s poll with cleanup. ephemeralAgents derived via useMemo.
 // 4. [Pattern]: WS: event_created (auto-select), event_closed (deselect + optimistic), event_status_changed, subscription_changed, kargo_*.
-// 5. [Pattern]: useWSReconnect invalidates all queries + kargo + headhunter.
+// 5. [Pattern]: useWSReconnect invalidates all queries + kargo + headhunter + aligner.
+// 7. [Pattern]: invalidateAligner on event_created + event_closed + reconnect (diverges from HH which skips event_created).
 // 6. [Constraint]: Must be wrapped by WebSocketProvider (uses useWSMessage, useWSConnection, useWSReconnect).
 // 7. [Pattern]: Inline ref assignment for selectedEventIdRef (render phase sync for WS handlers).
 import { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
@@ -122,7 +123,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const { connected, send } = useWSConnection();
-  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
+  const { invalidateActive, invalidateEvent, invalidateAll, invalidateClosed, invalidateHeadhunter, invalidateAligner, optimisticRemoveEvent, optimisticPatchEvent } = useQueueInvalidation();
   const { data: activeEvents } = useActiveEvents();
 
   const ephemeralAgents = useMemo(() => {
@@ -138,7 +139,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
 
   selectedEventIdRef.current = selectedEventId;
 
-  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); });
+  useWSReconnect(() => { invalidateAll(); invalidateKargoStages(); invalidateHeadhunter(); invalidateAligner(); });
 
   useWSMessage((msg) => {
     if (msg.type === 'event_created' && msg.event_id) {
@@ -146,6 +147,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         selectEvent(msg.event_id as string);
       }
       invalidateActive();
+      invalidateAligner();
     } else if (msg.type === 'event_closed') {
       const closedId = msg.event_id as string;
       if (closedId) {
@@ -154,6 +156,7 @@ export function OpsControlProvider({ children }: { children: ReactNode }) {
         invalidateActive();
         invalidateClosed();
         invalidateHeadhunter();
+        invalidateAligner();
         if (closedId === selectedEventIdRef.current) {
           selectedEventIdRef.current = null;
           setSelectedEventId(null);

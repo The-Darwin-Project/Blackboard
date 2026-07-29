@@ -10,6 +10,7 @@
 # 8. [Pattern]: /active response includes unread_notes for sidebar badge display.
 # 9. [Pattern]: Knowledge CRUD routes mirror lesson pattern. KnowledgeUpdateRequest uses extra="forbid" to enforce immutability of identity fields (topic, scope) -- Pydantic returns 422 on unknown fields.
 # 10. [Pattern]: PATCH /admin/knowledge/{id} does read-modify-reembed-upsert. Only mutable fields (fact, source, confidence, valid_until) can be updated.
+# 11. [Pattern]: GET /aligner/pending reads from darwin:aligner:pending ZSET + meta HASH. Pure Redis read (unlike HH which re-fetches from GitLab). response_model=list[PendingAnomaly].
 # 11. [Pattern]: KnowledgeRequest includes optional `service` (part of uuid5 identity). KnowledgeUpdateRequest
 #     deliberately omits it -- service is immutable once a fact is created.
 """
@@ -25,6 +26,7 @@ Provides endpoints for the unified group chat UI to:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -35,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
-from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus
+from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, PendingAnomaly
 from ..state.blackboard import BlackboardState
 
 
@@ -857,6 +859,25 @@ async def update_knowledge(knowledge_id: str, req: KnowledgeUpdateRequest):
     if not success:
         raise HTTPException(404, f"Knowledge {knowledge_id} not found")
     return {"status": "updated", "knowledge_id": knowledge_id}
+
+
+@router.get("/aligner/pending", response_model=list[PendingAnomaly])
+async def aligner_pending_items(
+    blackboard: BlackboardState = Depends(get_blackboard),
+):
+    """Pending anomalies in the Aligner dwell queue."""
+    members = await blackboard.redis.zrange(
+        "darwin:aligner:pending", 0, -1, withscores=True
+    )
+    result = []
+    for member, score in members:
+        meta_json = await blackboard.redis.hget(
+            "darwin:aligner:pending:meta", member
+        )
+        meta = {} if meta_json is None else json.loads(meta_json)
+        target, scope = member.split("|", 1) if "|" in member else (member, "unknown")
+        result.append({"key": member, "target": target, "first_seen": score, **meta})
+    return result
 
 
 @router.get("/headhunter/pending")

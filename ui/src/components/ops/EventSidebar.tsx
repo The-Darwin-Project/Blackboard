@@ -1,6 +1,6 @@
 // BlackBoard/ui/src/components/ops/EventSidebar.tsx
 // @ai-rules:
-// 1. [Pattern]: Persistent sidebar. Unified system state tree: Agents, Events, HH Queue, Schedules.
+// 1. [Pattern]: Persistent sidebar. Unified system state tree: Agents, Events, ArgoCD Queue, Jira, Kargo, HH Queue, Schedules.
 // 2. [Pattern]: Event detail area extracted to EventChatPanel. Sidebar is tree-only + new-event ChatInput.
 // 3. [Pattern]: Right-click context menus per node type. Icons + color from ACTOR_COLORS and lucide-react.
 // 4. [Pattern]: Resize handle on right edge. Width persisted in localStorage.
@@ -12,14 +12,14 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsControl, AGENTS } from '../../contexts/OpsStateContext';
-import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending } from '../../hooks/useQueue';
+import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
 import { ACTOR_COLORS } from '../../constants/colors';
 import { useSchedules } from '../../hooks/useTimeKeeper';
 import { useJiraMissions, useJiraActions } from '../../hooks/useJira';
 import SourceIcon from '../SourceIcon';
 import { TreeGroup, TreeNode, EventNode, EmptyLabel, AgentDot, EventDot } from './TreePrimitives';
-import { agentMenuItems, eventMenuItems, hhMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
+import { agentMenuItems, eventMenuItems, hhMenuItems, alignerPendingMenuItems, kargoStageMenuItems, jiraMissionMenuItems } from './sidebarMenus';
 import { safeOpen } from '../../utils/safeOpen';
 import { MOCK_EVENTS, MOCK_HH_TODOS, MOCK_CLOSED_EVENTS } from './mockData';
 
@@ -67,6 +67,7 @@ export default function EventSidebar() {
     refetchInterval: 10_000,
   });
   const { data: hhTodos = [], isError: hhError } = useHeadhunterPending();
+  const { data: alignerPending = [] } = useAlignerPending();
   const { data: jiraMissions = [] } = useJiraMissions();
   const jiraActions = useJiraActions();
   const { data: schedules = [] } = useSchedules();
@@ -296,6 +297,26 @@ export default function EventSidebar() {
                     />
                   ))}
                 </TreeGroup>
+              ))}
+            </TreeGroup>
+
+            {/* ArgoCD Queue Group */}
+            <TreeGroup icon={<SourceIcon source="aligner" evidence={{ argocd_app: "true" }} size={16} />}
+              label="ArgoCD Queue" count={alignerPending.length}
+              countColor={alignerPending.length > 0 ? '#EF7B4D' : '#64748b'}
+              forceCollapsed={!!selectedEventId}>
+              {alignerPending.length === 0 && <EmptyLabel>No pending anomalies</EmptyLabel>}
+              {alignerPending.map(item => (
+                <TreeNode key={item.key}
+                  icon={<SourceIcon source="aligner" evidence={{ argocd_app: item.argocd_app }} size={18} />}
+                  label={item.target}
+                  sublabel={`${item.anomaly_type} (${Math.floor((Date.now() / 1000 - item.first_seen) / 60)}m)`}
+                  sublabelColor={item.severity === 'critical' ? '#ef4444' : '#f59e0b'}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setCtxMenu({ x: e.clientX, y: e.clientY, items: alignerPendingMenuItems(item) });
+                  }}
+                />
               ))}
             </TreeGroup>
 

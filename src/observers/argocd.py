@@ -5,18 +5,15 @@
 # 3. [Pattern]: Fingerprint cache (frozenset of Deployment name/health/sync tuples) skips the
 #    full extraction+write pass when nothing changed; last_seen is still touched on every
 #    watch event for known services so zombie detection never regresses.
-# 4. [Pattern]: sync_change_callback fires once per Application per watch tick (never fanned
-#    out per-service). It is gated on spec.syncPolicy.automated existing on the Application --
-#    Aligner owns the 60s dwell-time debounce state machine on top of these calls.
+# 4. [Pattern]: Two callbacks — anomaly_callback(target, anomaly_type, metadata) stages signals
+#    into the pending ZSET; recovery_callback(target, msg, scope) delegates to Aligner.handle_recovery.
+#    Dwell ownership is in the pending ZSET, not in-memory dicts.
 # 5. [Constraint]: Callbacks are async -- never raise into the watch loop. Wrap in try/except.
 # 6. [Pattern]: DELETED events remove every service tracked under that Application via
-#    blackboard.remove_service() -- keeps topology membership in sync with cluster state.
-# 7. [Pattern]: get_degraded_applications() is the on-demand read path for dashboard broadcast
-#    (mirrors KargoObserver.get_failed_stages()).
-# 8. [Pattern]: GitOps repo/path (spec.source.repoURL/.path) and version (first
-#    status.summary.images[] tag) are Application-level fields shared by every service
-#    exploded from that Application -- written via update_service_discovery() (never
-#    overwrites cpu/memory/error_rate). Coarse-grained by design: accepted per probe outcome.
+#    blackboard.remove_service() + remove_aligner_pending() -- keeps topology and queue in sync.
+# 7. [Pattern]: get_degraded_applications() is the on-demand read path for dashboard broadcast.
+# 8. [Pattern]: App-level sync_status persisted via HSET darwin:argocd_app_sync:{key} for ALL apps
+#    unconditionally every tick (uniform drain re-check source for Aligner poll loop).
 """
 ArgoCD Application Observer -- watches Application CRs via K8s Watch API.
 
@@ -69,13 +66,13 @@ class ArgoCDObserver:
     def __init__(
         self,
         blackboard: "BlackboardState",
-        health_change_callback: Optional[Callable[..., Awaitable[None]]] = None,
-        sync_change_callback: Optional[Callable[..., Awaitable[None]]] = None,
+        anomaly_callback: Optional[Callable[..., Awaitable[None]]] = None,
+        recovery_callback: Optional[Callable[..., Awaitable[None]]] = None,
         broadcast_callback: Optional[Callable[..., Awaitable[None]]] = None,
     ):
         self.blackboard = blackboard
-        self.health_change_callback = health_change_callback
-        self.sync_change_callback = sync_change_callback
+        self.anomaly_callback = anomaly_callback
+        self.recovery_callback = recovery_callback
         self.broadcast_callback = broadcast_callback
         self._name_mapping = _load_name_mapping()
 
@@ -380,11 +377,31 @@ class ArgoCDObserver:
             resource_health = prev_resource_health
             await self._touch_last_seen(resource_health)
 
-        if automated and not suppress_callbacks and self.sync_change_callback:
+        if automated and not suppress_callbacks and self.anomaly_callback:
             try:
-                await self.sync_change_callback(app_key, prev_app_sync, app_sync)
+                if app_sync != "Synced":
+                    display_text = (
+                        f"ArgoCD sync: {prev_app_sync or 'unknown'} -> {app_sync} for {app_key} "
+                        f"(out of sync, auto-sync enabled)"
+                    )
+                    await self.anomaly_callback(app_key, "argocd_sync_drift", {
+                        "display_text": display_text, "severity": "warning", "domain": "clear",
+                        "argocd_app": app_key, "namespace": app_ns, "subject_type": "system",
+                    })
+                elif app_sync == "Synced" and prev_app_sync and prev_app_sync != "Synced":
+                    if self.recovery_callback:
+                        await self.recovery_callback(app_key, "", "sync")
             except Exception as e:
-                logger.error(f"ArgoCDObserver sync_change_callback error for {app_key}: {e}")
+                logger.error(f"ArgoCDObserver sync callback error for {app_key}: {e}")
+
+        # Persist app-level sync_status for all apps (uniform drain re-check source)
+        if not suppress_callbacks:
+            try:
+                await self.blackboard.redis.hset(
+                    f"darwin:argocd_app_sync:{app_key}", "sync_status", app_sync
+                )
+            except Exception as e:
+                logger.debug(f"ArgoCDObserver app sync persist failed for {app_key}: {e}")
 
         self._application_states[app_key] = {
             "fingerprint": fingerprint,
@@ -447,15 +464,29 @@ class ArgoCDObserver:
                 not suppress_callbacks
                 and old_health is not None
                 and old_health != r_health
-                and self.health_change_callback
             ):
-                try:
-                    await self.health_change_callback(
-                        service_name, old_health, r_health,
-                        {"argocd_app": app_key, "namespace": svc_ns},
-                    )
-                except Exception as e:
-                    logger.error(f"ArgoCDObserver health_change_callback error for {service_name}: {e}")
+                if r_health in ("Degraded", "Missing") and old_health not in ("Degraded", "Missing"):
+                    if self.anomaly_callback:
+                        severity = "critical" if r_health == "Degraded" else "warning"
+                        display_text = (
+                            f"ArgoCD health: {old_health} -> {r_health} "
+                            f"(service={service_name}, namespace={svc_ns}, app={app_key})"
+                        )
+                        try:
+                            anomaly_type = "argocd_health_degraded" if r_health == "Degraded" else "argocd_health_missing"
+                            await self.anomaly_callback(service_name, anomaly_type, {
+                                "display_text": display_text, "severity": severity, "domain": "complicated",
+                                "argocd_app": app_key, "namespace": svc_ns, "subject_type": "service",
+                            })
+                        except Exception as e:
+                            logger.error(f"ArgoCDObserver anomaly_callback error for {service_name}: {e}")
+                elif r_health == "Healthy" and old_health in ("Degraded", "Missing"):
+                    if self.recovery_callback:
+                        recovery_msg = f"ArgoCD health recovered: {old_health} -> {r_health} for {service_name}"
+                        try:
+                            await self.recovery_callback(service_name, recovery_msg, "health")
+                        except Exception as e:
+                            logger.error(f"ArgoCDObserver recovery_callback error for {service_name}: {e}")
         return resource_health
 
     async def _touch_last_seen(self, resource_health: dict[str, str]) -> None:
@@ -477,6 +508,9 @@ class ArgoCDObserver:
         # Clean config-only app entries regardless of prev state
         await self.blackboard.redis.srem("darwin:argocd_apps", app_key)
         await self.blackboard.redis.delete(f"darwin:argocd_app:{app_key}")
+        # Clean app-level sync hash and pending sync anomaly
+        await self.blackboard.redis.delete(f"darwin:argocd_app_sync:{app_key}")
+        await self.blackboard.remove_aligner_pending(f"{app_key}|sync")
         if not prev:
             return
         for service_name in prev.get("resource_health", {}):

@@ -2,8 +2,8 @@
 # @ai-rules:
 # 1. [Pattern]: Tests the escalation suppression flag lifecycle across Aligner, Brain, and Nightwatcher.
 # 2. [Constraint]: No real LLM calls, no real Redis. All external deps are AsyncMock.
-# 3. [Pattern]: 15 cases covering gate, flag-set, recovery-clear, NW atomic clear, backward compat,
-#    Kargo lifecycle, Flash prompt, multi-escalation overwrite, malformed flag, failure-path, loop resilience.
+# 3. [Pattern]: _trigger_architect() returns Literal["created","suppressed_active","suppressed_cooldown","suppressed_escalation"].
+# 4. [Pattern]: handle_recovery(target, message, scope) replaces handle_health_change recovery path.
 """Unit tests for the escalation suppression flag (issue #78)."""
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def _stub_brain(bb):
 
 
 # =========================================================================
-# 1. Gate: Service with flag → _trigger_architect returns without create
+# 1. Gate: Service with flag → _trigger_architect returns "suppressed_escalation"
 # =========================================================================
 
 @pytest.mark.asyncio
@@ -101,12 +101,13 @@ async def test_gate_blocks_when_flag_set():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = "evt-old|high cpu"
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
+    result = await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_not_called()
+    assert result == "suppressed_escalation"
 
 
 # =========================================================================
-# 2. Gate negative: flag=None → normal path
+# 2. Gate negative: flag=None → "created"
 # =========================================================================
 
 @pytest.mark.asyncio
@@ -114,8 +115,9 @@ async def test_gate_allows_when_no_flag():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = None
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
+    result = await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Healthy -> Degraded")
     bb.create_event.assert_called_once()
+    assert result == "created"
 
 
 # =========================================================================
@@ -168,24 +170,24 @@ async def test_brain_skips_flag_when_service_none():
 
 
 # =========================================================================
-# 5. Recovery-clear: ArgoCD health recovers → notify + clear escalation flag
+# 5. Recovery-clear: handle_recovery(scope="health") → notify + clear + ZREM
 # =========================================================================
 
 @pytest.mark.asyncio
 async def test_recovery_clears_flag():
-    """handle_health_change(Degraded -> Healthy) notifies active events and clears the flag."""
+    """handle_recovery(scope='health') clears escalation flag and removes pending entry."""
     bb = _mock_blackboard()
     bb.get_journal.return_value = []
-    # Active event exists so the recovery notification has somewhere to land
     active_evt = _make_event(event_id="evt-active", service="svc-a")
     bb.get_active_events.return_value = ["evt-active"]
     bb.get_event.return_value = active_evt
 
     aligner = _make_aligner(bb)
 
-    await aligner.handle_health_change("svc-a", "Degraded", "Healthy", {"argocd_app": "ns/app"})
+    await aligner.handle_recovery("svc-a", "ArgoCD health recovered", "health")
 
     bb.clear_escalation_flag.assert_called_once_with("svc-a", scope="health")
+    bb.remove_aligner_pending.assert_called_once_with("svc-a|health")
 
 
 # =========================================================================
@@ -292,19 +294,20 @@ async def test_escalation_flag_lifecycle():
 
 
 # =========================================================================
-# 11. Escalation gate: pending flag → handle_health_change skips create_event
+# 11. Escalation gate: pending flag → _trigger_architect returns suppressed
 # =========================================================================
 
 @pytest.mark.asyncio
-async def test_health_change_respects_escalation_flag():
-    """handle_health_change does not create a duplicate event while escalation is pending."""
+async def test_trigger_architect_respects_escalation_flag():
+    """_trigger_architect returns 'suppressed_escalation' while escalation flag is pending."""
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = "evt-old|argocd health degraded"
     aligner = _make_aligner(bb)
 
-    await aligner.handle_health_change("svc-a", "Healthy", "Degraded", {"argocd_app": "ns/app"})
+    result = await aligner._trigger_architect("svc-a", "argocd_health_degraded", "ArgoCD health: Degraded")
 
     bb.create_event.assert_not_called()
+    assert result == "suppressed_escalation"
 
 
 # =========================================================================
@@ -406,15 +409,15 @@ async def test_nw_clear_loop_resilience():
 async def test_cross_scope_no_suppression():
     """Kargo-scoped flag does NOT suppress a health-scoped event."""
     bb = _mock_blackboard()
-    # get_escalation_flag returns None for health scope (only kargo is set)
     async def scope_aware_get(service, scope="health"):
         if scope == "kargo":
             return "evt-old|kargo promo"
         return None
     bb.get_escalation_flag.side_effect = scope_aware_get
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    result = await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
     bb.create_event.assert_called_once()
+    assert result == "created"
 
 
 # =========================================================================
@@ -427,8 +430,9 @@ async def test_same_scope_suppression():
     bb = _mock_blackboard()
     bb.get_escalation_flag.return_value = "evt-old|health flag"
     aligner = _make_aligner(bb)
-    await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
+    result = await aligner._trigger_architect("svc-a", "high_cpu", "ArgoCD health: Degraded")
     bb.create_event.assert_not_called()
+    assert result == "suppressed_escalation"
 
 
 # =========================================================================
@@ -441,8 +445,9 @@ async def test_recovery_clears_own_scope_only():
     bb = _mock_blackboard()
     bb.get_active_events.return_value = []
     aligner = _make_aligner(bb)
-    await aligner.handle_health_change("svc-a", "Degraded", "Healthy", {})
+    await aligner.handle_recovery("svc-a", "ArgoCD health recovered", "health")
     bb.clear_escalation_flag.assert_called_once_with("svc-a", scope="health")
+    bb.remove_aligner_pending.assert_called_once_with("svc-a|health")
 
 
 # =========================================================================

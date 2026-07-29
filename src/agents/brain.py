@@ -4460,12 +4460,14 @@ class Brain:
         except Exception:
             pass
         hh = self.agents.get("_headhunter")
+        aligner_ref = self.agents.get("_aligner")
         from .llm import get_token_meter
         self._flow_collector = FlowCollector(
             scheduler=self._scheduler,
             blackboard=self.blackboard,
             registry=registry,
             headhunter=hh,
+            aligner=aligner_ref,
             provisioner=self._ephemeral_provisioner,
             token_meter=get_token_meter(),
             interval=60.0,

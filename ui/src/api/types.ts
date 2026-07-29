@@ -325,6 +325,7 @@ export interface FlowMetrics {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  aligner_pending: number;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;
@@ -344,6 +345,7 @@ export interface FlowSnapshot {
   deferred_events: number;
   waiting_approval_events: number;
   headhunter_pending: number;
+  aligner_pending: number;
   wip_used: number;
   wip_cap: number;
   wip_utilization_pct: number;
@@ -368,6 +370,19 @@ export interface FlowSnapshot {
   token_total_delta: number;
   token_calls_delta: number;
   token_total_cumulative: number;
+}
+
+export interface AlignerPendingItem {
+  key: string;
+  target: string;
+  anomaly_type: string;
+  display_text: string;
+  severity: string;
+  domain: string;
+  argocd_app: string;
+  namespace: string;
+  subject_type: string;
+  first_seen: number;
 }
 
 // =============================================================================

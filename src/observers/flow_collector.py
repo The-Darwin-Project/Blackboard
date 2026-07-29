@@ -5,6 +5,7 @@
 # 3. [Gotcha]: Must survive Redis errors — try/except per cycle, log + continue.
 # 4. [Pattern]: Maintains _prev_* counters for delta computation across snapshots.
 # 5. [Constraint]: No Brain logic. No LLM. Pure data collection + persistence. TokenMeter via DI is permitted (counter, not LLM code).
+# 6. [Pattern]: aligner.pending_count is a sync property (in-memory counter) read unawaited — mirrors headhunter.pending_count pattern.
 """FlowCollector: periodic snapshot of system flow health, persisted to Redis."""
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..agents.agent_registry import AgentRegistry
+    from ..agents.aligner import Aligner
     from ..agents.ephemeral_provisioner import EphemeralProvisioner
     from ..agents.headhunter import Headhunter
     from ..agents.llm.token_meter import TokenMeter
@@ -36,6 +38,7 @@ class FlowCollector:
         blackboard: "BlackboardState",
         registry: "AgentRegistry | None" = None,
         headhunter: "Headhunter | None" = None,
+        aligner: "Aligner | None" = None,
         provisioner: "EphemeralProvisioner | None" = None,
         token_meter: "TokenMeter | None" = None,
         interval: float = 60.0,
@@ -44,6 +47,7 @@ class FlowCollector:
         self._blackboard = blackboard
         self._registry = registry
         self._headhunter = headhunter
+        self._aligner = aligner
         self._provisioner = provisioner
         self._token_meter = token_meter
         self._interval = interval
@@ -144,6 +148,13 @@ class FlowCollector:
         except Exception:
             pass
 
+        aligner_pending = 0
+        try:
+            if self._aligner:
+                aligner_pending = self._aligner.pending_count
+        except Exception:
+            pass
+
         dispatch_total = 0
         dispatch_success_rate_pct = 100.0
         dispatch_infra_fails = 0
@@ -171,6 +182,7 @@ class FlowCollector:
             deferred_events=deferred_count,
             waiting_approval_events=flow.get("waiting_approval_events", 0),
             headhunter_pending=hh_pending,
+            aligner_pending=aligner_pending,
             wip_used=wip_used_raw,
             wip_cap=wip_cap,
             wip_utilization_pct=round(wip_used_raw / wip_cap * 100, 1) if wip_cap > 0 else 0.0,

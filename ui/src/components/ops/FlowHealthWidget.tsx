@@ -83,6 +83,9 @@ export default function FlowHealthWidget() {
         {(data.headhunter_pending ?? 0) > 0 && (
           <span>{data.headhunter_pending} HH pending</span>
         )}
+        {(data.aligner_pending ?? 0) > 0 && (
+          <span>{data.aligner_pending} ArgoCD pending</span>
+        )}
       </div>
 
       {/* Per-role breakdown */}

@@ -1,13 +1,15 @@
 # BlackBoard/src/agents/aligner.py
 # @ai-rules:
-# 1. [Pattern]: Deterministic event-driven state transitions -- NO LLM in the health/sync loop.
-#    handle_health_change/handle_sync_drift decide escalation via fixed rules, not Flash reasoning.
-# 2. [Pattern]: Last-write-wins: updates pending confirm evidence via update_turn_evidence() instead of skipping when previous confirm still SENT/DELIVERED.
-# 3. [Pattern]: _notify_active_events always delivers updates (dedup + deferred-skip only).
+# 1. [Pattern]: Poll-driven event creation — _drain_once() fires every ALIGNER_POLL_INTERVAL seconds,
+#    re-checks health/sync state from Redis before creating events. No in-memory dwell state.
+# 2. [Pattern]: TimeKeeper lifecycle — start()/stop() own an asyncio.Task running _poll_loop().
+# 3. [Pattern]: _trigger_architect returns outcome string ("created", "suppressed_active",
+#    "suppressed_cooldown", "suppressed_escalation") for drain disposition.
 # 4. [Constraint]: AIR GAP: No kubernetes or git imports allowed. LLM access via .llm adapter only.
-# 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly (via LLM_MAX_TOKENS_ALIGNER or per-call override).
-# 6. [Pattern]: Aligner uses GeminiAdapter (model from LLM_MODEL_ALIGNER) ONLY for configure_filter() NLP
-#    parsing. Flash is no longer in the health/sync escalation path (see rule 1).
+# 5. [Constraint]: All generate() calls MUST set max_output_tokens explicitly.
+# 6. [Pattern]: pending_count is an in-memory property updated at drain cycle start/end.
+# 7. [Gotcha]: Post-restart gap: _initial_sync(suppress_callbacks=True) won't re-populate
+#    pending for already-unhealthy apps. Same as prior edge-triggered behavior.
 """
 Agent 1: The Aligner (The Listener)
 
@@ -27,6 +29,8 @@ AIR GAP: This module may import google-genai (for configure_filter) but NOT kube
 # used exclusively by configure_filter(). Independent of Brain's Pro model.
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import time
@@ -42,9 +46,6 @@ if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
 logger = logging.getLogger(__name__)
-
-# Sync drift dwell-time debounce -- Application must stay OutOfSync this long before escalating
-SYNC_DRIFT_DWELL_SECONDS = 60
 
 
 class FilterRule:
@@ -98,15 +99,15 @@ class Aligner:
         self._llm_enabled = bool(os.getenv("GCP_PROJECT"))
         self.temperature = float(os.getenv("LLM_TEMPERATURE_ALIGNER", "0.3"))
         
-        # Closed-loop state tracking
-        self._known_services: set[str] = set()
-        self._service_versions: dict[str, str] = {}  # service -> last known version
-
-        # Sync drift dwell-time tracking -- argocd_app -> first-seen-OutOfSync timestamp
-        self._sync_drift_first_seen: dict[str, float] = {}
-        
         # Event creation cooldown -- prevents rapid event churn after close/resolve cycles
         self._last_event_creation: dict[str, float] = {}  # service -> last event creation timestamp
+
+        # Poll loop state (TimeKeeper pattern)
+        self._running: bool = False
+        self._task: Optional[asyncio.Task] = None
+        self._poll_interval = int(os.getenv("ALIGNER_POLL_INTERVAL", "30"))
+        self._dwell_seconds = float(os.getenv("ALIGNER_DWELL_SECONDS", "30"))
+        self._pending_count: int = 0
     
     async def _get_adapter(self):
         """Lazy-load LLM adapter (always Gemini for Aligner, model from LLM_MODEL_ALIGNER)."""
@@ -125,7 +126,125 @@ class Aligner:
                 self._adapter = None
         
         return self._adapter
-    
+
+    # =========================================================================
+    # Poll Loop Lifecycle (TimeKeeper pattern)
+    # =========================================================================
+
+    @property
+    def pending_count(self) -> int:
+        """In-memory pending count updated each drain cycle."""
+        return self._pending_count
+
+    async def start(self) -> None:
+        """Start the poll loop task."""
+        if self._running:
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._poll_loop())
+        logger.info("Aligner poll loop started (interval=%ds, dwell=%ds)",
+                    self._poll_interval, self._dwell_seconds)
+
+    async def stop(self) -> None:
+        """Stop the poll loop task. Idempotent when never started."""
+        if not self._running:
+            return
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _poll_loop(self) -> None:
+        """Periodic drain loop — fires _drain_once every poll interval."""
+        while self._running:
+            try:
+                await self._drain_once()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Aligner drain cycle failed")
+            await asyncio.sleep(self._poll_interval)
+
+    async def _drain_once(self) -> None:
+        """Drain dwell-expired signals: re-check health, create events or discard."""
+        keys = await self.blackboard.drain_aligner_pending(self._dwell_seconds)
+        if not keys:
+            return
+        self._pending_count = await self.blackboard.count_aligner_pending()
+        created = resolved = restaged = 0
+        for key in keys:
+            try:
+                meta_json = await self.blackboard.redis.hget(
+                    "darwin:aligner:pending:meta", key
+                )
+                if meta_json is None:
+                    logger.warning("Orphan pending key %s, cleaning up", key)
+                    await self.blackboard.commit_aligner_signal(key)
+                    continue
+                meta = json.loads(meta_json)
+                if "|" not in key:
+                    logger.warning("Malformed pending key %s, cleaning up", key)
+                    await self.blackboard.commit_aligner_signal(key)
+                    continue
+                target, _ = key.split("|", 1)
+                subject_type = meta.get("subject_type", "service")
+
+                # Re-check current state before event creation
+                if subject_type == "service":
+                    svc = await self.blackboard.get_service(target)
+                    if svc is None or svc.health_status in ("Healthy", "Progressing"):
+                        await self.blackboard.commit_aligner_signal(key)
+                        if svc and svc.health_status == "Healthy":
+                            await self._notify_active_events(target, "self-resolved")
+                            try:
+                                await self.blackboard.clear_escalation_flag(target, scope="health")
+                            except Exception:
+                                pass
+                        resolved += 1
+                        continue
+                else:
+                    sync_val = await self.blackboard.redis.hget(
+                        f"darwin:argocd_app_sync:{target}", "sync_status"
+                    )
+                    if sync_val in ("Synced", None):
+                        await self.blackboard.commit_aligner_signal(key)
+                        resolved += 1
+                        continue
+
+                # Still sick — attempt event creation
+                anomaly_type = meta.get("anomaly_type", "health")
+                outcome = await self._trigger_architect(
+                    target, anomaly_type.replace("_", " "),
+                    meta["display_text"],
+                    domain=meta.get("domain", "complicated"),
+                    severity_level=meta.get("severity", "warning"),
+                    subject_type=subject_type,
+                    argocd_app=meta.get("argocd_app", ""),
+                )
+                if outcome in ("created", "suppressed_active"):
+                    await self.blackboard.commit_aligner_signal(key)
+                    if outcome == "created":
+                        created += 1
+                else:
+                    await self.blackboard.restage_aligner_signal(key, meta)
+                    restaged += 1
+            except Exception:
+                logger.exception("Drain error for key %s, committing to prevent retry loop", key)
+                try:
+                    await self.blackboard.commit_aligner_signal(key)
+                except Exception:
+                    pass
+        self._pending_count = await self.blackboard.count_aligner_pending()
+        if keys:
+            logger.info(
+                "Aligner drain: %d expired, %d events, %d self-resolved, %d re-dwelled",
+                len(keys), created, resolved, restaged,
+            )
+
     async def configure_filter(self, instruction: str) -> Optional[FilterRule]:
         """
         Configure a filter rule from natural language instruction.
@@ -254,87 +373,20 @@ class Aligner:
         
         return False
     
-    async def handle_health_change(
-        self, service: str, old_health: str, new_health: str, resources_summary: dict,
-    ) -> None:
-        """Deterministic escalation on ArgoCD health transitions -- no LLM in the loop.
+    async def handle_recovery(self, target: str, message: str, scope: str) -> None:
+        """Handle a recovery signal from the observer.
 
-        Called by ArgoCDObserver whenever a Deployment's health.status changes.
-        Degraded or Missing always creates an event: these states directly indicate
-        replica/pod failure, unlike Progressing (normal deploy transient) or Healthy.
-        Recovering to Healthy from a failed state notifies active events and clears
-        any pending escalation flag -- the deterministic analog of the old report_recovery path.
+        scope="health": notify active events + clear escalation flag + ZREM pending
+        scope="sync": ZREM pending only (sync never had a recovery-notify path)
         """
-        if new_health == "Healthy" and old_health in ("Degraded", "Missing"):
-            msg = f"ArgoCD health recovered: {old_health} -> {new_health} for {service}"
+        if scope == "health":
+            await self._notify_active_events(target, message)
             try:
-                await self._notify_active_events(service, msg)
-            finally:
-                try:
-                    await self.blackboard.clear_escalation_flag(service, scope="health")
-                except Exception as ce:
-                    logger.warning(f"Failed to clear escalation flag on recovery for {service}: {ce}")
-            return
-
-        if new_health not in ("Degraded", "Missing"):
-            logger.debug(f"ArgoCD health change for {service}: {old_health} -> {new_health} (no escalation)")
-            return
-
-        argocd_app = resources_summary.get("argocd_app", "")
-        namespace = resources_summary.get("namespace", "")
-        severity = "critical" if new_health == "Degraded" else "warning"
-        display_text = (
-            f"ArgoCD health: {old_health} -> {new_health} "
-            f"(service={service}, namespace={namespace}, app={argocd_app})"
-        )
-        await self._trigger_architect(
-            service, f"argocd_health_{new_health.lower()}", display_text,
-            domain="complicated", severity_level=severity,
-            argocd_app=argocd_app,
-        )
-
-    async def handle_sync_drift(
-        self, argocd_app: str, old_sync: Optional[str], new_sync: str,
-    ) -> None:
-        """Deterministic escalation on sustained ArgoCD sync drift (dwell-time debounced).
-
-        Called by ArgoCDObserver once per Application per watch tick -- already gated
-        on spec.syncPolicy.automated existing (manual-sync apps never reach here).
-        Escalates only after the Application has stayed OutOfSync for
-        SYNC_DRIFT_DWELL_SECONDS -- avoids alerting on transient drift during a normal
-        deploy cycle. Clears the dwell timer as soon as the Application reports Synced.
-        """
-        now = time.time()
-        if new_sync == "Synced":
-            self._sync_drift_first_seen.pop(argocd_app, None)
-            return
-
-        first_seen = self._sync_drift_first_seen.get(argocd_app)
-        if first_seen is None:
-            self._sync_drift_first_seen[argocd_app] = now
-            return
-
-        if now - first_seen < SYNC_DRIFT_DWELL_SECONDS:
-            return
-
-        display_text = (
-            f"ArgoCD sync: {old_sync or 'unknown'} -> {new_sync} for {argocd_app} "
-            f"(out of sync {SYNC_DRIFT_DWELL_SECONDS}s+, auto-sync enabled)"
-        )
-        await self._trigger_architect(
-            argocd_app, "argocd_sync_drift", display_text,
-            domain="clear", severity_level="warning",
-            subject_type="system", argocd_app=argocd_app,
-        )
-
-    async def _has_active_event_for(self, service: str) -> bool:
-        """Check if an active event exists for this service."""
-        active_ids = await self.blackboard.get_active_events()
-        for eid in active_ids:
-            existing = await self.blackboard.get_event(eid)
-            if existing and existing.service == service and existing.status.value in ("new", "active", "deferred"):
-                return True
-        return False
+                await self.blackboard.clear_escalation_flag(target, scope="health")
+            except Exception as e:
+                logger.warning("Failed to clear escalation flag on recovery: %s", e)
+        key = f"{target}|{scope}"
+        await self.blackboard.remove_aligner_pending(key)
 
     async def _check_escalation_gate(self, service: str, scope: str) -> bool:
         """Layer 3 escalation suppression gate — direct HGET, not get_service().
@@ -357,16 +409,15 @@ class Aligner:
         self, service: str, anomaly_type: str, display_text: str,
         domain: str = "complicated", severity_level: str = "warning",
         subject_type: str = "service", argocd_app: str = "",
-    ) -> None:
+    ) -> str:
         """
         Create an event for the Brain to process -- with three-layer deduplication.
         
-        Layer 1 (active-event check): skip if an event is already being worked on.
-        Layer 2 (time-based cooldown): skip if we recently created an event for
-        this key, even if it was closed fast. Prevents rapid event churn during
-        oscillation cycles (e.g. flapping health/sync states).
-        Layer 3 (escalation suppression): skip while Brain's report_incident flag
-        is pending on the target service.
+        Returns outcome string for poll loop disposition:
+        - "created": event was created, caller should commit pending signal
+        - "suppressed_active": active event already covers this service
+        - "suppressed_cooldown": cooldown period active, caller should restage
+        - "suppressed_escalation": escalation flag set, caller should restage
         """
         # Layer 1: check if an active event already exists for this service
         active_ids = await self.blackboard.get_active_events()
@@ -377,15 +428,13 @@ class Aligner:
                     f"Skipping event creation for {service} ({anomaly_type}) "
                     f"-- active event {eid} already exists (status: {existing.status.value})"
                 )
-                return
+                return "suppressed_active"
 
         # Layer 2: time-based cooldown (5 minutes between events per service)
-        # Check in-memory cache first, then Redis (survives pod restarts)
         COOLDOWN_SECONDS = 300
         now = time.time()
         last_event_time = self._last_event_creation.get(service, 0)
         if not last_event_time:
-            # In-memory miss -- check Redis (populated by previous pod lifecycle)
             redis_ts = await self.blackboard.redis.get(f"darwin:aligner:cooldown:{service}")
             if redis_ts:
                 last_event_time = float(redis_ts)
@@ -395,13 +444,13 @@ class Aligner:
                 f"Skipping event for {service} ({anomaly_type}): "
                 f"cooldown ({int(now - last_event_time)}s/{COOLDOWN_SECONDS}s since last)"
             )
-            return
+            return "suppressed_cooldown"
 
         # Layer 3: escalation suppression (flag set by Brain on report_incident)
         scope = ESCALATION_SCOPE_MAP.get(subject_type, "health")
         if await self._check_escalation_gate(service, scope):
             logger.info(f"Skipping event for {service} ({anomaly_type}): escalation gate (scope={scope})")
-            return
+            return "suppressed_escalation"
 
         from ..models import EventEvidence
         evidence_obj = EventEvidence(
@@ -423,11 +472,11 @@ class Aligner:
             subject_type=subject_type,
         )
         self._last_event_creation[service] = now
-        # Persist to Redis so cooldown survives pod restarts (TTL = cooldown + buffer)
         await self.blackboard.redis.set(
             f"darwin:aligner:cooldown:{service}", str(now), ex=COOLDOWN_SECONDS + 60
         )
         logger.info(f"Created event for {service} ({anomaly_type})")
+        return "created"
 
     async def _notify_active_events(self, service: str, message: str) -> None:
         """Append an aligner.confirm turn to any active events for this service.

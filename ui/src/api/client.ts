@@ -352,6 +352,12 @@ export async function getHeadhunterPending(): Promise<HeadhunterTodo[]> {
   return fetchApi<HeadhunterTodo[]>('/queue/headhunter/pending');
 }
 
+import type { AlignerPendingItem } from './types';
+
+export async function getAlignerPending(): Promise<AlignerPendingItem[]> {
+  return fetchApi<AlignerPendingItem[]>('/queue/aligner/pending');
+}
+
 // =============================================================================
 // Jira Missions API
 // =============================================================================

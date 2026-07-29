@@ -3,7 +3,9 @@
 # 1. [Constraint]: No real K8s API calls. All K8s interactions mocked.
 # 2. [Pattern]: Tests exercise _process_application/_process_deleted directly with dict fixtures.
 # 3. [Pattern]: Async tests use pytest-asyncio. Callbacks and blackboard are AsyncMock.
-"""Unit tests for ArgoCDObserver -- N:1 Application-to-service extraction, health/sync callbacks."""
+# 4. [Pattern]: Observer uses anomaly_callback(target, anomaly_type, metadata) and
+#    recovery_callback(target, message, scope) — NOT health_change_callback/sync_change_callback.
+"""Unit tests for ArgoCDObserver -- N:1 Application-to-service extraction, anomaly/recovery callbacks."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -64,12 +66,12 @@ def _make_application(
     return doc
 
 
-def _make_observer(health_cb=None, sync_cb=None) -> ArgoCDObserver:
+def _make_observer(anomaly_cb=None, recovery_cb=None) -> ArgoCDObserver:
     bb = AsyncMock()
     obs = ArgoCDObserver(
         blackboard=bb,
-        health_change_callback=health_cb or AsyncMock(),
-        sync_change_callback=sync_cb or AsyncMock(),
+        anomaly_callback=anomaly_cb or AsyncMock(),
+        recovery_callback=recovery_cb or AsyncMock(),
     )
     return obs
 
@@ -81,13 +83,13 @@ def _make_observer(health_cb=None, sync_cb=None) -> ArgoCDObserver:
 @pytest.mark.asyncio
 async def test_null_health_guard_skips_processing():
     """Application with no status.health is skipped (freshly-created / ApplicationSet child)."""
-    health_cb = AsyncMock()
-    obs = _make_observer(health_cb=health_cb)
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
     app = {"metadata": {"namespace": "argocd", "name": "new-app"}, "status": {}}
 
     await obs._process_application(app)
 
-    health_cb.assert_not_called()
+    anomaly_cb.assert_not_called()
     assert "argocd/new-app" not in obs._application_states
 
 
@@ -134,28 +136,29 @@ async def test_initial_extraction_registers_service():
 
 
 @pytest.mark.asyncio
-async def test_initial_sync_suppresses_health_callback():
-    """suppress_callbacks=True records state but does NOT fire health_change_callback."""
-    health_cb = AsyncMock()
-    obs = _make_observer(health_cb=health_cb)
+async def test_initial_sync_suppresses_anomaly_callback():
+    """suppress_callbacks=True records state but does NOT fire anomaly_callback."""
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
     app = _make_application()
 
     await obs._process_application(app, suppress_callbacks=True)
 
-    health_cb.assert_not_called()
+    anomaly_cb.assert_not_called()
     assert obs._application_states["argocd/test-app"]["resource_health"] == {
         "test-namespace/my-service": "Healthy",
     }
 
 
 # =========================================================================
-# Test 3: Health transition fires per-service callback
+# Test 3: Health transition fires anomaly_callback (T-9)
 # =========================================================================
 
 @pytest.mark.asyncio
-async def test_health_transition_fires_callback():
-    health_cb = AsyncMock()
-    obs = _make_observer(health_cb=health_cb)
+async def test_health_transition_fires_anomaly_callback():
+    """T-9: Healthy→Degraded fires anomaly_callback with subject_type='service'."""
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
 
     healthy_app = _make_application(resources=[_deployment_resource(health_status="Healthy")], resource_version="1")
     await obs._process_application(healthy_app, suppress_callbacks=True)
@@ -167,17 +170,48 @@ async def test_health_transition_fires_callback():
     )
     await obs._process_application(degraded_app)
 
-    health_cb.assert_called_once_with(
-        "test-namespace/my-service", "Healthy", "Degraded",
-        {"argocd_app": "argocd/test-app", "namespace": "test-namespace"},
+    anomaly_cb.assert_called_once()
+    args = anomaly_cb.call_args
+    assert args[0][0] == "test-namespace/my-service"  # target
+    assert args[0][1] == "argocd_health_degraded"  # anomaly_type
+    metadata = args[0][2]
+    assert metadata["subject_type"] == "service"
+    assert metadata["severity"] == "critical"
+    assert metadata["argocd_app"] == "argocd/test-app"
+
+
+@pytest.mark.asyncio
+async def test_health_recovery_fires_recovery_callback():
+    """T-10: Degraded→Healthy fires recovery_callback with scope='health'."""
+    recovery_cb = AsyncMock()
+    obs = _make_observer(recovery_cb=recovery_cb)
+
+    degraded_app = _make_application(
+        app_health="Degraded",
+        resources=[_deployment_resource(health_status="Degraded")],
+        resource_version="1",
     )
+    await obs._process_application(degraded_app, suppress_callbacks=True)
+
+    healthy_app = _make_application(
+        app_health="Healthy",
+        resources=[_deployment_resource(health_status="Healthy")],
+        resource_version="2",
+    )
+    await obs._process_application(healthy_app)
+
+    recovery_cb.assert_called_once()
+    args = recovery_cb.call_args
+    assert args[0][0] == "test-namespace/my-service"  # target
+    assert "recovered" in args[0][1].lower() or "Healthy" in args[0][1]  # message
+    assert args[0][2] == "health"  # scope
 
 
 @pytest.mark.asyncio
 async def test_new_service_first_sighting_does_not_fire_callback():
     """A brand-new Deployment appearing in an already-tracked app does not fire on first sight."""
-    health_cb = AsyncMock()
-    obs = _make_observer(health_cb=health_cb)
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
 
     app_v1 = _make_application(resources=[_deployment_resource(name="svc-a")], resource_version="1")
     await obs._process_application(app_v1, suppress_callbacks=True)
@@ -188,7 +222,7 @@ async def test_new_service_first_sighting_does_not_fire_callback():
     )
     await obs._process_application(app_v2)
 
-    health_cb.assert_not_called()
+    anomaly_cb.assert_not_called()
 
 
 # =========================================================================
@@ -208,11 +242,12 @@ async def test_fingerprint_unchanged_skips_extraction():
 
     obs.blackboard.update_service_argocd_status.assert_not_called()
     obs.blackboard.add_service.assert_not_called()
-    # last_seen is still touched for known services
-    assert obs.blackboard.redis.hset.await_count == 1
-    call_args = obs.blackboard.redis.hset.call_args
-    assert call_args.args[0] == "darwin:service:test-namespace/my-service"
-    assert call_args.args[1] == "last_seen"
+    # last_seen touch + app-level sync persistence = 2 hset calls
+    assert obs.blackboard.redis.hset.await_count == 2
+    hset_calls = obs.blackboard.redis.hset.call_args_list
+    hset_keys = [c.args[0] for c in hset_calls]
+    assert "darwin:service:test-namespace/my-service" in hset_keys
+    assert any(k.startswith("darwin:argocd_app_sync:") for k in hset_keys)
 
 
 @pytest.mark.asyncio
@@ -233,13 +268,14 @@ async def test_fingerprint_changed_triggers_extraction():
 
 
 # =========================================================================
-# Test 5: N:1 sync-once -- sync callback fires once per Application, not per service
+# Test 5: N:1 sync-once -- anomaly_callback fires once per Application, not per service (T-11)
 # =========================================================================
 
 @pytest.mark.asyncio
-async def test_sync_drift_fires_once_for_multi_service_app():
-    sync_cb = AsyncMock()
-    obs = _make_observer(sync_cb=sync_cb)
+async def test_sync_drift_fires_anomaly_callback_for_multi_service_app():
+    """T-11: OutOfSync fires anomaly_callback once with subject_type='system'."""
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
 
     synced_app = _make_application(
         app_sync="Synced",
@@ -257,16 +293,20 @@ async def test_sync_drift_fires_once_for_multi_service_app():
     )
     await obs._process_application(out_of_sync_app)
 
-    sync_cb.assert_called_once_with(
-        "argocd/test-app", "Synced", "OutOfSync",
-    )
+    anomaly_cb.assert_called_once()
+    args = anomaly_cb.call_args
+    assert args[0][0] == "argocd/test-app"  # target = app_key
+    assert args[0][1] == "argocd_sync_drift"  # anomaly_type
+    metadata = args[0][2]
+    assert metadata["subject_type"] == "system"
+    assert metadata["severity"] == "warning"
 
 
 @pytest.mark.asyncio
 async def test_sync_callback_gated_on_automated_key():
-    """No spec.syncPolicy.automated key -- sync_change_callback never fires even on drift."""
-    sync_cb = AsyncMock()
-    obs = _make_observer(sync_cb=sync_cb)
+    """No spec.syncPolicy.automated key -- anomaly_callback never fires even on drift."""
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
 
     app = _make_application(app_sync="Synced", automated=None, resource_version="1")
     await obs._process_application(app, suppress_callbacks=True)
@@ -274,25 +314,46 @@ async def test_sync_callback_gated_on_automated_key():
     drifted = _make_application(app_sync="OutOfSync", automated=None, resource_version="2")
     await obs._process_application(drifted)
 
-    sync_cb.assert_not_called()
+    anomaly_cb.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_sync_callback_fires_on_every_tick_while_automated():
-    """Repeated MODIFIED events with automated=True re-invoke the callback each time
-    (Aligner owns the dwell-time debounce, not the observer)."""
-    sync_cb = AsyncMock()
-    obs = _make_observer(sync_cb=sync_cb)
+async def test_sync_anomaly_fires_on_every_tick_while_out_of_sync():
+    """anomaly_callback fires every tick while OutOfSync (level-triggered).
+    ZADD NX at the Redis layer prevents dwell-timer reset — the observer
+    must re-supply so that committed entries can be re-armed."""
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb)
 
-    app_v1 = _make_application(app_sync="OutOfSync", automated={}, resource_version="1")
+    app_v1 = _make_application(app_sync="Synced", automated={}, resource_version="1")
     await obs._process_application(app_v1, suppress_callbacks=True)
 
     app_v2 = _make_application(app_sync="OutOfSync", automated={}, resource_version="2")
     await obs._process_application(app_v2)
+    assert anomaly_cb.call_count == 1
+
     app_v3 = _make_application(app_sync="OutOfSync", automated={}, resource_version="3")
     await obs._process_application(app_v3)
+    assert anomaly_cb.call_count == 2  # re-fires — level-triggered, not edge-triggered
 
-    assert sync_cb.call_count == 2
+
+@pytest.mark.asyncio
+async def test_sync_recovery_fires_recovery_callback():
+    """Synced after OutOfSync → recovery_callback with scope='sync'."""
+    recovery_cb = AsyncMock()
+    anomaly_cb = AsyncMock()
+    obs = _make_observer(anomaly_cb=anomaly_cb, recovery_cb=recovery_cb)
+
+    oos_app = _make_application(app_sync="OutOfSync", automated={}, resource_version="1")
+    await obs._process_application(oos_app, suppress_callbacks=True)
+
+    synced_app = _make_application(app_sync="Synced", automated={}, resource_version="2")
+    await obs._process_application(synced_app)
+
+    recovery_cb.assert_called_once()
+    args = recovery_cb.call_args
+    assert args[0][0] == "argocd/test-app"  # target
+    assert args[0][2] == "sync"  # scope
 
 
 # =========================================================================
@@ -510,3 +571,64 @@ async def test_config_only_app_last_seen_refreshed_on_unchanged_tick():
     second_hset_count = obs.blackboard.redis.hset.call_count
 
     assert second_hset_count > first_hset_count
+
+
+# =========================================================================
+# Test 13: App-level sync_status persisted for ALL apps (T-17)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_app_sync_status_persisted_every_tick():
+    """T-17: _process_application writes HSET darwin:argocd_app_sync:{app_key} when not suppressed."""
+    obs = _make_observer()
+    app_init = _make_application(app_sync="Synced", resource_version="1")
+    await obs._process_application(app_init, suppress_callbacks=True)
+    obs.blackboard.redis.hset.reset_mock()
+
+    app = _make_application(app_sync="OutOfSync", automated={}, resource_version="2")
+    await obs._process_application(app)
+
+    obs.blackboard.redis.hset.assert_any_call(
+        "darwin:argocd_app_sync:argocd/test-app", "sync_status", "OutOfSync"
+    )
+
+
+@pytest.mark.asyncio
+async def test_app_sync_persisted_for_synced_app():
+    """Synced apps also persist their sync_status (uniform read path)."""
+    obs = _make_observer()
+    app_init = _make_application(app_sync="OutOfSync", resource_version="1")
+    await obs._process_application(app_init, suppress_callbacks=True)
+    obs.blackboard.redis.hset.reset_mock()
+
+    app = _make_application(app_sync="Synced", resource_version="2")
+    await obs._process_application(app)
+
+    obs.blackboard.redis.hset.assert_any_call(
+        "darwin:argocd_app_sync:argocd/test-app", "sync_status", "Synced"
+    )
+
+
+# =========================================================================
+# Test 14: _process_deleted cleans pending entries
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_deleted_cleans_pending_entries():
+    """_process_deleted removes aligner pending entries for services AND app sync."""
+    obs = _make_observer()
+    app = _make_application(
+        resources=[_deployment_resource(name="svc-a"), _deployment_resource(name="svc-b")],
+        automated={},
+    )
+    await obs._process_application(app, suppress_callbacks=True)
+
+    await obs._process_deleted(app)
+
+    # Service removal (which internally cleans pending health entries)
+    obs.blackboard.remove_service.assert_any_call("test-namespace/svc-a")
+    obs.blackboard.remove_service.assert_any_call("test-namespace/svc-b")
+    # App sync pending entry cleaned explicitly (not covered by remove_service)
+    obs.blackboard.remove_aligner_pending.assert_any_call("argocd/test-app|sync")
+    # App sync hash deleted
+    obs.blackboard.redis.delete.assert_any_call("darwin:argocd_app_sync:argocd/test-app")

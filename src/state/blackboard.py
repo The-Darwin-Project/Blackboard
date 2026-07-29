@@ -11,6 +11,7 @@
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
 # 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag).
 # 11. [Pattern]: Field Notes Notebook (darwin:notebook HASH). RENAMENX for atomic drain; ResponseError for missing-source guard. Quarantine via RENAME after MAX_DIGEST_RETRIES. Retry counter is Redis INCR with TTL (survives pod restart).
+# 12. [Pattern]: Aligner pending queue — darwin:aligner:pending ZSET (ZADD NX score=first_seen) + darwin:aligner:pending:meta HASH. Pipelined stage/commit/restage. remove_service() auto-cleans health pending.
 """
 Blackboard State Repository - Central state management for Darwin Brain.
 
@@ -220,6 +221,8 @@ return 0
             if removed:
                 await self.redis.delete(f"darwin:edge:{other}:{name}")
                 deleted += removed + 1
+        # Clean pending aligner anomaly for this service
+        await self.remove_aligner_pending(f"{name}|health")
         logger.info(f"Removed stale service '{name}' ({deleted} keys cleaned)")
         return deleted
 
@@ -1599,6 +1602,7 @@ return 0
                 deferred_events=round(sum(s.deferred_events for s in group) / n),
                 waiting_approval_events=round(sum(s.waiting_approval_events for s in group) / n),
                 headhunter_pending=round(sum(s.headhunter_pending for s in group) / n),
+                aligner_pending=round(sum(s.aligner_pending for s in group) / n),
                 wip_used=round(sum(s.wip_used for s in group) / n),
                 wip_cap=round(sum(s.wip_cap for s in group) / n),
                 wip_utilization_pct=sum(s.wip_utilization_pct for s in group) / n,
@@ -2764,6 +2768,54 @@ return 0
             })
         results.sort(key=lambda r: r["shift_date"], reverse=True)
         return results
+
+    # =========================================================================
+    # Aligner Pending Queue (ZSET + metadata HASH)
+    # =========================================================================
+
+    ALIGNER_PENDING = "darwin:aligner:pending"
+    ALIGNER_PENDING_META = "darwin:aligner:pending:meta"
+
+    async def stage_aligner_signal(self, key: str, metadata: dict) -> None:
+        """Stage an anomaly signal into the pending dwell queue.
+
+        ZADD NX preserves first_seen timestamp (dwell correctness).
+        HSET overwrites metadata with latest values.
+        """
+        pipe = self.redis.pipeline()
+        pipe.zadd(self.ALIGNER_PENDING, {key: time.time()}, nx=True)
+        pipe.hset(self.ALIGNER_PENDING_META, key, json.dumps(metadata))
+        await pipe.execute()
+
+    async def drain_aligner_pending(self, dwell_seconds: float) -> list[str]:
+        """Return pending keys that have dwelled longer than threshold."""
+        cutoff = time.time() - dwell_seconds
+        return await self.redis.zrangebyscore(self.ALIGNER_PENDING, 0, cutoff)
+
+    async def commit_aligner_signal(self, key: str) -> None:
+        """Remove a pending signal after event creation or self-resolution."""
+        pipe = self.redis.pipeline()
+        pipe.zrem(self.ALIGNER_PENDING, key)
+        pipe.hdel(self.ALIGNER_PENDING_META, key)
+        await pipe.execute()
+
+    remove_aligner_pending = commit_aligner_signal  # semantic alias for recovery path
+
+    async def count_aligner_pending(self) -> int:
+        """Count of pending anomalies in the dwell queue."""
+        return await self.redis.zcard(self.ALIGNER_PENDING)
+
+    async def restage_aligner_signal(self, key: str, metadata: dict) -> None:
+        """Re-stage a suppressed signal with fresh dwell timestamp.
+
+        Used when _trigger_architect returns suppressed_cooldown or suppressed_escalation.
+        ZREM + ZADD (no NX) resets the dwell clock.
+        """
+        pipe = self.redis.pipeline()
+        pipe.zrem(self.ALIGNER_PENDING, key)
+        pipe.zadd(self.ALIGNER_PENDING, {key: time.time()})
+        pipe.hset(self.ALIGNER_PENDING_META, key, json.dumps(metadata))
+        await pipe.execute()
 
     # =========================================================================
     # Observations (FRIDAY numeric series -- event-scoped + global timeline)

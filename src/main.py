@@ -347,18 +347,19 @@ async def lifespan(app: FastAPI):
         # Sole discovery, health, and sync source -- replaces KubernetesObserver.
         argocd_observer = None
         if ARGOCD_OBSERVER_ENABLED:
-            async def argocd_health_callback(
-                service: str, old_health: str, new_health: str, resources_summary: dict,
+            async def argocd_anomaly_callback(
+                target: str, anomaly_type: str, metadata: dict,
             ) -> None:
-                await aligner.handle_health_change(service, old_health, new_health, resources_summary)
+                scope = "sync" if metadata.get("subject_type") == "system" else "health"
+                key = f"{target}|{scope}"
+                await blackboard.stage_aligner_signal(key, {**metadata, "anomaly_type": anomaly_type})
 
-            async def argocd_sync_callback(
-                argocd_app: str, old_sync: str | None, new_sync: str,
+            async def argocd_recovery_callback(
+                target: str, message: str, scope: str,
             ) -> None:
-                await aligner.handle_sync_drift(argocd_app, old_sync, new_sync)
+                await aligner.handle_recovery(target, message, scope)
 
             async def argocd_broadcast_callback() -> None:
-                # Deferred -- no UI consumer this iteration. Dead wire kept for future WS support.
                 await brain.broadcast({
                     "type": "argocd_health_update",
                     "applications": argocd_observer.get_degraded_applications(),
@@ -366,15 +367,16 @@ async def lifespan(app: FastAPI):
 
             argocd_observer = ArgoCDObserver(
                 blackboard=blackboard,
-                health_change_callback=argocd_health_callback,
-                sync_change_callback=argocd_sync_callback,
+                anomaly_callback=argocd_anomaly_callback,
+                recovery_callback=argocd_recovery_callback,
                 broadcast_callback=argocd_broadcast_callback,
             )
             brain.agents["_argocd_observer"] = argocd_observer
             await argocd_observer.start()
+            await aligner.start()
             dashboard_adapter.set_argocd_observer(argocd_observer)
             set_argocd_observer(argocd_observer)
-            logger.info("ArgoCDObserver started for Application health/sync watching")
+            logger.info("ArgoCDObserver + Aligner poll loop started")
         else:
             logger.info("ArgoCDObserver disabled (ARGOCD_OBSERVER_ENABLED=false)")
 
@@ -488,6 +490,11 @@ async def lifespan(app: FastAPI):
     if redis and argocd_observer:
         await argocd_observer.stop()
         logger.info("ArgoCDObserver stopped")
+
+    # Stop Aligner poll loop (idempotent when never started)
+    if redis:
+        await aligner.stop()
+        logger.info("Aligner poll loop stopped")
 
     # Stop Kargo observer
     if redis and kargo_observer:
@@ -604,6 +611,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         logger.warning("Flow enrichment from snapshot failed: %s", exc)
 
     hh_pending = 0
+    aligner_pending_count = 0
     wip_used = 0
     wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
     try:
@@ -611,6 +619,9 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         hh = brain.agents.get("_headhunter") if brain else None
         if hh:
             hh_pending = hh.pending_count
+        aligner_ref = brain.agents.get("_aligner") if brain else None
+        if aligner_ref:
+            aligner_pending_count = aligner_ref.pending_count
         if brain:
             wip_used = await brain.count_global_wip()
     except Exception:
@@ -628,6 +639,7 @@ async def get_flow_metrics() -> FlowMetricsResponse:
         deferred_events=latest.deferred_events if latest else 0,
         waiting_approval_events=flow.get("waiting_approval_events", 0),
         headhunter_pending=hh_pending,
+        aligner_pending=aligner_pending_count,
         wip_used=wip_used,
         wip_cap=wip_cap,
         wip_utilization_pct=round(wip_utilization_pct, 1),

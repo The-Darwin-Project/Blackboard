@@ -627,6 +627,7 @@ class FlowMetricsResponse(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    aligner_pending: int = 0
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0
@@ -647,6 +648,7 @@ class FlowSnapshot(BaseModel):
     deferred_events: int = 0
     waiting_approval_events: int = 0
     headhunter_pending: int = 0
+    aligner_pending: int = 0
     wip_used: int = 0
     wip_cap: int = 0
     wip_utilization_pct: float = 0.0
@@ -671,6 +673,20 @@ class FlowSnapshot(BaseModel):
     token_total_delta: int = 0
     token_calls_delta: int = 0
     token_total_cumulative: int = 0
+
+
+class PendingAnomaly(BaseModel):
+    """Aligner pending queue item — an anomaly signal dwelling before event creation."""
+    key: str
+    target: str
+    anomaly_type: str
+    display_text: str
+    severity: str
+    domain: str
+    argocd_app: str
+    namespace: str
+    subject_type: str = Field(description="'service' for health, 'system' for sync")
+    first_seen: float
 
 
 class ReportMeta(BaseModel):
