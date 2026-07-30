@@ -73,13 +73,22 @@ if printf '%s\n' "$NORMALIZED" | grep -q "\$'"; then
   exit 2
 fi
 
-# A command that STARTS with a substitution ($(...) or a backtick expression) is
-# computing its own command name dynamically. Legitimate read-only commands use
-# substitution as an ARGUMENT (e.g. `git log $(cat ref.txt)`), never as the executable
-# position. Blocking this position closes the base64-decode-into-$(...) bypass class,
-# which -- like ANSI-C quoting above -- contains no literal dangerous token for the
-# word-boundary checks below to ever match against.
-if printf '%s\n' "$NORMALIZED" | grep -qE '^[[:space:]]*(\$\(|`)'; then
+# A command that STARTS a statement with a substitution ($(...) or a backtick
+# expression) is computing its own command name dynamically -- this covers ANY
+# mechanism that decodes to a command name at runtime (base64, printf hex-escapes,
+# echo -e, etc.), since the check is on POSITION, not content. Legitimate read-only
+# commands use substitution as an ARGUMENT (e.g. `git log $(cat ref.txt)`), never as
+# the executable position. Checked at start-of-command AND after any command
+# separator (;, &, |) -- not just the very start of the whole string -- so
+# `true; $(echo r)m -rf /data` is caught too, not just a substitution in position 0.
+# `["']*` tolerates the substitution being wrapped in quotes (`"$(...)"`), which
+# would otherwise dodge a bare `^\$\(` anchor while still resolving to the same
+# dynamically-computed command at execution time.
+# Known residual gap (documented, not fixed): a substitution-as-command-name that
+# lands immediately after a NEWLINE-turned-separator (rather than ;/&/|) is
+# indistinguishable from ordinary whitespace once NORMALIZED collapses newlines to
+# spaces above -- same class of accepted risk as the other exotic forms noted below.
+if printf '%s\n' "$NORMALIZED" | grep -qE '(^|[;&|])[[:space:]]*["'"'"']*(\$\(|`)'; then
   echo "Blocked: command substitution as the command itself is not permitted." >&2
   exit 2
 fi
@@ -114,10 +123,27 @@ GIT_GAP='((-\S+)(\s+\S+)?\s+)*'
 # `git config` covers the alias-definition bypass (`git config --local alias.p push`
 # followed by `git p ...`): the runtime-resolved alias name is opaque to any static
 # check, so the fix is blocking the ability to DEFINE a new alias in the first place.
-BLOCK_PATTERN="\\bgit\\s+${GIT_GAP}(commit|push|merge|rebase|reset\\s+.*--hard|checkout\\s+-[bB]|branch\\s+-[dD]|tag\\s|clean\\s+-\\S*f|rm\\b|apply\\b|am\\b|switch\\s+-c|config\\b)"
+# `branch`/`switch` apply GIT_GAP a SECOND time between the subcommand and ITS OWN
+# mutating flag (`git branch --no-color -d x`), not just between `git` and the
+# subcommand -- and include the GNU long-option spelling (`--delete`, `--create`)
+# alongside the short form, since flag-gap tolerance alone doesn't help if the flag
+# text itself isn't in the alternation.
+BLOCK_PATTERN="\\bgit\\s+${GIT_GAP}(commit|push|merge|rebase|reset\\s+.*--hard|checkout\\s+-[bB]|branch\\s+${GIT_GAP}(-[dD]\\b|--delete\\b)|tag\\s|clean\\s+-\\S*f|rm\\b|apply\\b|am\\b|switch\\s+${GIT_GAP}(-c\\b|--create\\b)|config\\b)"
 BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
 BLOCK_PATTERN+='|\bfind\b.*(-delete\b|-exec\s+(rm|mv|chmod|chown|dd|cp)\b)'
-BLOCK_PATTERN+="|sed\\s+${GIT_GAP}-i\\b|>\\s*[^&0-9]|\\btee\\b"
+# Redirect-mutation check excludes only `&` (fd duplication: `2>&1`, `>&2`) -- NOT
+# digits generally. A prior version excluded `[^&0-9]`, meaning any redirect target
+# starting with a digit (`>1x.sh`) evaded detection entirely; digit-prefixed fd-target
+# redirects (`2>&1`) are still correctly excluded because `&` itself is the excluded
+# char, immediately after `>`, regardless of what precedes `>`.
+# sed in-place: covers the attached-suffix short form (`-ibak`, no space -- GNU sed
+# accepts a suffix glued directly onto -i) and the GNU long option (`--in-place`,
+# `--in-place=.bak`). A prior version only matched bare `-i` with mandatory trailing
+# whitespace, which a suffix like `-ibak` defeated (nothing to anchor `\b` on between
+# "-i" and "bak" -- they're one token). Requires a preceding space so this doesn't
+# fire on a quoted search pattern that happens to contain the substring "-i".
+BLOCK_PATTERN+='|\bsed\b.*[[:space:]]-i[a-zA-Z0-9._-]*\b|\bsed\b.*--in-place\b'
+BLOCK_PATTERN+="|>\\s*[^&]|\\btee\\b"
 BLOCK_PATTERN+='|(curl|wget).*\|\s*(sh|bash)'
 # scp/ssh/rsync/sftp: no legitimate read-only-review need, and unlike curl/wget these
 # require no special flag or pipe target to exfiltrate the workspace (plain
@@ -127,6 +153,15 @@ BLOCK_PATTERN+="|\\b(kubectl|oc)\\s+${GIT_GAP}(apply|delete|patch|edit|scale)\\b
 BLOCK_PATTERN+='|\b(bash|sh|zsh)\s+(-\S+\s+)*-c\b|\|\s*(bash|sh|zsh)\b'
 BLOCK_PATTERN+='|\bpython3?\s+(-\S+\s+)*-c\b|\bnode\s+(-\S+\s+)*(-e|--eval)\b|\bperl\s+(-\S+\s+)*-e\b|\bruby\s+(-\S+\s+)*-e\b|\|\s*(python3?|node|perl|ruby)\b'
 BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby)\s*(<<|<[[:space:]])'
+# Bare "<interpreter> <file>" (no -c/-e/heredoc/pipe) runs an arbitrary script FILE --
+# a pre-existing malicious script committed to the reviewed repo needs no write at
+# all, only invocation, so write-detection above doesn't cover this path. The next
+# token after the interpreter name must start with `-` (a flag: --version, -m, etc.)
+# to be allowed; anything else (a path, a bare filename) is blocked. This is stricter
+# than "no legitimate use exists" -- it is "no legitimate use was found in this
+# review's own verification commands" (helm/tsc/pytest are standalone binaries, not
+# `python3 <file>` invocations), so the trade-off leans safe over permissive.
+BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby)\s+[^-[:space:]]'
 
 if printf '%s\n' "$CHECK_COMMAND" | grep -qiE "$BLOCK_PATTERN"; then
   # Bound + redact the logged command: blocked commands can legitimately contain

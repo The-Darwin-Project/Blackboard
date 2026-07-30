@@ -622,6 +622,13 @@ class Brain:
         self._last_processed: dict[str, float] = {}
         # Orphan re-queue attempts per event (blank events stuck in active set)
         self._orphan_requeue_count: dict[str, int] = {}
+        # In-process counter: how many times _defer_event_safely swallowed a failed
+        # defer_event call. Sensing signal for the codereview finding that relying
+        # solely on a log line + ResyncTrigger rediscovery had no persistent,
+        # queryable observability -- a sustained non-zero rate here (surfaceable via
+        # /flow or similar in a future pass) indicates the circuit-breaker defer path
+        # itself is degraded, not just the agent it was trying to defer.
+        self._defer_safety_failures: int = 0
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
@@ -3216,9 +3223,11 @@ class Brain:
             )
             return True
         except Exception:
+            self._defer_safety_failures += 1
             logger.warning(
-                "defer_event call failed for %s (reason=%s) -- not re-enqueueing immediately; "
-                "ResyncTrigger will rediscover this event", event_id, reason, exc_info=True,
+                "defer_event call failed for %s (reason=%s, total_failures=%d) -- not "
+                "re-enqueueing immediately; ResyncTrigger will rediscover this event",
+                event_id, reason, self._defer_safety_failures, exc_info=True,
             )
             return False
 

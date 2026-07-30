@@ -43,14 +43,18 @@ function buildCLICommand(prompt, options = {}) {
         const effectiveRoleForSettings = options.role || AGENT_ROLE;
         const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
         if (settingsFile) {
-            if (fs.existsSync(settingsFile)) {
-                args.push('--settings', settingsFile);
-            } else {
-                // Silent degrade to hook-only enforcement was the codereview finding here --
-                // this role EXPECTS an engine-enforced permission layer; its absence at runtime
-                // (missing image layer, bad COPY, wrong path) must be loud, not a quiet no-op.
-                console.error(`[${new Date().toISOString()}] WARNING: expected --settings file missing for role '${effectiveRoleForSettings}': ${settingsFile} -- proceeding WITHOUT the native permissions.deny layer (hook-only enforcement)`);
+            if (!fs.existsSync(settingsFile)) {
+                // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
+                // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
+                // exist. Losing it silently (missing image layer, bad COPY, wrong path) means
+                // this role now runs with a weaker security posture than its own design
+                // assumes, with nothing but a log line to notice -- codereview finding was
+                // that a log line alone isn't loud enough given what this layer guards.
+                const msg = `Expected --settings file missing for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
+                console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
+                throw new Error(msg);
             }
+            args.push('--settings', settingsFile);
         }
         if (permissionMode === 'plan') {
             args.push('--permission-mode', 'plan');
@@ -162,7 +166,17 @@ async function requestFindings(workDir, autoApprove, model, role) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
-    const { binary, args } = buildCLICommand(prompt, { autoApprove, model, role });
+    // buildCLICommand can now throw (fail-closed on a missing --settings file) -- this
+    // function must never reject (ai-rule 6), so catch it here and resolve(null) the
+    // same as any other retry failure, rather than let it surface as an unhandled
+    // rejection through resolveResult's un-guarded `await requestFindings(...)` call.
+    let binary, args;
+    try {
+        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role }));
+    } catch (e) {
+        console.log(`[${new Date().toISOString()}] Retry findings buildCLICommand failed: ${e.message}`);
+        return null;
+    }
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {

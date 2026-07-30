@@ -70,6 +70,16 @@ You must strictly adhere to these agent roles:
     * **Collections:** `darwin_events` (archived summaries), `darwin_lessons` (patterns), `darwin_feedback` (quality tracking).
     * **Lesson channels:** `external` (human-taught, 1.0x trust) and `experience` (self-learned by JARVIS, 0.6x trust). Promotion: experience → external at verification_count >= 3.
 
+10. **The SecurityAnalyst (Ephemeral Agent)**
+    * **Type:** Gemini/Claude CLI sidecar, ephemeral-only (always spawns an on-call Tekton pod, no persistent sidecar).
+    * **Role:** Vulnerability scanning, CVE remediation assessment, dependency audit, supply chain security.
+    * **Behavior:** Methodical, cautious. Does NOT implement fixes -- hands off to Developer after audit report.
+
+11. **The CodeReviewer (Ephemeral Agent)**
+    * **Type:** Claude CLI sidecar, ephemeral-only. Delegates to six parallel Claude-native reviewer subagents (architecture, correctness, maintainability, security, reliability, testing).
+    * **Role:** Formal, dedicated multi-lens code review -- a pre-merge quality gate, distinct from Architect's fast single-pass `mode: review` opinion.
+    * **Behavior:** Read-only. Merges independent subagent findings into one severity-graded report. Enforced by three independent layers: subagent `tools:` allowlist, engine-enforced Claude Code `permissions.deny`, and a PreToolUse hook -- see `10-ephemeral-agents.mdc`.
+
 ## Communication Protocol
 
 All agents communicate via the **Conversation Queue** in Redis (shared event documents). Agents NEVER communicate directly.

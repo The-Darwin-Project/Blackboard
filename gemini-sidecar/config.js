@@ -1,14 +1,14 @@
 // gemini-sidecar/config.js
 // @ai-rules:
 // 1. [Constraint]: Pure constants and env-derived values only. No side effects at load time.
-// 2. [Pattern]: TIMEOUT_MS derives from AGENT_ROLE via ROLE_TIMEOUTS; PORT/TIMEOUT_MS can be overridden by env.
-//    TIMEOUT_MS itself is a load-time snapshot for AGENT_ROLE (persistent-sidecar roles set this
-//    env var and never change it) -- ephemeral roles get their role per-task via a WS message field
-//    (see ws-server.js msg.role), NOT via this env var, which stays "" for them. Call
-//    resolveTimeoutMs(role) instead of reading TIMEOUT_MS directly anywhere a per-task role is known
-//    (cli-executor.js executeCLI/executeCLIStreaming) -- codereview finding: the code_reviewer/
-//    security_analyst ROLE_TIMEOUTS entries were dead without this, silently falling back to
-//    ROLE_TIMEOUTS.default every time.
+// 2. [Pattern]: resolveTimeoutMs(role) derives a per-task CLI timeout from ROLE_TIMEOUTS.
+//    There is deliberately NO module-level TIMEOUT_MS constant: ephemeral roles get their role
+//    per-task via a WS message field (see ws-server.js msg.role), NOT via AGENT_ROLE, which stays
+//    "" for them at process start. A load-time snapshot of AGENT_ROLE would silently pin every
+//    ephemeral dispatch to ROLE_TIMEOUTS.default regardless of the role's own entry -- this was a
+//    real, shipped bug (code_reviewer's 45min entry was dead) before resolveTimeoutMs existed. All
+//    consumers (currently only cli-executor.js's two spawn() call sites) MUST call
+//    resolveTimeoutMs(options.role || AGENT_ROLE) at the point of use, never cache the result.
 // 3. [Pattern]: AGENT_CLI routes CLI selection (gemini|claude); AGENT_EFFORT_LEVEL controls Claude adaptive reasoning depth.
 // 4. [Pattern]: stripAnsi cleans PTY output for Brain/LLM consumption.
 // 5. [Gotcha]: stripAnsi and resolveTimeoutMs are the only non-constant exports — pure functions, safe to call anywhere.
@@ -23,14 +23,11 @@ const ROLE_TIMEOUTS = {
     code_reviewer: 2700000,   // 45 min -- fans out to 6 sequential/concurrent subagent delegations before merging, unlike single-pass roles
     default: 1800000,         // 30 min
 };
-// resolveTimeoutMs(role): explicit TIMEOUT_MS env var always wins (operator override), then the
-// role-specific ceiling, then the default. Use this (not the TIMEOUT_MS constant below) wherever
-// the caller knows the actual per-task role -- see ai-rule 2 above.
+// explicit TIMEOUT_MS env var always wins (operator override), then the role-specific ceiling,
+// then the default. See ai-rule 2 above for why this MUST be called per-task, never cached.
 function resolveTimeoutMs(role) {
     return parseInt(process.env.TIMEOUT_MS) || ROLE_TIMEOUTS[role || 'default'] || ROLE_TIMEOUTS.default;
 }
-// Backward-compat snapshot for persistent-sidecar call sites that only ever see AGENT_ROLE.
-const TIMEOUT_MS = resolveTimeoutMs(process.env.AGENT_ROLE);
 const FINDINGS_FRESHNESS_MS = 30000; // 30s -- findings.md older than this is stale
 const DEFAULT_WORK_DIR = '/data/gitops';
 
@@ -61,7 +58,6 @@ function stripAnsi(text) { return text.replace(ANSI_RE, ''); }
 module.exports = {
   PORT,
   ROLE_TIMEOUTS,
-  TIMEOUT_MS,
   resolveTimeoutMs,
   FINDINGS_FRESHNESS_MS,
   DEFAULT_WORK_DIR,

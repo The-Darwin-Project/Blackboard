@@ -96,9 +96,10 @@ class TestReviewerSubagentHookWiring:
 class TestCodeReviewerPermissionsFile:
     """The native Claude Code permission layer (--settings, engine-enforced) referenced by
     cli-executor.js ROLE_SETTINGS_FILE must exist, be valid JSON, and actually deny the
-    categories the hook also covers -- this is layer 2 of 3; if it silently went missing
-    or empty, code_reviewer would fall back to layer 3 (the hook) alone without anyone
-    noticing, since --settings pointing at a missing file is a soft no-op in cli-executor.js.
+    categories the hook also covers -- this is layer 2 of 3. cli-executor.js now fails
+    CLOSED (throws) if this file is missing at runtime rather than silently degrading to
+    layer 3 (the hook) alone -- this test guards the file's committed presence/content so
+    that fail-closed behavior is a deploy-time safety net, not the routine path.
     """
 
     SETTINGS_PATH = (

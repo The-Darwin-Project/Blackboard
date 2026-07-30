@@ -21,6 +21,8 @@ alwaysApply: true
   * **Headhunter** (`headhunter.py`) is an in-process daemon (same pattern as Aligner). Polls GitLab `/todos`, classifies MRs, creates events. Does NOT route to agents -- Brain handles all routing. See `07-headhunter.mdc`.
   * **Headhunter Jira** (`headhunter_jira.py`) polls Jira for QE missions. Two-phase: Planning → comment, To Do → Brain event. See `docs/agents.md`.
   * **Dispatcher** (`ephemeral_provisioner.py`) provisions ephemeral agents via Tekton webhook. Pure plumbing -- no routing logic, no LLM. Brain decides WHAT to dispatch; Dispatcher decides WHERE (local sidecar vs ephemeral agent based on event source). See `10-ephemeral-agents.mdc`.
+  * **SecurityAnalyst** sidecar is ephemeral-only (no persistent sidecar). Air gap enforced behaviorally via `gemini-sidecar/rules/security_analyst.md` -- read-only investigation, hands off fixes to Developer.
+  * **CodeReviewer** sidecar is ephemeral-only. Air gap enforced by THREE independent layers, not behavior alone: (1) its six reviewer subagents' `tools:` allowlist excludes Write/Edit/NotebookEdit, (2) Claude Code's own engine-enforced `permissions.deny` rules (`--settings code-reviewer-permissions.json`, denies Edit/Write/NotebookEdit and mutation commands for the CodeReviewer session itself too), (3) a PreToolUse hook (`validate-reviewer-bash.sh`) as a non-exhaustive regex backstop for what the other two layers can't express.
 
 ## 3. The Conversation Queue Protocol
 
