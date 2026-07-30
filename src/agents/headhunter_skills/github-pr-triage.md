@@ -43,7 +43,7 @@ Assign each step to exactly one agent:
 | `qe` | Test execution, deployment verification, browser-based UI checks |
 | `architect` | Architecture analysis, code review, structured planning |
 | `security_analyst` | Vulnerability scanning, CVE remediation, dependency audit, container image analysis, supply chain security, RBAC review |
-| `code_reviewer` | Dedicated multi-lens review gate -- use when the review itself is the requested work, not architect's investigation-time opinion (READ-ONLY, ephemeral) |
+| `code_reviewer` | Dedicated multi-lens review gate for formal pre-merge quality checks -- six parallel subagents merged into one severity-graded report (READ-ONLY, ephemeral) |
 </agents>
 
 <routing_hints>

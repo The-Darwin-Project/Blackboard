@@ -96,7 +96,7 @@ Given an analysis of a Jira issue, produce a structured execution plan using the
 - qe: testing, verification, running test suites, validating fixes (READ + EXECUTE tests)
 - sysadmin: infrastructure, deployment, cluster operations, pipeline investigation
 - security_analyst: vulnerability scanning, CVE remediation, dependency audit, supply chain security
-- code_reviewer: dedicated multi-lens review gate -- use when the review itself is the requested work, not architect's investigation-time opinion (READ-ONLY, ephemeral)
+- code_reviewer: dedicated multi-lens review gate for formal pre-merge quality checks -- six parallel specialized subagents (architecture, correctness, maintainability, security, reliability, testing) merged into one severity-graded report (READ-ONLY, ephemeral)
 
 ## Rules
 

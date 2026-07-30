@@ -12,6 +12,9 @@
 // 9. [Pattern]: options.model/effort/role override env (AGENT_MODEL/AGENT_EFFORT_LEVEL/AGENT_ROLE) at the per-task level.
 //    Stored on state.getCurrentTask() (model/role) so resolveResult -> requestFindings can read them without threading
 //    extra params through the whole call chain -- mirrors the existing sessionId bridging pattern.
+// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
+//     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
+//     here (not a hardcoded role check) when a future role needs its own permission boundary.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -24,12 +27,23 @@ const { wsSend } = require('./ws-utils');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
 
+// Per-role native permission files (Claude Code engine-enforced deny rules).
+// Only roles listed here get --settings; all other roles are unaffected.
+const ROLE_SETTINGS_FILE = {
+    code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+};
+
 function buildCLICommand(prompt, options = {}) {
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
     if (AGENT_CLI === 'claude') {
         const args = [];
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
+        }
+        const effectiveRoleForSettings = options.role || AGENT_ROLE;
+        const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
+        if (settingsFile && fs.existsSync(settingsFile)) {
+            args.push('--settings', settingsFile);
         }
         if (permissionMode === 'plan') {
             args.push('--permission-mode', 'plan');

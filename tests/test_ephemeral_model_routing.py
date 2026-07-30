@@ -280,3 +280,57 @@ class TestCodeReviewerRouting:
             "properties"
         ]["agent"]
         assert "code_reviewer" in create_plan_agent_schema["enum"]
+
+
+class TestDeferEventSafely:
+    """_defer_event_safely (C4-F5 fix): a defer_event failure must not fall through to
+    _run_agent_task's outer handler's zero-backoff immediate re-enqueue."""
+
+    @pytest.mark.asyncio
+    async def test_defer_failure_does_not_raise(self, registry_and_bridge):
+        """execute_tool_locked raising (e.g. Redis blip during get_event) is swallowed --
+        the circuit-breaker defer call-site must not propagate to the outer handler."""
+        brain = _make_brain()
+        brain.execute_tool_locked = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        result = await brain._defer_event_safely("evt-hh0001", 60, "test reason")
+
+        assert result is False
+        brain.execute_tool_locked.assert_called_once_with(
+            "evt-hh0001", "defer_event", {"delay_seconds": 60, "reason": "test reason"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_defer_success_returns_true(self, registry_and_bridge):
+        brain = _make_brain()
+        brain.execute_tool_locked = AsyncMock(return_value=True)
+
+        result = await brain._defer_event_safely("evt-hh0001", 30, "test reason")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_code_reviewer_defer_failure_does_not_crash_run_agent_task(self, registry_and_bridge):
+        """End-to-end: circuit-breaker path for an EPHEMERAL_ONLY role whose defer_event
+        call itself fails must return cleanly (no exception surfaces to the caller), not
+        fall through to the generic error-turn + immediate-re-enqueue path."""
+        brain = _make_brain()
+        brain._ephemeral_provisioner = AsyncMock()
+        brain._ephemeral_provisioner.ensure_agent = AsyncMock(return_value=None)
+        brain._ephemeral_provisioner.record_dispatch_circuit_break = MagicMock()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback = MagicMock()
+        brain.execute_tool_locked = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        with patch(
+            "src.agents.brain.dispatch_to_agent",
+            new_callable=AsyncMock,
+            return_value=("Findings ready.", None),
+        ) as mock_dispatch:
+            # Must not raise -- the defer failure is caught inside _defer_event_safely.
+            await brain._run_agent_task(
+                event_id="evt-hh0001", agent_name="code_reviewer", agent=None,
+                task="Review the recent changes", event_md_path="/tmp/x.md",
+                routing_turn_num=1, mode="review", effort="",
+            )
+
+        mock_dispatch.assert_not_called()

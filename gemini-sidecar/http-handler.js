@@ -104,7 +104,7 @@ async function handleRequest(req, res) {
       cliType: AGENT_CLI,
       cliModel: AGENT_MODEL,
       agentRole: AGENT_ROLE || 'default',
-      toolRestrictions: AGENT_ROLE === 'architect' ? 'read-only (no file modification)' : 'full',
+      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer'].includes(AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),

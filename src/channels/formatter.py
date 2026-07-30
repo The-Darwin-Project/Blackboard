@@ -37,7 +37,7 @@ AGENT_COLORS: dict[str, str] = {
     "developer": "#10b981",
     "qe": "#fb7185",
     "security_analyst": "#ef4444",
-    "code_reviewer": "#6366f1",
+    "code_reviewer": "#f97316",
 }
 
 AGENT_EMOJI: dict[str, str] = {

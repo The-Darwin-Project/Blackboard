@@ -1,5 +1,5 @@
 ---
-name: darwin-code-reviewer
+name: darwin-multi-lens-review
 description: Multi-lens code review orchestration. Use when dispatched as code_reviewer to review a diff, MR, or PR through parallel specialized reviewer subagents.
 roles: [code_reviewer]
 modes: [review]

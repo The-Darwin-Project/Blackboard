@@ -3185,6 +3185,30 @@ class Brain:
             if self._active_tasks.get(event_id) is current_task:
                 self._release_task_state(event_id)
 
+    async def _defer_event_safely(self, event_id: str, delay_seconds: int, reason: str) -> bool:
+        """Guard a circuit-breaker defer_event call against its own failure (C4-F5).
+
+        execute_tool_locked calls blackboard.get_event() before entering
+        _execute_function_call's internal try/except -- if that raises (e.g. a Redis
+        blip), the exception previously propagated to _run_agent_task's outer handler,
+        which unconditionally re-enqueues with ZERO backoff, discarding the intended
+        defer delay and risking a tight retry loop against the exact dependency that's
+        already unhealthy. On failure here, deliberately do NOT re-enqueue -- the
+        ResyncTrigger's periodic scan will naturally rediscover the event, giving an
+        effective soft backoff instead of an immediate retry.
+        """
+        try:
+            await self.execute_tool_locked(
+                event_id, "defer_event", {"delay_seconds": delay_seconds, "reason": reason},
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "defer_event call failed for %s (reason=%s) -- not re-enqueueing immediately; "
+                "ResyncTrigger will rediscover this event", event_id, reason, exc_info=True,
+            )
+            return False
+
     async def _run_agent_task(
         self,
         event_id: str,
@@ -3350,9 +3374,8 @@ class Brain:
                             "Ephemeral-only role %s selected but provisioner unavailable for %s -- deferring",
                             agent_name, event_id,
                         )
-                        await self.execute_tool_locked(
-                            event_id, "defer_event",
-                            {"delay_seconds": 60, "reason": f"Role {agent_name} requires ephemeral provisioner (disabled)"},
+                        await self._defer_event_safely(
+                            event_id, 60, f"Role {agent_name} requires ephemeral provisioner (disabled)",
                         )
                         return
 
@@ -3394,9 +3417,8 @@ class Brain:
                                     await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                                 except Exception:
                                     logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                                await self.execute_tool_locked(
-                                    event_id, "defer_event",
-                                    {"delay_seconds": 60, "reason": "Ephemeral circuit breaker, no fallback"},
+                                await self._defer_event_safely(
+                                    event_id, 60, "Ephemeral circuit breaker, no fallback",
                                 )
                                 return
                             elif ephemeral_is_overflow:
@@ -3416,9 +3438,8 @@ class Brain:
                                     await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                                 except Exception:
                                     logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                                await self.execute_tool_locked(
-                                    event_id, "defer_event",
-                                    {"delay_seconds": 30, "reason": "All agents busy (local full + ephemeral circuit breaker)"},
+                                await self._defer_event_safely(
+                                    event_id, 30, "All agents busy (local full + ephemeral circuit breaker)",
                                 )
                                 return
                             else:
@@ -3439,9 +3460,8 @@ class Brain:
                                 await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                             except Exception:
                                 logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                            await self.execute_tool_locked(
-                                event_id, "defer_event",
-                                {"delay_seconds": infra_wait, "reason": "Tekton infrastructure unavailable"},
+                            await self._defer_event_safely(
+                                event_id, infra_wait, "Tekton infrastructure unavailable",
                             )
                             return
                         else:

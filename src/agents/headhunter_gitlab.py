@@ -67,7 +67,7 @@ steps:
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain), code_reviewer (dedicated multi-lens review gate -- use when the review itself is the requested work, not architect's investigation-time opinion).
+Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain), code_reviewer (dedicated multi-lens review gate for formal pre-merge quality checks, six parallel subagents merged into one severity-graded report).
 Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 If the MR description contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """

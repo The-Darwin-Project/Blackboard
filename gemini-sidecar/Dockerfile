@@ -209,6 +209,12 @@ COPY agents/ /home/default/.claude/agents/
 COPY hooks/validate-reviewer-bash.sh /app/hooks/validate-reviewer-bash.sh
 RUN chmod +x /app/hooks/validate-reviewer-bash.sh
 
+# Native Claude Code permission files (engine-enforced permissions.deny), applied per-role
+# via --settings in cli-executor.js -- NOT baked into a shared ~/.claude/settings.json, since
+# this image runs every role (sysadmin/developer need to commit/push; only specific roles
+# get a restrictive file here).
+COPY claude-settings/ /app/claude-settings/
+
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \
