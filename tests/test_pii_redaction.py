@@ -43,16 +43,16 @@ class TestRedactSecrets:
     def test_bearer_token_redacted(self):
         result = redact_pii("Authorization: Bearer abc123.def456-ghi")
         assert "abc123.def456-ghi" not in result
-        assert "[redacted-bearer-token]" in result
+        assert "Bearer [redacted-token]" in result
 
     def test_aws_key_redacted(self):
-        result = redact_pii("key=AKIAIOSFODNN7EXAMPLE")
+        result = redact_pii("access key: AKIAIOSFODNN7EXAMPLE")
         assert "AKIAIOSFODNN7EXAMPLE" not in result
         assert "[redacted-aws-key]" in result
 
     def test_google_api_key_redacted(self):
-        key = "AIzaSyD-1234567890abcdefghijklmnopqrstuv"
-        result = redact_pii(f"key={key}")
+        key = "AIza" + "x" * 35
+        result = redact_pii(f"the key is {key} for this project")
         assert key not in result
         assert "[redacted-google-api-key]" in result
 
@@ -61,6 +61,28 @@ class TestRedactSecrets:
         result = redact_pii(f"token={token}")
         assert token not in result
         assert "[redacted-github-token]" in result
+
+    def test_slack_token_redacted(self):
+        token = "xoxb-" + "1234567890"
+        result = redact_pii(f"slack token {token}")
+        assert token not in result
+        assert "[redacted-slack-token]" in result
+
+    def test_jwt_redacted(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PYE"
+        result = redact_pii(f"auth header: {jwt}")
+        assert jwt not in result
+        assert "[redacted-jwt]" in result
+
+    def test_generic_keyed_secret_redacted(self):
+        result = redact_pii('config: api_key="sk_live_abcdefghijklmnop"')
+        assert "sk_live_abcdefghijklmnop" not in result
+        assert "[redacted-secret]" in result
+
+    def test_password_field_redacted(self):
+        result = redact_pii("password: SuperSecret123456")
+        assert "SuperSecret123456" not in result
+        assert "[redacted-secret]" in result
 
 
 class TestRedactCombined:

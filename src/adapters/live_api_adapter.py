@@ -59,12 +59,13 @@
 #     store_context=True (when JARVIS_RAG_ENABLED) persists the WHOLE session, not one turn, so
 #     redacting only one send site left 7+ sibling paths carrying the same class of data unguarded.
 #     Static prompt constants (HANDOFF_REPORT_PROMPT, SESSION_STARTUP_PROTOCOL) need no redaction.
-#     NOT EXHAUSTIVE (codereview finding): covers emails, IPv4 addresses, and named-prefix
-#     secrets (Bearer tokens, AWS/Google/GitHub API-key formats) -- categories with distinctive
-#     patterns and low false-positive rates. Does NOT cover generic high-entropy strings, unknown
-#     secret formats, or free-text PII (names, addresses). Full arbitrary-secret detection is a
-#     separately-scoped effort. Archivist.rerank() applies the SAME _redact_pii() to text sent to
-#     the external Ranking API -- see archivist.py shebang.
+#     NOT EXHAUSTIVE (codereview finding): covers emails, IPv4 addresses, JWTs, and named-prefix/
+#     keyed secrets (Bearer tokens, AWS/Google/GitHub/Slack API-key formats, generic key=value
+#     pairs for api_key/secret/password/token fields) -- categories with distinctive patterns and
+#     low false-positive rates. Does NOT cover unrecognized high-entropy strings or free-text PII
+#     (names, addresses). Full arbitrary-secret detection is a separately-scoped effort. Lives in
+#     shared src/utils/pii_redaction.py -- Archivist.rerank() applies the SAME redact_pii() to
+#     text sent to the external Ranking API -- see archivist.py shebang.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
