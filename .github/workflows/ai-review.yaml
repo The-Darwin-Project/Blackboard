@@ -55,7 +55,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CLAUDE_CODE_USE_VERTEX: "1"
           GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
-          GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'us-central1' }}
+          GOOGLE_CLOUD_REGION: ${{ vars.GOOGLE_CLOUD_REGION || 'global' }}
           CLOUD_ML_REGION: ${{ vars.CLOUD_ML_REGION || 'global' }}
           ANTHROPIC_VERTEX_REGION: ${{ vars.CLOUD_ML_REGION || 'global' }}
           GOOGLE_APPLICATION_CREDENTIALS: "/tmp/vertex-sa.json"
