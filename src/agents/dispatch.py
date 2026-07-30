@@ -62,6 +62,7 @@ AGENT_VOLUME_PATHS = {
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
     "security_analyst": "/data/workspace",
+    "code_reviewer": "/data/workspace",
 }
 
 

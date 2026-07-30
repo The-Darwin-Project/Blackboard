@@ -204,6 +204,11 @@ RUN mkdir -p /home/default/.claude/skills && \
       ln -s "$skill" /home/default/.claude/skills/"$(basename "$skill")"; \
     done
 
+# Install Claude subagent definitions (code review reviewers) -- Claude-only, no Gemini equivalent
+COPY agents/ /home/default/.claude/agents/
+COPY hooks/validate-reviewer-bash.sh /app/hooks/validate-reviewer-bash.sh
+RUN chmod +x /app/hooks/validate-reviewer-bash.sh
+
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \

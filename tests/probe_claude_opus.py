@@ -130,7 +130,7 @@ async def main():
                 "properties": {
                     "agent_name": {
                         "type": "string",
-                        "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
+                        "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"],
                         "description": "Which agent to route to",
                     },
                     "task_instruction": {

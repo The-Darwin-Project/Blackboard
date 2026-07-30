@@ -43,6 +43,7 @@ Assign each step to exactly one agent:
 | `qe` | Test execution, deployment verification, browser-based UI checks |
 | `architect` | Architecture analysis, code review, structured planning |
 | `security_analyst` | Vulnerability scanning, CVE remediation, dependency audit, container image analysis, supply chain security, RBAC review |
+| `code_reviewer` | Dedicated multi-lens review gate -- use when the review itself is the requested work, not architect's investigation-time opinion (READ-ONLY, ephemeral) |
 </agents>
 
 <routing_hints>
@@ -55,6 +56,7 @@ Assign each step to exactly one agent:
 | Infrastructure paths changed (k8s manifests, Helm, Terraform) | sysadmin | Infrastructure expertise |
 | PR needs architecture review or design validation | architect | Design-first approach |
 | Deployment verification, smoke test needed | qe | Post-deploy validation |
+| "review requested" label/comment, formal pre-merge quality gate needed | code_reviewer | Dedicated multi-lens review gate -- the review itself is the requested work |
 </routing_hints>
 
 <risk>

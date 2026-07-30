@@ -289,6 +289,7 @@ VOLUME_PATHS = {
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
     "security_analyst": "/data/workspace",
+    "code_reviewer": "/data/workspace",
 }
 
 # Brain-declared phase -> additional skill folders to load alongside plumbing phases.
@@ -559,6 +560,7 @@ _ROLE_MODEL_MAP = {
     "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5"),
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
+    "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
@@ -566,6 +568,7 @@ _ROLE_EFFORT_MAP = {
     "developer": os.getenv("EPHEMERAL_EFFORT_DEVELOPER", "low"),
     "qe": os.getenv("EPHEMERAL_EFFORT_QE", "high"),
     "security_analyst": os.getenv("EPHEMERAL_EFFORT_SECURITY", "high"),
+    "code_reviewer": os.getenv("EPHEMERAL_EFFORT_CODE_REVIEWER", "high"),
 }
 
 
@@ -707,7 +710,7 @@ class Brain:
     _BYPASS_SOURCES = frozenset({"chat", "slack", "jarvis"})
 
     # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
-    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst"})
+    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst", "code_reviewer"})
 
     async def _count_global_wip(self) -> int:
         """Count all events in WIP (active + deferred), minus _waiting_for_user.
@@ -982,7 +985,7 @@ class Brain:
         # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
         agent_turns = sum(
             1 for t in event.conversation
-            if t.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst")
+            if t.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer")
         )
         if agent_turns >= MAX_TURNS_PER_EVENT:
             logger.warning(f"Event {event_id} hit max agent turns ({agent_turns}/{MAX_TURNS_PER_EVENT})")

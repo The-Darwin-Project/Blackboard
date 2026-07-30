@@ -1,7 +1,7 @@
 ---
 name: darwin-reporting-context
 description: MR/PR context gathering and diagnostic reporting guidelines. Activates when working on events that reference MRs/PRs or when reporting investigation findings.
-roles: [architect, sysadmin, developer, qe, security_analyst]
+roles: [architect, sysadmin, developer, qe, security_analyst, code_reviewer]
 ---
 
 # MR/PR Context and Diagnostic Reporting

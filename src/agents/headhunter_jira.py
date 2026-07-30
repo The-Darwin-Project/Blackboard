@@ -96,6 +96,7 @@ Given an analysis of a Jira issue, produce a structured execution plan using the
 - qe: testing, verification, running test suites, validating fixes (READ + EXECUTE tests)
 - sysadmin: infrastructure, deployment, cluster operations, pipeline investigation
 - security_analyst: vulnerability scanning, CVE remediation, dependency audit, supply chain security
+- code_reviewer: dedicated multi-lens review gate -- use when the review itself is the requested work, not architect's investigation-time opinion (READ-ONLY, ephemeral)
 
 ## Rules
 
@@ -129,7 +130,7 @@ PLAN_TOOL_SCHEMA = {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Short kebab-case step ID"},
-                        "agent": {"type": "string", "enum": ["qe", "developer", "architect", "sysadmin", "security_analyst"]},
+                        "agent": {"type": "string", "enum": ["qe", "developer", "architect", "sysadmin", "security_analyst", "code_reviewer"]},
                         "mode": {"type": "string", "enum": ["investigate", "test", "implement", "execute", "review"]},
                         "summary": {"type": "string", "description": "What this step does"},
                     },
