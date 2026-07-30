@@ -136,7 +136,9 @@
 #     guard on the next scan (3 retries, force close). The LLM deterministically calls set_phase("triage")
 #     on fresh headhunter events because brain_phase defaults to "triage" at creation.
 # 36. [Pattern]: Google Search grounding gated by BRAIN_GOOGLE_SEARCH_ENABLED env var + phase (triage/dispatch).
-#     Brain calls adapter.set_search_enabled() before/after generate_stream via try/finally. hasattr guard for Claude.
+#     _resolve_grounding_mode() computes (want_search, grounding_corpus) with mutual exclusion, passed
+#     as per-call search_enabled/grounding_corpus kwargs to generate_stream() -- NOT adapter state (the
+#     adapter is a cross-event singleton; a setter-then-reset pattern would race under concurrent workers).
 #     Grounding metadata formatted as evidence, not thoughts. Graceful fallback if search unavailable.
 # 36b. [Pattern]: _resolve_grounding_urls() follows Vertex grounding-api-redirect URIs to canonical URLs
 #     via httpx HEAD with follow_redirects=True, 2.5s timeout. Shared AsyncClient per batch. Deduplicates
@@ -670,11 +672,14 @@ class Brain:
         self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
 
         self._search_enabled = os.getenv("BRAIN_GOOGLE_SEARCH_ENABLED", "false").lower() == "true"
+        self._rag_grounding_corpus = os.getenv("RAG_GROUNDING_CORPUS", "")
+        self._rag_grounding_enabled = os.getenv("RAG_GROUNDING_ENABLED", "false").lower() == "true"
 
         skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
         wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
         search_status = "search=on" if self._search_enabled else "search=off"
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, agents={list(self.agents.keys())})")
+        grounding_status = "grounding=on" if self._rag_grounding_enabled and self._rag_grounding_corpus else "grounding=off"
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, {grounding_status}, agents={list(self.agents.keys())})")
 
         # Initialize tool router context — singleton, methods take event_id
         self._tool_ctx = _BrainToolContext(self)
@@ -1400,126 +1405,124 @@ class Brain:
         raw_parts = None
         last_grounding = None
 
-        want_search = self._search_enabled and brain_phase in ("triage", "dispatch")
-        if want_search and hasattr(self._adapter, 'set_search_enabled'):
-            self._adapter.set_search_enabled(True)
+        want_search, grounding_corpus = self._resolve_grounding_mode(
+            self._search_enabled, brain_phase, self._rag_grounding_enabled, self._rag_grounding_corpus,
+        )
 
         chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "120"))
         timeout_retries = 0
 
-        try:
-            for attempt in range(max_retries + 1):
-                accumulated_text = ""
-                accumulated_thoughts = ""
-                function_call = None
-                raw_parts = None
-                last_grounding = None
-                reflex_chunker, reflex_searcher = self._create_reflex_pair(
-                    event_id,
-                    event_domain=context_flags.get("event_domain") or "",
-                    event_service=event.service or "",
-                )
+        for attempt in range(max_retries + 1):
+            accumulated_text = ""
+            accumulated_thoughts = ""
+            function_call = None
+            raw_parts = None
+            last_grounding = None
+            reflex_chunker, reflex_searcher = self._create_reflex_pair(
+                event_id,
+                event_domain=context_flags.get("event_domain") or "",
+                event_service=event.service or "",
+            )
 
+            try:
+                stream = None
                 try:
-                    stream = None
-                    try:
-                        stream = self._adapter.generate_stream(
-                            system_prompt=system_prompt,
-                            contents=prompt,
-                            tools=active_tools,
-                            temperature=call_temp,
-                            max_output_tokens=phase_max_tokens,
-                            thinking_level=thinking_level,
-                        )
-                        it = stream.__aiter__()
-                        while True:
-                            try:
-                                chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
-                            except StopAsyncIteration:
-                                break
-                            if chunk.text:
-                                if chunk.is_thought:
-                                    accumulated_thoughts += chunk.text
-                                    if reflex_chunker:
-                                        window = reflex_chunker.feed(chunk.text)
-                                        if window and reflex_searcher:
-                                            reflex_searcher.fire(window)
-                                else:
-                                    accumulated_text += chunk.text
-                                    if len(accumulated_text) > 2000:
-                                        tail = accumulated_text[-200:]
-                                        token = tail[:20]
-                                        if token and tail.count(token) > 8:
-                                            logger.warning(
-                                                "Repetition collapse detected for %s — aborting stream (%d chars)",
-                                                event_id, len(accumulated_text),
-                                            )
-                                            accumulated_text = ""
-                                            break
-                                await self._broadcast({
-                                    "type": "brain_thinking",
-                                    "event_id": event_id,
-                                    "text": chunk.text,
-                                    "accumulated": accumulated_thoughts + accumulated_text,
-                                    "is_thought": chunk.is_thought,
-                                })
-                            if chunk.function_call:
-                                function_call = chunk.function_call
-                            if chunk.raw_parts:
-                                raw_parts = chunk.raw_parts
-                            if chunk.grounding_metadata:
-                                last_grounding = chunk.grounding_metadata
-                            if chunk.usage:
-                                from .llm import record_token_usage
-                                record_token_usage("brain", chunk.usage, event_id)
-                        last_error = None
-                        break
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Brain LLM stream timed out for {event_id} after {chunk_timeout}s (attempt {attempt+1})")
-                        if stream is not None and hasattr(stream, 'aclose'):
-                            try:
-                                await asyncio.wait_for(stream.aclose(), timeout=_ACLOSE_TIMEOUT)
-                            except (asyncio.TimeoutError, Exception) as cleanup_err:
-                                logger.warning(f"Stream cleanup failed for {event_id}: {cleanup_err}")
-                        raise
-                except Exception as e:
-                    last_error = e
-                    if isinstance(e, asyncio.TimeoutError):
-                        if timeout_retries < 1 and attempt < max_retries:
-                            timeout_retries += 1
-                            logger.warning(f"Brain LLM stream timeout for {event_id}, retrying once")
-                            await asyncio.sleep(5)
-                            continue
-                        accumulated_text = ""
-                        accumulated_thoughts = ""
-                        function_call = None
-                        raw_parts = None
-                        last_grounding = None
-                        logger.error(f"Brain LLM stream timeout for {event_id} after retry — giving up")
-                        break
-                    if attempt < max_retries and self._is_transient(e):
-                        is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
-                        base = 30 if is_rate_limit else 5
-                        delay = min(base * (2 ** attempt), 120)
-                        jitter = delay * 0.3 * (0.5 - __import__('random').random())
-                        delay = max(1, delay + jitter)
-                        logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
-                        await asyncio.sleep(delay)
-                        continue
-                    err_str = str(e)
-                    if "400" in err_str or "INVALID_ARGUMENT" in err_str:
-                        token_est = self._estimate_tokens(prompt)
-                        logger.error(
-                            f"Brain LLM 400 for {event_id} "
-                            f"(turns={len(event.conversation)}, est_tokens={token_est}): {e}",
-                            exc_info=True,
-                        )
-                    else:
-                        logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+                    stream = self._adapter.generate_stream(
+                        system_prompt=system_prompt,
+                        contents=prompt,
+                        tools=active_tools,
+                        temperature=call_temp,
+                        max_output_tokens=phase_max_tokens,
+                        thinking_level=thinking_level,
+                        search_enabled=want_search,
+                        grounding_corpus=grounding_corpus,
+                    )
+                    it = stream.__aiter__()
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(anext(it), timeout=chunk_timeout)
+                        except StopAsyncIteration:
+                            break
+                        if chunk.text:
+                            if chunk.is_thought:
+                                accumulated_thoughts += chunk.text
+                                if reflex_chunker:
+                                    window = reflex_chunker.feed(chunk.text)
+                                    if window and reflex_searcher:
+                                        reflex_searcher.fire(window)
+                            else:
+                                accumulated_text += chunk.text
+                                if len(accumulated_text) > 2000:
+                                    tail = accumulated_text[-200:]
+                                    token = tail[:20]
+                                    if token and tail.count(token) > 8:
+                                        logger.warning(
+                                            "Repetition collapse detected for %s — aborting stream (%d chars)",
+                                            event_id, len(accumulated_text),
+                                        )
+                                        accumulated_text = ""
+                                        break
+                            await self._broadcast({
+                                "type": "brain_thinking",
+                                "event_id": event_id,
+                                "text": chunk.text,
+                                "accumulated": accumulated_thoughts + accumulated_text,
+                                "is_thought": chunk.is_thought,
+                            })
+                        if chunk.function_call:
+                            function_call = chunk.function_call
+                        if chunk.raw_parts:
+                            raw_parts = chunk.raw_parts
+                        if chunk.grounding_metadata:
+                            last_grounding = chunk.grounding_metadata
+                        if chunk.usage:
+                            from .llm import record_token_usage
+                            record_token_usage("brain", chunk.usage, event_id)
+                    last_error = None
                     break
-        finally:
-            if want_search and hasattr(self._adapter, 'set_search_enabled'):
-                self._adapter.set_search_enabled(False)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Brain LLM stream timed out for {event_id} after {chunk_timeout}s (attempt {attempt+1})")
+                    if stream is not None and hasattr(stream, 'aclose'):
+                        try:
+                            await asyncio.wait_for(stream.aclose(), timeout=_ACLOSE_TIMEOUT)
+                        except (asyncio.TimeoutError, Exception) as cleanup_err:
+                            logger.warning(f"Stream cleanup failed for {event_id}: {cleanup_err}")
+                    raise
+            except Exception as e:
+                last_error = e
+                if isinstance(e, asyncio.TimeoutError):
+                    if timeout_retries < 1 and attempt < max_retries:
+                        timeout_retries += 1
+                        logger.warning(f"Brain LLM stream timeout for {event_id}, retrying once")
+                        await asyncio.sleep(5)
+                        continue
+                    accumulated_text = ""
+                    accumulated_thoughts = ""
+                    function_call = None
+                    raw_parts = None
+                    last_grounding = None
+                    logger.error(f"Brain LLM stream timeout for {event_id} after retry — giving up")
+                    break
+                if attempt < max_retries and self._is_transient(e):
+                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "Quota exhausted" in str(e)
+                    base = 30 if is_rate_limit else 5
+                    delay = min(base * (2 ** attempt), 120)
+                    jitter = delay * 0.3 * (0.5 - __import__('random').random())
+                    delay = max(1, delay + jitter)
+                    logger.warning(f"Brain LLM transient error for {event_id} (attempt {attempt+1}/{max_retries+1}, {'rate-limit' if is_rate_limit else 'transient'}): {e}. Retrying in {delay:.0f}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                err_str = str(e)
+                if "400" in err_str or "INVALID_ARGUMENT" in err_str:
+                    token_est = self._estimate_tokens(prompt)
+                    logger.error(
+                        f"Brain LLM 400 for {event_id} "
+                        f"(turns={len(event.conversation)}, est_tokens={token_est}): {e}",
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
+                break
 
         # Clear thinking indicator ONCE after the loop exits
         await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
@@ -1554,13 +1557,13 @@ class Brain:
         if last_grounding and last_grounding.get("chunks"):
             resolved_chunks = await self._resolve_grounding_urls(last_grounding["chunks"])
             sources = "\n".join(
-                f"- [{c['title']}]({c['uri']})"
+                f"- {'[internal] ' if c.get('source') == 'rag' else ''}[{c['title']}]({c['uri']})"
                 for c in resolved_chunks
                 if c.get("uri")
             )
             queries = ", ".join(last_grounding.get("queries", []))
-            grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
-            logger.info(f"Google Search grounding for {event_id}: {len(resolved_chunks)} sources (resolved)")
+            grounding_evidence = f"\n\n## Grounding Context\n\nQueries: {queries}\n\nSources:\n{sources}"
+            logger.info(f"Grounding for {event_id}: {len(resolved_chunks)} sources (resolved)")
 
         # Process the final result
         if function_call:
@@ -1735,9 +1738,30 @@ class Brain:
         return any(code in err_str for code in ["429", "502", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
 
     @staticmethod
+    def _resolve_grounding_mode(
+        search_enabled: bool, brain_phase: str, rag_grounding_enabled: bool, rag_grounding_corpus: str,
+    ) -> tuple[bool, str | None]:
+        """Compute (want_search, grounding_corpus_or_None) with mutual exclusion.
+
+        Pure function -- extracted so the safety-critical mutual-exclusion logic is directly
+        unit-testable without mocking Brain's heavy dependencies. Search takes priority during
+        triage/dispatch (fresh web results most relevant); RAG grounding fires on all other
+        phases when configured (curated org corpus). Never both simultaneously -- the 3-way
+        tool combination (functions + search + retrieval) is unproven on this API surface.
+        """
+        want_search = search_enabled and brain_phase in ("triage", "dispatch")
+        want_grounding = rag_grounding_enabled and bool(rag_grounding_corpus) and not want_search
+        return want_search, (rag_grounding_corpus if want_grounding else None)
+
+    @staticmethod
     async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:
         """Follow redirect URLs from Vertex AI Search grounding and deduplicate."""
+        from .llm.gemini_client import _MAX_GROUNDING_FIELD_LEN
+
         REDIRECT_PREFIX = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
+        # Defense-in-depth: the adapter layer already caps chunk count, but never fan out
+        # an unbounded number of HTTP HEAD requests from this call site either.
+        chunks = chunks[:20]
 
         async def resolve_one(client: httpx.AsyncClient, chunk: dict) -> dict:
             uri = chunk.get("uri", "")
@@ -1745,7 +1769,9 @@ class Brain:
                 return chunk
             try:
                 resp = await client.head(uri)
-                return {**chunk, "uri": str(resp.url)}
+                # The resolved redirect target is itself untrusted-size (codereview finding) --
+                # the adapter-layer cap on the pre-resolution uri doesn't survive this rewrite.
+                return {**chunk, "uri": str(resp.url)[:_MAX_GROUNDING_FIELD_LEN]}
             except Exception:
                 logger.debug(f"Grounding URL resolve failed for {chunk.get('title', '?')}")
                 return {**chunk, "uri": ""}

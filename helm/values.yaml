@@ -248,6 +248,23 @@ archivist:
   knowledgeDedupThreshold: 0.85 # Cosine similarity above which knowledge facts are flagged as near-duplicates (logged, not merged)
   knowledgeDedupLimit: 5 # Number of nearest-neighbor candidates to check for knowledge dedup
 # =============================================================================
+# Vertex Ranker (Discovery Engine Ranking API for deep memory reranking)
+# =============================================================================
+vertexRanker:
+  model: "" # e.g., "semantic-ranker-default@latest" -- empty = reranking disabled
+  location: "global" # Discovery Engine Ranking API only accepts global/us/eu
+  rankingConfig: "default_ranking_config"
+# =============================================================================
+# RAG Engine (Vertex AI RAG grounding for JARVIS + Brain)
+# =============================================================================
+ragEngine:
+  jarvis:
+    corpusId: "" # Full resource path: projects/{project}/locations/{location}/ragCorpora/{id}
+    enabled: false
+  grounding:
+    corpusId: "" # Full resource path: projects/{project}/locations/{location}/ragCorpora/{id}
+    enabled: false
+# =============================================================================
 # Brain Scheduling (ReconcileScheduler)
 # =============================================================================
 brain:

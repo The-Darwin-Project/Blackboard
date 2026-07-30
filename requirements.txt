@@ -48,5 +48,8 @@ aiohttp>=3.11.0
 # TimeKeeper (cron expression parsing for scheduled tasks)
 croniter>=6.0.0
 
+# Vertex AI Discovery Engine (Ranking API for deep memory reranking)
+google-cloud-discoveryengine>=0.13.0
+
 # Jira integration (markdown to Atlassian Document Format)
 marklassian>=0.1.0

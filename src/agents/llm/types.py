@@ -2,6 +2,9 @@
 # @ai-rules:
 # 1. [Constraint]: All tool schemas are plain dicts (provider-agnostic). No google.genai or anthropic imports.
 # 2. [Pattern]: LLMPort protocol defines generate() (blocking) and generate_stream() (async iterator).
+#    search_enabled/grounding_corpus are per-call params (not adapter state) -- GeminiAdapter is a
+#    singleton shared across concurrent event-processing workers; instance-attribute toggles would
+#    race. ClaudeAdapter accepts and ignores both (no Search/RAG-grounding equivalent).
 # 3. [Gotcha]: Anthropic uses "input_schema" key; Gemini uses "parameters_json_schema". Adapters convert.
 # 4. [Constraint]: BRAIN_TOOL_SCHEMAS must stay in sync with _execute_function_call() in brain.py.
 # 5. [Pattern]: NIGHTWATCHER write_incident.description includes link guidance (MR URLs, pipeline IDs, Slack threads).
@@ -81,6 +84,8 @@ class LLMPort(Protocol):
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> LLMResponse: ...
 
     async def generate_stream(
@@ -93,6 +98,8 @@ class LLMPort(Protocol):
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> AsyncIterator[LLMChunk]: ...
 
 

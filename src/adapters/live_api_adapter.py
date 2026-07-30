@@ -40,6 +40,25 @@
 #     channel (tool responses, FRIDAY direct, pulses, meta-events, session resume/report)
 #     prepends <skill id="..."> tags referencing the relevant SYSTEM_INSTRUCTION section.
 #     Anchors model attention to the right behavioral rules at the right time.
+# 18. [Pattern]: _build_live_tools() assembles the tool list for _connect(). When JARVIS_RAG_ENABLED
+#     and JARVIS_RAG_CORPUS_ID are set, adds Tool(retrieval=VertexRagStore(store_context=True))
+#     for implicit RAG grounding. store_context=True is Live API-specific (not for generateContent).
+#     Mutual exclusion (mirrors gemini_client.py's want_search/want_grounding split): google_search
+#     is DROPPED when RAG retrieval is active -- the 3-way combo (functions+search+retrieval) has
+#     never been probe-verified against the Live API. Restore google_search once that probe passes.
+# 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
+#     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect which has its own
+#     _replay_pending_context). Unconditional on wake — exercises MemoryCorpus even with no events.
+# 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks
+#     when present. Absence is the expected default (model decides when to retrieve).
+# 21. [Constraint]: _redact_emails() is applied at EVERY self._session.send()/tool-response call
+#     site that carries human/LLM/event-derived free text (receive_brain_response, send_pulse's
+#     formatted pulse, tool-call FunctionResponse results, _create_system_review_event's
+#     jarvis_context, _replay_pending_context's handoff replay, _rotate_session's summary,
+#     _send_wake_priming's handoff text) -- NOT just the one originally-fixed call site. Session
+#     store_context=True (when JARVIS_RAG_ENABLED) persists the WHOLE session, not one turn, so
+#     redacting only one send site left 7+ sibling paths carrying the same class of data unguarded.
+#     Static prompt constants (HANDOFF_REPORT_PROMPT, SESSION_STARTUP_PROTOCOL) need no redaction.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -80,6 +99,14 @@ logger = logging.getLogger(__name__)
 SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
 _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
 SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def _redact_emails(text: str) -> str:
+    """Strip email addresses before text becomes eligible for MemoryCorpus store_context."""
+    if not text:
+        return text
+    return _EMAIL_RE.sub("[redacted-email]", text)
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
@@ -162,6 +189,38 @@ class LiveAPIAdapter:
         self._handoff_buffer: list[str] = []
         self._resumption_handle: str | None = None
         self._last_audit_sent: dict[str, float] = {}
+        self._rag_corpus_id = os.getenv("JARVIS_RAG_CORPUS_ID", "")
+        self._rag_enabled = os.getenv("JARVIS_RAG_ENABLED", "false").lower() == "true"
+
+    def _build_live_tools(self, types) -> list:
+        """Build the Live API tool list.
+
+        Mutual exclusion: the untested 3-way combination (function_declarations +
+        google_search + retrieval) has never been probe-verified against the Live API
+        (plan's Step 1.5 gate). When RAG retrieval is enabled, google_search is dropped
+        in favor of functions+retrieval -- the 2-way combination with closer precedent
+        (Brain's own generateContent probe, different API surface but same SDK types).
+        """
+        tools = [types.Tool(function_declarations=[
+            types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
+        ])]
+        rag_active = self._rag_enabled and bool(self._rag_corpus_id)
+        if rag_active:
+            tools.append(types.Tool(retrieval=types.Retrieval(
+                vertex_rag_store=types.VertexRagStore(
+                    rag_resources=[types.VertexRagStoreRagResource(
+                        rag_corpus=self._rag_corpus_id,
+                    )],
+                    store_context=True,
+                ),
+            )))
+            logger.info(
+                "JARVIS MemoryCorpus enabled (google_search suppressed -- untested 3-way combo): %s",
+                self._rag_corpus_id,
+            )
+        else:
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
+        return tools
 
     async def _connect(self) -> None:
         """Lazy-connect Live API session. Called on first pulse after idle."""
@@ -185,12 +244,7 @@ class LiveAPIAdapter:
                 system_instruction=types.Content(
                     parts=[types.Part(text=SYSTEM_INSTRUCTION)]
                 ),
-                tools=[
-                    types.Tool(function_declarations=[
-                        types.FunctionDeclaration(**td) for td in TOOL_DECLARATIONS
-                    ]),
-                    types.Tool(google_search=types.GoogleSearch()),
-                ],
+                tools=self._build_live_tools(types),
             )
 
             self._session_ctx = self._client.aio.live.connect(
@@ -263,7 +317,7 @@ class LiveAPIAdapter:
             self._awaiting_jarvis_event_id = None
             return
         try:
-            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {response}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
+            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {_redact_emails(response)}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
             await self._session.send(input=msg, end_of_turn=True)
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
@@ -296,13 +350,17 @@ class LiveAPIAdapter:
 
         if self._generating_report:
             return
-        if not self._session:
+        was_idle = not self._session
+        if was_idle:
             await self._connect()
         if not self._session:
             return
 
+        if was_idle:
+            await self._send_wake_priming()
+
         try:
-            text = f"{_PULSE_REFS}{self._format_pulse(batch)}"
+            text = _redact_emails(f"{_PULSE_REFS}{self._format_pulse(batch)}")
             logger.debug(
                 "Cortex send_pulse: event=%s turn=%d len=%d end_of_turn=True",
                 batch.event_id, batch.turn, len(text),
@@ -312,6 +370,32 @@ class LiveAPIAdapter:
         except Exception as e:
             logger.debug("Cortex send_pulse failed (non-fatal): %s", e, exc_info=True)
             self._session = None
+
+    async def _send_wake_priming(self) -> None:
+        """Send continuity priming turn on fresh wake (deterministic Redis + implicit RAG retrieval).
+
+        Fires from send_pulse() only — _try_reconnect has its own _replay_pending_context.
+        Unconditional: exercises MemoryCorpus even when no events are active yet.
+
+        When JARVIS_RAG_ENABLED, this text is eligible for durable storage in the
+        Vertex-managed MemoryCorpus (store_context=True in _build_live_tools) -- redact
+        obvious PII (email addresses) before it leaves the process, mirroring the
+        "never embed email addresses" convention Archivist applies to LLM-generated facts.
+        """
+        try:
+            handoff_text = _redact_emails(await self._tool_recall_handoff_notes(last_n=3))
+            has_handoff = bool(handoff_text) and "No handoff notes found" not in handoff_text
+            if has_handoff:
+                priming = (
+                    f"{_RESUME_REFS}Resuming session. Prior context:\n{handoff_text}\n\n"
+                    "What patterns from prior sessions are relevant to current monitoring?"
+                )
+            else:
+                priming = f"{_RESUME_REFS}Resuming fresh session. No prior handoff notes available."
+            await self._session.send(input=priming, end_of_turn=True)
+            logger.info("Cortex wake priming sent (handoff=%s)", has_handoff)
+        except Exception as e:
+            logger.debug("Cortex wake priming failed (non-fatal): %s", e)
 
     async def _load_neuron_labels(self) -> None:
         """Pre-load titles for knowledge neurons so first-mention pulses include context."""
@@ -480,6 +564,27 @@ class LiveAPIAdapter:
 
         eid = self._last_pulse_event_id
 
+        if hasattr(msg, "server_content") and msg.server_content:
+            gm = getattr(msg.server_content, "grounding_metadata", None)
+            if gm:
+                chunks = getattr(gm, "grounding_chunks", None) or []
+                queries = list(getattr(gm, "retrieval_queries", None) or [])
+                web_queries = list(getattr(gm, "web_search_queries", None) or [])
+                if chunks or queries or web_queries:
+                    rag_count = sum(
+                        1 for c in chunks
+                        if hasattr(c, "retrieved_context") and c.retrieved_context
+                    )
+                    web_count = sum(
+                        1 for c in chunks
+                        if hasattr(c, "web") and c.web
+                    )
+                    logger.info(
+                        "Cortex grounding: web=%d rag=%d queries=%s",
+                        web_count, rag_count,
+                        queries or web_queries,
+                    )
+
         if hasattr(msg, "text") and msg.text:
             if self._collecting_handoff:
                 self._handoff_buffer.append(msg.text)
@@ -573,7 +678,7 @@ class LiveAPIAdapter:
                 if self._session:
                     try:
                         refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc.name, []))
-                        result_with_refs = f"{refs}{result}" if refs else result
+                        result_with_refs = _redact_emails(f"{refs}{result}" if refs else result)
                         tool_response = types.LiveClientToolResponse(
                             function_responses=[
                                 types.FunctionResponse(
@@ -1256,7 +1361,7 @@ class LiveAPIAdapter:
             jarvis_context = (
                 f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
                 f"Here is what I observed and asked her to assess:\n\n"
-                f"{display_text}\n\n"
+                f"{_redact_emails(display_text)}\n\n"
                 f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
                 f"these events. Challenge her reasoning when she responds."
             )
@@ -1700,7 +1805,9 @@ class LiveAPIAdapter:
                 if reports:
                     latest = reports[0].get("report", "")
                     if latest:
-                        handoff_section = f"\n\nYour previous session notes:\n{latest}\n"
+                        # Same handoff-report content _send_wake_priming redacts on the fresh-wake
+                        # path -- this is the reconnect sibling path, must redact identically.
+                        handoff_section = f"\n\nYour previous session notes:\n{_redact_emails(latest)}\n"
             except Exception:
                 pass
 
@@ -1758,7 +1865,7 @@ class LiveAPIAdapter:
         if self._session and summary:
             try:
                 await self._session.send(
-                    input=f"[SESSION RESUMED] Previous session summary:\n{summary}",
+                    input=f"[SESSION RESUMED] Previous session summary:\n{_redact_emails(summary)}",
                     end_of_turn=True,
                 )
             except Exception as e:
