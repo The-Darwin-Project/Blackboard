@@ -51,7 +51,7 @@
 #     _replay_pending_context). Unconditional on wake — exercises MemoryCorpus even with no events.
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks
 #     when present. Absence is the expected default (model decides when to retrieve).
-# 21. [Constraint]: _redact_emails() is applied at EVERY self._session.send()/tool-response call
+# 21. [Constraint]: _redact_sensitive() is applied at EVERY self._session.send()/tool-response call
 #     site that carries human/LLM/event-derived free text (receive_brain_response, send_pulse's
 #     formatted pulse, tool-call FunctionResponse results, _create_system_review_event's
 #     jarvis_context, _replay_pending_context's handoff replay, _rotate_session's summary,
@@ -100,13 +100,34 @@ SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
 _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
 SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b")
+_AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
+_GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")
+_SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")
+_BEARER_TOKEN_RE = re.compile(r"\bBearer\s+[A-Za-z0-9\-._~+/]{8,}=*", re.IGNORECASE)
+# Catch-all for "key=value"/"key: value" secrets (api_key, token, secret, password, ...).
+_KEYED_SECRET_RE = re.compile(
+    r"\b(api[_-]?key|access[_-]?key|secret|password|passwd|token|authorization)"
+    r"\s*[:=]\s*(['\"]?)[A-Za-z0-9\-._~+/]{8,}=*\2",
+    re.IGNORECASE,
+)
 
 
-def _redact_emails(text: str) -> str:
-    """Strip email addresses before text becomes eligible for MemoryCorpus store_context."""
+def _redact_sensitive(text: str) -> str:
+    """Strip PII and secrets (emails, IPs, tokens, keys) before text becomes eligible
+    for durable, Vertex-managed MemoryCorpus storage."""
     if not text:
         return text
-    return _EMAIL_RE.sub("[redacted-email]", text)
+    text = _EMAIL_RE.sub("[redacted-email]", text)
+    text = _JWT_RE.sub("[redacted-jwt]", text)
+    text = _AWS_ACCESS_KEY_RE.sub("[redacted-aws-key]", text)
+    text = _GITHUB_TOKEN_RE.sub("[redacted-github-token]", text)
+    text = _SLACK_TOKEN_RE.sub("[redacted-slack-token]", text)
+    text = _BEARER_TOKEN_RE.sub("Bearer [redacted-token]", text)
+    text = _KEYED_SECRET_RE.sub(lambda m: f"{m.group(1)}=[redacted-secret]", text)
+    text = _IPV4_RE.sub("[redacted-ip]", text)
+    return text
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
@@ -317,7 +338,7 @@ class LiveAPIAdapter:
             self._awaiting_jarvis_event_id = None
             return
         try:
-            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {_redact_emails(response)}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
+            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {_redact_sensitive(response)}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
             await self._session.send(input=msg, end_of_turn=True)
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
@@ -360,7 +381,7 @@ class LiveAPIAdapter:
             await self._send_wake_priming()
 
         try:
-            text = _redact_emails(f"{_PULSE_REFS}{self._format_pulse(batch)}")
+            text = _redact_sensitive(f"{_PULSE_REFS}{self._format_pulse(batch)}")
             logger.debug(
                 "Cortex send_pulse: event=%s turn=%d len=%d end_of_turn=True",
                 batch.event_id, batch.turn, len(text),
@@ -383,7 +404,7 @@ class LiveAPIAdapter:
         "never embed email addresses" convention Archivist applies to LLM-generated facts.
         """
         try:
-            handoff_text = _redact_emails(await self._tool_recall_handoff_notes(last_n=3))
+            handoff_text = _redact_sensitive(await self._tool_recall_handoff_notes(last_n=3))
             has_handoff = bool(handoff_text) and "No handoff notes found" not in handoff_text
             if has_handoff:
                 priming = (
@@ -678,7 +699,7 @@ class LiveAPIAdapter:
                 if self._session:
                     try:
                         refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc.name, []))
-                        result_with_refs = _redact_emails(f"{refs}{result}" if refs else result)
+                        result_with_refs = _redact_sensitive(f"{refs}{result}" if refs else result)
                         tool_response = types.LiveClientToolResponse(
                             function_responses=[
                                 types.FunctionResponse(
@@ -1361,7 +1382,7 @@ class LiveAPIAdapter:
             jarvis_context = (
                 f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
                 f"Here is what I observed and asked her to assess:\n\n"
-                f"{_redact_emails(display_text)}\n\n"
+                f"{_redact_sensitive(display_text)}\n\n"
                 f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
                 f"these events. Challenge her reasoning when she responds."
             )
@@ -1807,7 +1828,7 @@ class LiveAPIAdapter:
                     if latest:
                         # Same handoff-report content _send_wake_priming redacts on the fresh-wake
                         # path -- this is the reconnect sibling path, must redact identically.
-                        handoff_section = f"\n\nYour previous session notes:\n{_redact_emails(latest)}\n"
+                        handoff_section = f"\n\nYour previous session notes:\n{_redact_sensitive(latest)}\n"
             except Exception:
                 pass
 
@@ -1865,7 +1886,7 @@ class LiveAPIAdapter:
         if self._session and summary:
             try:
                 await self._session.send(
-                    input=f"[SESSION RESUMED] Previous session summary:\n{_redact_emails(summary)}",
+                    input=f"[SESSION RESUMED] Previous session summary:\n{_redact_sensitive(summary)}",
                     end_of_turn=True,
                 )
             except Exception as e:
