@@ -6,6 +6,8 @@
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: defer_event uses ctx.get_blackboard().defer_event_status() (not raw Redis).
 # 6. [Gotcha]: close_event delegates to ctx.close_and_broadcast() which stays on Brain.
+# 7. [Pattern]: close_event has pessimistic re-check — re-fetches event from Redis, calls
+#    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
+from .tool_gates import has_unevaluated_close_blocker
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -29,6 +32,29 @@ logger = logging.getLogger("darwin.brain")
 async def handle_close_event(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
+    # Pessimistic re-check: a user/jarvis message may have arrived during the
+    # LLM stream (after the UNEVALUATED_CLOSE gate evaluated). Re-fetch from
+    # Redis and scan for unevaluated turns before committing the close.
+    bb = ctx.get_blackboard()
+    fresh = await bb.get_event(event_id)
+    if not fresh or fresh.status.value == "closed":
+        logger.debug("close_event skipped for %s: event gone or already closed", event_id)
+        return False
+    if has_unevaluated_close_blocker(fresh.conversation):
+        abort_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts="Close aborted: unevaluated message arrived during processing. "
+                     "Address it before closing.",
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        assigned = await ctx.append_and_broadcast(event_id, abort_turn)
+        if not assigned:
+            logger.warning("close_event abort turn failed to persist for %s", event_id)
+        logger.info("close_event aborted for %s: late-arriving unevaluated message", event_id)
+        return True
     summary = args.get("summary", "Event closed.")
     await ctx.close_and_broadcast(event_id, summary)
     return False

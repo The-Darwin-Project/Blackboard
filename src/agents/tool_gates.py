@@ -197,13 +197,13 @@ def _pred_read_sticky(ctx: GateContext) -> bool:
     return ctx.unread_notes <= 0
 
 
-def _pred_unevaluated_close(ctx: GateContext) -> bool:
-    """Block close_event when unevaluated jarvis.message or user.message turns exist.
+def has_unevaluated_close_blocker(conversation: list) -> bool:
+    """True if unevaluated jarvis/user message exists after last brain.phase/close.
 
-    Scan stops at the close phase transition — messages before it triggered
-    the close and are by definition addressed.
+    Shared by the UNEVALUATED_CLOSE gate (pre-LLM) and the handle_close_event
+    pessimistic re-check (post-LLM). Handles both dict and object turns.
     """
-    for t in reversed(ctx.conversation):
+    for t in reversed(conversation):
         actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
         status = t.get("status") if isinstance(t, dict) else getattr(t, "status", None)
@@ -215,6 +215,15 @@ def _pred_unevaluated_close(ctx: GateContext) -> bool:
         ):
             return True
     return False
+
+
+def _pred_unevaluated_close(ctx: GateContext) -> bool:
+    """Block close_event when unevaluated jarvis.message or user.message turns exist.
+
+    Scan stops at the close phase transition — messages before it triggered
+    the close and are by definition addressed.
+    """
+    return has_unevaluated_close_blocker(ctx.conversation)
 
 
 def _pred_silent_park(ctx: GateContext) -> bool:

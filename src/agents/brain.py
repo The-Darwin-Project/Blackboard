@@ -5,6 +5,7 @@
 # 2. [Pattern]: process_event -> _process_event_inner with per-event asyncio.Lock prevents concurrent calls.
 # 3. [Pattern]: MessageStatus protocol: SENT -> DELIVERED (Brain scanned) -> EVALUATED (LLM processed).
 # 4. [Gotcha]: turn_snapshot captures len(conversation) BEFORE LLM call. mark_turns_evaluated uses this scope.
+#    In-memory sync loop after mark_turns_evaluated keeps gate predicates (UNEVALUATED_CLOSE) coherent on iteration 0.
 # 5. [Gotcha]: _waiting_for_user (dict[str,float]: event_id -> wait_start_timestamp) is cleared by main.py WS handler AND queue.py REST endpoints (clear_waiting), not by Brain internally.
 # 6. [Pattern]: Bidirectional agent status: routing_turn_num tracks brain.route -> DELIVERED on first progress -> EVALUATED on completion.
 # 7. [Pattern]: Temporal memory: _journal_cache (60s TTL) + _get_journal_cached(). Invalidated in _close_and_broadcast().
@@ -169,6 +170,9 @@
 #     directive into the final user-role block of the prompt. One-shot per iteration. turn_snapshot
 #     NOT expanded — safety net: if LLM ignores, user turn stays DELIVERED for next scan cycle.
 #     response_emitted + _response_emitted_for reset on interrupt (fresh response cycle).
+# 46. [Pattern]: _close_and_broadcast unevaluated-message re-check runs only for LLM-driven closes
+#     (close_reason="resolved"). System-driven closes (duplicate, timeout, error, force_closed,
+#     stream_close) bypass intentionally — safety-valve closes must always win regardless of pending messages.
 # 45. [Pattern]: _ROLE_MODEL_MAP/_ROLE_EFFORT_MAP (module-level, env-backed) resolve per-role model/effort
 #     for EPHEMERAL dispatch only -- local sidecars keep their Deployment-configured model. Gate at the
 #     dispatch_to_agent() call site is `agent_id_override is not None`, NOT is_ephemeral_dispatch (the
@@ -1068,6 +1072,11 @@ class Brain:
             # Gates can immediately trust "Brain has seen this." Crash recovery uses
             # the absence of PROCESSED to detect incomplete cycles.
             await self.blackboard.mark_turns_evaluated(event_id, up_to_turn=turn_snapshot)
+            # Sync in-memory event to match Redis — prevents tool gates
+            # (UNEVALUATED_CLOSE) from seeing stale SENT/DELIVERED on iteration 0.
+            for t in event.conversation[:turn_snapshot]:
+                if t.status in (MessageStatus.SENT, MessageStatus.DELIVERED):
+                    t.status = MessageStatus.EVALUATED
             await self._broadcast_status_update(
                 event_id, "evaluated",
                 turns=[t.turn for t in event.conversation[:turn_snapshot]],
@@ -4035,6 +4044,14 @@ class Brain:
             token_usage = get_token_meter().drain_event(event_id)
         except Exception:
             pass
+        # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
+        # System-driven closes (duplicate, timeout, error, force_closed) bypass.
+        if close_reason == "resolved":
+            from .tool_gates import has_unevaluated_close_blocker
+            latest = await self.blackboard.get_event(event_id)
+            if latest and has_unevaluated_close_blocker(latest.conversation):
+                logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
+                return
         await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
         # Persist report snapshot (non-fatal)
         try:
