@@ -220,11 +220,23 @@ async def handle_consult_deep_memory(
             logger.warning(f"Deep memory event search failed: {e}")
 
     if archivist and hasattr(archivist, "rerank"):
-        knowledge, lessons, results = await asyncio.gather(
-            archivist.rerank(query, knowledge or [], "knowledge"),
-            archivist.rerank(query, lessons or [], "lessons"),
-            archivist.rerank(query, results or [], "events"),
+        # Defense-in-depth (codereview finding): rerank() is documented to never raise past
+        # this call, but return_exceptions=True + per-result fallback means a future regression
+        # in rerank() degrades one collection instead of failing the whole handler.
+        orig_knowledge, orig_lessons, orig_results = knowledge or [], lessons or [], results or []
+        gathered = await asyncio.gather(
+            archivist.rerank(query, orig_knowledge, "knowledge"),
+            archivist.rerank(query, orig_lessons, "lessons"),
+            archivist.rerank(query, orig_results, "events"),
+            return_exceptions=True,
         )
+        knowledge, lessons, results = (
+            orig if isinstance(reranked, Exception) else reranked
+            for reranked, orig in zip(gathered, (orig_knowledge, orig_lessons, orig_results))
+        )
+        for label, reranked in zip(("knowledge", "lessons", "events"), gathered):
+            if isinstance(reranked, Exception):
+                logger.warning(f"Rerank raised unexpectedly for {label} (original order): {reranked}")
 
     if knowledge:
         has_results = True

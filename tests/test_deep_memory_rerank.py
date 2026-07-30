@@ -443,6 +443,36 @@ class TestHandleConsultDeepMemoryRerankIntegration:
         turn = ctx.append_and_broadcast.await_args.args[1]
         assert "Redis" in turn.evidence or "Reference Facts" in turn.evidence
 
+    async def test_gather_fallback_when_rerank_raises_unexpectedly(self):
+        """Codereview finding (defense-in-depth): even though Archivist.rerank() is
+        documented to never raise, the real handle_consult_deep_memory() gather call site
+        now uses return_exceptions=True + per-collection fallback -- a hypothetical future
+        regression in rerank() degrades only the affected collection, not the whole handler."""
+        from src.agents.handlers_lookup import handle_consult_deep_memory
+
+        archivist = MagicMock()
+        archivist.embed_query = AsyncMock(return_value=None)
+        archivist.search_knowledge = AsyncMock(return_value=_knowledge_results())
+        archivist.search_lessons = AsyncMock(return_value=_lessons_results())
+        archivist.search = AsyncMock(return_value=_events_results())
+
+        async def flaky_rerank(query, results, source_type):
+            if source_type == "lessons":
+                raise RuntimeError("unexpected regression")
+            return results
+
+        archivist.rerank = flaky_rerank
+
+        ctx = _make_tool_ctx(_make_event_stub(), archivist)
+
+        result = await handle_consult_deep_memory(ctx, "evt-1", {"query": "test"}, None)
+
+        assert result is True, "Handler must not crash when one collection's rerank raises"
+        turn = ctx.append_and_broadcast.await_args.args[1]
+        assert "Reference Facts" in turn.evidence
+        assert "Lessons Learned" in turn.evidence, "Lessons must still render via original-order fallback"
+        assert "Past Events" in turn.evidence
+
     async def test_three_collections_reranked_via_real_gather(self):
         """T-5: handle_consult_deep_memory's real asyncio.gather(rerank x3) call site --
         verified end-to-end through a REAL Archivist.rerank(), not a monkeypatched stand-in."""

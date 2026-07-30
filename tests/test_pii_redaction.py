@@ -85,6 +85,48 @@ class TestRedactSecrets:
         assert "[redacted-secret]" in result
 
 
+class TestKeyedSecretScreamingSnakeCase:
+    """Codereview HIGH finding: SCREAMING_SNAKE_CASE-prefixed names (the most common
+    real-world secret-naming convention) previously bypassed the keyed-secret catch-all
+    because '_' and the keyword's first letter are both \\w chars, so \\b never fired."""
+
+    def test_db_password_redacted(self):
+        result = redact_pii("DB_PASSWORD=supersecret123")
+        assert "supersecret123" not in result
+        assert "DB_PASSWORD=[redacted-secret]" in result
+
+    def test_aws_secret_access_key_redacted(self):
+        result = redact_pii("AWS_SECRET_ACCESS_KEY=abcdefgh12345678")
+        assert "abcdefgh12345678" not in result
+        assert "[redacted-secret]" in result
+
+    def test_jwt_secret_env_var_redacted(self):
+        result = redact_pii("JWT_SECRET=abcdefgh12345678")
+        assert "abcdefgh12345678" not in result
+        assert "[redacted-secret]" in result
+
+    def test_compound_word_not_falsely_matched(self):
+        """A compound word like MYPASSWORD (letter immediately before the keyword, no
+        separator) should NOT match -- avoids over-matching unrelated identifiers."""
+        text = "MYPASSWORD=abcdefgh12345678"
+        assert redact_pii(text) == text
+
+
+class TestKeyedSecretCharsetAndSeparator:
+    """Codereview MEDIUM findings: value charset excluded common password punctuation,
+    and the separator was always rewritten to '=' even when the original used ':'."""
+
+    def test_punctuation_in_value_redacted(self):
+        result = redact_pii("password: my!pass123456")
+        assert "my!pass123456" not in result
+        assert "[redacted-secret]" in result
+
+    def test_colon_separator_preserved_not_rewritten_to_equals(self):
+        result = redact_pii("token: abcdefgh12345678")
+        assert "token:[redacted-secret]" in result
+        assert "token=[redacted-secret]" not in result
+
+
 class TestRedactCombined:
     def test_mixed_pii_all_redacted_in_one_pass(self):
         text = "Contact alice@example.com at 10.0.0.5 with Bearer sometoken123"

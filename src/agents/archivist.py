@@ -326,8 +326,6 @@ class Archivist:
             self._record_rank_failure()
             return results
 
-        from google.cloud.discoveryengine_v1 import RankRequest, RankingRecord
-
         text_map = {
             "knowledge": lambda p: p.get("fact", ""),
             "lessons": lambda p: f"{p.get('title', '')} {p.get('pattern', '')}",
@@ -336,6 +334,10 @@ class Archivist:
         extractor = text_map.get(source_type, lambda p: str(p))
 
         try:
+            # Codereview finding: this import previously sat outside this try/except,
+            # contradicting the "never raises past this method" invariant above.
+            from google.cloud.discoveryengine_v1 import RankRequest, RankingRecord
+
             id_to_result: dict[str, dict] = {}
             records = []
             for i, r in enumerate(results):

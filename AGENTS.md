@@ -17,12 +17,14 @@ reliability-reviewer, and doc-reviewer sub-agents on every review.
   a red blocking failure. Do not expect this check to gate merges.
 
 - **20-minute hard timeout.** Large PRs near the `AI_REVIEW_MAX_DIFF_LINES`
-  threshold (default 5000 lines) may occasionally hit this limit. If the
-  check times out, re-run manually from the Actions tab.
+  threshold (default 10000 lines) may occasionally hit this limit. Raising
+  `AI_REVIEW_MAX_TURNS`/`AI_REVIEW_MAX_BUDGET` for large diffs increases the
+  odds of hitting this timeout even further — if the check times out,
+  re-run manually from the Actions tab.
 
 - **Diff size skip.** Diffs exceeding `AI_REVIEW_MAX_DIFF_LINES` (default
-  5000) are silently skipped — the job exits cleanly with no review posted.
-  Do not interpret a clean green check on a large PR as "reviewed".
+  10000) are silently skipped — the job exits cleanly with no review
+  posted. Do not interpret a clean green check on a large PR as "reviewed".
 
 - **Artifact retention.** Structured results are uploaded to `ci-results/`
   and retained for 7 days. Fetch from the Actions tab workflow run page.
