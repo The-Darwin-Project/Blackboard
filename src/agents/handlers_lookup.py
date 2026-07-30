@@ -7,9 +7,13 @@
 # 5. [Gotcha]: consult_deep_memory cached guard uses string matching coupled to Archivist response text.
 # 6. [Pattern]: consult_deep_memory scopes search_knowledge() via service_filter=svc or event.service --
 #    explicit tool-call `service` arg wins, falling back to the event's own service.
+# 7. [Pattern]: consult_deep_memory uses fetch-all then asyncio.gather(rerank x3) then format-all.
+#    Reranking is per-collection via archivist.rerank() — gated by VERTEX_RANKER_MODEL env var.
+#    Each rerank() catches its own exceptions (never raises past gather).
 """Lookup and query tool handlers (service, deep memory, journal)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -192,6 +196,8 @@ async def handle_consult_deep_memory(
         except Exception as e:
             logger.debug(f"embed_query failed, each search will embed individually: {e}")
 
+    knowledge = lessons = results = None
+
     if archivist and hasattr(archivist, "search_knowledge"):
         try:
             knowledge = await archivist.search_knowledge(
@@ -200,69 +206,88 @@ async def handle_consult_deep_memory(
             )
         except Exception as e:
             logger.warning(f"Deep memory knowledge search failed: {e}")
-            knowledge = None
-        if knowledge:
-            has_results = True
-            memory_text += "### Reference Facts\n"
-            for i, r in enumerate(knowledge, 1):
-                p = r.get("payload", {})
-                stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
-                fact_text = p.get("fact", "?")
-                memory_text += (
-                    f"{i}. **{p.get('topic', '?')}** ({p.get('scope', '?')}, confidence: {p.get('confidence', '?')}){stale_tag}\n"
-                    f"   - {fact_text}\n"
-                    f"   - Source: {p.get('source', '?')}\n"
-                )
-            memory_text += "\n"
 
     if archivist and hasattr(archivist, "search_lessons"):
         try:
             lessons = await archivist.search_lessons(query, limit=3, context=pulse_ctx, vector=query_vector)
         except Exception as e:
             logger.warning(f"Deep memory lesson search failed: {e}")
-            lessons = None
-        if lessons:
-            has_results = True
-            memory_text += "### Lessons Learned\n"
-            for i, r in enumerate(lessons, 1):
-                p = r.get("payload", {})
-                memory_text += (
-                    f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f}, "
-                    f"channel: {p.get('channel', '?')})\n"
-                    f"   - Pattern: {p.get('pattern', '?')}\n"
-                )
-            memory_text += "\n"
 
     if archivist and hasattr(archivist, "search"):
         try:
             results = await archivist.search(query, limit=5, context=pulse_ctx, vector=query_vector, filter=qdrant_filter)
         except Exception as e:
             logger.warning(f"Deep memory event search failed: {e}")
-            results = None
-        if results:
-            has_results = True
-            memory_text += "### Past Events\n"
-            for i, r in enumerate(results, 1):
-                p = r.get("payload", {})
-                dur = p.get("duration_seconds", 0)
-                dur_m = f"{dur // 60}m" if dur else "?"
-                defers = p.get("defer_patterns", [])
-                total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
-                defer_m = f"{total_defer // 60}m" if total_defer else "0m"
-                timings = p.get("operational_timings", [])
-                timing_str = ", ".join(
-                    f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
-                    for t in timings if isinstance(t, dict)
-                ) or "none"
-                domain_str = p.get("brain_domain", p.get("domain", "?"))
-                corrected = " [CORRECTED]" if p.get("corrected") else ""
-                memory_text += (
-                    f"{i}. domain: {domain_str} | score: {r.get('score', 0):.2f}{corrected}\n"
-                    f"   - Pattern: {p.get('symptom', '?')}\n"
-                    f"   - Root cause: {p.get('root_cause', '?')}\n"
-                    f"   - Fix: {p.get('fix_action', '?')}\n"
-                    f"   - Service: {p.get('service', '?')} | Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
-                )
+
+    if archivist and hasattr(archivist, "rerank"):
+        # Defense-in-depth (codereview finding): rerank() is documented to never raise past
+        # this call, but return_exceptions=True + per-result fallback means a future regression
+        # in rerank() degrades one collection instead of failing the whole handler.
+        orig_knowledge, orig_lessons, orig_results = knowledge or [], lessons or [], results or []
+        gathered = await asyncio.gather(
+            archivist.rerank(query, orig_knowledge, "knowledge"),
+            archivist.rerank(query, orig_lessons, "lessons"),
+            archivist.rerank(query, orig_results, "events"),
+            return_exceptions=True,
+        )
+        knowledge, lessons, results = (
+            orig if isinstance(reranked, Exception) else reranked
+            for reranked, orig in zip(gathered, (orig_knowledge, orig_lessons, orig_results))
+        )
+        for label, reranked in zip(("knowledge", "lessons", "events"), gathered):
+            if isinstance(reranked, Exception):
+                logger.warning(f"Rerank raised unexpectedly for {label} (original order): {reranked}")
+
+    if knowledge:
+        has_results = True
+        memory_text += "### Reference Facts\n"
+        for i, r in enumerate(knowledge, 1):
+            p = r.get("payload", {})
+            stale_tag = " [STALE - verify before acting]" if r.get("stale") else ""
+            fact_text = p.get("fact", "?")
+            memory_text += (
+                f"{i}. **{p.get('topic', '?')}** ({p.get('scope', '?')}, confidence: {p.get('confidence', '?')}){stale_tag}\n"
+                f"   - {fact_text}\n"
+                f"   - Source: {p.get('source', '?')}\n"
+            )
+        memory_text += "\n"
+
+    if lessons:
+        has_results = True
+        memory_text += "### Lessons Learned\n"
+        for i, r in enumerate(lessons, 1):
+            p = r.get("payload", {})
+            memory_text += (
+                f"{i}. **{p.get('title', '?')}** (score: {r.get('score', 0):.2f}, "
+                f"channel: {p.get('channel', '?')})\n"
+                f"   - Pattern: {p.get('pattern', '?')}\n"
+            )
+        memory_text += "\n"
+
+    if results:
+        has_results = True
+        memory_text += "### Past Events\n"
+        for i, r in enumerate(results, 1):
+            p = r.get("payload", {})
+            dur = p.get("duration_seconds", 0)
+            dur_m = f"{dur // 60}m" if dur else "?"
+            defers = p.get("defer_patterns", [])
+            total_defer = sum(d.get("duration_seconds", 0) for d in defers if isinstance(d, dict))
+            defer_m = f"{total_defer // 60}m" if total_defer else "0m"
+            timings = p.get("operational_timings", [])
+            timing_str = ", ".join(
+                f"{t.get('process', '?')}={t.get('duration_seconds', 0) // 60}m"
+                for t in timings if isinstance(t, dict)
+            ) or "none"
+            domain_str = p.get("brain_domain", p.get("domain", "?"))
+            corrected = " [CORRECTED]" if p.get("corrected") else ""
+            memory_text += (
+                f"{i}. domain: {domain_str} | score: {r.get('score', 0):.2f}{corrected}\n"
+                f"   - Pattern: {p.get('symptom', '?')}\n"
+                f"   - Root cause: {p.get('root_cause', '?')}\n"
+                f"   - Fix: {p.get('fix_action', '?')}\n"
+                f"   - Service: {p.get('service', '?')} | Duration: {dur_m}, defers: {defer_m}, timings: [{timing_str}], outcome: {p.get('outcome', '?')}\n"
+            )
 
     if not has_results:
         if qdrant_filter:

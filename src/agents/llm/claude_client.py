@@ -11,6 +11,11 @@
 # 9. [Pattern]: _extract_usage() sums three non-overlapping Anthropic input categories:
 #    input_tokens (cache misses) + cache_read (hits) + cache_creation (writes).
 #    cached_tokens = cache_read + cache_creation. total = all_input + output.
+# 10. [Gotcha]: generate()/generate_stream() accept thinking_level/search_enabled/grounding_corpus
+#     for full LLMPort conformance -- Claude has no equivalent for any of the three, so all are
+#     silently ignored here. Without this, Brain's unconditional `thinking_level=` kwarg on every
+#     generate_stream() call would raise TypeError if LLM_PROVIDER=claude (pre-existing gap, closed
+#     alongside the search_enabled/grounding_corpus parity fix since it's the same conformance issue).
 """
 ClaudeAdapter -- LLMPort implementation using Anthropic SDK (Vertex AI).
 
@@ -236,8 +241,15 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> LLMResponse:
+        # thinking_level/search_enabled/grounding_corpus: no Claude equivalent, accepted for
+        # LLMPort signature parity only (codereview finding -- Brain unconditionally passes
+        # thinking_level regardless of provider; without this param, LLM_PROVIDER=claude would
+        # raise TypeError on every single Brain LLM call).
         # Normalize temperature: 0.0-2.0 -> 0.0-1.0. Drop top_p (Claude rejects both).
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
@@ -269,8 +281,13 @@ class ClaudeAdapter:
         temperature: float = 0.8,
         top_p: float = 0.95,
         max_output_tokens: int = 65000,
+        thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> AsyncIterator[LLMChunk]:
+        # thinking_level/search_enabled/grounding_corpus: no Claude equivalent, accepted for
+        # LLMPort signature parity only (see generate()'s comment for the concrete crash this fixes).
         claude_temp = min(temperature / 2.0, 1.0)
         kwargs = self._build_kwargs(system_prompt, contents, tools, claude_temp, max_output_tokens, tool_choice)
 

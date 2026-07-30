@@ -29,6 +29,22 @@
 #     (see handlers_observations.py) as authoritative overrides of earlier triage/diagnosis. Both the Claude
 #     path (archive_event) and Gemini fallback (_archive_event_fallback) extract reference_facts (with
 #     service) and set corrected_by_field_notes.
+# 21. [Pattern]: rerank() uses a DEDICATED _ensure_rank_client() lazy-init for RankServiceAsyncClient
+#     (Discovery Engine), NOT shared with _ensure_initialized(). Rank client failures degrade gracefully
+#     to original order without affecting core Archivist (embeddings + Qdrant). Per-collection reranking
+#     preserves service-scoping and lesson channel-trust weighting. Gated by VERTEX_RANKER_MODEL env var.
+#     The ENTIRE record-building + API call + id-correlation reconstruction lives inside one
+#     try/except (never raises past gather) -- do not split it back apart. Both `query` and
+#     per-record `content` are passed through utils.redact_pii() before leaving the process to
+#     the external Ranking API (codereview finding: this path was previously unredacted, unlike
+#     the equivalent JARVIS Live API path in live_api_adapter.py -- both now share one utility).
+#     Circuit breaker: _RANK_CIRCUIT_THRESHOLD consecutive failures opens the circuit for
+#     _RANK_CIRCUIT_COOLDOWN_SEC, skipping the API entirely (no 2s timeout tax) until it
+#     self-heals -- codereview finding, sustained outage otherwise pays the tax on every call.
+# 22. [Convention]: This file uses lazy/inline imports pervasively (google.genai, VectorStore,
+#     create_adapter, discoveryengine_v1, etc.) to defer heavy/optional SDK loading until the
+#     capability is actually used. This is an intentional, file-wide exception to the workspace's
+#     top-of-file import rule -- new methods should follow the same pattern, not import at module scope.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -45,7 +61,9 @@ import os
 import time
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from ..utils import redact_pii
 
 if TYPE_CHECKING:
     from ..models import EventDocument
@@ -59,6 +77,8 @@ KNOWLEDGE_COLLECTION = "darwin_knowledge"
 VALID_SCOPES = {"convention", "ownership", "historical", "relationship"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 EMBEDDING_DIMS = int(os.getenv("EMBEDDING_DIMS", "768"))
+_RANK_CIRCUIT_THRESHOLD = 3  # consecutive Ranking API failures before the circuit opens
+_RANK_CIRCUIT_COOLDOWN_SEC = 60  # how long to skip the API while the circuit is open
 ARCHIVIST_MODEL = os.getenv("LLM_MODEL_ARCHIVIST", "gemini-3.6-flash")
 EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-5")
 # Separate output-token knobs per provider/call-shape (Goal 4, truncation-search-destroy):
@@ -213,6 +233,12 @@ class Archivist:
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
+        self._ranker_model = os.getenv("VERTEX_RANKER_MODEL", "")
+        self._ranker_location = os.getenv("VERTEX_RANKER_LOCATION", "global")
+        self._ranker_config = os.getenv("VERTEX_RANKER_CONFIG", "default_ranking_config")
+        self._rank_client = None  # RankServiceAsyncClient | None
+        self._rank_consecutive_failures = 0
+        self._rank_circuit_open_until = 0.0  # epoch seconds; skip API calls until past this
 
     async def _ensure_initialized(self) -> bool:
         """Lazy-init google-genai client and vector store."""
@@ -257,6 +283,119 @@ class Archivist:
         except Exception as e:
             logger.warning(f"Archivist init failed (non-fatal): {e}")
             return False
+
+    async def _ensure_rank_client(self) -> None:
+        """Lazy-init Discovery Engine RankServiceAsyncClient (dedicated, NOT shared with _ensure_initialized)."""
+        if self._rank_client is not None:
+            return
+        from google.cloud.discoveryengine_v1 import RankServiceAsyncClient
+        client_options = (
+            None if self._ranker_location == "global"
+            else {"api_endpoint": f"{self._ranker_location}-discoveryengine.googleapis.com"}
+        )
+        self._rank_client = RankServiceAsyncClient(client_options=client_options)
+
+    async def rerank(
+        self, query: str, results: list[dict], source_type: Literal["knowledge", "lessons", "events"],
+    ) -> list[dict]:
+        """Rerank a single collection's results via Vertex Ranking API.
+
+        Per-collection only -- preserves Qdrant's service-scoping and lesson
+        channel-trust weighting (each collection's own score ordering is refined, not replaced).
+
+        Never raises past this method (gather-safe): the record-building loop, the API call,
+        and the id-correlation reconstruction all live inside one try/except so a malformed
+        payload field can't escape uncaught into the caller's unprotected asyncio.gather().
+        """
+        if not results or not self._ranker_model:
+            return results
+
+        # Circuit breaker (codereview finding): during a sustained Discovery Engine outage,
+        # every consult_deep_memory call would otherwise pay the full 2s timeout tax with no
+        # aggregate signal. After _RANK_CIRCUIT_THRESHOLD consecutive failures, skip the API
+        # call entirely (fail-fast to original order) for _RANK_CIRCUIT_COOLDOWN_SEC, then
+        # self-heal by trying again -- railways, not a hard-disable switch.
+        now = time.time()
+        if now < self._rank_circuit_open_until:
+            return results
+
+        try:
+            await self._ensure_rank_client()
+        except Exception as e:
+            logger.warning("Rank client init failed (original order): %s", e)
+            self._record_rank_failure()
+            return results
+
+        text_map = {
+            "knowledge": lambda p: p.get("fact", ""),
+            "lessons": lambda p: f"{p.get('title', '')} {p.get('pattern', '')}",
+            "events": lambda p: f"{p.get('symptom', '')} {p.get('root_cause', '')} {p.get('fix_action', '')}",
+        }
+        extractor = text_map.get(source_type, lambda p: str(p))
+
+        try:
+            # Codereview finding: this import previously sat outside this try/except,
+            # contradicting the "never raises past this method" invariant above.
+            from google.cloud.discoveryengine_v1 import RankRequest, RankingRecord
+
+            id_to_result: dict[str, dict] = {}
+            records = []
+            for i, r in enumerate(results):
+                rid = str(i)
+                id_to_result[rid] = r
+                p = r.get("payload") or {}
+                content = extractor(p)
+                # Defensive coercion: the "knowledge" extractor returns the raw payload value
+                # unwrapped (no f-string like the other two) -- a non-string `fact` field would
+                # otherwise raise inside RankingRecord's proto-plus validation.
+                if not isinstance(content, str):
+                    content = str(content or "")
+                # PII/secret redaction before this leaves the process to Google's external
+                # Discovery Engine Ranking API -- same _redact_pii() the Live API adapter
+                # applies (codereview finding: this path was previously unredacted).
+                records.append(RankingRecord(id=rid, content=redact_pii(content)))
+
+            response = await asyncio.wait_for(
+                self._rank_client.rank(RankRequest(
+                    ranking_config=self._rank_client.ranking_config_path(
+                        self.project, self._ranker_location, self._ranker_config,
+                    ),
+                    model=self._ranker_model,
+                    query=redact_pii(query),
+                    records=records,
+                )),
+                timeout=2.0,
+            )
+            # Duplicate-id defense: track membership via `seen`, not len(reranked), so a
+            # duplicate id from the API can't inflate the count and silently mask a dropped item.
+            seen: set[str] = set()
+            reranked: list[dict] = []
+            for rec in response.records:
+                if rec.id in id_to_result and rec.id not in seen:
+                    reranked.append(id_to_result[rec.id])
+                    seen.add(rec.id)
+            if len(seen) < len(results):
+                logger.warning("Rerank returned %d/%d unique results -- appending missing", len(seen), len(results))
+                reranked.extend(r for i, r in enumerate(results) if str(i) not in seen)
+            self._rank_consecutive_failures = 0
+            return reranked
+        except Exception as e:
+            logger.warning("Rerank fallback (original order): %s", e)
+            self._record_rank_failure()
+            return results
+
+    def _record_rank_failure(self) -> None:
+        """Track consecutive Ranking API failures; open the circuit breaker after
+        _RANK_CIRCUIT_THRESHOLD in a row so a sustained outage doesn't pay the timeout
+        tax on every consult_deep_memory call."""
+        self._rank_consecutive_failures += 1
+        if self._rank_consecutive_failures >= _RANK_CIRCUIT_THRESHOLD:
+            self._rank_circuit_open_until = time.time() + _RANK_CIRCUIT_COOLDOWN_SEC
+            logger.warning(
+                "Rerank circuit breaker OPEN after %d consecutive failures -- "
+                "skipping Ranking API for %ds",
+                self._rank_consecutive_failures, _RANK_CIRCUIT_COOLDOWN_SEC,
+            )
 
     async def _get_adapter(self):
         """Lazy-load LLM adapter for summarization (Gemini, ARCHIVIST model)."""

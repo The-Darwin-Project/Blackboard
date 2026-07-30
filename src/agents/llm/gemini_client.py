@@ -10,9 +10,20 @@
 # 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
-# 11. [Pattern]: set_search_enabled() controls Google Search grounding. Adapter-level state, not LLMPort param.
-#     _build_config reads self._search_enabled to append GoogleSearch tool. Grounding metadata extracted
-#     from final candidate and yielded on the done=True chunk. Graceful fallback: None if not available.
+# 11. [Pattern]: search_enabled/grounding_corpus are per-call keyword args on generate()/generate_stream(),
+#     NOT adapter-instance state. This adapter is a singleton shared across N concurrent ReconcileScheduler
+#     workers (per-event locks, not global) -- instance-attribute toggles would race across unrelated events
+#     processed concurrently. _build_config() receives both as explicit params and appends GoogleSearch/
+#     Tool(retrieval=VertexRagStore) accordingly. Grounding metadata extracted from final candidate and
+#     yielded on the done=True chunk. Graceful fallback: None if not available.
+# 11b. [Pattern]: _build_config appends Tool(retrieval=VertexRagStore) in the 'if tools' branch
+#     (when grounding_corpus is set, search or not) and the 'elif grounding_corpus' branch --
+#     NOT the 'elif search_enabled' branch, since the mutual-exclusion guard above already nulls
+#     grounding_corpus whenever search_enabled is True, making that branch's grounding effectively
+#     unreachable by construction. No store_context (Live API-specific). _build_rag_tool() helper
+#     avoids duplication. Grounding extraction handles both .web (search) and .retrieved_context
+#     (RAG) chunk types. grounding_chunks capped to _MAX_GROUNDING_CHUNKS and title/uri truncated
+#     -- untrusted-size defense.
 # 12. [Pattern]: generate_stream accumulates thought_parts (part.thought=True) separately from last_parts.
 #     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
@@ -33,6 +44,9 @@ from collections.abc import AsyncIterator
 from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
+
+_MAX_GROUNDING_CHUNKS = 20  # defense-in-depth cap on untrusted grounding_chunks count
+_MAX_GROUNDING_FIELD_LEN = 300  # cap on title/uri length before they flow into evidence/logs
 
 
 class GeminiAdapter:
@@ -59,16 +73,7 @@ class GeminiAdapter:
         )
         self._model_name = model_name
         self._tracker = quota_tracker
-        self._search_enabled = False
         logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
-
-    def set_search_enabled(self, enabled: bool) -> None:
-        """Enable/disable Google Search grounding for subsequent calls.
-
-        Adapter-level state -- callers set before generate_stream() and reset after.
-        Only affects _build_config tool assembly. No impact on LLMPort interface.
-        """
-        self._search_enabled = enabled
 
     # -----------------------------------------------------------------
     # Quota tracking helpers
@@ -127,9 +132,29 @@ class GeminiAdapter:
         top_p: float,
         max_output_tokens: int,
         thinking_level: str = "",
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ):
-        """Build GenerateContentConfig from method args."""
+        """Build GenerateContentConfig from method args.
+
+        search_enabled/grounding_corpus are explicit per-call params (not adapter state) --
+        this adapter instance is shared across concurrent calls for different events.
+        """
         from google.genai import types
+
+        # Self-enforced mutual exclusion (codereview finding): the untested 3-way tool
+        # combination (functions + google_search + retrieval) must never be assembled,
+        # regardless of caller discipline. Brain's _resolve_grounding_mode() already
+        # resolves this before calling in, but this adapter is a shared, provider-level
+        # boundary -- it must not rely solely on one caller's correctness, mirroring how
+        # LiveAPIAdapter._build_live_tools() self-enforces the same invariant internally.
+        if search_enabled and grounding_corpus:
+            logger.warning(
+                "GeminiAdapter._build_config: search_enabled and grounding_corpus both set -- "
+                "dropping grounding_corpus to avoid the untested 3-way tool combination "
+                "(caller should resolve this via Brain._resolve_grounding_mode-style logic)",
+            )
+            grounding_corpus = None
 
         thinking_kwargs: dict = {"include_thoughts": True}
         if thinking_level:
@@ -145,17 +170,35 @@ class GeminiAdapter:
             kwargs["system_instruction"] = system_prompt
         if tools is not None:
             tool_objects = [self._convert_tools(tools)]
-            if self._search_enabled:
+            if search_enabled:
                 tool_objects.append(types.Tool(google_search=types.GoogleSearch()))
+            if grounding_corpus:
+                tool_objects.append(self._build_rag_tool(types, grounding_corpus))
             kwargs["tools"] = tool_objects
             kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
             kwargs["tool_config"] = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode="AUTO")
             )
-        elif self._search_enabled:
+        elif search_enabled:
+            # grounding_corpus is guaranteed None here -- the mutual-exclusion guard above
+            # already nulls it whenever search_enabled is True (codereview finding: the
+            # prior version of this branch had a dead `if grounding_corpus:` check).
             kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        elif grounding_corpus:
+            kwargs["tools"] = [self._build_rag_tool(types, grounding_corpus)]
 
         return types.GenerateContentConfig(**kwargs)
+
+    @staticmethod
+    def _build_rag_tool(types, grounding_corpus: str):
+        """Build Tool(retrieval=VertexRagStore) for RAG Engine grounding (no store_context)."""
+        return types.Tool(retrieval=types.Retrieval(
+            vertex_rag_store=types.VertexRagStore(
+                rag_resources=[types.VertexRagStoreRagResource(
+                    rag_corpus=grounding_corpus,
+                )],
+            ),
+        ))
 
     @staticmethod
     def _convert_tools(schemas: list[dict]):
@@ -250,8 +293,13 @@ class GeminiAdapter:
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> LLMResponse:
-        config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
+        config = self._build_config(
+            system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level,
+            search_enabled=search_enabled, grounding_corpus=grounding_corpus,
+        )
 
         estimate = self._estimate_tokens(contents)
         if self._tracker:
@@ -299,8 +347,13 @@ class GeminiAdapter:
         max_output_tokens: int = 65000,
         thinking_level: str = "",
         tool_choice: dict | None = None,
+        search_enabled: bool = False,
+        grounding_corpus: str | None = None,
     ) -> AsyncIterator[LLMChunk]:
-        config = self._build_config(system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level)
+        config = self._build_config(
+            system_prompt, tools, temperature, top_p, max_output_tokens, thinking_level,
+            search_enabled=search_enabled, grounding_corpus=grounding_corpus,
+        )
 
         estimate = self._estimate_tokens(contents)
         if self._tracker:
@@ -330,13 +383,24 @@ class GeminiAdapter:
                                     yield LLMChunk(text=part.text, is_thought=True)
                     if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
                         gm = candidate.grounding_metadata
+                        chunks = []
+                        # Cap count: grounding_chunks is untrusted-size API output (defense-in-depth).
+                        for c in (gm.grounding_chunks or [])[:_MAX_GROUNDING_CHUNKS]:
+                            if hasattr(c, 'web') and c.web:
+                                chunks.append({
+                                    "title": self._truncate_field(c.web.title),
+                                    "uri": self._truncate_field(c.web.uri),
+                                    "source": "search",
+                                })
+                            elif hasattr(c, 'retrieved_context') and c.retrieved_context:
+                                chunks.append({
+                                    "title": self._truncate_field(getattr(c.retrieved_context, 'title', '')),
+                                    "uri": self._truncate_field(getattr(c.retrieved_context, 'uri', '')),
+                                    "source": "rag",
+                                })
                         last_grounding = {
-                            "queries": list(gm.web_search_queries or []),
-                            "chunks": [
-                                {"title": c.web.title, "uri": c.web.uri}
-                                for c in (gm.grounding_chunks or [])
-                                if hasattr(c, 'web') and c.web
-                            ],
+                            "queries": list(gm.web_search_queries or []) + list(getattr(gm, 'retrieval_queries', None) or []),
+                            "chunks": chunks,
                         }
 
             if chunk.text:
@@ -357,8 +421,21 @@ class GeminiAdapter:
                 return
 
         token_usage = self._record_usage(last_usage, estimate)
-        if last_grounding:
-            logger.debug(f"Google Search grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
+        if last_grounding and last_grounding.get("chunks"):
+            logger.debug(f"Grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
+        elif search_enabled or grounding_corpus:
+            # Distinguish "attempted, 0 chunks" from "grounding disabled" -- observability without error noise.
+            logger.info(
+                "Grounding attempted (search_enabled=%s, corpus=%s) but no chunks returned",
+                search_enabled, bool(grounding_corpus),
+            )
         output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
         all_parts = thought_parts + output_parts
         yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding, usage=token_usage)
+
+    @staticmethod
+    def _truncate_field(value: str, max_len: int = _MAX_GROUNDING_FIELD_LEN) -> str:
+        """Truncate an untrusted grounding-chunk field (title/uri) before it flows into evidence/logs."""
+        if not value:
+            return value
+        return value[:max_len]

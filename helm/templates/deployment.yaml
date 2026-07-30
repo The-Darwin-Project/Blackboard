@@ -140,6 +140,30 @@ spec:
                 configMapKeyRef:
                   name: {{ .Release.Name }}-config
                   key: LLM_MAX_TOKENS_ARCHIVIST_DIGEST
+            # Vertex Ranker (Discovery Engine Ranking API)
+            {{- if .Values.vertexRanker }}
+            - name: VERTEX_RANKER_MODEL
+              value: {{ .Values.vertexRanker.model | default "" | quote }}
+            - name: VERTEX_RANKER_LOCATION
+              value: {{ .Values.vertexRanker.location | default "global" | quote }}
+            - name: VERTEX_RANKER_CONFIG
+              value: {{ .Values.vertexRanker.rankingConfig | default "default_ranking_config" | quote }}
+            {{- end }}
+            # RAG Engine (Vertex AI RAG grounding)
+            {{- if .Values.ragEngine }}
+            {{- if .Values.ragEngine.jarvis }}
+            - name: JARVIS_RAG_CORPUS_ID
+              value: {{ .Values.ragEngine.jarvis.corpusId | default "" | quote }}
+            - name: JARVIS_RAG_ENABLED
+              value: {{ .Values.ragEngine.jarvis.enabled | default false | quote }}
+            {{- end }}
+            {{- if .Values.ragEngine.grounding }}
+            - name: RAG_GROUNDING_CORPUS
+              value: {{ .Values.ragEngine.grounding.corpusId | default "" | quote }}
+            - name: RAG_GROUNDING_ENABLED
+              value: {{ .Values.ragEngine.grounding.enabled | default false | quote }}
+            {{- end }}
+            {{- end }}
             # AI Transparency & Compliance
             - name: DARWIN_CONTACT_EMAIL
               valueFrom:

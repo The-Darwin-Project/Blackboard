@@ -67,8 +67,14 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AI_REVIEW_MODEL: "claude-sonnet-5"
           AI_REVIEW_EFFORT: ${{ vars.AI_REVIEW_EFFORT || 'medium' }}
-          AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '15' }}
-          AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '3.50' }}
+          # Raised from 15/$3.50 (codereview finding: too tight for large multi-file diffs --
+          # the reviewer ran out of budget gathering context before delegating to sub-agents).
+          # Accepted tradeoff (codereview informational finding): this widens the $ blast radius
+          # of a prompt-injection-driven runaway loop against untrusted MR diff content. Mitigated
+          # by continue-on-error (advisory-only, never blocks merge) and AI_REVIEW_MAX_DIFF_LINES
+          # still capping the largest diffs this can ever run against.
+          AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '40' }}
+          AI_REVIEW_MAX_BUDGET: ${{ vars.AI_REVIEW_MAX_BUDGET || '10.00' }}
           AI_REVIEW_MAX_DIFF_LINES: ${{ vars.AI_REVIEW_MAX_DIFF_LINES || '10000' }}
         run: node /app/entrypoint/dist/index.js
 

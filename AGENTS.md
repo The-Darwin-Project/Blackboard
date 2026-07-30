@@ -17,12 +17,14 @@ reliability-reviewer, and doc-reviewer sub-agents on every review.
   a red blocking failure. Do not expect this check to gate merges.
 
 - **20-minute hard timeout.** Large PRs near the `AI_REVIEW_MAX_DIFF_LINES`
-  threshold (default 5000 lines) may occasionally hit this limit. If the
-  check times out, re-run manually from the Actions tab.
+  threshold (default 10000 lines) may occasionally hit this limit. Raising
+  `AI_REVIEW_MAX_TURNS`/`AI_REVIEW_MAX_BUDGET` for large diffs increases the
+  odds of hitting this timeout even further — if the check times out,
+  re-run manually from the Actions tab.
 
 - **Diff size skip.** Diffs exceeding `AI_REVIEW_MAX_DIFF_LINES` (default
-  5000) are silently skipped — the job exits cleanly with no review posted.
-  Do not interpret a clean green check on a large PR as "reviewed".
+  10000) are silently skipped — the job exits cleanly with no review
+  posted. Do not interpret a clean green check on a large PR as "reviewed".
 
 - **Artifact retention.** Structured results are uploaded to `ci-results/`
   and retained for 7 days. Fetch from the Actions tab workflow run page.
@@ -39,12 +41,15 @@ reliability-reviewer, and doc-reviewer sub-agents on every review.
 |---|---|---|---|
 | `VERTEX_SA_JSON` | Secret | Yes | Base64-encoded SA JSON. Encode with `cat sa.json \| jq -c '.' \| base64 -w0`. The `jq -c '.'` compaction step is mandatory — omitting it causes silent decode failures. |
 | `GOOGLE_CLOUD_PROJECT` | Variable | Yes | GCP project ID hosting the Vertex AI endpoint |
-| `GOOGLE_CLOUD_REGION` | Variable | No | Defaults to `us-central1` |
-| `AI_REVIEW_MODEL` | Variable | No | Defaults to `claude-sonnet-4-6` |
+| `GOOGLE_CLOUD_REGION` | Variable | No | Defaults to `global` |
+| `AI_REVIEW_MODEL` | Variable | No | Defaults to `claude-sonnet-5` |
 | `AI_REVIEW_EFFORT` | Variable | No | `low`, `medium`, `high`. Defaults to `medium` |
-| `AI_REVIEW_MAX_TURNS` | Variable | No | Defaults to `15` |
-| `AI_REVIEW_MAX_BUDGET` | Variable | No | USD spend cap per run. Defaults to `3.50` |
-| `AI_REVIEW_MAX_DIFF_LINES` | Variable | No | Skip threshold. Defaults to `5000` |
+| `AI_REVIEW_MAX_TURNS` | Variable | No | Defaults to `40` (raised from `15` — large multi-file diffs need more turns to delegate to sub-agents before hitting the cap) |
+| `AI_REVIEW_MAX_BUDGET` | Variable | No | USD spend cap per run. Defaults to `10.00` (raised from `3.50` for the same reason) |
+| `AI_REVIEW_MAX_DIFF_LINES` | Variable | No | Skip threshold. Defaults to `10000` |
+
+**Repo-level Actions variables of the same name override the yaml fallback.** Check
+`gh variable list` before assuming the yaml default is what's actually active.
 
 ### Anti-patterns
 
