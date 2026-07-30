@@ -39,6 +39,8 @@ def _make_archivist(**overrides):
     a._ranker_model = overrides.get("ranker_model", "semantic-ranker-default@latest")
     a._ranker_location = overrides.get("ranker_location", "global")
     a._ranker_config = overrides.get("ranker_config", "default_ranking_config")
+    a._rank_consecutive_failures = overrides.get("rank_consecutive_failures", 0)
+    a._rank_circuit_open_until = overrides.get("rank_circuit_open_until", 0.0)
     a._vector_store = overrides.get("vector_store", AsyncMock())
     # Fix ranking_config_path to be synchronous (it's a classmethod/staticmethod on real client)
     if a._rank_client is not None and hasattr(a._rank_client, 'ranking_config_path'):
@@ -471,6 +473,97 @@ class TestHandleConsultDeepMemoryRerankIntegration:
         assert "Reference Facts" in turn.evidence
         assert "Lessons Learned" in turn.evidence
         assert "Past Events" in turn.evidence
+
+
+# ===========================================================================
+# Codereview fix: circuit breaker opens after N consecutive failures, skipping
+# the Ranking API entirely (no 2s timeout tax) until cooldown expires
+# ===========================================================================
+@pytest.mark.asyncio
+class TestRerankCircuitBreaker:
+    async def test_circuit_opens_after_threshold_consecutive_failures(self):
+        """After _RANK_CIRCUIT_THRESHOLD consecutive failures, the circuit opens and
+        _rank_circuit_open_until moves into the future."""
+        from src.agents.archivist import _RANK_CIRCUIT_THRESHOLD
+
+        mock_client = AsyncMock()
+        mock_client.ranking_config_path.return_value = "projects/test/locations/global/rankingConfigs/default"
+        mock_client.rank.side_effect = Exception("503 Service Unavailable")
+
+        archivist = _make_archivist(rank_client=mock_client)
+
+        before = time.time()
+        for _ in range(_RANK_CIRCUIT_THRESHOLD):
+            await archivist.rerank("test", _knowledge_results(), "knowledge")
+
+        assert archivist._rank_consecutive_failures >= _RANK_CIRCUIT_THRESHOLD
+        assert archivist._rank_circuit_open_until > before
+
+    async def test_open_circuit_skips_api_call_entirely(self):
+        """While the circuit is open, rerank() must not call the Ranking API at all --
+        this is the whole point (no timeout tax during a sustained outage)."""
+        mock_client = AsyncMock()
+        archivist = _make_archivist(rank_client=mock_client, rank_circuit_open_until=time.time() + 60)
+        original = _knowledge_results()
+
+        result = await archivist.rerank("test", original, "knowledge")
+
+        assert result is original
+        mock_client.rank.assert_not_called()
+
+    async def test_success_resets_consecutive_failure_count(self):
+        """A successful rerank call resets the failure counter -- the circuit
+        self-heals rather than staying degraded forever after transient errors."""
+        mock_client = AsyncMock()
+        mock_client.ranking_config_path.return_value = "projects/test/locations/global/rankingConfigs/default"
+        mock_client.rank.return_value = _make_ranking_response(["0"])
+
+        archivist = _make_archivist(rank_client=mock_client, rank_consecutive_failures=2)
+
+        await archivist.rerank("test", [_knowledge_results()[0]], "knowledge")
+
+        assert archivist._rank_consecutive_failures == 0
+
+    async def test_circuit_closes_after_cooldown_expires(self):
+        """Once _rank_circuit_open_until is in the past, rerank() resumes calling
+        the API normally -- the circuit self-heals rather than staying open forever."""
+        mock_client = AsyncMock()
+        mock_client.ranking_config_path.return_value = "projects/test/locations/global/rankingConfigs/default"
+        mock_client.rank.return_value = _make_ranking_response(["0"])
+
+        archivist = _make_archivist(rank_client=mock_client, rank_circuit_open_until=time.time() - 1)
+
+        await archivist.rerank("test", [_knowledge_results()[0]], "knowledge")
+
+        mock_client.rank.assert_called_once()
+
+
+# ===========================================================================
+# Codereview fix: rerank() redacts PII/secrets before sending to the external
+# Ranking API (query and per-record content), mirroring the JARVIS Live API path
+# ===========================================================================
+@pytest.mark.asyncio
+class TestRerankPiiRedaction:
+    async def test_content_and_query_redacted_before_api_call(self):
+        """Both the query and per-record content must be redacted before they leave
+        the process to Google's external Discovery Engine Ranking API."""
+        mock_client = AsyncMock()
+        mock_client.ranking_config_path.return_value = "projects/test/locations/global/rankingConfigs/default"
+        mock_client.rank.return_value = _make_ranking_response(["0"])
+
+        archivist = _make_archivist(rank_client=mock_client)
+        results = [{"id": "k1", "score": 0.8, "payload": {"fact": "Contact alice@example.com about 10.0.0.5"}}]
+
+        await archivist.rerank("email me at bob@example.com", results, "knowledge")
+
+        call_args = mock_client.rank.call_args
+        rank_request = call_args[0][0]
+        assert "alice@example.com" not in rank_request.records[0].content
+        assert "10.0.0.5" not in rank_request.records[0].content
+        assert "[redacted-email]" in rank_request.records[0].content
+        assert "[redacted-ip]" in rank_request.records[0].content
+        assert "bob@example.com" not in rank_request.query
+        assert "[redacted-email]" in rank_request.query
 
 
 # ===========================================================================

@@ -51,7 +51,7 @@
 #     _replay_pending_context). Unconditional on wake — exercises MemoryCorpus even with no events.
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks
 #     when present. Absence is the expected default (model decides when to retrieve).
-# 21. [Constraint]: _redact_emails() is applied at EVERY self._session.send()/tool-response call
+# 21. [Constraint]: _redact_pii() is applied at EVERY self._session.send()/tool-response call
 #     site that carries human/LLM/event-derived free text (receive_brain_response, send_pulse's
 #     formatted pulse, tool-call FunctionResponse results, _create_system_review_event's
 #     jarvis_context, _replay_pending_context's handoff replay, _rotate_session's summary,
@@ -59,6 +59,12 @@
 #     store_context=True (when JARVIS_RAG_ENABLED) persists the WHOLE session, not one turn, so
 #     redacting only one send site left 7+ sibling paths carrying the same class of data unguarded.
 #     Static prompt constants (HANDOFF_REPORT_PROMPT, SESSION_STARTUP_PROTOCOL) need no redaction.
+#     NOT EXHAUSTIVE (codereview finding): covers emails, IPv4 addresses, and named-prefix
+#     secrets (Bearer tokens, AWS/Google/GitHub API-key formats) -- categories with distinctive
+#     patterns and low false-positive rates. Does NOT cover generic high-entropy strings, unknown
+#     secret formats, or free-text PII (names, addresses). Full arbitrary-secret detection is a
+#     separately-scoped effort. Archivist.rerank() applies the SAME _redact_pii() to text sent to
+#     the external Ranking API -- see archivist.py shebang.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -87,6 +93,7 @@ from ..agents.jarvis_instructions import (
 )
 from ..memory.pulse import PulseBatch
 from ..models import _resolve_phase
+from ..utils import redact_pii as _redact_pii
 
 if TYPE_CHECKING:
     from ..agents.archivist import Archivist
@@ -99,14 +106,6 @@ logger = logging.getLogger(__name__)
 SHADOW_KEY_PREFIX = "darwin:cortex:shadow:"
 _DEFER_DELAY_RE = re.compile(r"Deferring event for (\d+)s:")
 SHADOW_INDEX_KEY = "darwin:cortex:shadow:_index"
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-
-
-def _redact_emails(text: str) -> str:
-    """Strip email addresses before text becomes eligible for MemoryCorpus store_context."""
-    if not text:
-        return text
-    return _EMAIL_RE.sub("[redacted-email]", text)
 
 # Compact pulse format: track which neurons have been introduced
 _INTERVENTION_COOLDOWN_SECONDS = 300  # 5 minutes between interventions on the same event
@@ -317,7 +316,7 @@ class LiveAPIAdapter:
             self._awaiting_jarvis_event_id = None
             return
         try:
-            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {_redact_emails(response)}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
+            msg = f"{_PEER_REFS}[FRIDAY DIRECT for {event_id}]: {_redact_pii(response)}\n\n[SYSTEM] You MUST call send_event_message to reply. Text is silent to FRIDAY."
             await self._session.send(input=msg, end_of_turn=True)
             logger.info("Delivered FRIDAY response to Cortex session for %s", event_id)
         except Exception as e:
@@ -360,7 +359,7 @@ class LiveAPIAdapter:
             await self._send_wake_priming()
 
         try:
-            text = _redact_emails(f"{_PULSE_REFS}{self._format_pulse(batch)}")
+            text = _redact_pii(f"{_PULSE_REFS}{self._format_pulse(batch)}")
             logger.debug(
                 "Cortex send_pulse: event=%s turn=%d len=%d end_of_turn=True",
                 batch.event_id, batch.turn, len(text),
@@ -379,11 +378,12 @@ class LiveAPIAdapter:
 
         When JARVIS_RAG_ENABLED, this text is eligible for durable storage in the
         Vertex-managed MemoryCorpus (store_context=True in _build_live_tools) -- redact
-        obvious PII (email addresses) before it leaves the process, mirroring the
-        "never embed email addresses" convention Archivist applies to LLM-generated facts.
+        obvious PII/secrets (emails, IPs, named-prefix tokens) before it leaves the process,
+        mirroring the "never embed email addresses" convention Archivist applies to
+        LLM-generated facts. Not exhaustive -- see _redact_pii()'s docstring for scope.
         """
         try:
-            handoff_text = _redact_emails(await self._tool_recall_handoff_notes(last_n=3))
+            handoff_text = _redact_pii(await self._tool_recall_handoff_notes(last_n=3))
             has_handoff = bool(handoff_text) and "No handoff notes found" not in handoff_text
             if has_handoff:
                 priming = (
@@ -678,7 +678,7 @@ class LiveAPIAdapter:
                 if self._session:
                     try:
                         refs = _build_skill_refs(_TOOL_SKILL_MAP.get(fc.name, []))
-                        result_with_refs = _redact_emails(f"{refs}{result}" if refs else result)
+                        result_with_refs = _redact_pii(f"{refs}{result}" if refs else result)
                         tool_response = types.LiveClientToolResponse(
                             function_responses=[
                                 types.FunctionResponse(
@@ -1361,7 +1361,7 @@ class LiveAPIAdapter:
             jarvis_context = (
                 f"{_REVIEW_REFS}[SYSTEM] I created a system review event ({event_id}) for FRIDAY. "
                 f"Here is what I observed and asked her to assess:\n\n"
-                f"{_redact_emails(display_text)}\n\n"
+                f"{_redact_pii(display_text)}\n\n"
                 f"While waiting for FRIDAY's assessment, search deep memory for patterns in "
                 f"these events. Challenge her reasoning when she responds."
             )
@@ -1807,7 +1807,7 @@ class LiveAPIAdapter:
                     if latest:
                         # Same handoff-report content _send_wake_priming redacts on the fresh-wake
                         # path -- this is the reconnect sibling path, must redact identically.
-                        handoff_section = f"\n\nYour previous session notes:\n{_redact_emails(latest)}\n"
+                        handoff_section = f"\n\nYour previous session notes:\n{_redact_pii(latest)}\n"
             except Exception:
                 pass
 
@@ -1865,7 +1865,7 @@ class LiveAPIAdapter:
         if self._session and summary:
             try:
                 await self._session.send(
-                    input=f"[SESSION RESUMED] Previous session summary:\n{_redact_emails(summary)}",
+                    input=f"[SESSION RESUMED] Previous session summary:\n{_redact_pii(summary)}",
                     end_of_turn=True,
                 )
             except Exception as e:

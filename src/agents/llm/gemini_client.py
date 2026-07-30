@@ -16,10 +16,14 @@
 #     processed concurrently. _build_config() receives both as explicit params and appends GoogleSearch/
 #     Tool(retrieval=VertexRagStore) accordingly. Grounding metadata extracted from final candidate and
 #     yielded on the done=True chunk. Graceful fallback: None if not available.
-# 11b. [Pattern]: _build_config appends Tool(retrieval=VertexRagStore) in ALL three branches (tools,
-#     search-only, grounding-only). No store_context (Live API-specific). _build_rag_tool() helper avoids
-#     duplication. Grounding extraction handles both .web (search) and .retrieved_context (RAG) chunk types.
-#     grounding_chunks capped to _MAX_GROUNDING_CHUNKS and title/uri truncated -- untrusted-size defense.
+# 11b. [Pattern]: _build_config appends Tool(retrieval=VertexRagStore) in the 'if tools' branch
+#     (when grounding_corpus is set, search or not) and the 'elif grounding_corpus' branch --
+#     NOT the 'elif search_enabled' branch, since the mutual-exclusion guard above already nulls
+#     grounding_corpus whenever search_enabled is True, making that branch's grounding effectively
+#     unreachable by construction. No store_context (Live API-specific). _build_rag_tool() helper
+#     avoids duplication. Grounding extraction handles both .web (search) and .retrieved_context
+#     (RAG) chunk types. grounding_chunks capped to _MAX_GROUNDING_CHUNKS and title/uri truncated
+#     -- untrusted-size defense.
 # 12. [Pattern]: generate_stream accumulates thought_parts (part.thought=True) separately from last_parts.
 #     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
@@ -176,10 +180,10 @@ class GeminiAdapter:
                 function_calling_config=types.FunctionCallingConfig(mode="AUTO")
             )
         elif search_enabled:
-            tool_objects = [types.Tool(google_search=types.GoogleSearch())]
-            if grounding_corpus:
-                tool_objects.append(self._build_rag_tool(types, grounding_corpus))
-            kwargs["tools"] = tool_objects
+            # grounding_corpus is guaranteed None here -- the mutual-exclusion guard above
+            # already nulls it whenever search_enabled is True (codereview finding: the
+            # prior version of this branch had a dead `if grounding_corpus:` check).
+            kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
         elif grounding_corpus:
             kwargs["tools"] = [self._build_rag_tool(types, grounding_corpus)]
 

@@ -245,7 +245,7 @@ class TestGroundingDisabled:
         has_retrieval = any(t.retrieval is not None for t in tool_objects)
         assert not has_retrieval, "No retrieval when corpus is empty string"
 
-    async     def test_setter_methods_removed(self):
+    async def test_setter_methods_removed(self):
         """T-12: set_search_enabled/set_grounding_corpus were removed -- fixed the singleton
         adapter-state race (codereview finding). Behavior is now call-scoped only."""
         adapter = _make_adapter()

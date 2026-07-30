@@ -38,12 +38,17 @@ unless you want to override behaviour.
 
 | Variable name | Default | Description |
 |---|---|---|
-| `GOOGLE_CLOUD_REGION` | `us-central1` | Vertex AI region |
-| `AI_REVIEW_MODEL` | `claude-sonnet-4-6` | Model identifier passed to the reviewer |
+| `GOOGLE_CLOUD_REGION` | `global` | Vertex AI region |
+| `AI_REVIEW_MODEL` | `claude-sonnet-5` | Model identifier passed to the reviewer |
 | `AI_REVIEW_EFFORT` | `medium` | Review depth (`low`, `medium`, `high`) |
-| `AI_REVIEW_MAX_TURNS` | `15` | Maximum reasoning turns per review |
-| `AI_REVIEW_MAX_BUDGET` | `3.50` | Maximum spend cap per review run (USD) |
-| `AI_REVIEW_MAX_DIFF_LINES` | `5000` | Diffs larger than this are skipped |
+| `AI_REVIEW_MAX_TURNS` | `40` | Maximum reasoning turns per review — raised from `15` for large multi-file diffs |
+| `AI_REVIEW_MAX_BUDGET` | `10.00` | Maximum spend cap per review run (USD) — raised from `3.50` for large multi-file diffs |
+| `AI_REVIEW_MAX_DIFF_LINES` | `10000` | Diffs larger than this are skipped |
+
+These are fallback defaults set directly in `ai-review.yaml`. If repo-level Actions
+variables of the same name exist (Settings → Secrets and variables → Actions →
+Variables), **they take precedence over the yaml fallback** — check there first if
+the review behaves differently than this table describes.
 
 ## Operational notes
 
