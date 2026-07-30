@@ -43,14 +43,23 @@ function buildCLICommand(prompt, options = {}) {
         const effectiveRoleForSettings = options.role || AGENT_ROLE;
         const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
         if (settingsFile) {
-            if (!fs.existsSync(settingsFile)) {
-                // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
-                // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
-                // exist. Losing it silently (missing image layer, bad COPY, wrong path) means
-                // this role now runs with a weaker security posture than its own design
-                // assumes, with nothing but a log line to notice -- codereview finding was
-                // that a log line alone isn't loud enough given what this layer guards.
-                const msg = `Expected --settings file missing for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
+            // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
+            // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
+            // exist and be valid. Losing it silently (missing image layer, bad COPY, wrong
+            // path, truncated/corrupted file) means this role now runs with a weaker
+            // security posture than its own design assumes, with nothing but a log line
+            // to notice. Checking existence alone (fs.existsSync) only proves the file is
+            // THERE, not that Claude Code can actually parse and apply it -- verify it's
+            // valid JSON with the expected shape before trusting it.
+            let settingsValid = false;
+            try {
+                const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+                settingsValid = !!(parsed && parsed.permissions && Array.isArray(parsed.permissions.deny) && parsed.permissions.deny.length > 0);
+            } catch (e) {
+                settingsValid = false;
+            }
+            if (!settingsValid) {
+                const msg = `Expected --settings file missing or invalid for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
                 console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
                 throw new Error(msg);
             }

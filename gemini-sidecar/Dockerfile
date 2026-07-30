@@ -220,6 +220,18 @@ RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \
     chmod -R g=u /home/default /app /data
 
+# Re-tighten the two files enforcing code_reviewer's read-only guarantee: root:0-owned,
+# mode 0550 (r-x for owner AND group, nothing for other). MUST run AFTER the broader
+# chown/chmod above, which grants 1001:0 group-write via `g=u` -- reversing that order
+# would make these writable again for the runtime UID. The runtime USER 1001 has no
+# /etc/passwd entry, so its primary GID defaults to 0, matching the GROUP permission
+# bits (r-x) here, not owner -- it can read+execute but never WRITE. This closes the
+# "compromise once, disable forever" root cause: a write primitive that slips past
+# validate-reviewer-bash.sh (e.g. an undiscovered future bypass) can no longer
+# overwrite/truncate the hook or the permissions file meant to stop it.
+RUN chown -R root:0 /app/hooks/validate-reviewer-bash.sh /app/claude-settings && \
+    chmod -R 0550 /app/hooks/validate-reviewer-bash.sh /app/claude-settings
+
 # Switch to non-root user
 USER 1001
 ENV HOME=/home/default

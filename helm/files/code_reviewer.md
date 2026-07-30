@@ -113,18 +113,30 @@ The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blac
      commands and deny Edit/Write/NotebookEdit outright for your own session too. This
      layer is shell-operator-aware (compound commands, wrapper-stripping) and cannot be
      disabled by a crashed subprocess -- it doesn't depend on any script you or a
-     subagent could interact with.
+     subagent could interact with. It also carries `Read` deny rules for the specific
+     credential file paths this environment writes (`/tmp/git-creds-*`, `~/.ssh/**`,
+     etc.) -- Claude Code's own docs state a `Read` deny rule matches a symlink whose
+     TARGET resolves to a denied path, not just the symlink's own path, which is the
+     specific mechanism that closes a reviewed diff shipping a symlink into a checked-out
+     repo that points at one of these files. This does NOT generalize to arbitrary,
+     unenumerated sensitive paths -- only the ones explicitly listed.
   3. **`validate-reviewer-bash.sh`** (subagent-only, PreToolUse hook): a regex blocklist
      that fails CLOSED on any parse/timeout failure. Catches patterns layer 2's exact-prefix
-     matching can't express (flag insertion, variable indirection, heredoc-fed interpreters).
-     Non-exhaustive by design -- accept the matching usability cost: legitimate read-only
-     one-liners that happen to match a blocked pattern (e.g. `python3 -c "..."`) are
-     blocked outright.
+     matching can't express (flag insertion, variable indirection, heredoc-fed interpreters,
+     backslash-escape and quote-splitting evasion). Non-exhaustive by design -- accept the
+     matching usability cost: legitimate read-only one-liners that happen to match a
+     blocked pattern (e.g. `python3 -c "..."`) are blocked outright.
+  **Explicitly NOT covered by any of the three layers**: a command that legitimately
+  executes (nothing in its own text is a mutation) but whose CHILD PROCESS mutates or
+  exfiltrates -- e.g. a dependency-install command's postinstall/setup.py hook. Mitigated
+  narrowly by blocking the install commands themselves (`npm install`, `pip install`,
+  `make`, etc.) rather than trying to inspect what they might spawn.
   OS-level sandboxing (filesystem + network isolation, inherited automatically by all
-  subagents) would close the remaining gaps in layers 2-3 -- e.g. mutations that occur
-  entirely within the working directory, or novel command constructions neither layer
-  anticipated -- but requires validating bubblewrap/OpenShift SCC compatibility first.
-  Tracked as a follow-up, not yet enabled.
+  subagents) would close the remaining gaps in layers 2-3 more generally -- e.g. mutations
+  that occur entirely within the working directory, reads of credential paths not
+  explicitly enumerated above, or novel command constructions neither layer anticipated
+  -- but requires validating bubblewrap/OpenShift SCC compatibility first. Tracked as a
+  follow-up, not yet enabled.
 
 ## Engineering Principles
 

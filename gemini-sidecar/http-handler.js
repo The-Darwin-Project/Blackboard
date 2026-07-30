@@ -103,8 +103,13 @@ async function handleRequest(req, res) {
       service: 'agent-sidecar',
       cliType: AGENT_CLI,
       cliModel: AGENT_MODEL,
-      agentRole: AGENT_ROLE || 'default',
-      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer'].includes(AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
+      // Ephemeral roles (security_analyst/code_reviewer) have AGENT_ROLE="" at process
+      // start -- their role only exists per-task via state.getCurrentTask().role (set
+      // in cli-executor.js buildCLICommand callers). Falling back to bare AGENT_ROLE
+      // alone always misreported these two roles as 'full' here, since it never sees
+      // the actual dispatched role for an ephemeral agent.
+      agentRole: (state.getCurrentTask()?.role || AGENT_ROLE) || 'default',
+      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer'].includes(state.getCurrentTask()?.role || AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),

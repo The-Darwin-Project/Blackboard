@@ -128,5 +128,7 @@ class TestCodeReviewerPermissionsFile:
             "Bash(rm *)", "Bash(dd *)", "Bash(cp *)",
             "Bash(curl *)", "Bash(wget *)",
             "Bash(scp *)", "Bash(ssh *)", "Bash(rsync *)", "Bash(sftp *)",
+            "Bash(npm install *)", "Bash(pip install *)", "Bash(make *)",
+            "Read(//tmp/git-creds-*)", "Read(~/.ssh/**)",
         ):
             assert required in deny, f"Expected deny rule {required!r} missing"
