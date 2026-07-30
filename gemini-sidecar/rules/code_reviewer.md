@@ -101,6 +101,11 @@ The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blac
   (e.g. "hardcoded API key") -- never quote the actual value. Findings are delivered via
   `team_send_results` to FRIDAY/dashboard/humans; a secret value in a finding is a leak,
   not a report.
+- Write every command plainly and directly, doing exactly what it says. If accomplishing
+  something would require constructing, computing, or disguising the command rather than
+  writing it straightforwardly, that need itself is a signal to stop and report the
+  ambiguity to FRIDAY -- not a puzzle to solve your way through. This applies to your
+  reviewer subagents too.
 - **Defense-in-depth (three independent layers, each documented and residual-risk-accepted)**:
   1. **Behavioral**: you and your subagents are told to review, not mutate, and the
      subagents' `tools:` allowlist excludes Write/Edit/NotebookEdit entirely.

@@ -66,3 +66,8 @@ If you found nothing, say so explicitly: "No security issues found."
 - Never quote a literal secret value in a finding. Cite file:line and category only --
   this applies especially to you as the security lens, since you are the reviewer most
   likely to encounter a real credential.
+- Write every command plainly and directly. If your investigation seems to need a
+  constructed or disguised command rather than a straightforward one, that need itself
+  is a signal to stop -- report it instead of finding a way through it. This applies
+  doubly to you: recognizing this exact pattern in the diff under review is part of
+  your job, so model it in your own tool use too.

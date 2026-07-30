@@ -20,7 +20,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
@@ -42,8 +42,15 @@ function buildCLICommand(prompt, options = {}) {
         }
         const effectiveRoleForSettings = options.role || AGENT_ROLE;
         const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
-        if (settingsFile && fs.existsSync(settingsFile)) {
-            args.push('--settings', settingsFile);
+        if (settingsFile) {
+            if (fs.existsSync(settingsFile)) {
+                args.push('--settings', settingsFile);
+            } else {
+                // Silent degrade to hook-only enforcement was the codereview finding here --
+                // this role EXPECTS an engine-enforced permission layer; its absence at runtime
+                // (missing image layer, bad COPY, wrong path) must be loud, not a quiet no-op.
+                console.error(`[${new Date().toISOString()}] WARNING: expected --settings file missing for role '${effectiveRoleForSettings}': ${settingsFile} -- proceeding WITHOUT the native permissions.deny layer (hook-only enforcement)`);
+            }
         }
         if (permissionMode === 'plan') {
             args.push('--permission-mode', 'plan');
@@ -253,7 +260,7 @@ async function executeCLI(prompt, options = {}) {
                 ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
             },
             cwd: workDir,
-            timeout: TIMEOUT_MS,
+            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 
@@ -341,7 +348,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                 ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
             },
             cwd: workDir,
-            timeout: TIMEOUT_MS,
+            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 

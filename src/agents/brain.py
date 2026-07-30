@@ -3194,8 +3194,21 @@ class Brain:
         which unconditionally re-enqueues with ZERO backoff, discarding the intended
         defer delay and risking a tight retry loop against the exact dependency that's
         already unhealthy. On failure here, deliberately do NOT re-enqueue -- the
-        ResyncTrigger's periodic scan will naturally rediscover the event, giving an
-        effective soft backoff instead of an immediate retry.
+        ResyncTrigger's periodic scan will naturally rediscover the event.
+
+        Verified (codereview follow-up, not just asserted): a failed defer_event call
+        never transitions the event's status to DEFERRED (that write is inside the
+        handler this call never reached) -- the event's status stays whatever it was
+        before this dispatch attempt (ACTIVE, since _run_agent_task only runs for
+        active events). _scan_active_for_reconcile's active-events loop (every 5s) has
+        no path that skips a still-ACTIVE event with no running task in _active_tasks
+        (Guard 1 only special-cases events WITH a live task; this one's task already
+        finished by the time the scan runs, per _release_task_state in the finally
+        block) -- it falls through to the default "active, no task running" handling
+        and gets appended to to_enqueue. Rediscovery does NOT depend on any state this
+        failed call would have written; only on the event remaining ACTIVE, which it
+        already is by construction. See src/scheduling/triggers.py ResyncTrigger and
+        brain.py _scan_active_for_reconcile.
         """
         try:
             await self.execute_tool_locked(

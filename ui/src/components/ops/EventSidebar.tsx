@@ -10,7 +10,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield, SearchCheck } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Bot, Radio, GitMerge, Clock, CheckCircle2, Compass, Terminal, Code2, FlaskConical, Snowflake, Shield } from 'lucide-react';
 import { useOpsControl, AGENTS } from '../../contexts/OpsStateContext';
 import { useActiveEvents, useWaitingApprovalEvents, useHeadhunterPending, useAlignerPending } from '../../hooks/useQueue';
 import { getClosedEvents } from '../../api/client';
@@ -131,7 +131,12 @@ export default function EventSidebar() {
                 const isBusy = reg?.busy || false;
                 const isRegistered = !!reg;
                 const color = ACTOR_COLORS[name] || '#6b7280';
-                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical, security_analyst: Shield, code_reviewer: SearchCheck } as Record<string, typeof Compass>)[name];
+                // code_reviewer is EPHEMERAL_ONLY (no persistent sidecar) and never appears in
+                // AGENTS (OpsStateContext.tsx tracks persistent-sidecar busy/idle state only) --
+                // no icon mapped here for it; adding one would be dead code until AGENTS itself
+                // is extended to cover ephemeral-only roles. (security_analyst below shares this
+                // same property but predates this PR -- out of scope here.)
+                const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical, security_analyst: Shield } as Record<string, typeof Compass>)[name];
                 return (
                   <TreeNode key={name}
                     icon={

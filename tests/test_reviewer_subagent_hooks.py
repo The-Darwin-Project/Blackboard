@@ -123,8 +123,9 @@ class TestCodeReviewerPermissionsFile:
         deny = data["permissions"]["deny"]
         for required in (
             "Edit", "Write", "NotebookEdit",
-            "Bash(git commit *)", "Bash(git push *)",
+            "Bash(git commit *)", "Bash(git push *)", "Bash(git config *)",
             "Bash(rm *)", "Bash(dd *)", "Bash(cp *)",
             "Bash(curl *)", "Bash(wget *)",
+            "Bash(scp *)", "Bash(ssh *)", "Bash(rsync *)", "Bash(sftp *)",
         ):
             assert required in deny, f"Expected deny rule {required!r} missing"
