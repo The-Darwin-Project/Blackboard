@@ -32,8 +32,11 @@ _GITHUB_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")
 _SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")
 _BEARER_TOKEN_RE = re.compile(r"\bBearer\s+[A-Za-z0-9\-._~+/]{8,}=*", re.IGNORECASE)
 # Catch-all for "key=value"/"key: value" secrets (api_key, token, secret, password, ...).
+# Uses a lookbehind instead of \b before the keyword: \b can't match between `_` and a
+# word char, so it silently fails to match SCREAMING_SNAKE_CASE names like DB_PASSWORD=
+# or AWS_SECRET_ACCESS_KEY= (both sides of that boundary are \w).
 _KEYED_SECRET_RE = re.compile(
-    r"\b(api[_-]?key|access[_-]?key|secret|password|passwd|token|authorization)"
+    r"(?<![A-Za-z0-9])(api[_-]?key|access[_-]?key|secret|password|passwd|token|authorization)"
     r"\s*[:=]\s*(['\"]?)[A-Za-z0-9\-._~+/]{8,}=*\2",
     re.IGNORECASE,
 )
