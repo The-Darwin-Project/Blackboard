@@ -57,18 +57,20 @@ COMMAND="${PARSED#OK:}"
 [ -z "$COMMAND" ] && exit 0
 
 # Join backslash-newline continuations the way bash itself does when it executes this
-# string (deletes both characters, concatenating with no inserted space), then collapse
-# any remaining bare newlines (genuine multi-statement commands) into spaces. Without
-# this, grep evaluates $COMMAND per-line and `git \` + newline + `commit` slips through
-# as two individually-safe-looking lines.
-NORMALIZED=$(printf '%s' "$COMMAND" | sed -z 's/\\\n//g' | tr '\n' ' ')
+# string (deletes both characters, concatenating with no inserted space). Real
+# (non-continuation) newlines are deliberately NOT collapsed yet -- the position-based
+# checks below run against JOINED (still multi-line) so grep's default per-line
+# behavior gives `^` a free per-line anchor, catching a substitution/ANSI-C construct
+# that starts a genuine new statement on its own line, not just after a literal ;/&/|.
+# Collapsing to a single line happens AFTER those checks, right before UNQUOTED.
+JOINED=$(printf '%s' "$COMMAND" | sed -z 's/\\\n//g')
 
 # ANSI-C quoting ($'...') lets bash interpret \xNN/\oNNN escapes into arbitrary literal
 # bytes at parse time -- the only standard construct that can produce a command name
 # (e.g. "rm") without its literal text ever appearing anywhere in $COMMAND for the
 # checks below to see. Legitimate reviewer commands (git/grep/find/rg/cat) never need
 # this construct; block it outright rather than trying to decode every escape form.
-if printf '%s\n' "$NORMALIZED" | grep -q "\$'"; then
+if printf '%s\n' "$JOINED" | grep -q "\$'"; then
   echo "Blocked: ANSI-C quoting (\$'...') is not permitted -- reviewer subagents are read-only." >&2
   exit 2
 fi
@@ -81,17 +83,22 @@ fi
 # the executable position. Checked at start-of-command AND after any command
 # separator (;, &, |) -- not just the very start of the whole string -- so
 # `true; $(echo r)m -rf /data` is caught too, not just a substitution in position 0.
+# Running this against JOINED (real newlines still present, grep's default per-line
+# mode) also catches a substitution starting a genuine new statement on its own line
+# (`some_cmd\n$(echo r)m -rf /data`) via the same `^` anchor -- no longer a documented
+# gap now that this runs before the newline-to-space collapse.
 # `["']*` tolerates the substitution being wrapped in quotes (`"$(...)"`), which
 # would otherwise dodge a bare `^\$\(` anchor while still resolving to the same
 # dynamically-computed command at execution time.
-# Known residual gap (documented, not fixed): a substitution-as-command-name that
-# lands immediately after a NEWLINE-turned-separator (rather than ;/&/|) is
-# indistinguishable from ordinary whitespace once NORMALIZED collapses newlines to
-# spaces above -- same class of accepted risk as the other exotic forms noted below.
-if printf '%s\n' "$NORMALIZED" | grep -qE '(^|[;&|])[[:space:]]*["'"'"']*(\$\(|`)'; then
+if printf '%s\n' "$JOINED" | grep -qE '(^|[;&|])[[:space:]]*["'"'"']*(\$\(|`)'; then
   echo "Blocked: command substitution as the command itself is not permitted." >&2
   exit 2
 fi
+
+# NOW collapse any remaining bare (non-continuation) newlines into spaces for the
+# rest of the pipeline -- the \b-boundary matching below doesn't depend on exact
+# separator characters the way the position checks above did.
+NORMALIZED=$(printf '%s' "$JOINED" | tr '\n' ' ')
 
 # Strip quote characters before the main mutation check so quote-splitting (writing a
 # dangerous token as e.g. r'm' -- bash concatenates adjacent quoted/unquoted strings
@@ -197,6 +204,34 @@ BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|awk|gawk|php|lua|Rscript
 # awk/gawk -i inplace is a GNU extension that mutates a file internally (the write
 # never appears as a shell redirect, so the generic `>` check can't see it either).
 BLOCK_PATTERN+='|\b(awk|gawk)\b.*-i[[:space:]]*inplace\b'
+# eval/exec/source (and `.` as the POSIX alias for source) re-interpret a
+# dynamically-constructed string as a NEW command -- a fundamentally different
+# mechanism from direct substitution-as-command-name above, and one where the
+# actual dangerous verb can be hidden entirely inside the string being evaluated
+# (`eval "$(printf '\x72\x6d -rf /data')"`). No legitimate read-only review command
+# needs to re-interpret constructed strings as code. The dot-sourcing form (`.
+# script.sh`) is anchored to start-of-command/after a separator -- NOT a bare
+# `\.\s+\S` anywhere in the string, which would false-positive on the extremely
+# common "." meaning current directory (`find . -name`, `grep -r pattern .`,
+# `rg foo .`) that appears constantly in legitimate reviewer commands.
+BLOCK_PATTERN+='|\b(eval|exec|source)\b|(^|[;&|]\s*)\.\s+\S'
+# Direct execution of a relative path (`./repro.sh`, `../scripts/x.sh`) runs an
+# arbitrary FILE via its own shebang line -- no interpreter name (bash/python3/etc.)
+# ever appears in the command for the interpreter-name rules above to match against.
+# A git-tracked file with its executable bit set (preserved by git) plus a
+# prompt-injected instruction to run it is a full code-execution path this hook
+# would otherwise never see. Legitimate reviewer commands are all installed system
+# binaries resolved via $PATH (git, grep, rg, helm, tsc, pytest, ...) -- none of them
+# are legitimately invoked via a `./`-relative path.
+BLOCK_PATTERN+='|(^|[;&|]\s*)\.\.?/'
+# Credential file paths this environment actually writes or is likely to contain --
+# block ANY command that references them as an argument, regardless of which command
+# (cat/grep/find/head/tail/whatever) is used to read them. This is a backstop
+# independent of whether the native permissions.deny Read-tool rules (layer 2, see
+# code-reviewer-permissions.json) extend to a given Bash command -- the hook does
+# not need to know or trust that answer since it inspects the argument text
+# directly. Mirrors the same path set as the layer-2 Read deny rules.
+BLOCK_PATTERN+='|(~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.kube/config|~/\.netrc|/tmp/git-creds-)'
 
 if printf '%s\n' "$CHECK_COMMAND" | grep -qiE "$BLOCK_PATTERN"; then
   # Bound + redact the logged command: blocked commands can legitimately contain
