@@ -75,23 +75,29 @@ if printf '%s\n' "$JOINED" | grep -q "\$'"; then
   exit 2
 fi
 
-# A command that STARTS a statement with a substitution ($(...) or a backtick
-# expression) is computing its own command name dynamically -- this covers ANY
-# mechanism that decodes to a command name at runtime (base64, printf hex-escapes,
-# echo -e, etc.), since the check is on POSITION, not content. Legitimate read-only
-# commands use substitution as an ARGUMENT (e.g. `git log $(cat ref.txt)`), never as
-# the executable position. Checked at start-of-command AND after any command
-# separator (;, &, |) -- not just the very start of the whole string -- so
-# `true; $(echo r)m -rf /data` is caught too, not just a substitution in position 0.
+# A command that STARTS a statement with a substitution ($(...), a backtick
+# expression, OR a bare variable expansion ($VAR, ${VAR})) is computing its own
+# command name dynamically -- this covers ANY mechanism that decodes to a command
+# name at runtime (base64, printf hex-escapes, echo -e, variable-splitting across
+# multiple assignments like `A=r;B=m;$A$B`, etc.), since the check is on POSITION,
+# not content or how the value was constructed. A dangerous verb split across two
+# separately-assigned variables never appears as a contiguous substring anywhere in
+# $COMMAND for the word-boundary checks below to see -- blocking ANY variable
+# reference in the command-name position closes this regardless of how many
+# variables the value was assembled from. Legitimate read-only commands use
+# variables and substitution as an ARGUMENT (e.g. `git log $BRANCH`,
+# `git log $(cat ref.txt)`), never as the executable position. Checked at
+# start-of-command AND after any command separator (;, &, |) -- not just the very
+# start of the whole string -- so `true; $(echo r)m -rf /data` and
+# `A=r;B=m;$A$B -rf /data` are both caught, not just position 0.
 # Running this against JOINED (real newlines still present, grep's default per-line
-# mode) also catches a substitution starting a genuine new statement on its own line
-# (`some_cmd\n$(echo r)m -rf /data`) via the same `^` anchor -- no longer a documented
-# gap now that this runs before the newline-to-space collapse.
-# `["']*` tolerates the substitution being wrapped in quotes (`"$(...)"`), which
-# would otherwise dodge a bare `^\$\(` anchor while still resolving to the same
+# mode) also catches a substitution/variable starting a genuine new statement on its
+# own line (`some_cmd\n$(echo r)m -rf /data`) via the same `^` anchor.
+# `["']*` tolerates the construct being wrapped in quotes (`"$(...)"`), which would
+# otherwise dodge a bare `^\$\(` anchor while still resolving to the same
 # dynamically-computed command at execution time.
-if printf '%s\n' "$JOINED" | grep -qE '(^|[;&|])[[:space:]]*["'"'"']*(\$\(|`)'; then
-  echo "Blocked: command substitution as the command itself is not permitted." >&2
+if printf '%s\n' "$JOINED" | grep -qE '(^|[;&|])[[:space:]]*["'"'"']*(\$\(|`|\$[A-Za-z_{])'; then
+  echo "Blocked: command substitution or variable expansion as the command itself is not permitted." >&2
   exit 2
 fi
 
@@ -145,7 +151,7 @@ GIT_GAP='((-\S+)(\s+\S+)?\s+)*'
 # text itself isn't in the alternation.
 BLOCK_PATTERN="\\bgit\\s+${GIT_GAP}(commit|push|merge|rebase|reset\\s+.*--hard|checkout\\s+-[bB]|branch\\s+${GIT_GAP}(-[dD]\\b|--delete\\b)|tag\\s|clean\\s+-\\S*f|rm\\b|apply\\b|am\\b|switch\\s+${GIT_GAP}(-c\\b|--create\\b)|config\\b)"
 BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
-BLOCK_PATTERN+='|\bfind\b.*(-delete\b|-exec\s+(rm|mv|chmod|chown|dd|cp)\b)'
+BLOCK_PATTERN+='|\bfind\b.*(-delete\b|-exec(dir)?\s+(rm|mv|chmod|chown|dd|cp)\b)'
 # Redirect-mutation check excludes only `&` (fd duplication: `2>&1`, `>&2`) -- NOT
 # digits generally. A prior version excluded `[^&0-9]`, meaning any redirect target
 # starting with a digit (`>1x.sh`) evaded detection entirely; digit-prefixed fd-target
@@ -247,6 +253,7 @@ if printf '%s\n' "$CHECK_COMMAND" | grep -qiE "$BLOCK_PATTERN"; then
     | sed -E 's/Authorization:[[:space:]]*(Bearer|Basic)[[:space:]]+[^[:space:]"'"'"']*/Authorization: \1 <redacted>/gi' \
     | sed -E 's/(^|[[:space:]])-u[[:space:]]+[^[:space:]]+:[^[:space:]]*/\1-u <redacted>/g' \
     | sed -E 's/([A-Za-z_-]*(token|password|apikey|api_key|secret)[[:space:]]*[:=])[[:space:]]*[^[:space:]]*/\1 <redacted>/gi' \
+    | sed -E 's/(Authorization:[[:space:]]*token|PRIVATE-TOKEN|X-Auth-Token)[[:space:]]+[^[:space:]"'"'"']*/\1 <redacted>/gi' \
     | sed -E 's/\b(ghp_|gho_|ghu_|ghs_|glpat-|AKIA)[A-Za-z0-9_-]+/\1<redacted>/g' \
     | cut -c1-200)
   echo "Blocked: reviewer subagents are read-only. Command matched a mutation pattern: $LOG_COMMAND" >&2

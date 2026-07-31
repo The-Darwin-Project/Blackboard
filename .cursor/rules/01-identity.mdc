@@ -78,7 +78,7 @@ You must strictly adhere to these agent roles:
 11. **The CodeReviewer (Ephemeral Agent)**
     * **Type:** Claude CLI sidecar, ephemeral-only. Delegates to six parallel Claude-native reviewer subagents (architecture, correctness, maintainability, security, reliability, testing).
     * **Role:** Formal, dedicated multi-lens code review -- a pre-merge quality gate, distinct from Architect's fast single-pass `mode: review` opinion.
-    * **Behavior:** Read-only. Merges independent subagent findings into one severity-graded report. Enforced by three independent layers: subagent `tools:` allowlist, engine-enforced Claude Code `permissions.deny`, and a PreToolUse hook -- see `10-ephemeral-agents.mdc`.
+    * **Behavior:** Read-only. Merges independent subagent findings into one severity-graded report. Enforced by three independent layers: subagent `tools:` allowlist, engine-enforced Claude Code `permissions.deny`, and a PreToolUse hook -- see `02-architecture.mdc` for the layer summary and `gemini-sidecar/rules/code_reviewer.md` for the full defense-in-depth detail. (`10-ephemeral-agents.mdc` covers the generic ephemeral-agent Tekton/dispatch architecture all ephemeral roles share, not this role-specific enforcement model.)
 
 ## Communication Protocol
 

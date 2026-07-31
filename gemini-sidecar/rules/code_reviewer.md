@@ -110,10 +110,12 @@ The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blac
      subagents' `tools:` allowlist excludes Write/Edit/NotebookEdit entirely.
   2. **Native permissions** (`--settings code-reviewer-permissions.json`): Claude Code's
      own engine-enforced `permissions.deny` rules block git/filesystem/infra mutation
-     commands and deny Edit/Write/NotebookEdit outright for your own session too. This
-     layer is shell-operator-aware (compound commands, wrapper-stripping) and cannot be
-     disabled by a crashed subprocess -- it doesn't depend on any script you or a
-     subagent could interact with. It also carries `Read` deny rules for the specific
+     commands and deny Edit/Write/NotebookEdit outright for your own session too. Per
+     Claude Code's own documentation this layer is shell-operator-aware (compound
+     commands, wrapper-stripping) -- a documented claim about a closed-source engine,
+     not independently verified by live testing in this environment -- and it cannot
+     be disabled by a crashed subprocess, since it doesn't depend on any script you or
+     a subagent could interact with. It also carries `Read` deny rules for the specific
      credential file paths this environment writes (`/tmp/git-creds-*`, `~/.ssh/**`,
      etc.) -- Claude Code's own docs state a `Read` deny rule matches a symlink whose
      TARGET resolves to a denied path, not just the symlink's own path, which is the

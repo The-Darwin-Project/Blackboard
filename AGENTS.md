@@ -16,11 +16,17 @@ reliability-reviewer, and doc-reviewer sub-agents on every review.
   crash or timeout will show as a yellow warning in the PR checks list, not
   a red blocking failure. Do not expect this check to gate merges.
 
-- **20-minute hard timeout.** Large PRs near the `AI_REVIEW_MAX_DIFF_LINES`
-  threshold (default 10000 lines) may occasionally hit this limit. Raising
-  `AI_REVIEW_MAX_TURNS`/`AI_REVIEW_MAX_BUDGET` for large diffs increases the
-  odds of hitting this timeout even further — if the check times out,
-  re-run manually from the Actions tab.
+- **40-minute hard timeout** (raised from 20 -- live-reproduced on a large PR
+  where the two-phase REVIEW+SIGN-OFF pipeline needed the full budget and was
+  still mid-sign-off when the old 20-minute ceiling cancelled it, discarding
+  all results with no PR comment update or `ci-results/` artifact). Note that
+  `continue-on-error: true` on the review STEP does not protect against a
+  JOB-level `timeout-minutes` cancellation -- they are independent mechanisms;
+  a job timeout is an external cancellation, not a step failure. Very large
+  PRs near the `AI_REVIEW_MAX_DIFF_LINES` threshold (default 10000 lines) or
+  with `AI_REVIEW_MAX_TURNS`/`AI_REVIEW_MAX_BUDGET` raised for extra headroom
+  may still occasionally hit this limit — if the check times out, re-run
+  manually from the Actions tab.
 
 - **Diff size skip.** Diffs exceeding `AI_REVIEW_MAX_DIFF_LINES` (default
   10000) are silently skipped — the job exits cleanly with no review

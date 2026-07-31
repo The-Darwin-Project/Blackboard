@@ -33,6 +33,14 @@ const ROLE_SETTINGS_FILE = {
     code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
 };
 
+// Minimum load-bearing deny rules the settings-validity check requires (below) --
+// a near-empty-but-shape-valid file (e.g. `{"permissions":{"deny":["Edit"]}}`) would
+// previously pass a bare "non-empty array" check while providing almost no real
+// restriction. Checking for a representative sample across categories (tool-level,
+// git mutation, filesystem mutation, network exfil) catches wholesale content
+// tampering/corruption without needing to enumerate every rule in the real file.
+const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git push *)', 'Bash(rm *)'];
+
 function buildCLICommand(prompt, options = {}) {
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
     if (AGENT_CLI === 'claude') {
@@ -54,7 +62,8 @@ function buildCLICommand(prompt, options = {}) {
             let settingsValid = false;
             try {
                 const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-                settingsValid = !!(parsed && parsed.permissions && Array.isArray(parsed.permissions.deny) && parsed.permissions.deny.length > 0);
+                const denyList = parsed && parsed.permissions && parsed.permissions.deny;
+                settingsValid = Array.isArray(denyList) && REQUIRED_DENY_RULES.every((rule) => denyList.includes(rule));
             } catch (e) {
                 settingsValid = false;
             }
@@ -263,6 +272,15 @@ function watchResultsDir(workDir) {
 }
 
 async function executeCLI(prompt, options = {}) {
+    // buildCLICommand can throw (fail-closed on a missing/invalid --settings file --
+    // see ROLE_SETTINGS_FILE above). No try/catch needed HERE: a synchronous throw
+    // inside a `new Promise((resolve, reject) => {...})` executor is caught by the
+    // Promise constructor itself per the ECMAScript spec and auto-rejects -- this is
+    // guaranteed language behavior, not an assumption. Every real caller of
+    // executeCLI (http-handler.js's /execute handler) already awaits it inside its
+    // own try/catch, so a throw here degrades to a clean error response, never an
+    // unhandled rejection. (Raised repeatedly in AI review across multiple rounds --
+    // documenting the reasoning here rather than adding a redundant try/catch.)
     return new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
@@ -350,6 +368,11 @@ async function executeCLI(prompt, options = {}) {
 }
 
 async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
+    // Same guarantee as executeCLI above: a buildCLICommand throw auto-rejects this
+    // Promise via the executor-throw-to-reject spec behavior. Every real caller
+    // (ws-server.js task/followup handlers, ws-client.js reconnect path) already
+    // awaits this inside its own try/catch, converting a throw into a clean WS error
+    // message -- never an unhandled rejection.
     return new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,

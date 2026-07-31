@@ -233,8 +233,21 @@ RUN mkdir -p /home/default /data/gitops && \
 # agents/ directory carries each subagent's `tools:` allowlist and `hooks:` wiring;
 # leaving it group-writable would let a compromised session permanently disable
 # layers 1+3 for the rest of the pod's lifetime by editing those files directly.
-RUN chown -R root:0 /app/hooks/validate-reviewer-bash.sh /app/claude-settings /home/default/.claude/agents && \
-    chmod -R 0550 /app/hooks/validate-reviewer-bash.sh /app/claude-settings /home/default/.claude/agents
+#
+# Target the ENCLOSING DIRECTORY for the hook (/app/hooks), not just the file inside
+# it -- codereview caught (and this was empirically reproduced) that hardening only
+# the leaf file leaves its parent directory writable, and directory-entry create/
+# delete is governed by the PARENT's write bit, independent of the child file's own
+# permissions: `rm /app/hooks/validate-reviewer-bash.sh` only needs write on
+# /app/hooks, not on the file itself. /app/claude-settings and
+# /home/default/.claude/agents don't have this gap because they were already
+# targeted as directories (their own entries become 0550 too, and removing a
+# non-empty directory whose entries can't be individually unlinked fails closed).
+# /app/hooks also contains check-inbox.sh/cluster-context.sh (unrelated, non-
+# security-critical CLI hooks) -- hardening the whole directory after they're
+# already copied in is safe since neither needs further writes at runtime.
+RUN chown -R root:0 /app/hooks /app/claude-settings /home/default/.claude/agents && \
+    chmod -R 0550 /app/hooks /app/claude-settings /home/default/.claude/agents
 
 # Switch to non-root user
 USER 1001
