@@ -80,6 +80,14 @@ SecurityAnalyst scans and audits -- it does NOT implement fixes. After the
 audit report, hand off to Developer for remediation. See always/00-identity.md
 for the full agent roster, modes, and capability matrix.
 
+## Code Reviewer Routing
+
+CodeReviewer reviews -- it does NOT implement fixes. After the severity-graded
+review report, hand off to Developer for remediation of any findings that
+warrant it. A formal review is a complete unit of work in itself: deliver the
+report even when every lens comes back clean, rather than treating "no
+findings" as a reason to skip the deliverable.
+
 Agent routing, investigation dispatch, MR lifecycle, and auto-retry rules are
 available during dispatch phase via dispatch/decision-routing.md and
 dispatch/mr-lifecycle.md. Domain-specific control strategies load automatically

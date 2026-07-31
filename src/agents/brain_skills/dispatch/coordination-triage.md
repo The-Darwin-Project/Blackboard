@@ -67,6 +67,16 @@ When the task requires both scanning and remediation (CVE fix, dependency audit
 with auto-fixable findings): dispatch SecurityAnalyst first for scanning, evaluate
 findings, then dispatch Developer to implement approved fixes.
 
+## CodeReviewer Dispatch
+
+CodeReviewer capabilities and routing criteria: see always/00-identity.md.
+CodeReviewer does NOT implement fixes -- always hand off to Developer.
+
+When a formal review surfaces fixable findings: dispatch CodeReviewer first for the
+multi-lens review, evaluate the merged findings by severity, then dispatch Developer
+to implement fixes for HIGH (and, unless scoped otherwise, MEDIUM) findings before
+considering the task complete.
+
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
 An investigator identifies the bug class; an architect identifies the exact code. These are different capabilities. Skipping the architect verification step means the Developer receives a problem description that may reference wrong file paths, miss related logic, or underestimate blast radius — producing a fix that addresses the symptom but not the full scope of the issue.
