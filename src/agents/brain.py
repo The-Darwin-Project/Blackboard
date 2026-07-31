@@ -4228,6 +4228,102 @@ class Brain:
         self._event_locks.pop(event_id, None)
         return True
 
+    # =========================================================================
+    # Domain Override (Human-initiated via UI)
+    # =========================================================================
+
+    async def enforce_domain_override(
+        self, event_id: str, domain: str, reason: str, user_label: str,
+    ) -> bool:
+        """Human-initiated domain override (e.g. Enforce Casual UI button).
+
+        Serializes against Brain's own tool-handler writes via per-event lock.
+        Returns False (no-op) if the event is closed, not eligible (e.g. deferred
+        with a live external subscription), or the lock could not be acquired
+        within a bounded timeout.
+
+        Codereview-driven fixes (all findings independently confirmed by 2+
+        reviewers on this same round):
+        - Query the blackboard FIRST, before touching `_event_locks`. A bare
+          `.get(event_id) is None` check conflated "lock never created in this
+          process" (e.g. a DEFERRED event surviving a pod restart, genuinely
+          open) with "event closed and lock reclaimed" -- a false-negative 409
+          for the former case (R1 finding).
+        - Only ACTIVE/WAITING_APPROVAL are eligible. A DEFERRED event has a live
+          StateWatcher subscription and/or pending external wake condition; a
+          casual override would silently orphan that subscription behind the
+          CASUAL-gate's 10-tool whitelist, which excludes refresh_gitlab_context/
+          refresh_kargo_context/defer_event/close_event -- the exact tools needed
+          to act on the eventual wake (C6 adversarial finding).
+        - Bound the lock wait with a timeout instead of an indefinite `async with`
+          -- this method can otherwise hang for the full duration of Brain's own
+          LLM-cycle critical section, silently, with no client-visible signal
+          (C4/C6 finding).
+        - Guard the turn-write sequence: if the SECOND write (directive turn)
+          fails after the FIRST succeeds, the domain is already mutated but the
+          event is left half-written. Log a distinguishable CRITICAL marker and
+          re-raise so the route surfaces a real 500, not a misleading 409/200
+          (C4 finding).
+        """
+        event = await self.blackboard.get_event(event_id)
+        if not event or event.status == EventStatus.CLOSED:
+            logger.warning(f"enforce_domain_override: event {event_id} not found or closed")
+            return False
+        if event.status not in (EventStatus.ACTIVE, EventStatus.WAITING_APPROVAL):
+            logger.warning(
+                f"enforce_domain_override: event {event_id} status={event.status.value} "
+                "not eligible (must be active or waiting_approval)"
+            )
+            return False
+        lock = self._event_locks[event_id]  # safe: status confirmed non-closed above
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"enforce_domain_override: timed out waiting for lock on {event_id}")
+            return False
+        try:
+            # Re-check status inside the lock -- closes the TOCTOU window between
+            # the pre-check above and this acquisition.
+            event = await self.blackboard.get_event(event_id)
+            if not event or event.status == EventStatus.CLOSED:
+                logger.warning(f"enforce_domain_override: event {event_id} closed mid-request, skipping")
+                return False
+            await self.blackboard.update_event_domain(event_id, domain)
+            override_turn = ConversationTurn(
+                turn=0,
+                actor="user",
+                action="override",
+                user_name=user_label,
+                thoughts=f"[DOMAIN OVERRIDE] {user_label} enforced {domain.upper()} domain. Reason: {reason}",
+            )
+            directive = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                waitingFor="enforce_domain_override",
+                evidence=(
+                    f"Domain locked: {domain.upper()}. Respond to the user conversationally now. "
+                    "Do not reclassify unless the user's next message shifts to a task."
+                ),
+            )
+            try:
+                await self._append_and_broadcast(event_id, override_turn)
+                await self._append_and_broadcast(event_id, directive)
+                await self._broadcast({"type": "domain_updated", "event_id": event_id, "domain": domain})
+            except Exception:
+                logger.critical(
+                    f"enforce_domain_override: PARTIAL_OVERRIDE on {event_id} -- domain "
+                    f"already set to {domain!r} but the turn-write sequence failed mid-way",
+                    exc_info=True,
+                )
+                raise
+            self.clear_waiting(event_id)
+            await self.resume_if_parked(event_id)
+            logger.info(f"enforce_domain_override: {user_label} enforced {domain} on {event_id}")
+            return True
+        finally:
+            lock.release()
+
     async def emergency_stop(self) -> int:
         """Cancel ALL active agent tasks and close their events. Master kill switch.
 
@@ -4614,6 +4710,10 @@ class Brain:
         resource_label = (
             f"GitLab MR !{spec.resource_ref.mr_iid}"
             if spec.resource_type == "gitlab_mr"
+            else f"GitLab Pipeline #{spec.resource_ref.pipeline_id}"
+            if spec.resource_type == "gitlab_pipeline"
+            else f"GitHub PR #{spec.resource_ref.pr_number} ({spec.resource_ref.owner}/{spec.resource_ref.repo})"
+            if spec.resource_type == "github_pr"
             else f"Kargo {spec.resource_ref.project}/{spec.resource_ref.stage}"
         )
         notification = (

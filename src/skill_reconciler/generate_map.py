@@ -39,6 +39,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "PHASE_NOTIFY": "phase is not escalate or close",
     "PHASE_CLOSE": "phase is not escalate or close",
     "PHASE_OBSERVATION": "phase is close",
+    "OBS_PLATEAU": "same observation recorded 3+ times consecutively without a decision",
     "PHASE_JIRA_COMMENT": "phase not in dispatch/verify/escalate/close",
     "NO_KARGO_CONTEXT": "no Kargo evidence on event",
     "NO_GITHUB_CONTEXT": "no GitHub evidence on event",

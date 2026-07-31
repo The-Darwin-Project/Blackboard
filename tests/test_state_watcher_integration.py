@@ -24,7 +24,7 @@ import httpx
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from src.scheduling.state_watcher import (
-    StateWatcher, SubscriptionSpec, GitLabMrRef, KargoStageRef,
+    StateWatcher, SubscriptionSpec, GitLabMrRef, GitLabPipelineRef, KargoStageRef,
     StateKey, MAX_SUBSCRIPTIONS, _QueueEntry, BACKOFF_BASE,
 )
 
@@ -46,6 +46,8 @@ def _make_spec(
     ref = (
         GitLabMrRef(project_id=123, mr_iid=42)
         if resource_type == "gitlab_mr"
+        else GitLabPipelineRef(project_id=123, pipeline_id=99999)
+        if resource_type == "gitlab_pipeline"
         else KargoStageRef(project="test", stage="dev")
     )
     return SubscriptionSpec(

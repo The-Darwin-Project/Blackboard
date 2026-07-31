@@ -19,6 +19,7 @@ and why a rejected tool was blocked. Extracted from brain.py inline gate logic.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Literal
 
@@ -246,6 +247,46 @@ def _pred_silent_park(ctx: GateContext) -> bool:
     return found_user_msg
 
 
+_OBS_PLATEAU_RE = re.compile(r"Recorded observation '(.+?)' = (.+?) \(point #")
+_OBS_PLATEAU_THRESHOLD = 3
+_OBS_DECISION_TOOLS = frozenset({
+    "defer_event", "close_event", "select_agent", "set_phase",
+    "classify_event", "report_incident", "refresh_gitlab_context",
+    "refresh_kargo_context", "refresh_github_context",
+})
+
+
+def _pred_obs_plateau(ctx: GateContext) -> bool:
+    """True if the last N consecutive record_observation results are identical."""
+    streak = 0
+    last_key: tuple[str, str] | None = None
+    for t in reversed(ctx.conversation):
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        waiting = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+        if action == "tool_result" and waiting == "record_observation":
+            thoughts = t.get("thoughts") if isinstance(t, dict) else getattr(t, "thoughts", None)
+            if not thoughts:
+                break
+            m = _OBS_PLATEAU_RE.search(thoughts)
+            if not m:
+                break
+            key = (m.group(1), m.group(2))
+            if last_key is None:
+                last_key = key
+            if key != last_key:
+                break
+            streak += 1
+            if streak >= _OBS_PLATEAU_THRESHOLD:
+                return True
+        else:
+            # Any non-matching turn resets the count and stops scanning -- a
+            # tool_result for some OTHER tool (e.g. list_observations) must not
+            # be silently skipped over, or two genuinely-separated observation
+            # cycles would be miscounted as adjacent (codereview finding, R2/C6/C11).
+            break
+    return False
+
+
 def _pred_hard_strip_defer(ctx: GateContext) -> bool:
     return ctx.brain_phase == "triage" or ctx.event_source == "jarvis"
 
@@ -288,6 +329,10 @@ def _tools_close(_ctx: GateContext) -> set[str]:
 
 def _tools_observation(_ctx: GateContext) -> set[str]:
     return {"record_observation", "list_observations", "take_note", "review_notes"}
+
+
+def _tools_obs_plateau(_ctx: GateContext) -> set[str]:
+    return {"record_observation"}
 
 
 def _tools_jira_comment(_ctx: GateContext) -> set[str]:
@@ -402,6 +447,14 @@ def _msg_phase_close(tool: str, ctx: GateContext) -> str:
 
 def _msg_phase_observation(tool: str, _ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: phase is close. Constraint: observations not available after close."
+
+
+def _msg_obs_plateau(tool: str, _ctx: GateContext) -> str:
+    return (
+        f"[GATE] {tool} blocked. Same observation recorded {_OBS_PLATEAU_THRESHOLD} times "
+        "consecutively without a decision. Evaluate the evidence: defer if waiting, "
+        "close if resolved, or dispatch if action is needed."
+    )
 
 
 def _msg_phase_jira_comment(tool: str, ctx: GateContext) -> str:
@@ -559,6 +612,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         predicate=_pred_phase_observation,
         tools_affected=_tools_observation,
         message=_msg_phase_observation,
+    ),
+    GateDefinition(
+        gate_id="OBS_PLATEAU",
+        mode="strip",
+        predicate=_pred_obs_plateau,
+        tools_affected=_tools_obs_plateau,
+        message=_msg_obs_plateau,
+        hint="record a different metric, or transition to a decision tool.",
     ),
     GateDefinition(
         gate_id="PHASE_JIRA_COMMENT",

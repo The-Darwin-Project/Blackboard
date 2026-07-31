@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from src.scheduling.state_watcher import (
-    StateWatcher, SubscriptionSpec, GitLabMrRef, KargoStageRef,
+    StateWatcher, SubscriptionSpec, GitLabMrRef, GitLabPipelineRef, KargoStageRef,
     StateKey, MAX_SUBSCRIPTIONS,
 )
 
@@ -29,7 +29,12 @@ def _make_spec(
         poll_fn = AsyncMock(return_value=state_key or {"mr_state": "opened", "pipeline_status": "running", "merge_status": "unchecked"})
     if state_key is None:
         state_key = {"mr_state": "opened", "pipeline_status": "running", "merge_status": "unchecked"}
-    ref = GitLabMrRef(project_id=123, mr_iid=42) if resource_type == "gitlab_mr" else KargoStageRef(project="test", stage="dev")
+    if resource_type == "gitlab_mr":
+        ref = GitLabMrRef(project_id=123, mr_iid=42)
+    elif resource_type == "gitlab_pipeline":
+        ref = GitLabPipelineRef(project_id=123, pipeline_id=99999)
+    else:
+        ref = KargoStageRef(project="test", stage="dev")
     return SubscriptionSpec(
         event_id=event_id,
         resource_type=resource_type,
