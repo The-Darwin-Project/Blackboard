@@ -43,6 +43,7 @@ Assign each step to exactly one agent:
 | qe | Test execution, deployment verification, browser-based UI checks |
 | architect | Architecture analysis, code review, structured planning |
 | security_analyst | Vulnerability scanning, CVE remediation, dependency audit, container image analysis, Enterprise Contract failures, supply chain security |
+| code_reviewer | Dedicated multi-lens review gate for formal pre-merge quality checks -- six parallel subagents merged into one severity-graded report (READ-ONLY, ephemeral) |
 </agents>
 
 <risk>
@@ -68,6 +69,7 @@ corresponding agent:
 | Kueue admission, pod scheduling, namespace quota | sysadmin | Infrastructure-level constraint |
 | MR needs architecture review or plan before fix | architect | Design-first, then implement |
 | Deployment verification, UI smoke test needed | qe | Post-deploy validation |
+| "review requested" label/comment, formal pre-merge quality gate needed | code_reviewer | Dedicated multi-lens review gate -- the review itself is the requested work |
 </routing_hints>
 
 <rules>

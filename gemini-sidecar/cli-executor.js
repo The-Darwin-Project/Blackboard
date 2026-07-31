@@ -12,17 +12,34 @@
 // 9. [Pattern]: options.model/effort/role override env (AGENT_MODEL/AGENT_EFFORT_LEVEL/AGENT_ROLE) at the per-task level.
 //    Stored on state.getCurrentTask() (model/role) so resolveResult -> requestFindings can read them without threading
 //    extra params through the whole call chain -- mirrors the existing sessionId bridging pattern.
+// 10. [Pattern]: ROLE_SETTINGS_FILE maps a role to a --settings JSON path (native Claude Code
+//     permissions.deny). Engine-enforced, independent of validate-reviewer-bash.sh -- add an entry
+//     here (not a hardcoded role check) when a future role needs its own permission boundary.
 
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, TIMEOUT_MS, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, AGENT_EFFORT_LEVEL, resolveTimeoutMs, DEFAULT_WORK_DIR, FINDINGS_FRESHNESS_MS } = require('./config');
 const state = require('./state');
 const { parseStreamLine } = require('./stream-parser');
 const { wsSend } = require('./ws-utils');
 
 const CLAUDE_JSON_PATH = path.join(os.homedir(), '.claude.json');
+
+// Per-role native permission files (Claude Code engine-enforced deny rules).
+// Only roles listed here get --settings; all other roles are unaffected.
+const ROLE_SETTINGS_FILE = {
+    code_reviewer: '/app/claude-settings/code-reviewer-permissions.json',
+};
+
+// Minimum load-bearing deny rules the settings-validity check requires (below) --
+// a near-empty-but-shape-valid file (e.g. `{"permissions":{"deny":["Edit"]}}`) would
+// previously pass a bare "non-empty array" check while providing almost no real
+// restriction. Checking for a representative sample across categories (tool-level,
+// git mutation, filesystem mutation, network exfil) catches wholesale content
+// tampering/corruption without needing to enumerate every rule in the real file.
+const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git push *)', 'Bash(rm *)'];
 
 function buildCLICommand(prompt, options = {}) {
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
@@ -30,6 +47,32 @@ function buildCLICommand(prompt, options = {}) {
         const args = [];
         if (fs.existsSync(CLAUDE_JSON_PATH)) {
             args.push('--mcp-config', CLAUDE_JSON_PATH);
+        }
+        const effectiveRoleForSettings = options.role || AGENT_ROLE;
+        const settingsFile = ROLE_SETTINGS_FILE[effectiveRoleForSettings];
+        if (settingsFile) {
+            // Fail CLOSED, not a quiet degrade to hook-only enforcement: a role in
+            // ROLE_SETTINGS_FILE EXPECTS the engine-enforced permissions.deny layer to
+            // exist and be valid. Losing it silently (missing image layer, bad COPY, wrong
+            // path, truncated/corrupted file) means this role now runs with a weaker
+            // security posture than its own design assumes, with nothing but a log line
+            // to notice. Checking existence alone (fs.existsSync) only proves the file is
+            // THERE, not that Claude Code can actually parse and apply it -- verify it's
+            // valid JSON with the expected shape before trusting it.
+            let settingsValid = false;
+            try {
+                const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+                const denyList = parsed && parsed.permissions && parsed.permissions.deny;
+                settingsValid = Array.isArray(denyList) && REQUIRED_DENY_RULES.every((rule) => denyList.includes(rule));
+            } catch (e) {
+                settingsValid = false;
+            }
+            if (!settingsValid) {
+                const msg = `Expected --settings file missing or invalid for role '${effectiveRoleForSettings}': ${settingsFile} -- refusing to launch without the native permissions.deny layer`;
+                console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
+                throw new Error(msg);
+            }
+            args.push('--settings', settingsFile);
         }
         if (permissionMode === 'plan') {
             args.push('--permission-mode', 'plan');
@@ -141,7 +184,17 @@ async function requestFindings(workDir, autoApprove, model, role) {
     const prompt = 'You completed your task but did not write a completion report. '
         + 'Write a brief summary of what you did to ./results/findings.md now. '
         + 'Include: files changed, what was implemented or verified, and the outcome.';
-    const { binary, args } = buildCLICommand(prompt, { autoApprove, model, role });
+    // buildCLICommand can now throw (fail-closed on a missing --settings file) -- this
+    // function must never reject (ai-rule 6), so catch it here and resolve(null) the
+    // same as any other retry failure, rather than let it surface as an unhandled
+    // rejection through resolveResult's un-guarded `await requestFindings(...)` call.
+    let binary, args;
+    try {
+        ({ binary, args } = buildCLICommand(prompt, { autoApprove, model, role }));
+    } catch (e) {
+        console.log(`[${new Date().toISOString()}] Retry findings buildCLICommand failed: ${e.message}`);
+        return null;
+    }
     return new Promise((resolve) => {
         const timeout = setTimeout(() => resolve(null), 60000);
         const child = spawn(binary, args, {
@@ -219,6 +272,15 @@ function watchResultsDir(workDir) {
 }
 
 async function executeCLI(prompt, options = {}) {
+    // buildCLICommand can throw (fail-closed on a missing/invalid --settings file --
+    // see ROLE_SETTINGS_FILE above). No try/catch needed HERE: a synchronous throw
+    // inside a `new Promise((resolve, reject) => {...})` executor is caught by the
+    // Promise constructor itself per the ECMAScript spec and auto-rejects -- this is
+    // guaranteed language behavior, not an assumption. Every real caller of
+    // executeCLI (http-handler.js's /execute handler) already awaits it inside its
+    // own try/catch, so a throw here degrades to a clean error response, never an
+    // unhandled rejection. (Raised repeatedly in AI review across multiple rounds --
+    // documenting the reasoning here rather than adding a redundant try/catch.)
     return new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
@@ -239,7 +301,7 @@ async function executeCLI(prompt, options = {}) {
                 ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
             },
             cwd: workDir,
-            timeout: TIMEOUT_MS,
+            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 
@@ -306,6 +368,11 @@ async function executeCLI(prompt, options = {}) {
 }
 
 async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
+    // Same guarantee as executeCLI above: a buildCLICommand throw auto-rejects this
+    // Promise via the executor-throw-to-reject spec behavior. Every real caller
+    // (ws-server.js task/followup handlers, ws-client.js reconnect path) already
+    // awaits this inside its own try/catch, converting a throw into a clean WS error
+    // message -- never an unhandled rejection.
     return new Promise((resolve, reject) => {
         const { binary, args } = buildCLICommand(prompt, {
             autoApprove: options.autoApprove,
@@ -327,7 +394,7 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                 ...(AGENT_CLI === 'gemini' ? { GOOGLE_GENAI_USE_VERTEXAI: 'true' } : {}),
             },
             cwd: workDir,
-            timeout: TIMEOUT_MS,
+            timeout: resolveTimeoutMs(options.role || AGENT_ROLE),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 

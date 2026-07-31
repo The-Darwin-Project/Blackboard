@@ -64,12 +64,12 @@ risk: [low|medium|high]
 reasoning: "[One sentence -- include any constraints from PR description]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect|security_analyst]
+    agent: [sysadmin|developer|qe|architect|security_analyst|code_reviewer]
     summary: "[What this step accomplishes -- include PR number, branch, error details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/PR/CI), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/dependency audit/supply chain).
+Agents: sysadmin (k8s/gitops), developer (code/PR/CI), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/dependency audit/supply chain), code_reviewer (dedicated multi-lens review gate for formal pre-merge quality checks, six parallel subagents merged into one severity-graded report).
 Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 If the PR body contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
@@ -87,12 +87,12 @@ risk: [low|medium|high]
 reasoning: "[One sentence]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect|security_analyst]
+    agent: [sysadmin|developer|qe|architect|security_analyst|code_reviewer]
     summary: "[What this step accomplishes — include issue number and key details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify), architect (analysis/design), security_analyst (CVE/vulnerability/dependency audit/supply chain).
+Agents: sysadmin (k8s/gitops), developer (code/implementation), qe (test/verify), architect (analysis/design), security_analyst (CVE/vulnerability/dependency audit/supply chain), code_reviewer (dedicated multi-lens review gate for formal pre-merge quality checks, six parallel subagents merged into one severity-graded report).
 Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 """
 

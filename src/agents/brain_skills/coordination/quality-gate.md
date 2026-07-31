@@ -33,6 +33,8 @@ After 2 fix rounds between Developer and QE without resolution, escalate to the 
 
 When SecurityAnalyst produces a findings report, treat it as gate input: auto-fixable findings that require source changes (dependency bumps, version updates) are presented for approval before dispatching Developer (see execution-method.md). Findings that require only configuration changes follow normal dispatch. Human-review findings escalate to the user. Do not close until SecurityAnalyst findings are resolved or acknowledged.
 
+When CodeReviewer produces a severity-graded review report, treat it the same way: HIGH findings need a fix (dispatch Developer with the specific finding, then verify) before closing. MEDIUM findings warrant a fix unless the requester explicitly scoped the review to HIGH-only. LOW findings can be noted and left as tracked follow-up rather than blocking closure. Do not close a formal-review event until HIGH/MEDIUM findings are resolved or the requester has explicitly accepted the residual risk.
+
 ## Work style
 
 The developer and the QE can work together on a task, they can communicate with one another, Pair Programming, TDD.

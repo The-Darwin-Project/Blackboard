@@ -42,6 +42,8 @@ Skip this only when the agent's report is a simple acknowledgment with no action
 
 When SecurityAnalyst reports findings with auto-fixable CVEs, present the findings for approval before dispatching Developer to implement the recommended version bumps. When SecurityAnalyst reports only human-review items (major bumps, no-fix-available), escalate to the user with the full findings table.
 
+When CodeReviewer returns a merged, severity-graded report, act on the highest severity present: HIGH findings route to Developer for a fix (cite the specific finding and file:line), then verification. If the report is entirely LOW severity or clean, proceed with the original task rather than treating the review as a blocker.
+
 ## Evaluate Recommendations
 
 An agent recommendation is a data signal that must produce a response — act, observe, or ask. Silently dropping a recommendation breaks the feedback loop: the agent invested a full dispatch cycle producing findings that vanish without affecting the event's trajectory.

@@ -332,6 +332,8 @@ spec:
               value: {{ .Values.ephemeralAgents.roleModels.qe | quote }}
             - name: EPHEMERAL_MODEL_SECURITY
               value: {{ .Values.ephemeralAgents.roleModels.security_analyst | quote }}
+            - name: EPHEMERAL_MODEL_CODE_REVIEWER
+              value: {{ .Values.ephemeralAgents.roleModels.code_reviewer | quote }}
             - name: EPHEMERAL_EFFORT_ARCHITECT
               value: {{ .Values.ephemeralAgents.roleEffort.architect | quote }}
             - name: EPHEMERAL_EFFORT_SYSADMIN
@@ -342,6 +344,8 @@ spec:
               value: {{ .Values.ephemeralAgents.roleEffort.qe | quote }}
             - name: EPHEMERAL_EFFORT_SECURITY
               value: {{ .Values.ephemeralAgents.roleEffort.security_analyst | quote }}
+            - name: EPHEMERAL_EFFORT_CODE_REVIEWER
+              value: {{ .Values.ephemeralAgents.roleEffort.code_reviewer | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

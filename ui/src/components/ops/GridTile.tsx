@@ -31,7 +31,7 @@ function GridTile({
   contentTile, onCloseContent,
 }: GridTileProps) {
   if (type === 'content-viewer' && contentTile) {
-    const actorMatch = contentTile.title.match(/^(brain|architect|sysadmin|developer|qe|security_analyst|aligner|user)\b/i);
+    const actorMatch = contentTile.title.match(/^(brain|architect|sysadmin|developer|qe|security_analyst|code_reviewer|aligner|user)\b/i);
     const actorName = actorMatch ? actorMatch[1].toLowerCase() : null;
     const tileColor = actorName ? (ACTOR_COLORS[actorName] || '#6b7280') : '#6b7280';
     const isReport = contentTile.title.toLowerCase().startsWith('report');

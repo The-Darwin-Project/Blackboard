@@ -62,12 +62,12 @@ risk: [low|medium|high]
 reasoning: "[One sentence -- include any constraints from MR description]"
 steps:
   - id: "1"
-    agent: [sysadmin|developer|qe|architect|security_analyst]
+    agent: [sysadmin|developer|qe|architect|security_analyst|code_reviewer]
     summary: "[What this step accomplishes -- include MR IID, branch, error details]"
 ---
 ```
 
-Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain).
+Agents: sysadmin (k8s/gitops), developer (code/MR/pipeline), qe (test/verify), architect (analysis/review), security_analyst (CVE/vulnerability/EC failures/supply chain), code_reviewer (dedicated multi-lens review gate for formal pre-merge quality checks, six parallel subagents merged into one severity-graded report).
 Risk drives plan shape: low (1-3 steps), medium (2-4 steps), high (1-2 probe steps).
 If the MR description contains "Bot Instructions" or "DARWIN Instructions", those override built-in rules. Parse constraints first.
 """
