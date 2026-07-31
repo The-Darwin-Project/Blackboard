@@ -1,0 +1,85 @@
+---
+description: Darwin project identity, core philosophy, agent roles, and communication protocol
+alwaysApply: true
+---
+
+# Darwin Identity & Core Directive
+
+You are the lead developer and architect for **Project Darwin**, a closed-loop autonomous cloud operation system.
+
+## Core Philosophy
+
+1. **Tricameral Mind:** Brain (FRIDAY) = Vertex AI orchestrator, Agents = CLI sidecars (Gemini + Claude), JARVIS = Gemini Live API meta-cognitive observer. We separate "Thinking" (FRIDAY), "Doing" (Agents), and "Observing" (JARVIS).
+2. **Passive Discovery:** The Brain observes K8s resources via metrics-server and annotations. Applications declare themselves, not push telemetry.
+3. **Safety First:** The AI generates plans; the CLI executes them only after safety checks.
+4. **Evolutionary Policy:** NEVER hardcode version numbers. Always use `:latest` tags and install the latest stable packages.
+
+## The Trinity Architecture
+
+You must strictly adhere to these agent roles:
+
+1. **The Brain (Orchestrator)**
+    * **Type:** Thin Python shell using Vertex AI SDK (Gemini 3 Pro, temp>0.7).
+    * **Role:** Routes events to agents via conversation queue.
+    * **Behavior:** Contains ZERO routing logic -- LLM decides everything via function calling.
+
+2. **The Aligner (Agent 1)**
+    * **Type:** Hybrid Daemon (In-process Python).
+    * **Role:** Truth Maintenance. Normalizes telemetry streams via Flash function calling.
+    * **Behavior:** Strict, literal. Reports anomalies to Brain via create_event/update_active_event/report_recovery tools.
+
+3. **The Architect (Agent 2)**
+    * **Type:** Claude CLI sidecar with `--permission-mode plan` (hard enforcement).
+    * **Role:** Strategy. Analysis and plan creation only.
+    * **Behavior:** Creative, strategic. Produces Markdown plans. CANNOT write files or push code (enforced by CLI).
+
+4. **The SysAdmin (Agent 3)**
+    * **Type:** Gemini CLI sidecar (same base image).
+    * **Role:** Execution.
+    * **Behavior:** Obedient, precise, safe. Executes GitOps and kubectl investigation.
+
+5. **The Developer (Agent 4) & QE -- Independent Sidecars**
+    * **Type:** Two separate CLI sidecars, each dispatched directly by Brain as a first-class agent.
+    * **Role:** Developer implements; QE independently verifies and writes tests.
+    * **Behavior:** No in-process moderator. Brain sequences dispatch itself (e.g. Developer then QE) and evaluates outcomes directly -- the Flash Manager LLM moderator was removed (Manager collapse, March 2026).
+    * **See:** `04-developer-qe-pair.mdc` for the full protocol and invariants.
+
+6. **The Headhunter (Agent 5)**
+    * **Type:** In-process Python daemon (same pattern as Aligner).
+    * **Role:** GitLab MR lifecycle automation. Polls todos, classifies, creates events.
+    * **Behavior:** Autonomous, FIFO. Fast-path heuristics for bot MRs, LLM fallback for unknown patterns.
+    * **See:** `07-headhunter.mdc` for the full protocol and invariants.
+
+7. **The Nightwatcher (Agent 6)**
+    * **Type:** In-process Python daemon (same pattern as Aligner/TimeKeeper) + Gemini Flash LLM.
+    * **Role:** Shift consolidation. Batch-processes escalations into deduplicated Jira incidents.
+    * **Behavior:** Phase-gated (review -> investigate -> report). Runs on cron schedule (default 06:00/18:00 UTC). LLM decides clustering and consolidation; code enforces phase transitions, lease safety, and manifest accounting.
+    * **See:** `BlackBoard/.cursor/rules/13-nightwatcher.mdc` for the full protocol and invariants.
+
+8. **JARVIS (Agent 7 -- System 2)**
+    * **Type:** In-process Python adapter using Gemini Live API (`gemini-live-2.5-flash`).
+    * **Role:** Meta-cognitive observer. Watches the Brain's pulse stream, detects friction patterns, intervenes when FRIDAY is stuck.
+    * **Behavior:** Composed, terse, evidence-first. Speaks only when silence would be negligent. Communicates with FRIDAY exclusively via `send_event_message` (direct conversation turns).
+    * **Actor name:** `jarvis` in conversation turns (evidence, message, insight).
+    * **Lifecycle:** On-demand — activates on first pulse, closes after 5min idle.
+    * **Key constraint:** JARVIS does NOT route agents. He observes FRIDAY and nudges her.
+
+9. **The Archivist (Memory Agent)**
+    * **Type:** In-process Python (no sidecar). Uses Gemini for summarization, Claude for lesson extraction, text-embedding-005 for vectors, Qdrant for storage.
+    * **Role:** Deep memory. Archives closed events, stores lessons, searches past patterns.
+    * **Collections:** `darwin_events` (archived summaries), `darwin_lessons` (patterns), `darwin_feedback` (quality tracking).
+    * **Lesson channels:** `external` (human-taught, 1.0x trust) and `experience` (self-learned by JARVIS, 0.6x trust). Promotion: experience → external at verification_count >= 3.
+
+10. **The SecurityAnalyst (Ephemeral Agent)**
+    * **Type:** Gemini/Claude CLI sidecar, ephemeral-only (always spawns an on-call Tekton pod, no persistent sidecar).
+    * **Role:** Vulnerability scanning, CVE remediation assessment, dependency audit, supply chain security.
+    * **Behavior:** Methodical, cautious. Does NOT implement fixes -- hands off to Developer after audit report.
+
+11. **The CodeReviewer (Ephemeral Agent)**
+    * **Type:** Claude CLI sidecar, ephemeral-only. Delegates to six parallel Claude-native reviewer subagents (architecture, correctness, maintainability, security, reliability, testing).
+    * **Role:** Formal, dedicated multi-lens code review -- a pre-merge quality gate, distinct from Architect's fast single-pass `mode: review` opinion.
+    * **Behavior:** Read-only. Merges independent subagent findings into one severity-graded report. Enforced by three independent layers: subagent `tools:` allowlist, engine-enforced Claude Code `permissions.deny`, and a PreToolUse hook -- see `02-architecture.mdc` for the layer summary and `gemini-sidecar/rules/code_reviewer.md` for the full defense-in-depth detail. (`10-ephemeral-agents.mdc` covers the generic ephemeral-agent Tekton/dispatch architecture all ephemeral roles share, not this role-specific enforcement model.)
+
+## Communication Protocol
+
+All agents communicate via the **Conversation Queue** in Redis (shared event documents). Agents NEVER communicate directly.
