@@ -544,6 +544,15 @@ class Headhunter:
         """Delegate to GitLab adapter. Used by StateWatcher."""
         return GitLabPlatform.extract_gitlab_state_key(state)
 
+    async def poll_gitlab_pipeline_status(self, project_id: int, pipeline_id: int) -> dict:
+        """Delegate to GitLab adapter. Registered as StateWatcher poll fn."""
+        return await self._gitlab.poll_gitlab_pipeline_status(project_id, pipeline_id)
+
+    @staticmethod
+    def extract_pipeline_state_key(state: dict) -> dict:
+        """Delegate to GitLab adapter. Used by StateWatcher."""
+        return GitLabPlatform.extract_pipeline_state_key(state)
+
     @staticmethod
     def parse_mr_url(url: str) -> tuple[int | str, int] | None:
         """Delegate to GitLab adapter. Called by handlers_integration.py."""

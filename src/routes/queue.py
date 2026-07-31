@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..dependencies import get_archivist, get_blackboard, get_brain
+from ..auth import UserContext, require_auth
 from ..models import ConversationTurn, EventDocument, EventEvidence, EventStatus, PendingAnomaly
 from ..state.blackboard import BlackboardState
 
@@ -372,6 +373,55 @@ async def close_event_by_user(
         logger.warning(f"Deep memory archive failed for {event_id} (non-fatal): {e}")
     logger.info(f"User force-closed event {event_id}: {body.reason}")
     return {"status": "closed", "event_id": event_id}
+
+
+class EnforceCasualRequest(BaseModel):
+    reason: str = Field(
+        "User enforced casual domain.", max_length=2000, description="Override reason"
+    )
+
+
+@router.post("/{event_id}/enforce-casual")
+async def enforce_casual_domain(
+    event_id: str,
+    body: EnforceCasualRequest = EnforceCasualRequest(),
+    blackboard: BlackboardState = Depends(get_blackboard),
+    user: UserContext = Depends(require_auth),
+):
+    """Force event domain to casual from the UI (human override).
+
+    Requires authentication. Source-restricted server-side to chat/slack.
+    """
+    event = await blackboard.get_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+    if event.status == EventStatus.CLOSED:
+        raise HTTPException(status_code=409, detail="Cannot modify a closed event")
+    # Ownership check (codereview finding: auth-rbac) -- require_auth only proves the
+    # caller is *someone*, not that they own this event. created_by_email is the same
+    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events).
+    # Deny-by-default: an event with no recorded owner (legacy/automated -- optional for
+    # backward compat per EventDocument.created_by_email) can't be verified as belonging
+    # to this caller, so it is treated the same as an owner mismatch, not left open.
+    if event.created_by_email != user.email:
+        raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
+    if event.source not in ("chat", "slack"):
+        raise HTTPException(status_code=400, detail="Casual domain override is only valid for chat/slack events")
+
+    try:
+        brain = await get_brain()
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Brain not available")
+
+    applied = await brain.enforce_domain_override(event_id, "casual", body.reason, user.label)
+    if not applied:
+        # Same 409 as the pre-check above -- Brain's own re-check inside the lock
+        # covers the identical "closed" condition (TOCTOU window) plus the
+        # deferred/ineligible-status case; a client can't usefully distinguish
+        # these, so they share one message (codereview finding, C2).
+        raise HTTPException(status_code=409, detail="Cannot modify a closed event")
+
+    return {"status": "enforced", "event_id": event_id, "domain": "casual"}
 
 
 @router.get("/{event_id}/report")

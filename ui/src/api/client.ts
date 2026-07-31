@@ -182,6 +182,13 @@ export async function closeEvent(eventId: string, reason?: string): Promise<unkn
   });
 }
 
+export async function enforceCasualDomain(eventId: string, reason?: string): Promise<unknown> {
+  return fetchApi<unknown>(`/queue/${encodeURIComponent(eventId)}/enforce-casual`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason || 'User enforced casual domain.' }),
+  });
+}
+
 export async function getClosedEvents(limit?: number): Promise<ActiveEvent[]> {
   const params = limit ? `?limit=${limit}` : '';
   return fetchApi<ActiveEvent[]>(`/queue/closed/list${params}`);

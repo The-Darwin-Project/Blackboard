@@ -42,7 +42,7 @@ ALL_SCHEMAS = _fake_schemas(*ALL_TOOL_NAMES)
 
 
 def _turn(actor: str, action: str, **kw) -> SimpleNamespace:
-    return SimpleNamespace(actor=actor, action=action, waitingFor=kw.get("waitingFor"))
+    return SimpleNamespace(actor=actor, action=action, waitingFor=kw.get("waitingFor"), thoughts=kw.get("thoughts"))
 
 
 def _ctx(**overrides) -> GateContext:
@@ -71,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_27_gates(self):
-        assert len(GATE_REGISTRY) == 27
+    def test_registry_has_28_gates(self):
+        assert len(GATE_REGISTRY) == 28
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -83,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentythree_strip_mode_gates(self):
+    def test_twentyfour_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 23
+        assert len(strip_gates) == 24
 
 
 # ---------------------------------------------------------------------------
@@ -931,3 +931,94 @@ class TestHintInDiagnostic:
         ctx = _ctx(brain_phase="dispatch")
         msg = diagnose_rejection("report_incident", ctx)
         assert "Hint:" not in msg
+
+
+# ---------------------------------------------------------------------------
+# OBS_PLATEAU gate tests
+# ---------------------------------------------------------------------------
+
+class TestObsPlateau:
+    """Tests for the OBS_PLATEAU gate that prevents record_observation spirals."""
+
+    _OBS_THOUGHTS = "Recorded observation 'pipeline_duration_m' = 31 (point #3, event age 45m)"
+
+    def _obs_turn(self, name: str = "pipeline_duration_m", value: str = "31") -> SimpleNamespace:
+        return _turn(
+            "brain", "tool_result",
+            waitingFor="record_observation",
+            thoughts=f"Recorded observation '{name}' = {value} (point #3, event age 45m)",
+        )
+
+    def test_fires_at_3_identical(self):
+        conv = [self._obs_turn() for _ in range(3)]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is True
+
+    def test_does_not_fire_at_2(self):
+        conv = [self._obs_turn() for _ in range(2)]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is False
+
+    def test_resets_after_decision_turn(self):
+        conv = [
+            self._obs_turn(),
+            self._obs_turn(),
+            _turn("brain", "tool_result", waitingFor="defer_event"),
+            self._obs_turn(),
+            self._obs_turn(),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is False
+
+    def test_different_values_do_not_trigger(self):
+        conv = [
+            self._obs_turn(value="31"),
+            self._obs_turn(value="42"),
+            self._obs_turn(value="55"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is False
+
+    def test_different_names_do_not_trigger(self):
+        conv = [
+            self._obs_turn(name="pipeline_duration_m"),
+            self._obs_turn(name="error_count"),
+            self._obs_turn(name="pod_restart_count"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is False
+
+    def test_resets_after_unlisted_non_decision_tool(self):
+        """Regression test (codereview finding, R2/C6/C11): a tool_result turn for
+        an unrelated tool NOT in the decision set (e.g. list_observations) must
+        still break the streak scan, not be silently skipped over."""
+        conv = [
+            self._obs_turn(),
+            self._obs_turn(),
+            _turn("brain", "tool_result", waitingFor="list_observations"),
+            self._obs_turn(),
+            self._obs_turn(),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau
+        assert _pred_obs_plateau(ctx) is False
+
+    def test_gate_strips_record_observation_when_plateau_active(self):
+        """T-5: evaluate_gates() actually strips record_observation from the
+        active tool list when the plateau predicate fires (integration point
+        between the predicate and the gate-application pipeline)."""
+        conv = [self._obs_turn() for _ in range(3)]
+        ctx = _ctx(conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "record_observation" not in _names(result)
+
+    def test_gate_does_not_strip_at_2(self):
+        conv = [self._obs_turn() for _ in range(2)]
+        ctx = _ctx(conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "record_observation" in _names(result)

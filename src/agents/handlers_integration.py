@@ -461,88 +461,185 @@ async def handle_refresh_gitlab_context(
             await ctx.append_and_broadcast(event_id, turn)
             return True
 
-    state = await headhunter.refresh_mr_state(
-        event_id,
-        override_project_id=override_project_id,
-        override_mr_iid=override_mr_iid,
-    )
-    mr_state = state.get("mr_state", "unknown")
-
-    if mr_url and override_project_id and override_mr_iid and "error" not in state:
-        await bb.update_event_gitlab_context(event_id, {
-            "project_id": override_project_id,
-            "mr_iid": override_mr_iid,
-            "target_url": mr_url,
-        })
-    if "error" in state:
-        from datetime import datetime as _dt
-        result_text = (
-            f"MR State: {mr_state}\n"
-            f"Pipeline: {state.get('pipeline_status', '?')}\n"
-            f"Severity: {state.get('severity', '?')}\n"
-            f"Error: {state['error']}"
-        )
-    elif mr_state in ("merged", "closed"):
-        from datetime import datetime as _dt
-        lines = [
-            f"MR State: {mr_state}",
-            f"Pipeline: {state['pipeline_status']}",
-            f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}",
-            f"Severity: {state['severity']}",
-        ]
-        changed_at = state.get("state_changed_at", "")
-        if changed_at:
-            try:
-                dt = _dt.fromisoformat(changed_at.replace("Z", "+00:00"))
-                age = int(time.time() - dt.timestamp())
-                m, s = divmod(age, 60)
-                lines.append(f"{mr_state.title()} {m}m {s}s ago")
-            except (ValueError, TypeError):
-                pass
-        result_text = "\n".join(lines)
-    else:
-        merge_status = state['merge_status']
-        merge_line = f"Merge Readiness: {merge_status}"
-        if merge_status == "need_rebase":
-            merge_line = "Merge Blocked: needs rebase (new commits on target branch)"
-        elif merge_status == "conflict":
-            merge_line = "Merge Blocked: merge conflicts (requires human resolution)"
-        elif merge_status in ("ci_must_pass", "ci_still_running"):
-            merge_line = f"Merge Blocked: {merge_status} (wait for pipeline)"
-        elif merge_status == "not_approved":
-            merge_line = "Merge Blocked: not approved (requires human approval)"
-        result_text = (
-            f"MR State: {mr_state}\n"
-            f"Pipeline: {state['pipeline_status']}\n"
-            f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}\n"
-            f"{merge_line}\n"
-            f"Severity: {state['severity']}"
-        )
-
-    subscription_active = False
+    # Pipeline-by-ID path (no MR required) vs. existing MR path -- mutually exclusive.
     state_watcher = ctx.get_state_watcher()
-    if args.get("subscribe") and state_watcher and "error" not in state:
+    subscription_active = False
+    pipeline_id_arg = args.get("pipeline_id")
+    if pipeline_id_arg is not None and not mr_url:
+        try:
+            pipeline_id_int = int(pipeline_id_arg)
+        except (TypeError, ValueError):
+            pipeline_id_int = None
+        if pipeline_id_int is None or pipeline_id_int <= 0:
+            result_text = "pipeline_id must be a positive integer."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
         event = await bb.get_event(event_id)
-        gl_ctx = getattr(event.event.evidence, "gitlab_context", None) if event and event.event and event.event.evidence else None
-        if gl_ctx:
-            from ..scheduling import SubscriptionSpec, GitLabMrRef
+        gl_ctx = (getattr(event.event.evidence, "gitlab_context", None) or {}) if event and event.event and event.event.evidence else {}
+        project_id = gl_ctx.get("project_id")
+        if not project_id:
+            result_text = "No project_id available. Supply mr_url or ensure gitlab_context has project_id."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+        # Mirror the MR path's graceful-degradation contract (codereview finding,
+        # R1/C4): poll_gitlab_pipeline_status is designed to raise (StateWatcher's
+        # subscription loop has its own try/except+backoff), but THIS call site is
+        # a direct, synchronous handler invocation with no such wrapper -- an
+        # unhandled raise here falls through to _execute_function_call's generic
+        # catch-all, losing waitingFor="refresh_gitlab_context" (making the failure
+        # invisible to BUDGET_EXHAUSTED's refresh-count tracking) and collapsing a
+        # specific GitLab error into a truncated "Internal error executing ..." turn.
+        try:
+            state = await headhunter.poll_gitlab_pipeline_status(project_id, pipeline_id_int)
+        except httpx.HTTPStatusError as e:
+            result_text = f"Pipeline ID: {pipeline_id_int}\nError: GitLab returned {e.response.status_code} for this pipeline."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+        except httpx.HTTPError as e:
+            result_text = f"Pipeline ID: {pipeline_id_int}\nError: GitLab request failed ({type(e).__name__})."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+        except ValueError as e:
+            # resp.json() raises json.JSONDecodeError (a ValueError subclass) on a
+            # 200 with a non-JSON body -- catch it explicitly so it doesn't fall
+            # through to _execute_function_call's generic catch-all and lose
+            # waitingFor="refresh_gitlab_context".
+            result_text = f"Pipeline ID: {pipeline_id_int}\nError: GitLab returned an invalid response ({type(e).__name__})."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
+        result_text = f"Pipeline Status: {state['pipeline_status']}\nPipeline ID: {pipeline_id_int}"
+        if args.get("subscribe") and state_watcher:
+            from ..scheduling import SubscriptionSpec, GitLabPipelineRef
             interval = max(15, min(int(args.get("poll_interval", 30)), 300))
             spec = SubscriptionSpec(
                 event_id=event_id,
-                resource_type="gitlab_mr",
-                resource_ref=GitLabMrRef(
-                    project_id=gl_ctx.get("project_id", 0),
-                    mr_iid=gl_ctx.get("mr_iid", 0),
-                ),
-                poll_fn=headhunter.poll_gitlab_mr_status,
+                resource_type="gitlab_pipeline",
+                resource_ref=GitLabPipelineRef(project_id=project_id, pipeline_id=pipeline_id_int),
+                poll_fn=headhunter.poll_gitlab_pipeline_status,
                 interval=interval,
-                state_key=headhunter.extract_gitlab_state_key(state),
+                state_key=headhunter.extract_pipeline_state_key(state),
                 registered_at=time.time(),
                 cycle_id=ctx.get_cycle_id(event_id),
             )
             subscription_active = state_watcher.register(spec)
             if subscription_active:
                 await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
+    else:
+        state = await headhunter.refresh_mr_state(
+            event_id,
+            override_project_id=override_project_id,
+            override_mr_iid=override_mr_iid,
+        )
+        mr_state = state.get("mr_state", "unknown")
+
+        if mr_url and override_project_id and override_mr_iid and "error" not in state:
+            await bb.update_event_gitlab_context(event_id, {
+                "project_id": override_project_id,
+                "mr_iid": override_mr_iid,
+                "target_url": mr_url,
+            })
+        if "error" in state:
+            from datetime import datetime as _dt
+            result_text = (
+                f"MR State: {mr_state}\n"
+                f"Pipeline: {state.get('pipeline_status', '?')}\n"
+                f"Severity: {state.get('severity', '?')}\n"
+                f"Error: {state['error']}"
+            )
+        elif mr_state in ("merged", "closed"):
+            from datetime import datetime as _dt
+            lines = [
+                f"MR State: {mr_state}",
+                f"Pipeline: {state['pipeline_status']}",
+                f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}",
+                f"Severity: {state['severity']}",
+            ]
+            changed_at = state.get("state_changed_at", "")
+            if changed_at:
+                try:
+                    dt = _dt.fromisoformat(changed_at.replace("Z", "+00:00"))
+                    age = int(time.time() - dt.timestamp())
+                    m, s = divmod(age, 60)
+                    lines.append(f"{mr_state.title()} {m}m {s}s ago")
+                except (ValueError, TypeError):
+                    pass
+            result_text = "\n".join(lines)
+        else:
+            merge_status = state['merge_status']
+            merge_line = f"Merge Readiness: {merge_status}"
+            if merge_status == "need_rebase":
+                merge_line = "Merge Blocked: needs rebase (new commits on target branch)"
+            elif merge_status == "conflict":
+                merge_line = "Merge Blocked: merge conflicts (requires human resolution)"
+            elif merge_status in ("ci_must_pass", "ci_still_running"):
+                merge_line = f"Merge Blocked: {merge_status} (wait for pipeline)"
+            elif merge_status == "not_approved":
+                merge_line = "Merge Blocked: not approved (requires human approval)"
+            result_text = (
+                f"MR State: {mr_state}\n"
+                f"Pipeline: {state['pipeline_status']}\n"
+                f"Pipeline ID: {state.get('pipeline_id') or 'unknown'}\n"
+                f"{merge_line}\n"
+                f"Severity: {state['severity']}"
+            )
+
+        if args.get("subscribe") and state_watcher and "error" not in state:
+            event = await bb.get_event(event_id)
+            gl_ctx = getattr(event.event.evidence, "gitlab_context", None) if event and event.event and event.event.evidence else None
+            if gl_ctx:
+                from ..scheduling import SubscriptionSpec, GitLabMrRef
+                interval = max(15, min(int(args.get("poll_interval", 30)), 300))
+                spec = SubscriptionSpec(
+                    event_id=event_id,
+                    resource_type="gitlab_mr",
+                    resource_ref=GitLabMrRef(
+                        project_id=gl_ctx.get("project_id", 0),
+                        mr_iid=gl_ctx.get("mr_iid", 0),
+                    ),
+                    poll_fn=headhunter.poll_gitlab_mr_status,
+                    interval=interval,
+                    state_key=headhunter.extract_gitlab_state_key(state),
+                    registered_at=time.time(),
+                    cycle_id=ctx.get_cycle_id(event_id),
+                )
+                subscription_active = state_watcher.register(spec)
+                if subscription_active:
+                    await ctx.broadcast({"type": "subscription_changed", "event_id": event_id, "active": True})
 
     evidence = f"Checking: {condition}\n{result_text}" if condition else result_text
     if args.get("subscribe"):

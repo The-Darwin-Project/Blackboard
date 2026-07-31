@@ -579,6 +579,24 @@ class GitLabPlatform:
             "pipeline_status": state.get("pipeline_status", "unknown"),
         }
 
+    async def poll_gitlab_pipeline_status(self, project_id: int, pipeline_id: int) -> dict:
+        """Lightweight read-only poll for StateWatcher. Returns pipeline status."""
+        async with httpx.AsyncClient(verify=False, timeout=30) as client:
+            resp = await client.get(
+                self._api_url(f"/projects/{project_id}/pipelines/{pipeline_id}"),
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+        pipeline = resp.json()
+        return {
+            "pipeline_status": pipeline.get("status", "unknown"),
+        }
+
+    @staticmethod
+    def extract_pipeline_state_key(state: dict) -> dict:
+        """Canonical state_key builder for pipeline-only polling."""
+        return {"pipeline_status": state.get("pipeline_status", "unknown")}
+
     @staticmethod
     def parse_mr_url(url: str) -> tuple[int | str, int] | None:
         """Extract (project_id, mr_iid) from a GitLab MR URL."""

@@ -811,6 +811,15 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "for subsequent calls."
                     ),
                 },
+                "pipeline_id": {
+                    "type": "integer",
+                    "description": (
+                        "Direct pipeline ID for post-merge or branch pipelines that have "
+                        "no associated MR. Mutually exclusive with mr_url — use one or "
+                        "the other. The system fetches pipeline status directly by ID "
+                        "without re-deriving from branch ref."
+                    ),
+                },
                 "subscribe": {
                     "type": "boolean",
                     "description": (
@@ -1077,8 +1086,9 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "name": "record_observation",
         "description": (
             "Record a numeric observation to an EXISTING time series or a canonical "
-            "series name. Observations build trajectories — a single data point has "
-            "zero value. Before recording, mentally check: will this same metric name "
+            "series name. Trajectories emerge across sampling intervals — record once "
+            "per measurement cycle, then evaluate (defer, close, or dispatch). "
+            "Before recording, mentally check: will this same metric name "
             "be recorded again in future events for this service? If not, use take_note "
             "instead. Reuse existing series names from list_observations. "
             "Canonical names: pipeline_duration_m, kueue_wait_m, s390x_build_duration_m, "

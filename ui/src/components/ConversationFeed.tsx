@@ -8,7 +8,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEventDocument, useQueueInvalidation } from '../hooks/useQueue';
 import { useWSMessage } from '../contexts/WebSocketContext';
-import { closeEvent, getEventReport } from '../api/client';
+import { closeEvent, enforceCasualDomain, getEventReport } from '../api/client';
 import type { ConversationTurn } from '../api/types';
 import TurnBubble, { StatusBadge } from './TurnBubble';
 import MarkdownViewer from './MarkdownViewer';
@@ -67,6 +67,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
   const [reportContent, setReportContent] = useState<string>('');
   const [turnViewer, setTurnViewer] = useState<{ content: string; filename: string } | null>(null);
   const [userScrolled, setUserScrolled] = useState(false);
+  const [enforcingCasual, setEnforcingCasual] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const { data: selectedEvent, isError: eventError } = useEventDocument(eventId);
@@ -204,6 +205,22 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
               style={{ background: '#7f1d1d', border: '1px solid #dc262644', borderRadius: 4, color: '#fca5a5', fontSize: 12, padding: '3px 10px', cursor: 'pointer', fontWeight: 600 }}
               title="Force close"
             >Force Close</button>
+          )}
+          {['active', 'waiting_approval'].includes(selectedEvent.status) && selectedEvent.source && ['chat', 'slack'].includes(selectedEvent.source) && (
+            <button
+              disabled={enforcingCasual}
+              onClick={() => {
+                if (enforcingCasual) return;
+                if (window.confirm(`Enforce CASUAL domain on ${selectedEvent.id}?\nThis restricts FRIDAY to conversational tools only.`)) {
+                  setEnforcingCasual(true);
+                  enforceCasualDomain(selectedEvent.id)
+                    .then(() => handleStatusChange())
+                    .finally(() => setEnforcingCasual(false));
+                }
+              }}
+              style={{ background: '#1e3a5f', border: '1px solid #3b82f644', borderRadius: 4, color: '#93c5fd', fontSize: 12, padding: '3px 10px', cursor: enforcingCasual ? 'default' : 'pointer', fontWeight: 600, opacity: enforcingCasual ? 0.6 : 1 }}
+              title="Force domain to CASUAL — restricts FRIDAY to conversational tools only"
+            >{enforcingCasual ? 'Enforcing…' : 'Enforce Casual'}</button>
           )}
           <div style={{ flex: 1 }} />
           {(() => {
