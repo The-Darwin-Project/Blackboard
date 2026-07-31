@@ -50,6 +50,12 @@ class GitLabMrRef:
 
 
 @dataclass(frozen=True)
+class GitLabPipelineRef:
+    project_id: int
+    pipeline_id: int
+
+
+@dataclass(frozen=True)
 class KargoStageRef:
     project: str
     stage: str
@@ -62,13 +68,13 @@ class GitHubPrRef:
     pr_number: int
 
 
-ResourceRef = GitLabMrRef | KargoStageRef | GitHubPrRef
+ResourceRef = GitLabMrRef | GitLabPipelineRef | KargoStageRef | GitHubPrRef
 
 
 @dataclass
 class SubscriptionSpec:
     event_id: str
-    resource_type: Literal["gitlab_mr", "kargo_stage", "github_pr"]
+    resource_type: Literal["gitlab_mr", "gitlab_pipeline", "kargo_stage", "github_pr"]
     resource_ref: ResourceRef
     poll_fn: Callable[..., Awaitable[StateKey]]
     interval: int
@@ -256,6 +262,10 @@ class StateWatcher:
             elif isinstance(ref, GitHubPrRef):
                 result = await sub.spec.poll_fn(
                     owner=ref.owner, repo=ref.repo, pr_number=ref.pr_number,
+                )
+            elif isinstance(ref, GitLabPipelineRef):
+                result = await sub.spec.poll_fn(
+                    project_id=ref.project_id, pipeline_id=ref.pipeline_id,
                 )
             else:
                 logger.error("StateWatcher: unknown resource ref type for %s", sub.spec.event_id)
