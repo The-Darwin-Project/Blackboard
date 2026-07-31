@@ -12,8 +12,8 @@
 #    engine-enforced, shell-operator-aware), (3) this hook (custom regex, catches what the
 #    denylist can't express, e.g. flag-insertion, indirection, heredoc-interpreter forms).
 #    See gemini-sidecar/rules/code_reviewer.md Hard Rules for the documented residual-risk
-#    trade-off (bypass risk + false-positive risk, both accepted) and the tracked sandboxing
-#    follow-up (OS-level enforcement, gated on an OpenShift SCC/bubblewrap compatibility probe).
+#    trade-off (bypass risk + false-positive risk, both accepted). OS-level sandboxing
+#    (bubblewrap) was investigated and closed as not viable on UBI9 -- see code_reviewer.md.
 # 4. [Contract]: MUST fail CLOSED (exit 2), never fail OPEN (exit 0), on any extraction
 #    failure -- missing node, parse error, or timeout. An empty command is only ever
 #    "allow" when extraction explicitly succeeded and the command was genuinely empty.
@@ -149,7 +149,7 @@ GIT_GAP='((-\S+)(\s+\S+)?\s+)*'
 # subcommand -- and include the GNU long-option spelling (`--delete`, `--create`)
 # alongside the short form, since flag-gap tolerance alone doesn't help if the flag
 # text itself isn't in the alternation.
-BLOCK_PATTERN="\\bgit\\s+${GIT_GAP}(commit|push|merge|rebase|reset\\s+.*--hard|checkout\\s+-[bB]|branch\\s+${GIT_GAP}(-[dD]\\b|--delete\\b)|tag\\s|clean\\s+-\\S*f|rm\\b|apply\\b|am\\b|switch\\s+${GIT_GAP}(-c\\b|--create\\b)|config\\b)"
+BLOCK_PATTERN="\\bgit\\s+${GIT_GAP}(commit|push|merge|rebase|reset\\s+.*--hard|checkout\\s+${GIT_GAP}-[bB]|branch\\s+${GIT_GAP}(-[dD]\\b|--delete\\b)|tag\\s|clean\\s+-\\S*f|rm\\b|apply\\b|am\\b|switch\\s+${GIT_GAP}(-c\\b|--create\\b)|config\\b)"
 BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
 BLOCK_PATTERN+='|\bfind\b.*(-delete\b|-exec(dir)?\s+(rm|mv|chmod|chown|dd|cp)\b)'
 # Redirect-mutation check excludes only `&` (fd duplication: `2>&1`, `>&2`) -- NOT
@@ -175,7 +175,7 @@ BLOCK_PATTERN+="|>\\s*[^&]|\\btee\\b"
 # is closed-source here, so this hook can't assume layer 2 covers what its own
 # blocklist doesn't. Blocking bare curl/wget here as well is a real backstop, not
 # redundant with layer 2.
-BLOCK_PATTERN+='|\b(curl|wget|scp|ssh|rsync|sftp)\b'
+BLOCK_PATTERN+='|\b(curl|wget|scp|ssh|rsync|sftp|nc|ncat)\b'
 # /dev/tcp and /dev/udp are bash's built-in pseudo-devices for raw socket I/O --
 # `bash -s < /dev/tcp/host/port` is a classic reverse-shell primitive that needs no
 # curl/wget/nc and so evades every network-tool-name-based rule above.
@@ -192,8 +192,8 @@ BLOCK_PATTERN+="|\\b(kubectl|oc)\\s+${GIT_GAP}(apply|delete|patch|edit|scale)\\b
 BLOCK_PATTERN+='|\b(npm|yarn|pnpm)\s+(install|add|ci)\b|\bpip3?\s+install\b|\bpoetry\s+(install|add)\b'
 BLOCK_PATTERN+='|\bbundle\s+install\b|\bcargo\s+install\b|\bgo\s+install\b|\bgem\s+install\b|\bmake\b'
 BLOCK_PATTERN+='|\b(bash|sh|zsh)\s+(-\S+\s+)*-c\b|\|\s*(bash|sh|zsh)\b'
-BLOCK_PATTERN+='|\bpython3?\s+(-\S+\s+)*-c\b|\bnode\s+(-\S+\s+)*(-e|--eval)\b|\bperl\s+(-\S+\s+)*-e\b|\bruby\s+(-\S+\s+)*-e\b|\|\s*(python3?|node|perl|ruby|deno|bun)\b'
-BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|deno|bun)\s*(<<|<[[:space:]])'
+BLOCK_PATTERN+='|\bpython3[.0-9]*\s+(-\S+\s+)*-c\b|\bnode\s+(-\S+\s+)*(-e|--eval)\b|\bperl\s+(-\S+\s+)*-e\b|\bruby\s+(-\S+\s+)*-e\b|\|\s*(python3[.0-9]*|node|perl|ruby|deno|bun)\b'
+BLOCK_PATTERN+='|\b(bash|sh|zsh|python3[.0-9]*|node|perl|ruby|deno|bun)\s*(<<|<[[:space:]])'
 # Bare "<interpreter> <file>" (no -c/-e/heredoc/pipe) runs an arbitrary script FILE --
 # a pre-existing malicious script committed to the reviewed repo needs no write at
 # all, only invocation, so write-detection above doesn't cover this path. The next
@@ -206,7 +206,7 @@ BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|deno|bun)\s*(<<|<[[:spac
 # perl/ruby set -- an enumerated interpreter list is inherently open-ended (there is
 # always one more exotic interpreter); this is documented, accepted residual risk,
 # not a claim of completeness.
-BLOCK_PATTERN+='|\b(bash|sh|zsh|python3?|node|perl|ruby|awk|gawk|php|lua|Rscript|deno|bun)\s+[^-[:space:]]'
+BLOCK_PATTERN+='|\b(bash|sh|zsh|python3[.0-9]*|node|perl|ruby|awk|gawk|php|lua|Rscript|deno|bun)\s+[^-[:space:]]'
 # awk/gawk -i inplace is a GNU extension that mutates a file internally (the write
 # never appears as a shell redirect, so the generic `>` check can't see it either).
 BLOCK_PATTERN+='|\b(awk|gawk)\b.*-i[[:space:]]*inplace\b'
