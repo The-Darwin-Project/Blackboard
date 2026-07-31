@@ -365,6 +365,14 @@ def _sanitize_error_text(error: BaseException) -> str:
     return raw
 
 
+def _sanitize_override_reason(reason: str) -> str:
+    """Strip tag-like sequences from a user-supplied override reason before it enters
+    ConversationTurn.thoughts and Brain's own LLM context (equivalent to Headhunter's
+    _sanitize_xml_fence -- length-bounding alone does not stop tag/fence-based prompt
+    injection, codereview finding)."""
+    return _HTML_TAG_RE.sub('', reason) if reason else reason
+
+
 def _wrap_section(path: str, body: str, tag_type: str = "skill") -> str:
     """Wrap a skill body with semantic XML tags for SI self-reference."""
     safe_path = _SAFE_PATH_RE.sub('_', path)
@@ -4300,7 +4308,7 @@ class Brain:
                 actor="user",
                 action="override",
                 user_name=user_label,
-                thoughts=f"[DOMAIN OVERRIDE] {user_label} enforced {domain.upper()} domain. Reason: {reason}",
+                thoughts=f"[DOMAIN OVERRIDE] {user_label} enforced {domain.upper()} domain. Reason: {_sanitize_override_reason(reason)}",
             )
             directive = ConversationTurn(
                 turn=0,
