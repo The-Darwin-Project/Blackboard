@@ -527,6 +527,21 @@ async def handle_refresh_gitlab_context(
             )
             await ctx.append_and_broadcast(event_id, turn)
             return True
+        except ValueError as e:
+            # resp.json() raises json.JSONDecodeError (a ValueError subclass) on a
+            # 200 with a non-JSON body -- catch it explicitly so it doesn't fall
+            # through to _execute_function_call's generic catch-all and lose
+            # waitingFor="refresh_gitlab_context".
+            result_text = f"Pipeline ID: {pipeline_id_int}\nError: GitLab returned an invalid response ({type(e).__name__})."
+            turn = ConversationTurn(
+                turn=(await ctx.next_turn_number(event_id)),
+                actor="brain", action="tool_result",
+                waitingFor="refresh_gitlab_context",
+                evidence=result_text,
+                response_parts=response_parts,
+            )
+            await ctx.append_and_broadcast(event_id, turn)
+            return True
         result_text = f"Pipeline Status: {state['pipeline_status']}\nPipeline ID: {pipeline_id_int}"
         if args.get("subscribe") and state_watcher:
             from ..scheduling import SubscriptionSpec, GitLabPipelineRef

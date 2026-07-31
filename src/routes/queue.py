@@ -376,7 +376,9 @@ async def close_event_by_user(
 
 
 class EnforceCasualRequest(BaseModel):
-    reason: str = Field("User enforced casual domain.", description="Override reason")
+    reason: str = Field(
+        "User enforced casual domain.", max_length=2000, description="Override reason"
+    )
 
 
 @router.post("/{event_id}/enforce-casual")

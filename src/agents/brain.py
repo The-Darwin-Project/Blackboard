@@ -4282,11 +4282,17 @@ class Brain:
             logger.warning(f"enforce_domain_override: timed out waiting for lock on {event_id}")
             return False
         try:
-            # Re-check status inside the lock -- closes the TOCTOU window between
-            # the pre-check above and this acquisition.
+            # Re-check FULL eligibility inside the lock -- closes the TOCTOU window
+            # between the pre-check above and this acquisition. A CLOSED-only check
+            # here would let a DEFERRED transition (acquired while waiting up to 15s
+            # for the lock) slip through and orphan the event's live StateWatcher
+            # subscription behind the CASUAL gate's restrictive tool whitelist.
             event = await self.blackboard.get_event(event_id)
-            if not event or event.status == EventStatus.CLOSED:
-                logger.warning(f"enforce_domain_override: event {event_id} closed mid-request, skipping")
+            if not event or event.status not in (EventStatus.ACTIVE, EventStatus.WAITING_APPROVAL):
+                logger.warning(
+                    f"enforce_domain_override: event {event_id} no longer eligible "
+                    f"(status={event.status.value if event else 'missing'}) mid-request, skipping"
+                )
                 return False
             await self.blackboard.update_event_domain(event_id, domain)
             override_turn = ConversationTurn(
