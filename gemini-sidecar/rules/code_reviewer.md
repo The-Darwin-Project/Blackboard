@@ -131,12 +131,21 @@ The AfterTool (Gemini) / PreToolUse (Claude) hook automatically injects new blac
   exfiltrates -- e.g. a dependency-install command's postinstall/setup.py hook. Mitigated
   narrowly by blocking the install commands themselves (`npm install`, `pip install`,
   `make`, etc.) rather than trying to inspect what they might spawn.
-  OS-level sandboxing (filesystem + network isolation, inherited automatically by all
-  subagents) would close the remaining gaps in layers 2-3 more generally -- e.g. mutations
-  that occur entirely within the working directory, reads of credential paths not
-  explicitly enumerated above, or novel command constructions neither layer anticipated
-  -- but requires validating bubblewrap/OpenShift SCC compatibility first. Tracked as a
-  follow-up, not yet enabled.
+  **OS-level sandboxing investigated and closed as not viable (not merely deferred)**:
+  Claude Code's built-in sandbox requires `bubblewrap`, which is unavailable on Darwin's
+  standardized base image (`registry.access.redhat.com/ubi9/nodejs-22`) via any
+  accessible repo -- confirmed absent from BaseOS, AppStream, CodeReady Builder, AND
+  EPEL9. The underlying kernel primitive (unprivileged user namespaces via `unshare
+  --user`) DOES work even under a simulated OpenShift-restricted-SCC profile (non-root
+  UID, all capabilities dropped, `no-new-privileges`) -- the blocker is package
+  availability, not an SCC/kernel restriction. The bubblewrap project publishes no
+  official prebuilt binaries (source tarballs only); the only binaries available
+  anywhere are unofficial third-party forks, which is not an acceptable supply-chain
+  risk for a security-enforcement dependency. Building from source (Meson + a new
+  gcc/libcap-devel toolchain in the Dockerfile) was assessed as disproportionate
+  engineering and ongoing-maintenance cost relative to the incremental risk reduction
+  over the existing three layers. Accepted as documented residual risk; do not re-open
+  this investigation without a change to the base image itself.
 
 ## Engineering Principles
 
