@@ -399,9 +399,11 @@ async def enforce_casual_domain(
         raise HTTPException(status_code=409, detail="Cannot modify a closed event")
     # Ownership check (codereview finding: auth-rbac) -- require_auth only proves the
     # caller is *someone*, not that they own this event. created_by_email is the same
-    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events);
-    # events with no recorded owner (legacy/automated) fall through unrestricted.
-    if event.created_by_email and event.created_by_email != user.email:
+    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events).
+    # Deny-by-default: an event with no recorded owner (legacy/automated -- optional for
+    # backward compat per EventDocument.created_by_email) can't be verified as belonging
+    # to this caller, so it is treated the same as an owner mismatch, not left open.
+    if event.created_by_email != user.email:
         raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
     if event.source not in ("chat", "slack"):
         raise HTTPException(status_code=400, detail="Casual domain override is only valid for chat/slack events")

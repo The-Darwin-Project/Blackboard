@@ -50,7 +50,11 @@ def _make_event(
     status: str = "active",
     source: str = "chat",
     gitlab_context: dict | None = None,
+    created_by_email: str | None = "alice@example.com",
 ) -> EventDocument:
+    """Defaults created_by_email to the `authed_client` fixture's user (alice@example.com)
+    so route tests exercise "owner acting on their own event" unless a test explicitly
+    passes a different value (e.g. to test the ownership-mismatch 403 branch)."""
     evidence = EventEvidence(
         display_text="test", source_type=source, domain="complicated", severity="info",
         gitlab_context=gitlab_context,
@@ -59,6 +63,7 @@ def _make_event(
     return EventDocument(
         id=event_id, source=source, status=EventStatus(status),
         service="test-svc", event=event_input, conversation=[],
+        created_by_email=created_by_email,
     )
 
 
@@ -623,6 +628,34 @@ class TestEnforceCasualRoute:
         )
         resp = authed_client.post("/queue/evt-1/enforce-casual")
         assert resp.status_code == 409
+
+    def test_rejects_owner_mismatch(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """Codereview finding (auth-rbac): an authenticated user who does not own the
+        event must not be able to force its domain -- 403, and Brain must never be
+        invoked. authed_client is alice@example.com; event is owned by bob."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="chat",
+                created_by_email="bob@example.com",
+            ),
+        )
+        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 403
+        mock_brain_route.enforce_domain_override.assert_not_awaited()
+
+    def test_rejects_ownerless_event(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """Codereview finding (auth-rbac): deny-by-default for ownerless events -- an
+        event with no recorded created_by_email (legacy/automated) must not fall
+        through unrestricted just because the caller is authenticated."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="chat",
+                created_by_email=None,
+            ),
+        )
+        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 403
+        mock_brain_route.enforce_domain_override.assert_not_awaited()
 
     def test_404_for_missing_event(self, authed_client, mock_blackboard_route):
         mock_blackboard_route.get_event = AsyncMock(return_value=None)
