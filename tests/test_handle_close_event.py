@@ -497,6 +497,48 @@ class TestTrackingLinkDomainAllowlist:
         assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is False
 
 
+class TestTrackingLinkBackslashBypassRejection:
+    """HIGH finding fix: urlsplit().hostname disagrees with WHATWG URL parsers
+    (browsers, many HTTP clients) on backslash handling -- WHATWG treats '\\' as
+    a path separator in special-scheme URLs, but urlsplit() treats it as an
+    ordinary character. A crafted value like "https://evil.example.com\\@github.com/x"
+    parses under urlsplit() as hostname "github.com" (passing the allowlist) while a
+    real browser navigates to evil.example.com -- any backslash must be rejected
+    outright, regardless of what urlsplit() thinks the host is."""
+
+    def test_rejects_the_documented_bypass_payload(self):
+        assert _is_valid_tracking_link("https://evil.example.com\\@github.com/x", []) is False
+
+    def test_urlsplit_would_have_been_fooled_by_the_payload(self):
+        # Sanity-check the premise of the fix: without the backslash guard, urlsplit()
+        # really does resolve this payload's hostname to the trusted "github.com".
+        from urllib.parse import urlsplit
+        assert urlsplit("https://evil.example.com\\@github.com/x").hostname == "github.com"
+
+    def test_rejects_backslash_anywhere_in_an_otherwise_valid_url(self):
+        assert _is_valid_tracking_link("https://github.com/org\\repo/issues/1", []) is False
+
+    def test_rejects_backslash_path_separator_variant(self):
+        assert _is_valid_tracking_link("https://github.com\\evil.example.com/x", []) is False
+
+    def test_rejects_backslash_even_when_no_open_incidents_or_open_refs_present(self):
+        # The backslash check lives in the same early-return chain as the newline
+        # check, so it must fire before the incident_references/pattern checks too.
+        assert _is_valid_tracking_link("https://evil.example.com\\@github.com/x", []) is False
+
+    def test_backslash_rejected_even_if_it_would_otherwise_exactly_match_incident_references(self):
+        # Defense-in-depth, mirroring the newline check's precedent: an exact
+        # incident_references match must not bypass the backslash rejection.
+        payload = "https://evil.example.com\\@github.com/x"
+        assert _is_valid_tracking_link(payload, [payload]) is False
+
+    def test_clean_url_without_backslash_is_unaffected(self):
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/1", []) is True
+
+    def test_clean_issue_key_without_backslash_is_unaffected(self):
+        assert _is_valid_tracking_link("PROJ-123", []) is True
+
+
 class TestEnableTerminalCloseGateFailsClosedOnMisconfig:
     """HIGH finding fix: an unrecognized ENABLE_TERMINAL_CLOSE_GATE value must resolve
     to True (gate enabled / fail-closed), matching the warning log emitted at import
