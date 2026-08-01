@@ -38,14 +38,15 @@ CLOSE_REASON_LABELS = {
     "no_action_needed": "No action needed",
 }
 
-_COMMENT_FIELD_STRIP_RE = re.compile(r'[<>@`]')
+_COMMENT_FIELD_STRIP_RE = re.compile(r'[<>@`\[\]()!]')
 
 
 def sanitize_comment_field(value: str, max_len: int = 200) -> str:
     """Strip markdown/mention-breakout characters and cap length.
 
     Shared by every field (close_reason, tracking_link) interpolated into an
-    externally-visible GitHub/GitLab comment -- prevents markdown injection,
-    @mentions, and unbounded length from LLM- or user-supplied text.
+    externally-visible GitHub/GitLab comment -- prevents markdown injection
+    (including `[text](url)` links and `![alt](url)` images), @mentions, and
+    unbounded length from LLM- or user-supplied text.
     """
     return _COMMENT_FIELD_STRIP_RE.sub('', value)[:max_len]
