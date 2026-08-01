@@ -2642,9 +2642,21 @@ class Brain:
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
 
         for turn in event.conversation:
-            role = "model" if turn.actor == "brain" else "user"
+            # FC/FR reconstruction: tool_result turns become structurally distinct
+            # functionCall/functionResponse pairs (never merged with other content)
             if turn.actor == "brain" and turn.action == "tool_result":
-                role = "user"
+                prev_model_parts = (
+                    contents[-1]["parts"]
+                    if contents and contents[-1]["role"] == "model"
+                    else None
+                )
+                fc_parts, fr_parts = self._emit_fc_fr(turn, prev_model_parts)
+                if fc_parts:
+                    contents.append({"role": "model", "parts": fc_parts})
+                contents.append({"role": "user", "parts": fr_parts})
+                continue
+
+            role = "model" if turn.actor == "brain" else "user"
             parts = self._turn_to_parts(turn)
             if not parts:
                 continue
@@ -2740,17 +2752,70 @@ class Brain:
 
         return parts
 
+    @staticmethod
+    def _emit_fc_fr(
+        turn: ConversationTurn, prev_model_parts: list[dict] | None,
+    ) -> tuple[list[dict] | None, list[dict]]:
+        """Reconstruct native functionCall + functionResponse pair from a tool_result turn.
+
+        Returns (fc_parts_or_None, fr_parts). When fc_parts is None, the preceding
+        model message already contains the matching functionCall.
+
+        3 cases:
+          (1) prev_model_parts has matching FC → return (None, [FR])
+          (2) turn.response_parts has FC data → return ([FC], [FR])
+          (3) Synthesize FC from turn.waitingFor → return ([FC], [FR])
+        """
+        tool_name = turn.waitingFor or "tool"
+        result_text = turn.evidence or turn.thoughts or turn.result or ""
+
+        fr_part: dict = {
+            "functionResponse": {
+                "name": tool_name,
+                "response": {"result": result_text},
+            }
+        }
+        fr_parts = [fr_part]
+
+        # Case 1: previous model message already has matching functionCall
+        if prev_model_parts:
+            for p in prev_model_parts:
+                fc = p.get("functionCall")
+                if fc and fc.get("name") == tool_name:
+                    return (None, fr_parts)
+
+        # Case 2: response_parts on the turn contains FC data
+        if turn.response_parts:
+            for rp in turn.response_parts:
+                fc = rp.get("functionCall")
+                if fc and fc.get("name") == tool_name:
+                    fc_parts = [{"functionCall": fc}]
+                    return (fc_parts, fr_parts)
+
+        # Case 3: synthesize FC from waitingFor
+        fc_parts = [{
+            "functionCall": {
+                "name": tool_name,
+                "args": {"_synthesized": True},
+            }
+        }]
+        return (fc_parts, fr_parts)
+
     # =========================================================================
     # Conversation Compression (progressive, no LLM call)
     # =========================================================================
 
     @staticmethod
     def _estimate_tokens(contents: list[dict]) -> int:
-        """Rough token estimate: ~4 chars per token."""
-        total_chars = sum(
-            len(str(part.get("text", "")))
-            for msg in contents for part in msg.get("parts", [])
-        )
+        """Rough token estimate: ~4 chars per token. Handles FC/FR dicts."""
+        total_chars = 0
+        for msg in contents:
+            for part in msg.get("parts", []):
+                text = part.get("text")
+                if text:
+                    total_chars += len(text)
+                elif "functionCall" in part or "functionResponse" in part:
+                    total_chars += len(json.dumps(part))
         return total_chars // 4
 
     @classmethod
