@@ -1094,7 +1094,8 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         "description": (
             "Record a numeric observation to an EXISTING time series or a canonical "
             "series name. Trajectories emerge across sampling intervals — record once "
-            "per measurement cycle, then evaluate (defer, close, or dispatch). "
+            "per measurement cycle. After recording, your NEXT action must be a decision "
+            "(defer_event, close_event, or dispatch) — never record twice consecutively. "
             "Before recording, mentally check: will this same metric name "
             "be recorded again in future events for this service? If not, use take_note "
             "instead. Reuse existing series names from list_observations. "

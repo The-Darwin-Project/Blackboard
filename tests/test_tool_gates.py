@@ -71,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_28_gates(self):
-        assert len(GATE_REGISTRY) == 28
+    def test_registry_has_29_gates(self):
+        assert len(GATE_REGISTRY) == 29
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -83,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentyfour_strip_mode_gates(self):
+    def test_twentyfive_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 24
+        assert len(strip_gates) == 25
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +334,20 @@ class TestDomainCasual:
                 "consult_deep_memory", "lookup_service", "lookup_journal",
                 "take_note", "review_notes"} <= names
 
-    def test_does_not_fire_for_aligner(self):
+    def test_fires_for_headhunter_source(self):
+        """T-9: DOMAIN_CASUAL fires for headhunter source when domain=casual.
+        The gate is now source-agnostic — any classified event with domain=casual
+        gets the casual tool whitelist regardless of event source."""
         ctx = _ctx(
-            event_source="aligner",
+            event_source="headhunter",
             context_flags={"brain_has_classified": True, "event_domain": "casual"},
         )
+        from src.agents.tool_gates import _pred_domain_casual
+        assert _pred_domain_casual(ctx) is True
         result = evaluate_gates(ALL_SCHEMAS, ctx)
-        assert "select_agent" in _names(result)
+        names = _names(result)
+        assert "select_agent" not in names
+        assert "classify_event" in names
 
     def test_blocks_close_event(self):
         ctx = _ctx(
@@ -370,15 +377,15 @@ class TestDomainCasual:
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "wait_for_user" not in _names(result)
 
-    def test_fail_open_non_chat_source(self):
-        """Casual gate doesn't fire for non-chat/slack -- fail-open to full tools."""
+    def test_aligner_source_also_restricted(self):
+        """Complement to T-9: aligner source + casual domain also restricts tools."""
         ctx = _ctx(
             event_source="aligner",
             context_flags={"brain_has_classified": True, "event_domain": "casual"},
         )
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert "select_agent" in names
+        assert "select_agent" not in names
 
     def test_intermediate_defers_casual(self):
         """CASUAL predicate yields to INTERMEDIATE -- agent comms tools available."""
@@ -1022,3 +1029,123 @@ class TestObsPlateau:
         ctx = _ctx(conversation=conv)
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         assert "record_observation" in _names(result)
+
+
+# ---------------------------------------------------------------------------
+# OBS_FLOOD gate tests (T-4, T-5, T-6)
+# ---------------------------------------------------------------------------
+
+class TestObsFlood:
+    """Tests for the OBS_FLOOD gate that prevents observation spirals with diverse keys."""
+
+    def _obs_turn(self, name: str = "metric_a", value: str = "42") -> SimpleNamespace:
+        return _turn(
+            "brain", "tool_result",
+            waitingFor="record_observation",
+            thoughts=f"Recorded observation '{name}' = {value} (point #1, event age 5.0m)",
+        )
+
+    def test_fires_at_6_different_keys(self):
+        """T-4: 6 different-key observations in a row → OBS_FLOOD fires."""
+        conv = [
+            self._obs_turn(name="metric_a", value="10"),
+            self._obs_turn(name="metric_b", value="20"),
+            self._obs_turn(name="metric_c", value="30"),
+            self._obs_turn(name="metric_d", value="40"),
+            self._obs_turn(name="metric_e", value="50"),
+            self._obs_turn(name="metric_f", value="60"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_flood
+        assert _pred_obs_flood(ctx) is True
+
+    def test_does_not_fire_at_5(self):
+        """T-5: 5 different-key observations → OBS_FLOOD does NOT fire."""
+        conv = [
+            self._obs_turn(name="metric_a", value="10"),
+            self._obs_turn(name="metric_b", value="20"),
+            self._obs_turn(name="metric_c", value="30"),
+            self._obs_turn(name="metric_d", value="40"),
+            self._obs_turn(name="metric_e", value="50"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_flood
+        assert _pred_obs_flood(ctx) is False
+
+    def test_resets_after_decision_turn(self):
+        """T-6: observations interrupted by decision turn → count resets.
+        3 obs + decision + 3 obs = max consecutive is 3, below threshold."""
+        conv = [
+            self._obs_turn(name="metric_a", value="10"),
+            self._obs_turn(name="metric_b", value="20"),
+            self._obs_turn(name="metric_c", value="30"),
+            _turn("brain", "tool_result", waitingFor="defer_event"),
+            self._obs_turn(name="metric_d", value="40"),
+            self._obs_turn(name="metric_e", value="50"),
+            self._obs_turn(name="metric_f", value="60"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_flood
+        assert _pred_obs_flood(ctx) is False
+
+    def test_gate_strips_record_observation_when_flood_active(self):
+        """Integration: evaluate_gates strips record_observation when OBS_FLOOD fires."""
+        conv = [
+            self._obs_turn(name=f"metric_{i}", value=str(i * 10))
+            for i in range(6)
+        ]
+        ctx = _ctx(conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "record_observation" not in _names(result)
+
+    def test_gate_does_not_strip_at_5(self):
+        """Integration: 5 observations is below threshold — record_observation survives."""
+        conv = [
+            self._obs_turn(name=f"metric_{i}", value=str(i * 10))
+            for i in range(5)
+        ]
+        ctx = _ctx(conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "record_observation" in _names(result)
+
+    def test_decision_turn_breaks_streak(self):
+        """A select_agent turn (in _OBS_FLOOD_DECISION_TURNS) breaks the streak."""
+        conv = [
+            self._obs_turn(name="metric_a", value="10"),
+            self._obs_turn(name="metric_b", value="20"),
+            self._obs_turn(name="metric_c", value="30"),
+            _turn("brain", "tool_result", waitingFor="select_agent"),
+            self._obs_turn(name="metric_d", value="40"),
+            self._obs_turn(name="metric_e", value="50"),
+            self._obs_turn(name="metric_f", value="60"),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_flood
+        assert _pred_obs_flood(ctx) is False
+
+    def test_obs_plateau_independent_of_flood(self):
+        """T-8: OBS_PLATEAU (identical-key 3x) still works independently of OBS_FLOOD.
+        3 identical observations fire PLATEAU but not FLOOD (count=3 < 6)."""
+        obs = _turn(
+            "brain", "tool_result",
+            waitingFor="record_observation",
+            thoughts="Recorded observation 'cpu_pct' = 95 (point #3, event age 45m)",
+        )
+        conv = [obs, obs, obs]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau, _pred_obs_flood
+        assert _pred_obs_plateau(ctx) is True
+        assert _pred_obs_flood(ctx) is False
+
+    def test_both_gates_fire_on_6_identical_observations(self):
+        """6+ identical observations should trigger BOTH OBS_PLATEAU and OBS_FLOOD."""
+        obs = _turn(
+            "brain", "tool_result",
+            waitingFor="record_observation",
+            thoughts="Recorded observation 'pipeline_status' = 1 (point #6, event age 20m)",
+        )
+        conv = [obs] * 6
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_obs_plateau, _pred_obs_flood
+        assert _pred_obs_plateau(ctx) is True
+        assert _pred_obs_flood(ctx) is True

@@ -206,7 +206,7 @@ export function ConversationFeed({ eventId, onInvalidateActive, onClose, onOpenC
               title="Force close"
             >Force Close</button>
           )}
-          {['active', 'waiting_approval'].includes(selectedEvent.status) && selectedEvent.source && ['chat', 'slack'].includes(selectedEvent.source) && (
+          {['active', 'waiting_approval'].includes(selectedEvent.status) && (
             <button
               disabled={enforcingCasual}
               onClick={() => {

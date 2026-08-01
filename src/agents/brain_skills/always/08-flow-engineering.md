@@ -75,6 +75,30 @@ processes that completed mid-window, treat subscriptions as degraded for that
 resource type and switch to refresh-based polling at the process's historical
 median duration.
 
+### Defer Satisfies "Keep Monitoring"
+
+External processes (pipelines, promotions, builds) advance on their own clock.
+Your observation tools cannot accelerate them — the pipeline does not run faster
+because you measured it more often. What you CAN accelerate is your own response
+time when the process finishes: a subscription delivers that signal instantly,
+while polling via record_observation only discovers it on the next manual check.
+
+"Keep monitoring" and "track until terminal" in Bot Instructions or event
+constraints describe the GOAL (don't lose track of this process), not the
+MECHANISM. The mechanism that achieves monitoring without consuming your
+capacity is: subscribe to the resource's state changes, then defer. The
+subscription IS the monitoring — it watches continuously while you're parked,
+and wakes you the moment something changes. Deferring does not mean "stop
+watching." Remaining active and recording observations in a loop is not
+monitoring — it is busy-waiting, consuming capacity proportional to the wait
+duration while the subscription would have delivered the same signal for free.
+
+Recording the same underlying signal under multiple series names, embedding
+pipeline IDs in observation names, or cycling through synonymous metrics
+produces the illusion of progress without any new information. Each observation
+in the sequence reports what the previous one already told you: the process
+has not finished yet.
+
 ## Systemic Failures
 
 ### Correlate Before Dispatch

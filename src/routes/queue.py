@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 
 
@@ -62,6 +63,15 @@ def _serialize_evidence(event: EventDocument) -> dict:
         "domain": "complicated",
         "severity": "warning",
     }
+
+
+def _is_maintainer(email: Optional[str]) -> bool:
+    """Check email against HEADHUNTER_MAINTAINERS (read at call time, same allowlist
+    used for privileged escalation bypass elsewhere -- see slack_gate.py, headhunter_*.py)."""
+    if not email:
+        return False
+    maintainers = {e.strip().lower() for e in os.getenv("HEADHUNTER_MAINTAINERS", "").split(",") if e.strip()}
+    return email.strip().lower() in maintainers
 
 
 def _has_active_subscription(event_id: str) -> bool:
@@ -390,23 +400,23 @@ async def enforce_casual_domain(
 ):
     """Force event domain to casual from the UI (human override).
 
-    Requires authentication. Source-restricted server-side to chat/slack.
+    Requires authentication. Ownership-checked for chat/slack events; automated/
+    operational events have no single owner, so overriding them is restricted to
+    maintainers (HEADHUNTER_MAINTAINERS) instead of any authenticated caller
+    (codereview finding, auth-rbac: unscoped removal would let any authenticated
+    user force domain=casual -- and its restrictive tool-gate whitelist -- onto
+    another team's automated/incident event).
     """
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
     if event.status == EventStatus.CLOSED:
         raise HTTPException(status_code=409, detail="Cannot modify a closed event")
-    # Ownership check (codereview finding: auth-rbac) -- require_auth only proves the
-    # caller is *someone*, not that they own this event. created_by_email is the same
-    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events).
-    # Deny-by-default: an event with no recorded owner (legacy/automated -- optional for
-    # backward compat per EventDocument.created_by_email) can't be verified as belonging
-    # to this caller, so it is treated the same as an owner mismatch, not left open.
-    if event.created_by_email != user.email:
+    if event.source in ("chat", "slack"):
+        if event.created_by_email != user.email:
+            raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
+    elif not _is_maintainer(user.email):
         raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
-    if event.source not in ("chat", "slack"):
-        raise HTTPException(status_code=400, detail="Casual domain override is only valid for chat/slack events")
 
     try:
         brain = await get_brain()
