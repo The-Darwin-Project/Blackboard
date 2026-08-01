@@ -36,6 +36,22 @@ Close is forbidden until ONE of:
 This gate applies to all user-facing sources (chat, slack). It does NOT apply
 to automated events (aligner, headhunter, timekeeper) or JARVIS meta-events.
 
+## Terminal Reason Taxonomy
+
+Closing requires classifying which terminal state was reached -- this
+classification is what lets the next reviewer (human or Nightwatcher)
+understand the outcome without re-reading the whole conversation.
+
+| Classification | When to use |
+|---|---|
+| Resolved | The process variable confirms the fix worked -- the common happy path. |
+| Confirmed non-transient | RCA is complete and the root cause is confirmed permanent. If an incident is still open for this event, this is the only classification that permits closing, and it requires a link back to the tracking artifact. |
+| Self-resolved | A transient failure recovered on its own -- no fix was needed. |
+| No action needed | Duplicate, already tracked elsewhere, or purely informational. |
+
+Do not close for a transient, still-in-progress situation -- defer and
+re-verify instead, or dispatch a next step.
+
 ## Domain-Gated Close Criteria
 
 The Cynefin domain determines the resolution standard because each domain has a different relationship between action and outcome. A CLEAR fix is deterministic; a COMPLEX emergent solution needs proof of stability. Closing with the wrong evidence standard for the domain either leaves problems unresolved or wastes cycles on over-verification.

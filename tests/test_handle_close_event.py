@@ -3,19 +3,24 @@
 # 1. [Constraint]: Pure unit tests — mock ToolContext + BlackboardState, no real Redis.
 # 2. [Pattern]: Uses ConversationTurn objects (not dicts) to match production path.
 # 3. [Gotcha]: handle_close_event is async — all tests use pytest-asyncio.
-"""Tests for handle_close_event pessimistic re-check (commit 76803ab0).
+"""Tests for handle_close_event pessimistic re-check (commit 76803ab0) and the
+terminal-state close-gate enforcement (GitHub #155/#156).
 
 Covers: abort on unevaluated user/jarvis message, happy-path close,
-None/closed event fallback, brain.phase scan boundary, response_parts threading.
+None/closed event fallback, brain.phase scan boundary, response_parts threading,
+terminal_reason validation, open-incident-reference blocking + escape valve,
+feature flag, and precedence between the pessimistic guard and the new checks.
 """
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agents.handlers_state import handle_close_event
+import src.agents.handlers_state as handlers_state
+from src.agents.handlers_state import _is_valid_tracking_link, handle_close_event
 from src.models import ConversationTurn, EventStatus, MessageStatus
 
 
@@ -33,10 +38,17 @@ def _mock_ctx(event=None):
     return ctx, bb
 
 
-def _event(conversation: list[ConversationTurn], status: str = "active"):
+def _event(
+    conversation: list[ConversationTurn],
+    status: str = "active",
+    source: str = "chat",
+    incident_references: list[str] | None = None,
+):
     return SimpleNamespace(
         conversation=conversation,
         status=SimpleNamespace(value=status),
+        source=source,
+        incident_references=incident_references,
     )
 
 
@@ -80,16 +92,20 @@ class TestHappyPathClose:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {"summary": "Done."}, None)
+        result = await handle_close_event(
+            ctx, "evt-1", {"summary": "Done.", "terminal_reason": "resolved"}, None,
+        )
         assert result is False
-        ctx.close_and_broadcast.assert_called_once_with("evt-1", "Done.")
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Done.", close_reason="resolved", tracking_link=None,
+        )
         ctx.append_and_broadcast.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_empty_conversation_closes(self):
         event = _event([])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -124,7 +140,7 @@ class TestScanBoundary:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -136,7 +152,7 @@ class TestScanBoundary:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -148,7 +164,7 @@ class TestNonBlockingTurns:
     async def test_user_confirm_ignored(self):
         event = _event([_turn("user", "confirm", MessageStatus.SENT)])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -156,6 +172,418 @@ class TestNonBlockingTurns:
     async def test_sysadmin_message_ignored(self):
         event = _event([_turn("sysadmin", "message", MessageStatus.SENT)])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
+
+
+class TestTerminalReasonValidation:
+    """T-1, T-2, T-13: terminal_reason is required and must be a valid enum value."""
+
+    @pytest.mark.asyncio
+    async def test_missing_terminal_reason_rejects(self):
+        # T-1
+        event = _event([])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"summary": "done"}, None)
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert turn_arg.waitingFor == "close_event"
+
+    @pytest.mark.asyncio
+    async def test_invalid_terminal_reason_rejects(self):
+        # T-2
+        event = _event([])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1", {"summary": "done", "terminal_reason": "whatever"}, None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_terminal_reason_no_open_incidents_closes(self):
+        # T-3
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.", close_reason="resolved", tracking_link=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_self_resolved_still_works(self):
+        # T-13
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "self_resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
+
+class TestOpenIncidentEscapeValve:
+    """T-4 through T-7: open incident_references block close unless non_transient_confirmed + tracking_link."""
+
+    @pytest.mark.asyncio
+    async def test_open_incident_blocks_close_without_escape_valve(self):
+        # T-4
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "JIRA-1" in turn_arg.thoughts
+        assert turn_arg.waitingFor == "close_event"
+
+    @pytest.mark.asyncio
+    async def test_non_transient_confirmed_without_tracking_link_still_blocks(self):
+        # T-5
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1", {"terminal_reason": "non_transient_confirmed"}, None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_transient_confirmed_with_tracking_link_succeeds(self):
+        # T-6
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "non_transient_confirmed", "tracking_link": "JIRA-1"},
+            None,
+        )
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.",
+            close_reason="non_transient_confirmed", tracking_link="JIRA-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_incident_on_non_automated_source_does_not_block(self):
+        # T-7
+        event = _event([], source="chat", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
+
+class TestTrackingLinkValidatedRegardlessOfOpenIncidents:
+    """HIGH finding fix: the tracking_link host-allowlist check must run whenever a
+    tracking_link is supplied, even when there are no open incident_references --
+    it is later interpolated into bot-authored comments unconditionally, so it must
+    not be possible to smuggle an untrusted-host link through by closing an event
+    with no open incidents."""
+
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_with_no_open_incidents(self):
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "evil.example.com" in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_trusted_host_tracking_link_accepted_with_no_open_incidents(self):
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://github.com/org/repo/issues/1"},
+            None,
+        )
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.",
+            close_reason="resolved", tracking_link="https://github.com/org/repo/issues/1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_even_with_open_incidents_and_wrong_terminal_reason(self):
+        # The unconditional host check now runs before the open-incident block, so an
+        # untrusted-host tracking_link is rejected on its own merits even in a request
+        # that would also fail the "terminal_reason must be non_transient_confirmed"
+        # gate -- the host-allowlist rejection must not be skippable by also getting
+        # the open-incident escape valve wrong.
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "evil.example.com" in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_for_non_automated_source(self):
+        # Non-automated sources skip the open-incident escape-valve block entirely,
+        # but the host-allowlist check must still apply to any supplied tracking_link.
+        event = _event([], source="chat", incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_tracking_link_does_not_trigger_host_check(self):
+        # Absence of a tracking_link must not be treated as an invalid one -- the
+        # `if tracking_link and ...` guard should short-circuit cleanly.
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
+
+class TestFeatureFlag:
+    """T-14: ENABLE_TERMINAL_CLOSE_GATE=false restores legacy behavior."""
+
+    @pytest.mark.asyncio
+    async def test_feature_flag_disabled_skips_enforcement(self, monkeypatch):
+        monkeypatch.setattr(handlers_state, "ENABLE_TERMINAL_CLOSE_GATE", False)
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"summary": "done"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with("evt-1", "done", close_reason="resolved")
+
+
+class TestExistingGuardPrecedence:
+    """T-20: the pre-existing unevaluated-close-blocker still wins over terminal_reason checks."""
+
+    @pytest.mark.asyncio
+    async def test_unevaluated_message_blocks_even_with_valid_terminal_reason(self):
+        event = _event(
+            [_turn("user", "message", MessageStatus.SENT)],
+            source="aligner", incident_references=["JIRA-1"],
+        )
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "non_transient_confirmed", "tracking_link": "JIRA-1"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "unevaluated message" in turn_arg.thoughts
+
+
+class TestIsValidTrackingLinkNewlineRejection:
+    """HIGH finding fix: embedded newlines in tracking_link must be rejected outright,
+    even when they would otherwise match incident_references or the URL/issue-key
+    pattern -- prevents GitLab quick-action/comment injection under the bot's identity."""
+
+    def test_rejects_bare_newline(self):
+        assert _is_valid_tracking_link("PROJ-123\n/close", []) is False
+
+    def test_rejects_bare_carriage_return(self):
+        assert _is_valid_tracking_link("PROJ-123\r/close", []) is False
+
+    def test_rejects_crlf(self):
+        assert _is_valid_tracking_link("https://example.com/x\r\n/assign @bot", []) is False
+
+    def test_rejects_newline_even_when_matching_incident_references(self):
+        # Defense-in-depth: an exact incident_references match must not bypass the
+        # newline check -- an attacker-controlled tracking_link should never be able
+        # to smuggle a newline just because its prefix happens to equal a known ref.
+        assert _is_valid_tracking_link("JIRA-1\n/close", ["JIRA-1\n/close"]) is False
+
+    def test_rejects_newline_in_otherwise_valid_url(self):
+        assert _is_valid_tracking_link("https://example.com/incident/42\ninjected", []) is False
+
+    def test_rejects_trailing_newline(self):
+        assert _is_valid_tracking_link("https://example.com/incident/42\n", []) is False
+
+    def test_accepts_clean_issue_key(self):
+        assert _is_valid_tracking_link("PROJ-123", []) is True
+
+    def test_accepts_clean_url(self):
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/42", []) is True
+
+    def test_accepts_exact_incident_reference_match_without_newline(self):
+        assert _is_valid_tracking_link("JIRA-1", ["JIRA-1"]) is True
+
+    def test_rejects_empty_string(self):
+        assert _is_valid_tracking_link("", []) is False
+
+    def test_rejects_unrecognized_pattern_without_newline(self):
+        assert _is_valid_tracking_link("just some text", []) is False
+
+
+class TestTrackingLinkDomainAllowlist:
+    """HIGH finding fix: tracking_link URLs must resolve to an allowlisted host --
+    prevents an attacker-supplied tracking_link from posting an arbitrary phishing/
+    prompt-injection URL under the bot's identity."""
+
+    def test_accepts_github_host(self):
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/1", []) is True
+
+    def test_rejects_untrusted_host(self):
+        assert _is_valid_tracking_link("https://evil.example.com/phish", []) is False
+
+    def test_rejects_lookalike_host(self):
+        # Host must match exactly, not merely contain the trusted domain as a substring.
+        assert _is_valid_tracking_link("https://github.com.evil.example/x", []) is False
+
+    def test_accepts_configured_gitlab_host(self, monkeypatch):
+        monkeypatch.setenv("GITLAB_HOST", "gitlab.example.com")
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is True
+
+    def test_accepts_configured_jira_host(self, monkeypatch):
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is True
+
+    def test_exact_incident_reference_match_bypasses_host_check(self):
+        # A URL that's already a recorded incident_references entry is trusted as-is,
+        # regardless of host -- it wasn't attacker-supplied at that point.
+        untrusted_but_recorded = "https://example.com/incident/42"
+        assert _is_valid_tracking_link(untrusted_but_recorded, [untrusted_but_recorded]) is True
+
+    def test_host_match_is_case_insensitive(self):
+        assert _is_valid_tracking_link("https://GitHub.COM/org/repo/issues/1", []) is True
+
+    def test_http_scheme_also_honors_allowlist(self):
+        assert _is_valid_tracking_link("http://github.com/org/repo/issues/1", []) is True
+        assert _is_valid_tracking_link("http://evil.example.com/phish", []) is False
+
+    def test_rejects_subdomain_of_trusted_host(self):
+        # A subdomain is a distinct host -- not implicitly trusted just because it
+        # ends with an allowlisted domain.
+        assert _is_valid_tracking_link("https://sub.github.com/org/repo/issues/1", []) is False
+
+    def test_rejects_userinfo_bypass_attempt(self):
+        # "https://github.com@evil.example.com/phish" parses github.com as userinfo,
+        # not the host -- must resolve on the real host (evil.example.com) and reject.
+        assert _is_valid_tracking_link("https://github.com@evil.example.com/phish", []) is False
+
+    def test_gitlab_host_env_var_strips_scheme_and_trailing_slash(self, monkeypatch):
+        # _allowed_tracking_hosts() strips a "https://"/"http://" prefix and trailing
+        # "/" off GITLAB_HOST before comparing -- verify that normalization actually
+        # runs, not just the already-bare-hostname case covered above.
+        monkeypatch.setenv("GITLAB_HOST", "https://gitlab.example.com/")
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is True
+
+    def test_jira_url_env_var_without_scheme_is_still_parsed(self, monkeypatch):
+        # JIRA_URL may be configured as a bare host (no scheme) -- _allowed_tracking_hosts()
+        # must still extract the hostname correctly.
+        monkeypatch.setenv("JIRA_URL", "jira.example.com")
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is True
+
+    def test_unconfigured_gitlab_and_jira_hosts_are_not_allowed(self, monkeypatch):
+        monkeypatch.delenv("GITLAB_HOST", raising=False)
+        monkeypatch.delenv("JIRA_URL", raising=False)
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is False
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is False
+
+
+class TestTrackingLinkBackslashBypassRejection:
+    """HIGH finding fix: urlsplit().hostname disagrees with WHATWG URL parsers
+    (browsers, many HTTP clients) on backslash handling -- WHATWG treats '\\' as
+    a path separator in special-scheme URLs, but urlsplit() treats it as an
+    ordinary character. A crafted value like "https://evil.example.com\\@github.com/x"
+    parses under urlsplit() as hostname "github.com" (passing the allowlist) while a
+    real browser navigates to evil.example.com -- any backslash must be rejected
+    outright, regardless of what urlsplit() thinks the host is."""
+
+    def test_rejects_the_documented_bypass_payload(self):
+        assert _is_valid_tracking_link("https://evil.example.com\\@github.com/x", []) is False
+
+    def test_urlsplit_would_have_been_fooled_by_the_payload(self):
+        # Sanity-check the premise of the fix: without the backslash guard, urlsplit()
+        # really does resolve this payload's hostname to the trusted "github.com".
+        from urllib.parse import urlsplit
+        assert urlsplit("https://evil.example.com\\@github.com/x").hostname == "github.com"
+
+    def test_rejects_backslash_anywhere_in_an_otherwise_valid_url(self):
+        assert _is_valid_tracking_link("https://github.com/org\\repo/issues/1", []) is False
+
+    def test_rejects_backslash_path_separator_variant(self):
+        assert _is_valid_tracking_link("https://github.com\\evil.example.com/x", []) is False
+
+    def test_rejects_backslash_even_when_no_open_incidents_or_open_refs_present(self):
+        # The backslash check lives in the same early-return chain as the newline
+        # check, so it must fire before the incident_references/pattern checks too.
+        assert _is_valid_tracking_link("https://evil.example.com\\@github.com/x", []) is False
+
+    def test_backslash_rejected_even_if_it_would_otherwise_exactly_match_incident_references(self):
+        # Defense-in-depth, mirroring the newline check's precedent: an exact
+        # incident_references match must not bypass the backslash rejection.
+        payload = "https://evil.example.com\\@github.com/x"
+        assert _is_valid_tracking_link(payload, [payload]) is False
+
+    def test_clean_url_without_backslash_is_unaffected(self):
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/1", []) is True
+
+    def test_clean_issue_key_without_backslash_is_unaffected(self):
+        assert _is_valid_tracking_link("PROJ-123", []) is True
+
+
+class TestEnableTerminalCloseGateFailsClosedOnMisconfig:
+    """HIGH finding fix: an unrecognized ENABLE_TERMINAL_CLOSE_GATE value must resolve
+    to True (gate enabled / fail-closed), matching the warning log emitted at import
+    time -- previously the log claimed fail-closed but _raw_flag was never reset,
+    so ENABLE_TERMINAL_CLOSE_GATE silently evaluated to False (fail-open)."""
+
+    @staticmethod
+    def _reload_with_env(monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("ENABLE_TERMINAL_CLOSE_GATE", raising=False)
+        else:
+            monkeypatch.setenv("ENABLE_TERMINAL_CLOSE_GATE", value)
+        return importlib.reload(handlers_state)
+
+    def test_unrecognized_value_fails_closed(self, monkeypatch, caplog):
+        with caplog.at_level("WARNING"):
+            reloaded = self._reload_with_env(monkeypatch, "garbage")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+        assert "defaulting to enabled" in caplog.text
+
+    def test_empty_string_value_fails_closed(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_case_variant_value_fails_closed(self, monkeypatch):
+        # Only the exact lowercase "false" disables the gate -- anything else,
+        # including a plausible-looking variant, must fail closed.
+        reloaded = self._reload_with_env(monkeypatch, "False")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_explicit_true_enables_gate(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "true")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_explicit_false_disables_gate(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "false")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is False
+
+    def test_unset_env_var_defaults_to_enabled(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, None)
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def teardown_method(self, method):
+        # Restore the module to its normal (unset-env) state for any other test
+        # in this file that imported handlers_state before this class reloaded it.
+        import os
+        os.environ.pop("ENABLE_TERMINAL_CLOSE_GATE", None)
+        importlib.reload(handlers_state)

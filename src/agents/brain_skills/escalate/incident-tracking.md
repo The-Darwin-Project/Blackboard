@@ -103,6 +103,11 @@ If the work was stuck in a queue (Kueue, Tekton queue, CI backlog), defer with a
 calibrated interval based on historical queue drain time. The queue clearing is the
 resolution, not the escalation filing.
 
+This is now structurally enforced, not just behavioral: `close_event` is
+rejected by the handler whenever `incident_references` is non-empty for an
+automated source, unless `terminal_reason=non_transient_confirmed` is
+provided together with a `tracking_link`.
+
 ### Mandatory Triggers
 
 File an incident (after investigation and pre-escalation check) when:

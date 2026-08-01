@@ -211,6 +211,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import httpx
 
+from ..event_types import TERMINAL_REASONS
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
@@ -344,6 +345,14 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "select_agent", "wait_for_agent",
     "request_user_approval",
 })
+
+# The exhaustive set of close_event's LLM-facing terminal_reason values (types.py's
+# schema enum, derived from the shared event_types.TERMINAL_REASONS tuple). Used by
+# _close_and_broadcast's TOCTOU recheck -- must stay an exact superset of that enum,
+# no more, no less: system-driven close_reason values (stale, duplicate, timeout,
+# force_closed, idle_timeout, error) never reach this path from the LLM and must
+# remain excluded from the recheck.
+_LLM_CLOSE_REASONS = frozenset(TERMINAL_REASONS)
 
 
 import re as _re
@@ -508,8 +517,13 @@ class _BrainToolContext:
     async def next_turn_number(self, event_id: str) -> int:
         return await self._b._next_turn_number(event_id)
 
-    async def close_and_broadcast(self, event_id: str, summary: str, close_reason: str | None = None) -> None:
-        await self._b._close_and_broadcast(event_id, summary, close_reason=close_reason)
+    async def close_and_broadcast(
+        self, event_id: str, summary: str, close_reason: str | None = None,
+        tracking_link: str | None = None,
+    ) -> None:
+        await self._b._close_and_broadcast(
+            event_id, summary, close_reason=close_reason, tracking_link=tracking_link,
+        )
 
     async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False, effort="") -> None:
         task_coro = self._b._run_agent_task(
@@ -4109,7 +4123,10 @@ class Brain:
             self._orphan_requeue_count.pop(event_id, None)
             logger.error(f"Orphan {event_id} closed after 3 failed re-queue attempts")
 
-    async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
+    async def _close_and_broadcast(
+        self, event_id: str, summary: str, close_reason: str = "resolved",
+        tracking_link: str | None = None,
+    ) -> None:
         """Close an event and broadcast the closure to UI."""
         event = await self.blackboard.get_event(event_id)
         if not event or event.status.value == "closed":
@@ -4125,13 +4142,16 @@ class Brain:
             pass
         # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
         # System-driven closes (duplicate, timeout, error, force_closed) bypass.
-        if close_reason == "resolved":
+        if close_reason in _LLM_CLOSE_REASONS:
             from .tool_gates import has_unevaluated_close_blocker
             latest = await self.blackboard.get_event(event_id)
             if latest and has_unevaluated_close_blocker(latest.conversation):
                 logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
                 return
-        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        await self.blackboard.close_event(
+            event_id, summary, close_reason=close_reason,
+            token_usage=token_usage, tracking_link=tracking_link,
+        )
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)

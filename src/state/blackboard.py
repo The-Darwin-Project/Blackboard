@@ -1922,13 +1922,17 @@ return 0
 
     async def close_event(
         self, event_id: str, summary: str, close_reason: str = "resolved",
-        token_usage: dict | None = None,
+        token_usage: dict | None = None, tracking_link: str | None = None,
     ) -> None:
         """Close an event with summary. Move from active to closed.
 
         close_reason: structured reason for closure. Stored in close turn's evidence field.
         Values: resolved, stale, timeout, force_closed, duplicate, user_closed, error.
         token_usage: pre-drained per-event token totals (caller drains BEFORE calling this).
+        tracking_link: optional external tracking reference (Jira issue key/URL, incident
+        link). Stored in the close turn's unused `result` field -- `evidence` stays exactly
+        `close_reason`, preserving existing exact-match reads in headhunter_gitlab.py/
+        headhunter_github.py.
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
@@ -1951,6 +1955,7 @@ return 0
                         action="close",
                         thoughts=summary,
                         evidence=close_reason,
+                        result=tracking_link,
                     )
                     event.conversation.append(close_turn)
                     pipe.multi()
@@ -2212,6 +2217,34 @@ return 0
                 except WatchError:
                     continue
         logger.debug(f"Brain severity set on event {event_id}: {brain_severity}")
+
+    async def add_incident_reference(self, event_id: str, ref: str) -> None:
+        """Append an incident reference (Jira issue key or Nightwatcher staging
+        placeholder) to an EventDocument's incident_references list (WATCH/MULTI/EXEC).
+
+        Used by report_incident's handler to make has_open_incidents-style checks
+        possible for close_event's terminal-state enforcement (GitHub #155).
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for incident_reference update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    refs = list(event.incident_references or [])
+                    refs.append(ref)
+                    event.incident_references = refs
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.info(f"Incident reference added to event {event_id}: {ref}")
 
     async def update_event_sticky_notes(
         self, event_id: str, sticky_notes: list[dict], unread_notes: int,

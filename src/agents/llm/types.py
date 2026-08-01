@@ -22,6 +22,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+from ...event_types import TERMINAL_REASONS
+
 
 # =============================================================================
 # Data Types
@@ -349,11 +351,15 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "close_event",
         "description": (
-            "Close the event as resolved. "
+            "Close the event once it has reached a terminal state. "
             "For user-initiated events (chat, slack): you MUST have sent a visible reply "
             "to the user before calling this. The close summary is an internal record -- "
             "the user needs YOUR response in the conversation, not just a closure notification. "
-            "For automated events (headhunter, aligner, timekeeper): close directly after verification."
+            "For automated events (headhunter, aligner, timekeeper): closing requires a "
+            "terminal_reason classification, and is REJECTED if this event has an open "
+            "incident reference unless you provide terminal_reason=non_transient_confirmed "
+            "together with a tracking_link. Do not call this for a transient, still-in-progress "
+            "situation -- dispatch or defer instead."
         ),
         "input_schema": {
             "type": "object",
@@ -364,6 +370,30 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "Summary of what was done and the outcome. "
                         "Start with the event identifier: '[evt-XXXXXXX] summary text'. "
                         "Include the root cause or resolution, not just 'closed' or 'resolved'."
+                    ),
+                },
+                "terminal_reason": {
+                    "type": "string",
+                    "enum": list(TERMINAL_REASONS),
+                    "description": (
+                        "Classify why this event has reached a terminal state. "
+                        "'resolved': PV confirms the fix worked. "
+                        "'non_transient_confirmed': RCA is complete and the root cause is confirmed "
+                        "permanent -- requires tracking_link when an open incident exists for this event. "
+                        "'self_resolved': a transient failure recovered on its own, no fix needed. "
+                        "'no_action_needed': duplicate, already tracked elsewhere, or purely informational. "
+                        "Do not call close_event for a transient, still-in-progress situation -- "
+                        "dispatch or defer instead."
+                    ),
+                },
+                "tracking_link": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": (
+                        "External tracking reference (Jira issue key/URL, incident link) for this "
+                        "closure. Required when terminal_reason=non_transient_confirmed and an open "
+                        "incident reference exists for this event; optional otherwise. Surfaced in "
+                        "GitLab MR / GitHub issue feedback comments so a human can follow the link."
                     ),
                 },
             },

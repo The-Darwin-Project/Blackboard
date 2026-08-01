@@ -13,6 +13,12 @@
 #    user.message turns exist. Prevents closing over unread interventions.
 # 10. [Pattern]: OBS_FLOOD is a broader count gate (any 6+ observations without decision),
 #     separate from OBS_PLATEAU (same key/value 3+ times).
+# 11. [Pattern]: CLOSE_RETRY_CIRCUIT_BREAKER strips close_event after 3+ consecutive
+#     tool_result turns with waitingFor="close_event". Reverse scan only considers actual
+#     tool turns (action in ("tool_result", "execute")) -- non-tool turns (thoughts,
+#     response, triage, phase, route, wait) are skipped, not streak-breakers. Independent
+#     of ENABLE_TERMINAL_CLOSE_GATE -- also guards the pre-existing UNEVALUATED_CLOSE
+#     rejection loop, which writes the same waitingFor="close_event" marker.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -252,6 +258,13 @@ def _pred_silent_park(ctx: GateContext) -> bool:
 _OBS_PLATEAU_RE = re.compile(r"Recorded observation '(.+?)' = (.+?) \(point #")
 _OBS_PLATEAU_THRESHOLD = 3
 
+_CLOSE_RETRY_THRESHOLD = 3
+_OBS_DECISION_TOOLS = frozenset({
+    "defer_event", "close_event", "select_agent", "set_phase",
+    "classify_event", "report_incident", "refresh_gitlab_context",
+    "refresh_kargo_context", "refresh_github_context",
+})
+
 
 def _pred_obs_plateau(ctx: GateContext) -> bool:
     """True if the last N consecutive record_observation results are identical."""
@@ -315,6 +328,37 @@ def _pred_obs_flood(ctx: GateContext) -> bool:
     return False
 
 
+def _pred_close_retry_circuit_breaker(ctx: GateContext) -> bool:
+    """True if the tail of the conversation has >=3 consecutive tool_result
+    turns with waitingFor="close_event" (the retry marker handle_close_event
+    writes on all 3 of its reject paths -- see terminal-state-close-gate plan).
+
+    Accepted trade-off (explicit, see plan Revision History): any-3-consecutive-
+    rejections, NOT _pred_obs_plateau's same-value-repeats semantics. Simpler,
+    self-correcting cost (one extra round-trip) rather than a stuck state -- any
+    other tool call (including a non-close_event tool_result) resets the streak,
+    re-arming close_event on the very next attempt.
+
+    Non-tool turns (thoughts, response, triage, phase, route, wait -- anything
+    the LLM emits between tool calls) are skipped, not treated as streak-breakers:
+    only an actual tool call/result for a DIFFERENT tool resets the streak.
+    """
+    streak = 0
+    for t in reversed(ctx.conversation):
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        waiting = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+        # Skip non-tool turns (thoughts, response, triage, phase, route, wait)
+        if action not in ("tool_result", "execute"):
+            continue
+        # Only break streak on a tool_result for a different tool
+        if waiting != "close_event":
+            break
+        streak += 1
+        if streak >= _CLOSE_RETRY_THRESHOLD:
+            return True
+    return False
+
+
 def _pred_hard_strip_defer(ctx: GateContext) -> bool:
     return ctx.brain_phase == "triage" or ctx.event_source == "jarvis"
 
@@ -361,6 +405,10 @@ def _tools_observation(_ctx: GateContext) -> set[str]:
 
 def _tools_obs_plateau(_ctx: GateContext) -> set[str]:
     return {"record_observation"}
+
+
+def _tools_close_retry_circuit_breaker(_ctx: GateContext) -> set[str]:
+    return {"close_event"}
 
 
 def _tools_jira_comment(_ctx: GateContext) -> set[str]:
@@ -491,6 +539,15 @@ def _msg_obs_flood(tool: str, _ctx: GateContext) -> str:
         "observations recorded without a decision. You have enough data — evaluate now: "
         "defer_event if waiting for an external process, close_event if resolved, "
         "or dispatch if action needed."
+    )
+
+
+def _msg_close_retry_circuit_breaker(tool: str, _ctx: GateContext) -> str:
+    return (
+        f"[GATE] {tool} unavailable. State: {_CLOSE_RETRY_THRESHOLD}+ consecutive "
+        "close_event rejections. Constraint: address the rejection reason (supply "
+        "a valid terminal_reason, or a tracking_link if an incident is open) "
+        "before retrying, or use another tool to re-arm close_event."
     )
 
 
@@ -658,6 +715,12 @@ GATE_REGISTRY: list[GateDefinition] = [
         message=_msg_obs_plateau,
         hint="record a different metric, or transition to a decision tool.",
     ),
+    # Intentionally NOT gated by ENABLE_TERMINAL_CLOSE_GATE (handlers_state.py): this is an
+    # independent safety mechanism against repeated close_event rejection loops, regardless of
+    # whether terminal-state enforcement is enabled -- the pre-existing UNEVALUATED_CLOSE gate
+    # above also writes its abort turn with the same waitingFor="close_event" marker, so this
+    # circuit breaker still protects against unevaluated-close-blocker retry loops even with the
+    # feature flag off.
     GateDefinition(
         gate_id="OBS_FLOOD",
         mode="strip",
@@ -665,6 +728,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_obs_plateau,
         message=_msg_obs_flood,
         hint="defer_event if waiting for external process, close_event if resolved.",
+    ),
+    GateDefinition(
+        gate_id="CLOSE_RETRY_CIRCUIT_BREAKER",
+        mode="strip",
+        predicate=_pred_close_retry_circuit_breaker,
+        tools_affected=_tools_close_retry_circuit_breaker,
+        message=_msg_close_retry_circuit_breaker,
+        hint="fix the rejection reason, or call a different tool to re-arm close_event.",
     ),
     GateDefinition(
         gate_id="PHASE_JIRA_COMMENT",

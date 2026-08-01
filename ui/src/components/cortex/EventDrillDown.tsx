@@ -7,8 +7,8 @@
 // 5. [Pattern]: Cortex Observations section merges shadow + live whisper entries with [shadow]/[live] badges.
 import { useMemo, type FC } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { X, Clock, Layers, Zap, AlertTriangle } from 'lucide-react';
-import { getEventPulses } from '../../api/client';
+import { X, Clock, Layers, Zap, AlertTriangle, Link as LinkIcon } from 'lucide-react';
+import { getEventPulses, getEventDocument } from '../../api/client';
 import { PHASE_COLORS, ACTOR_COLORS } from '../../constants/colors';
 import BrainCore from './BrainCore';
 import PulseTimeline from './PulseTimeline';
@@ -49,6 +49,27 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
     queryFn: () => getEventPulses(eventId),
     staleTime: 10_000,
   });
+
+  // Full event document -- the pulse stream doesn't carry incident_references
+  // or the closing terminal_reason (GitHub #155/#156).
+  const { data: eventDoc } = useQuery({
+    queryKey: ['event-document', eventId],
+    queryFn: () => getEventDocument(eventId),
+    staleTime: 10_000,
+  });
+
+  const incidentReferences = eventDoc?.incident_references ?? [];
+
+  // terminal_reason is never persisted as its own field -- derive it from the
+  // last close-action turn's evidence field (which IS close_reason/terminal_reason
+  // verbatim), not a phantom event.terminal_reason property.
+  const terminalReason = useMemo(() => {
+    const conversation = eventDoc?.conversation ?? [];
+    for (let i = conversation.length - 1; i >= 0; i--) {
+      if (conversation[i].action === 'close') return conversation[i].evidence ?? null;
+    }
+    return null;
+  }, [eventDoc]);
 
   const eventBatches = useMemo(() => {
     const hist = historicalBatches ?? [];
@@ -227,6 +248,28 @@ const EventDrillDown: FC<EventDrillDownProps> = ({
                   <span className="text-text-muted ml-1">fired {cf.count}x together</span>
                 </div>);
               })}
+            </div>
+          </section>
+        )}
+
+        {/* Incident references + terminal reason (GitHub #155/#156) */}
+        {(incidentReferences.length > 0 || terminalReason) && (
+          <section className="pb-3 border-b border-border/30">
+            <h4 className="text-[10px] text-text-muted uppercase tracking-wider mb-1.5">
+              Terminal State
+            </h4>
+            <div className="flex flex-wrap gap-1 items-center">
+              {terminalReason && (
+                <span className="text-xs px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 font-medium">
+                  {terminalReason}
+                </span>
+              )}
+              {incidentReferences.map((ref) => (
+                <span key={ref} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-tertiary text-[10px] text-slate-300 font-mono">
+                  <LinkIcon size={8} className="text-slate-500" />
+                  {ref}
+                </span>
+              ))}
             </div>
           </section>
         )}

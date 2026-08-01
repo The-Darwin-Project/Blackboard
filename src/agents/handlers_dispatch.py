@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..event_types import AUTOMATED_EVENT_SOURCES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventType
 from ..utils.event_markdown import event_to_markdown
 
@@ -368,8 +369,7 @@ async def handle_report_incident(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return True
-    automated_sources = ("headhunter", "timekeeper", "aligner")
-    if event_doc.source not in automated_sources:
+    if event_doc.source not in AUTOMATED_EVENT_SOURCES:
         result_text = (
             f"report_incident is only available for automated events "
             f"(source={event_doc.source} is not eligible)."
@@ -398,23 +398,37 @@ async def handle_report_incident(
         )
         try:
             await bb.stage_escalation(staged)
-            ctx.mark_incident_created(event_id)
-            if event_doc.service:
-                try:
-                    await bb.set_escalation_flag(
-                        event_doc.service, event_id,
-                        args.get("summary", "escalated")[:100],
-                        scope=esc_scope,
-                    )
-                except Exception as ef:
-                    logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
-            result_text = (
-                f"Escalation staged [nightwatcher] for consolidation "
-                f"(event {event_id}, service {event_doc.service})"
-            )
         except Exception as e:
             result_text = f"Failed to stage escalation: {e}"
             logger.warning(f"stage_escalation failed for {event_id}: {e}")
+        else:
+            # The escalation now exists; mark it created before attempting to persist the
+            # reference so a subsequent retry can't stage a duplicate escalation on top of
+            # this one if add_incident_reference fails below.
+            ctx.mark_incident_created(event_id)
+            try:
+                await bb.add_incident_reference(event_id, f"nightwatcher-staged:{staged.staged_at}")
+            except Exception as ref_err:
+                logger.error(f"Failed to persist incident reference for {event_id}: {ref_err}")
+                result_text = (
+                    f"Escalation staged [nightwatcher] for event {event_id}, but failed to "
+                    f"persist its incident reference ({ref_err}). The escalation exists; "
+                    "manual reconciliation of the tracking reference may be needed."
+                )
+            else:
+                if event_doc.service:
+                    try:
+                        await bb.set_escalation_flag(
+                            event_doc.service, event_id,
+                            args.get("summary", "escalated")[:100],
+                            scope=esc_scope,
+                        )
+                    except Exception as ef:
+                        logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
+                result_text = (
+                    f"Escalation staged [nightwatcher] for consolidation "
+                    f"(event {event_id}, service {event_doc.service})"
+                )
     else:
         adapter = ctx.get_incident_adapter()
         if not adapter:
@@ -446,25 +460,39 @@ async def handle_report_incident(
             }
             try:
                 result = await adapter.create_incident(fields)
-                ctx.mark_incident_created(event_id)
-                if event_doc.service:
-                    esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
-                    try:
-                        await bb.set_escalation_flag(
-                            event_doc.service, event_id,
-                            args.get("summary", "escalated")[:100],
-                            scope=esc_scope_jira,
-                        )
-                    except Exception as ef:
-                        logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
-                logger.info(f"Incident created for {event_id}")
-                result_text = (
-                    f"Incident created in Jira ({result['issue_key']}). "
-                    f"URL: {result['issue_url']}"
-                )
             except Exception as e:
                 result_text = f"Failed to create incident: {e}"
                 logger.warning(f"report_incident failed for {event_id}: {e}")
+            else:
+                # The Jira issue now exists; mark it created before attempting to persist the
+                # reference so a subsequent retry can't create a duplicate Jira issue on top
+                # of this one if add_incident_reference fails below.
+                ctx.mark_incident_created(event_id)
+                logger.info(f"Incident created for {event_id}")
+                try:
+                    await bb.add_incident_reference(event_id, result["issue_key"])
+                except Exception as ref_err:
+                    logger.error(f"Failed to persist incident reference for {event_id}: {ref_err}")
+                    result_text = (
+                        f"Incident created in Jira ({result['issue_key']}, {result['issue_url']}), "
+                        f"but failed to persist its incident reference ({ref_err}). The Jira issue "
+                        "exists; manual reconciliation of the tracking reference may be needed."
+                    )
+                else:
+                    if event_doc.service:
+                        esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
+                        try:
+                            await bb.set_escalation_flag(
+                                event_doc.service, event_id,
+                                args.get("summary", "escalated")[:100],
+                                scope=esc_scope_jira,
+                            )
+                        except Exception as ef:
+                            logger.warning(f"set_escalation_flag failed for {event_doc.service}: {ef}")
+                    result_text = (
+                        f"Incident created in Jira ({result['issue_key']}). "
+                        f"URL: {result['issue_url']}"
+                    )
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",

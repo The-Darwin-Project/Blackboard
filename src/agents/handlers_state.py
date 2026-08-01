@@ -8,15 +8,27 @@
 # 6. [Gotcha]: close_event delegates to ctx.close_and_broadcast() which stays on Brain.
 # 7. [Pattern]: close_event has pessimistic re-check — re-fetches event from Redis, calls
 #    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
+# 8. [Pattern]: Terminal-reason enforcement (GitHub #155/#156): _VALID_TERMINAL_REASONS is
+#    frozenset(TERMINAL_REASONS) from event_types.py (single source of truth, also used by
+#    brain.py's _LLM_CLOSE_REASONS and llm/types.py's schema enum). The open-incident escape
+#    valve requires terminal_reason=non_transient_confirmed AND a tracking_link that either
+#    matches a real incident_references entry or a recognizable issue-key/URL pattern
+#    (_is_valid_tracking_link) -- a bare truthy string is not sufficient.
+# 9. [Pattern]: All reject-turn writes check append_and_broadcast's return value and log a
+#    warning on persistence failure (matches the close_event abort-turn precedent).
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+import re
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
+from ..event_types import AUTOMATED_EVENT_SOURCES, TERMINAL_REASONS
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
 from .tool_gates import has_unevaluated_close_blocker
 
@@ -24,6 +36,77 @@ if TYPE_CHECKING:
     from .tool_router import ToolContext
 
 logger = logging.getLogger("darwin.brain")
+
+# Feature flag for the terminal-state close-gate enforcement (GitHub #155/#156).
+# Set to "false" for rapid disable without a redeploy of the schema/handler changes.
+_raw_flag = os.environ.get("ENABLE_TERMINAL_CLOSE_GATE", "true")
+if _raw_flag not in ("true", "false"):
+    logger.warning(
+        f"ENABLE_TERMINAL_CLOSE_GATE has unrecognized value '{_raw_flag}', defaulting to enabled"
+    )
+    _raw_flag = "true"
+ENABLE_TERMINAL_CLOSE_GATE = _raw_flag == "true"
+
+_VALID_TERMINAL_REASONS = frozenset(TERMINAL_REASONS)
+
+# Accepts a Jira-style issue key (PROJ-123) or any http(s) URL. Anything else must
+# match a real incident_references entry to be accepted as a tracking_link.
+_TRACKING_LINK_PATTERN = re.compile(r'^[A-Z]+-\d+$|^https?://')
+
+# URL tracking_links must resolve to one of these hosts. A bare truthy https?:// match is
+# not sufficient on its own: an attacker-supplied tracking_link is later interpolated into
+# bot-authored GitLab/GitHub comments, so an unrestricted host would let a crafted value
+# post an attacker-controlled link (phishing) or content (prompt-injection vector for any
+# agent that later dereferences it) under the bot's identity.
+_STATIC_TRACKING_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+def _allowed_tracking_hosts() -> frozenset[str]:
+    """Trusted hosts for tracking_link URLs: static hosts plus this deployment's
+    configured GitLab/Jira instances, read fresh so env changes apply without a restart.
+    """
+    hosts = set(_STATIC_TRACKING_HOSTS)
+    gitlab_host = os.environ.get("GITLAB_HOST", "").removeprefix("https://").removeprefix("http://").rstrip("/")
+    if gitlab_host:
+        hosts.add(gitlab_host)
+    jira_url = os.environ.get("JIRA_URL", "")
+    if jira_url:
+        jira_host = urlsplit(jira_url if "://" in jira_url else f"https://{jira_url}").hostname
+        if jira_host:
+            hosts.add(jira_host)
+    return frozenset(hosts)
+
+
+def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) -> bool:
+    """True if tracking_link references a real tracking artifact.
+
+    Either it matches one of the event's actual incident_references entries,
+    or it looks like a real issue key/URL (not just any non-empty string) -- and if
+    it's a URL, its host must be in the tracking-link allowlist.
+    """
+    if not tracking_link:
+        return False
+    if "\n" in tracking_link or "\r" in tracking_link:
+        # Reject embedded newlines outright: tracking_link is later interpolated into
+        # bot-authored GitLab/GitHub comments, and a newline would let a crafted value
+        # inject additional comment lines (e.g. GitLab quick-actions) under the bot's identity.
+        return False
+    if "\\" in tracking_link:
+        # Reject backslashes outright: WHATWG URL parsers (browsers, many HTTP clients)
+        # treat '\' as '/' in special-scheme URLs, but urlsplit() does not -- so a value
+        # like "https://evil.example.com\\@github.com/x" parses here as hostname
+        # "github.com" (passing the allowlist below) while actually navigating to
+        # evil.example.com, bypassing the host check entirely.
+        return False
+    if tracking_link in incident_references:
+        return True
+    if not _TRACKING_LINK_PATTERN.match(tracking_link):
+        return False
+    if tracking_link.startswith(("http://", "https://")):
+        host = (urlsplit(tracking_link).hostname or "").lower()
+        if host not in _allowed_tracking_hosts():
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +139,78 @@ async def handle_close_event(
         logger.info("close_event aborted for %s: late-arriving unevaluated message", event_id)
         return True
     summary = args.get("summary", "Event closed.")
-    await ctx.close_and_broadcast(event_id, summary)
+    terminal_reason = args.get("terminal_reason")
+    tracking_link = args.get("tracking_link")
+
+    if not ENABLE_TERMINAL_CLOSE_GATE:
+        # Legacy behavior, flag disabled: explicit "resolved" (not omitted) so the
+        # TOCTOU recheck in Brain._close_and_broadcast still fires correctly.
+        await ctx.close_and_broadcast(event_id, summary, close_reason="resolved")
+        return False
+
+    if terminal_reason not in _VALID_TERMINAL_REASONS:
+        reject_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts="close_event rejected: terminal_reason is required -- classify as "
+                     "resolved, non_transient_confirmed, self_resolved, or no_action_needed.",
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+        if not assigned:
+            logger.warning("close_event reject turn (invalid terminal_reason) failed to persist for %s", event_id)
+        logger.info("close_event rejected for %s: missing/invalid terminal_reason", event_id)
+        return True
+
+    open_refs = fresh.incident_references or []
+
+    # Validate tracking_link whenever one is supplied, regardless of whether an open
+    # incident reference exists: it is later interpolated into bot-authored GitLab/GitHub
+    # comments (headhunter_gitlab.py/headhunter_github.py) unconditionally, so the
+    # host-allowlist check must not be skippable by closing an event with no open incidents.
+    if tracking_link and not _is_valid_tracking_link(tracking_link, open_refs):
+        reject_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts=(
+                f"close_event rejected: tracking_link '{tracking_link}' does not match any "
+                f"open incident reference ({', '.join(open_refs)}) nor a recognizable tracking "
+                "pattern (an issue key like PROJ-123, or an http(s) URL). Provide a tracking_link "
+                "that references a real tracking artifact."
+            ),
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+        if not assigned:
+            logger.warning("close_event reject turn (invalid tracking_link) failed to persist for %s", event_id)
+        logger.info("close_event rejected for %s: unrecognizable tracking_link %r", event_id, tracking_link)
+        return True
+
+    if open_refs and fresh.source in AUTOMATED_EVENT_SOURCES:
+        if terminal_reason != "non_transient_confirmed" or not tracking_link:
+            reject_turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                thoughts=(
+                    f"close_event rejected: open incident reference(s) {', '.join(open_refs)} "
+                    "exist for this event. Provide terminal_reason=non_transient_confirmed together "
+                    "with a tracking_link to close, or resolve the incident(s) first."
+                ),
+                waitingFor="close_event",
+                response_parts=response_parts,
+            )
+            assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+            if not assigned:
+                logger.warning("close_event reject turn (open incident) failed to persist for %s", event_id)
+            logger.info("close_event rejected for %s: open incident reference(s) %s", event_id, open_refs)
+            return True
+
+    await ctx.close_and_broadcast(event_id, summary, close_reason=terminal_reason, tracking_link=tracking_link)
     return False
 
 

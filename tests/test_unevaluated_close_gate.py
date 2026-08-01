@@ -257,6 +257,34 @@ class TestDiagnosticMessage:
         assert "Hint:" in msg
 
 
+class TestCircuitBreakerInteraction:
+    """Step 12 supplementary case (not its own T-row): the new close-retry
+    circuit breaker (plan Step 7) and this pre-existing UNEVALUATED_CLOSE gate
+    strip close_event independently -- neither should mask or depend on the
+    other. _pred_close_retry_circuit_breaker does not exist at authoring time;
+    imported lazily so only this class fails, not collection of this file."""
+
+    def test_unevaluated_message_blocks_even_when_circuit_breaker_clear(self):
+        """UNEVALUATED_CLOSE fires on its own with no rejection streak present."""
+        turns = [_turn("jarvis", "message", status=MessageStatus.DELIVERED)]
+        ctx = _ctx(conversation=turns)
+        result = evaluate_gates(CLOSE_SCHEMAS, ctx)
+        assert "close_event" not in _names(result)
+
+    def test_circuit_breaker_blocks_even_when_unevaluated_close_clear(self):
+        """Circuit breaker fires independently when all messages are evaluated
+        but 3 consecutive close_event rejections exist."""
+        turns = [
+            _turn("jarvis", "message", status=MessageStatus.EVALUATED),
+            _turn("brain", "tool_result", waitingFor="close_event"),
+            _turn("brain", "tool_result", waitingFor="close_event"),
+            _turn("brain", "tool_result", waitingFor="close_event"),
+        ]
+        ctx = _ctx(conversation=turns)
+        from src.agents.tool_gates import _pred_close_retry_circuit_breaker
+        assert _pred_close_retry_circuit_breaker(ctx) is True
+
+
 class TestOnlyCloseEventAffected:
     """The UNEVALUATED_CLOSE gate only strips close_event, not other tools."""
 

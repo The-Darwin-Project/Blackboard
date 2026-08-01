@@ -43,7 +43,8 @@ graph TD
     PhaseV -->|"VERIFY"| Verify["Verify results (set_phase verify)"]
 
     Verify --> Progress{"Evidence: progress?"}
-    Progress -->|"resolved"| PhaseC{"CLOSE"}
+    Progress -->|"PV confirms recovery"| PhaseC{"CLOSE"}
+    Progress -->|"RCA: non-transient, externally tracked"| PhaseC
     Progress -->|"progressing: process running"| ChooseTs["Choose Ts (severity × source baseline)"]
     Progress -->|"stalled: no change"| Stall{"Stall count"}
     Progress -->|"new information"| DomainR2{"Domain?"}
@@ -99,3 +100,9 @@ Step 2 fires once per service+variant -- after the first variant-specific durati
 Expert analysis confirmed resolution. Evidence: verified state change or
 terminal state reached. Resolution means the PV matches the SP — not "I tried
 something."
+
+Closing requires classifying which terminal state you reached — a fix
+verified, a permanent root cause confirmed by RCA, or a transient issue
+that resolved on its own. If an incident is still open for this event, only
+an RCA-confirmed permanent root cause with a tracking link justifies closing;
+otherwise stay in VERIFY.
