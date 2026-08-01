@@ -158,6 +158,31 @@ async def handle_close_event(
         return True
 
     open_refs = fresh.incident_references or []
+
+    # Validate tracking_link whenever one is supplied, regardless of whether an open
+    # incident reference exists: it is later interpolated into bot-authored GitLab/GitHub
+    # comments (headhunter_gitlab.py/headhunter_github.py) unconditionally, so the
+    # host-allowlist check must not be skippable by closing an event with no open incidents.
+    if tracking_link and not _is_valid_tracking_link(tracking_link, open_refs):
+        reject_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts=(
+                f"close_event rejected: tracking_link '{tracking_link}' does not match any "
+                f"open incident reference ({', '.join(open_refs)}) nor a recognizable tracking "
+                "pattern (an issue key like PROJ-123, or an http(s) URL). Provide a tracking_link "
+                "that references a real tracking artifact."
+            ),
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+        if not assigned:
+            logger.warning("close_event reject turn (invalid tracking_link) failed to persist for %s", event_id)
+        logger.info("close_event rejected for %s: unrecognizable tracking_link %r", event_id, tracking_link)
+        return True
+
     if open_refs and fresh.source in AUTOMATED_EVENT_SOURCES:
         if terminal_reason != "non_transient_confirmed" or not tracking_link:
             reject_turn = ConversationTurn(
@@ -176,26 +201,6 @@ async def handle_close_event(
             if not assigned:
                 logger.warning("close_event reject turn (open incident) failed to persist for %s", event_id)
             logger.info("close_event rejected for %s: open incident reference(s) %s", event_id, open_refs)
-            return True
-
-        if not _is_valid_tracking_link(tracking_link, open_refs):
-            reject_turn = ConversationTurn(
-                turn=0,
-                actor="brain",
-                action="tool_result",
-                thoughts=(
-                    f"close_event rejected: tracking_link '{tracking_link}' does not match any "
-                    f"open incident reference ({', '.join(open_refs)}) nor a recognizable tracking "
-                    "pattern (an issue key like PROJ-123, or an http(s) URL). Provide a tracking_link "
-                    "that references a real tracking artifact."
-                ),
-                waitingFor="close_event",
-                response_parts=response_parts,
-            )
-            assigned = await ctx.append_and_broadcast(event_id, reject_turn)
-            if not assigned:
-                logger.warning("close_event reject turn (invalid tracking_link) failed to persist for %s", event_id)
-            logger.info("close_event rejected for %s: unrecognizable tracking_link %r", event_id, tracking_link)
             return True
 
     await ctx.close_and_broadcast(event_id, summary, close_reason=terminal_reason, tracking_link=tracking_link)

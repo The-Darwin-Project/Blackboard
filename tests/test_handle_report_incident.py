@@ -113,14 +113,14 @@ class TestNightwatcherStagedIncidentReference:
 
 
 class TestIncidentCreatedOrderingRelativeToReferencePersist:
-    """commit eac8703a: mark_incident_created must fire strictly after
-    add_incident_reference succeeds, in both branches -- not merely "not called
-    on failure" (already covered elsewhere), but actually ordered after on the
-    success path too, since a reordering bug could pass the failure-path tests
-    while still calling mark_incident_created too early on success."""
+    """HIGH finding fix: mark_incident_created must fire strictly before
+    add_incident_reference is attempted, in both branches. The external
+    incident/escalation already exists at that point, so has_incident_been_created's
+    dedup check must catch a retry even if add_incident_reference then fails --
+    otherwise a persistence hiccup would let a retry create a duplicate incident."""
 
     @pytest.mark.asyncio
-    async def test_staged_branch_marks_incident_created_after_reference_persist(self, monkeypatch):
+    async def test_staged_branch_marks_incident_created_before_reference_persist(self, monkeypatch):
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -130,10 +130,10 @@ class TestIncidentCreatedOrderingRelativeToReferencePersist:
 
         await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
 
-        assert call_order == ["add_incident_reference", "mark_incident_created"]
+        assert call_order == ["mark_incident_created", "add_incident_reference"]
 
     @pytest.mark.asyncio
-    async def test_direct_jira_branch_marks_incident_created_after_reference_persist(self, monkeypatch):
+    async def test_direct_jira_branch_marks_incident_created_before_reference_persist(self, monkeypatch):
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -150,18 +150,18 @@ class TestIncidentCreatedOrderingRelativeToReferencePersist:
             ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
         )
 
-        assert call_order == ["add_incident_reference", "mark_incident_created"]
+        assert call_order == ["mark_incident_created", "add_incident_reference"]
 
 
-class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
-    """commit a712fc02: add_incident_reference failures must no longer be silently
-    swallowed as non-fatal -- a write failure now aborts the rest of the staged-
-    escalation branch (skipping set_escalation_flag) and surfaces as a failure
-    result, instead of silently disabling incident-reference tracking while still
-    reporting success."""
+class TestNightwatcherStagedIncidentReferenceFailureIsNonFatal:
+    """HIGH finding fix: add_incident_reference failures after a successful
+    stage_escalation must not be treated as if the escalation itself failed --
+    the escalation already exists, so mark_incident_created still fires (to
+    prevent a retry from duplicating it) and the reference-persistence failure
+    is surfaced as a degraded-but-created result instead of a bare failure."""
 
     @pytest.mark.asyncio
-    async def test_add_incident_reference_failure_is_reported_as_failure(self, monkeypatch):
+    async def test_add_incident_reference_failure_is_reported_as_degraded_success(self, monkeypatch):
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -171,15 +171,15 @@ class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
 
         assert result is True
         turn_arg = ctx.append_and_broadcast.call_args[0][1]
-        assert "Failed to stage escalation" in turn_arg.thoughts
+        assert "Escalation staged" in turn_arg.thoughts
         assert "redis unavailable" in turn_arg.thoughts
-        assert "Escalation staged" not in turn_arg.thoughts
+        assert "Failed to stage escalation" not in turn_arg.thoughts
 
     @pytest.mark.asyncio
     async def test_add_incident_reference_failure_skips_set_escalation_flag(self, monkeypatch):
-        # The raise now propagates out of the add_incident_reference try/except and
-        # is caught by the outer try/except, so set_escalation_flag (which runs
-        # after the reference persist) must never be reached.
+        # add_incident_reference's failure short-circuits the success branch, so
+        # set_escalation_flag (which only runs after the reference persists) must
+        # never be reached.
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -190,11 +190,11 @@ class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
         bb.set_escalation_flag.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_add_incident_reference_failure_does_not_mark_incident_created(self, monkeypatch):
-        # HIGH finding fix: mark_incident_created must not fire before the
-        # (now-fatal) add_incident_reference call succeeds, otherwise a transient
-        # persistence failure would permanently block retries via
-        # has_incident_been_created's dedup check.
+    async def test_add_incident_reference_failure_still_marks_incident_created(self, monkeypatch):
+        # HIGH finding fix: mark_incident_created must fire once the escalation is
+        # staged, regardless of whether add_incident_reference then succeeds,
+        # otherwise a retry after a transient persistence failure would stage a
+        # duplicate escalation.
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -202,7 +202,7 @@ class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
 
         await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
 
-        ctx.mark_incident_created.assert_not_called()
+        ctx.mark_incident_created.assert_called_once_with("evt-1")
 
 
 class TestDirectJiraIncidentReference:
@@ -231,12 +231,15 @@ class TestDirectJiraIncidentReference:
         ctx.mark_incident_created.assert_called_once_with("evt-1")
 
 
-class TestDirectJiraIncidentReferenceFailureIsFatal:
-    """commit a712fc02: the direct-Jira branch's add_incident_reference failure
-    must also be fatal, mirroring the Nightwatcher-staged branch."""
+class TestDirectJiraIncidentReferenceFailureIsNonFatal:
+    """HIGH finding fix: mirrors the Nightwatcher-staged branch -- once
+    create_incident succeeds, the Jira issue already exists, so
+    add_incident_reference failing afterward must not be reported as if
+    incident creation itself failed, and must not skip mark_incident_created
+    (which would let a retry create a duplicate Jira issue)."""
 
     @pytest.mark.asyncio
-    async def test_add_incident_reference_failure_is_reported_as_failure(self, monkeypatch):
+    async def test_add_incident_reference_failure_is_reported_as_degraded_success(self, monkeypatch):
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -253,9 +256,10 @@ class TestDirectJiraIncidentReferenceFailureIsFatal:
 
         assert result is True
         turn_arg = ctx.append_and_broadcast.call_args[0][1]
-        assert "Failed to create incident" in turn_arg.thoughts
+        assert "Incident created in Jira" in turn_arg.thoughts
+        assert "VMER-1234" in turn_arg.thoughts
         assert "redis unavailable" in turn_arg.thoughts
-        assert "Incident created in Jira" not in turn_arg.thoughts
+        assert "Failed to create incident" not in turn_arg.thoughts
 
     @pytest.mark.asyncio
     async def test_add_incident_reference_failure_skips_set_escalation_flag(self, monkeypatch):
@@ -276,9 +280,11 @@ class TestDirectJiraIncidentReferenceFailureIsFatal:
         bb.set_escalation_flag.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_add_incident_reference_failure_does_not_mark_incident_created(self, monkeypatch):
+    async def test_add_incident_reference_failure_still_marks_incident_created(self, monkeypatch):
         # HIGH finding fix, mirrored for the direct-Jira branch: mark_incident_created
-        # must not fire before add_incident_reference succeeds.
+        # must fire once the Jira issue is created, regardless of whether
+        # add_incident_reference then succeeds, to prevent a retry from creating a
+        # duplicate Jira issue.
         monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
         event = _event_doc(source="aligner")
         ctx, bb = _mock_ctx(event)
@@ -293,4 +299,4 @@ class TestDirectJiraIncidentReferenceFailureIsFatal:
             ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
         )
 
-        ctx.mark_incident_created.assert_not_called()
+        ctx.mark_incident_created.assert_called_once_with("evt-1")

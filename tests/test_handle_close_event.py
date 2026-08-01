@@ -275,6 +275,43 @@ class TestOpenIncidentEscapeValve:
         ctx.close_and_broadcast.assert_called_once()
 
 
+class TestTrackingLinkValidatedRegardlessOfOpenIncidents:
+    """HIGH finding fix: the tracking_link host-allowlist check must run whenever a
+    tracking_link is supplied, even when there are no open incident_references --
+    it is later interpolated into bot-authored comments unconditionally, so it must
+    not be possible to smuggle an untrusted-host link through by closing an event
+    with no open incidents."""
+
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_with_no_open_incidents(self):
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "evil.example.com" in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_trusted_host_tracking_link_accepted_with_no_open_incidents(self):
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://github.com/org/repo/issues/1"},
+            None,
+        )
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.",
+            close_reason="resolved", tracking_link="https://github.com/org/repo/issues/1",
+        )
+
+
 class TestFeatureFlag:
     """T-14: ENABLE_TERMINAL_CLOSE_GATE=false restores legacy behavior."""
 
