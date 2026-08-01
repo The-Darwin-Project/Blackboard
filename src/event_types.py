@@ -7,3 +7,5 @@
 from typing import Literal
 
 EventSource = Literal["aligner", "chat", "slack", "headhunter", "timekeeper", "jarvis"]
+
+AUTOMATED_EVENT_SOURCES = ("headhunter", "aligner", "timekeeper")

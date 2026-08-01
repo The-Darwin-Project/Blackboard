@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
+from ..event_types import AUTOMATED_EVENT_SOURCES
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
 from .tool_gates import has_unevaluated_close_blocker
 
@@ -24,6 +26,14 @@ if TYPE_CHECKING:
     from .tool_router import ToolContext
 
 logger = logging.getLogger("darwin.brain")
+
+# Feature flag for the terminal-state close-gate enforcement (GitHub #155/#156).
+# Set to "false" for rapid disable without a redeploy of the schema/handler changes.
+ENABLE_TERMINAL_CLOSE_GATE = os.environ.get("ENABLE_TERMINAL_CLOSE_GATE", "true") == "true"
+
+_VALID_TERMINAL_REASONS = frozenset({
+    "resolved", "non_transient_confirmed", "self_resolved", "no_action_needed",
+})
 
 
 # ---------------------------------------------------------------------------

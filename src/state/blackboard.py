@@ -2213,6 +2213,34 @@ return 0
                     continue
         logger.debug(f"Brain severity set on event {event_id}: {brain_severity}")
 
+    async def add_incident_reference(self, event_id: str, ref: str) -> None:
+        """Append an incident reference (Jira issue key or Nightwatcher staging
+        placeholder) to an EventDocument's incident_references list (WATCH/MULTI/EXEC).
+
+        Used by report_incident's handler to make has_open_incidents-style checks
+        possible for close_event's terminal-state enforcement (GitHub #155).
+        """
+        key = f"{self.EVENT_PREFIX}{event_id}"
+        async with self.redis.pipeline(transaction=True) as pipe:
+            while True:
+                try:
+                    await pipe.watch(key)
+                    data = await pipe.get(key)
+                    if not data:
+                        logger.warning(f"Event {event_id} not found for incident_reference update")
+                        return
+                    event = EventDocument(**json.loads(data))
+                    refs = list(event.incident_references or [])
+                    refs.append(ref)
+                    event.incident_references = refs
+                    pipe.multi()
+                    pipe.set(key, json.dumps(event.model_dump()))
+                    await pipe.execute()
+                    break
+                except WatchError:
+                    continue
+        logger.info(f"Incident reference added to event {event_id}: {ref}")
+
     async def update_event_sticky_notes(
         self, event_id: str, sticky_notes: list[dict], unread_notes: int,
     ) -> None:

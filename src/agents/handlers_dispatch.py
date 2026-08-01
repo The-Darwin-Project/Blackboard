@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..event_types import AUTOMATED_EVENT_SOURCES
 from ..models import ConversationTurn, ESCALATION_SCOPE_MAP, EventType
 from ..utils.event_markdown import event_to_markdown
 
@@ -368,8 +369,7 @@ async def handle_report_incident(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return True
-    automated_sources = ("headhunter", "timekeeper", "aligner")
-    if event_doc.source not in automated_sources:
+    if event_doc.source not in AUTOMATED_EVENT_SOURCES:
         result_text = (
             f"report_incident is only available for automated events "
             f"(source={event_doc.source} is not eligible)."
@@ -399,6 +399,7 @@ async def handle_report_incident(
         try:
             await bb.stage_escalation(staged)
             ctx.mark_incident_created(event_id)
+            await bb.add_incident_reference(event_id, f"nightwatcher-staged:{staged.staged_at}")
             if event_doc.service:
                 try:
                     await bb.set_escalation_flag(
@@ -447,6 +448,7 @@ async def handle_report_incident(
             try:
                 result = await adapter.create_incident(fields)
                 ctx.mark_incident_created(event_id)
+                await bb.add_incident_reference(event_id, result["issue_key"])
                 if event_doc.service:
                     esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
                     try:
