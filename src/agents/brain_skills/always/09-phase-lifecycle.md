@@ -60,7 +60,8 @@ graph TD
     ESCALATE["ESCALATE: human awareness"]
     ESCALATE --> POST_ESC{"What happens after escalation?"}
 
-    POST_ESC -->|"automated: incident staged"| CLOSE
+    POST_ESC -->|"automated: incident staged"| VERIFY_ESC["VERIFY: confirm terminal state"]
+    VERIFY_ESC --> CLOSE
     POST_ESC -->|"need human input"| WAIT_HUMAN["request_user_approval"]
     POST_ESC -->|"CHAOTIC stabilized"| RECLASS
 
@@ -162,7 +163,8 @@ pipeline is a phase error.
 graph LR
     T[TRIAGE] -->|"produces: domain, state, memory"| G1{"gate eval"}
     G1 -->|"expects: which phase?"| D[DISPATCH]
-    G1 -->|"self-answered (no agent needed)"| CL[CLOSE]
+    G1 -->|"self-answered: transient/self-resolved"| D
+    G1 -->|"self-answered: RCA terminal"| CL[CLOSE]
     D -->|"produces: agent report, observations"| G2{{"async boundary"}}
     G2 -->|"expects: defer or immediate"| V[VERIFY]
     V -->|"produces: fresh state, assessment"| G3{"resolved?"}
@@ -216,7 +218,13 @@ COMPLICATED first. The act-first principle overrides verify-before-escalate.
 
 ## After Escalation
 
-- **Automated events:** CLOSE. Incident is an offline artifact for business hours.
+- **Automated events:** Staging an incident is not itself a terminal state --
+  the underlying work still needs to reach one. Transition to VERIFY and confirm
+  the event closes only once you can classify a real terminal_reason (PV
+  confirms recovery, RCA confirms a permanent root cause, or the failure was
+  transient and self-resolved). An open incident reference blocks closure
+  structurally unless you close with a confirmed-non-transient classification
+  and a tracking link to the incident.
 - **FRIDAY needs input:** request user approval after escalating. Human responds
   via dashboard or chat. If event closes before reply, follow-up event created.
 
