@@ -402,7 +402,8 @@ async def handle_report_incident(
             try:
                 await bb.add_incident_reference(event_id, f"nightwatcher-staged:{staged.staged_at}")
             except Exception as ref_err:
-                logger.warning(f"Failed to persist incident reference for {event_id} (non-fatal): {ref_err}")
+                logger.error(f"Failed to persist incident reference for {event_id}: {ref_err}")
+                raise
             if event_doc.service:
                 try:
                     await bb.set_escalation_flag(
@@ -454,7 +455,8 @@ async def handle_report_incident(
                 try:
                     await bb.add_incident_reference(event_id, result["issue_key"])
                 except Exception as ref_err:
-                    logger.warning(f"Failed to persist incident reference for {event_id} (non-fatal): {ref_err}")
+                    logger.error(f"Failed to persist incident reference for {event_id}: {ref_err}")
+                    raise
                 if event_doc.service:
                     esc_scope_jira = ESCALATION_SCOPE_MAP.get(event_doc.subject_type, "health")
                     try:

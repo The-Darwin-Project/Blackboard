@@ -1161,7 +1161,7 @@ class GitHubPlatform:
         turns = len(event.conversation)
         lines = [f"**Darwin** ({turns} turns)"]
         if close_summary:
-            lines.append(f"\n{close_summary}")
+            lines.append(f"\nSummary: {close_summary}")
         if tracking_link:
             lines.append(f"\n**Tracking:** {tracking_link}")
         if actions:
