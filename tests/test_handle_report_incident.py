@@ -1,0 +1,112 @@
+# tests/test_handle_report_incident.py
+# @ai-rules:
+# 1. [Constraint]: Pure unit tests -- mock ToolContext + BlackboardState, no real Redis, no Jira.
+# 2. [Pattern]: Mirrors test_handle_close_event.py's ToolContext-mock convention.
+# 3. [Gotcha]: handle_report_incident is async -- pytest.ini sets asyncio_mode=auto.
+"""Tests for handle_report_incident's incident_references persistence (T-11/T-12,
+plan: terminal-state-close-gate, Step 2) -- the prerequisite for GitHub #155's
+open-incident close-gate."""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from src.agents.handlers_dispatch import handle_report_incident
+from src.models import EventEvidence, EventInput
+
+
+def _event_doc(source: str = "aligner", conversation=None):
+    return SimpleNamespace(
+        id="evt-1",
+        source=source,
+        service="test-svc",
+        subject_type="service",
+        slack_thread_ts=None,
+        slack_channel_id=None,
+        conversation=conversation or [],
+        event=EventInput(
+            reason="anomaly",
+            evidence=EventEvidence(display_text="test", source_type=source, severity="warning"),
+        ),
+    )
+
+
+def _mock_ctx(event=None):
+    bb = AsyncMock()
+    bb.get_event = AsyncMock(return_value=event)
+    bb.stage_escalation = AsyncMock()
+    bb.add_incident_reference = AsyncMock()
+    bb.set_escalation_flag = AsyncMock()
+    ctx = AsyncMock()
+    ctx.get_blackboard = MagicMock(return_value=bb)
+    ctx.has_incident_been_created = MagicMock(return_value=False)
+    ctx.mark_incident_created = MagicMock()
+    ctx.next_turn_number = AsyncMock(return_value=1)
+    ctx.append_and_broadcast = AsyncMock(return_value=1)
+    ctx.get_incident_adapter = MagicMock(return_value=None)
+    return ctx, bb
+
+
+class TestNightwatcherStagedIncidentReference:
+    """T-12: the Nightwatcher-staged branch persists a placeholder incident
+    reference in "nightwatcher-staged:{staged_at}" format."""
+
+    @pytest.mark.asyncio
+    async def test_staged_branch_calls_add_incident_reference_with_placeholder(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+
+        result = await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        assert result is True
+        bb.add_incident_reference.assert_awaited_once()
+        call_args = bb.add_incident_reference.call_args
+        assert call_args.args[0] == "evt-1"
+        ref = call_args.args[1]
+        assert ref.startswith("nightwatcher-staged:")
+        # The suffix must be the StagedEscalation's own staged_at timestamp --
+        # parseable as a float, not a placeholder string.
+        float(ref.removeprefix("nightwatcher-staged:"))
+
+    @pytest.mark.asyncio
+    async def test_staged_branch_marks_incident_created(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="headhunter")
+        ctx, bb = _mock_ctx(event)
+
+        await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        ctx.mark_incident_created.assert_called_once_with("evt-1")
+
+    @pytest.mark.asyncio
+    async def test_non_automated_source_does_not_stage_or_persist_reference(self, monkeypatch):
+        """report_incident is only available for automated sources -- chat/slack
+        must neither stage an escalation nor add an incident_reference."""
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="chat")
+        ctx, bb = _mock_ctx(event)
+
+        result = await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        assert result is True
+        bb.stage_escalation.assert_not_awaited()
+        bb.add_incident_reference.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_incident_skips_staging_and_reference(self, monkeypatch):
+        """has_incident_been_created=True short-circuits before staging/reference logic."""
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        ctx.has_incident_been_created = MagicMock(return_value=True)
+
+        result = await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        assert result is True
+        bb.stage_escalation.assert_not_awaited()
+        bb.add_incident_reference.assert_not_awaited()

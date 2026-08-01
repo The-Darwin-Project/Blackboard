@@ -7,6 +7,8 @@
 """Tests for GitHubPlatform adapter — discovery, check aggregation, state_key, label lifecycle."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -719,3 +721,151 @@ class TestMultiInstallationRouting:
         resolved = await platform._resolve_client("", "org-a", "repo1")
         assert resolved is client
         manager.get_client_for_repo.assert_called_once_with("org-a", "repo1")
+
+
+# ---------------------------------------------------------------------------
+# T-18 / T-18b / T-19 / T-19b: tracking_link plumbing + close_reason humanization
+# (plan: terminal-state-close-gate, Step 5). PR-path tracking_link (_build_feedback_comment)
+# is already implemented at authoring time; the Issue-path additions in
+# post_issue_feedback (tracking_link + humanization) are not yet landed -- those
+# tests are written against the plan's target contract and may need adjustment
+# after reconciliation (e.g. exact f-string wording).
+# ---------------------------------------------------------------------------
+
+def _bfc_turn(result=None, evidence="resolved", thoughts="Done", timestamp=1719849600.0):
+    """Minimal close-turn stub for _build_feedback_comment -- only reads
+    actor/action/result/thoughts/timestamp off event.conversation[-1]."""
+    return SimpleNamespace(
+        actor="brain", action="close", result=result,
+        evidence=evidence, thoughts=thoughts, timestamp=timestamp,
+    )
+
+
+def _make_issue_event_stub(close_reason: str = "resolved", tracking_link: str | None = None,
+                            issue_ctx: dict | None = None):
+    """Minimal event-like object for post_issue_feedback()."""
+    evidence = MagicMock()
+    evidence.github_issue_context = issue_ctx or {
+        "owner": "org", "repo": "repo", "issue_number": 7, "installation_id": "456",
+    }
+    event_data = MagicMock()
+    event_data.evidence = evidence
+    turn = MagicMock()
+    turn.evidence = close_reason
+    turn.result = tracking_link
+    turn.actor = "brain"
+    turn.action = "close"
+    turn.thoughts = "Done"
+    turn.timestamp = 1719849600
+    evt = MagicMock()
+    evt.id = "evt-issue123"
+    evt.event = event_data
+    evt.conversation = [turn]
+    return evt
+
+
+class TestTrackingLinkInPrFeedbackComment:
+    """T-18 (GitHub half): _build_feedback_comment surfaces close_turn.result
+    as the tracking link, omitted cleanly when absent."""
+
+    def test_tracking_link_included_when_present(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(result="VMER-1234")])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "VMER-1234" in comment
+
+    def test_tracking_link_omitted_when_result_none(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(result=None)])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "Tracking" not in comment
+
+    def test_tracking_link_omitted_when_no_close_turn(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "Tracking" not in comment
+
+
+class TestTrackingLinkInIssueCloseComment:
+    """T-18b: post_issue_feedback surfaces the tracking link in the Issue close comment."""
+
+    @pytest.mark.asyncio
+    async def test_tracking_link_included_in_issue_comment(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+
+        evt = _make_issue_event_stub(close_reason="resolved", tracking_link="VMER-1234")
+        await platform.post_issue_feedback(evt)
+
+        comment_calls = [c for c in client.post.call_args_list if "comments" in str(c.args[0] if c.args else "")]
+        assert len(comment_calls) == 1
+        body = comment_calls[0].kwargs["json"]["body"]
+        assert "VMER-1234" in body
+
+    @pytest.mark.asyncio
+    async def test_tracking_link_omitted_cleanly_when_none(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+
+        evt = _make_issue_event_stub(close_reason="resolved", tracking_link=None)
+        await platform.post_issue_feedback(evt)
+
+        comment_calls = [c for c in client.post.call_args_list if "comments" in str(c.args[0] if c.args else "")]
+        assert len(comment_calls) == 1
+        body = comment_calls[0].kwargs["json"]["body"]
+        assert "Tracking" not in body
+
+
+class TestIssueCloseReasonHumanized:
+    """T-19: post_issue_feedback humanizes close_reason for display (e.g.
+    "Confirmed non-transient" instead of the raw "non_transient_confirmed")."""
+
+    @pytest.mark.asyncio
+    async def test_non_transient_confirmed_humanized_in_comment(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+
+        evt = _make_issue_event_stub(close_reason="non_transient_confirmed")
+        await platform.post_issue_feedback(evt)
+
+        comment_calls = [c for c in client.post.call_args_list if "comments" in str(c.args[0] if c.args else "")]
+        assert len(comment_calls) == 1
+        body = comment_calls[0].kwargs["json"]["body"]
+        assert "Confirmed non-transient" in body
+        assert "non_transient_confirmed" not in body
+
+
+class TestIssueHumanizationDoesNotLeakIntoSuppressionGate:
+    """T-19b: humanization is display-time-only -- the raw close_reason variable
+    that feeds the stale/duplicate suppression gate must never be reassigned to
+    its humanized label, or "Duplicate MR"-style text would silently break the
+    `close_reason not in ("stale", "duplicate")` gate check."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_still_suppresses_comment_after_humanization(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+
+        evt = _make_issue_event_stub(close_reason="duplicate")
+        await platform.post_issue_feedback(evt)
+
+        comment_calls = [c for c in client.post.call_args_list if "comments" in str(c.args[0] if c.args else "")]
+        assert len(comment_calls) == 0
+        platform.blackboard.mark_feedback_sent.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stale_still_suppresses_comment_after_humanization(self):
+        platform, client = _make_platform_with_client()
+        platform.blackboard.is_feedback_sent = AsyncMock(return_value=False)
+        platform.blackboard.mark_feedback_sent = AsyncMock()
+
+        evt = _make_issue_event_stub(close_reason="stale")
+        await platform.post_issue_feedback(evt)
+
+        comment_calls = [c for c in client.post.call_args_list if "comments" in str(c.args[0] if c.args else "")]
+        assert len(comment_calls) == 0

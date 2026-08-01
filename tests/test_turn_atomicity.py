@@ -107,6 +107,59 @@ class TestAtomicTurnAssignment:
         assert [t.turn for t in doc.conversation] == [1, 2, 3]
 
 
+class TestIncidentReferenceAndTrackingLink:
+    """T-11/T-15 (plan: terminal-state-close-gate): blackboard.add_incident_reference
+    and blackboard.close_event's tracking_link plumbing. Integration category --
+    reuses this file's fakeredis `bb` fixture + `_seed_event` helper."""
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_persists_real_key(self, bb):
+        # T-11: direct-Jira path -- add_incident_reference(event_id, "VMER-1234").
+        eid = await _seed_event(bb)
+
+        await bb.add_incident_reference(eid, "VMER-1234")
+
+        event = await bb.get_event(eid)
+        assert event.incident_references == ["VMER-1234"]
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_appends_without_clobbering(self, bb):
+        eid = await _seed_event(bb)
+
+        await bb.add_incident_reference(eid, "VMER-1234")
+        await bb.add_incident_reference(eid, "nightwatcher-staged:1719849600.0")
+
+        event = await bb.get_event(eid)
+        assert event.incident_references == ["VMER-1234", "nightwatcher-staged:1719849600.0"]
+
+    @pytest.mark.asyncio
+    async def test_close_event_persists_tracking_link_into_result_field(self, bb):
+        # T-15: tracking_link="VMER-1234" -> turn.result == "VMER-1234",
+        # turn.evidence unchanged (still close_reason).
+        eid = await _seed_event(bb)
+
+        await bb.close_event(
+            eid, "Root cause confirmed permanent.",
+            close_reason="non_transient_confirmed", tracking_link="VMER-1234",
+        )
+
+        event = await bb.get_event(eid)
+        close_turn = event.conversation[-1]
+        assert close_turn.result == "VMER-1234"
+        assert close_turn.evidence == "non_transient_confirmed"
+
+    @pytest.mark.asyncio
+    async def test_close_event_without_tracking_link_leaves_result_none(self, bb):
+        eid = await _seed_event(bb)
+
+        await bb.close_event(eid, "Self-recovered.", close_reason="self_resolved")
+
+        event = await bb.get_event(eid)
+        close_turn = event.conversation[-1]
+        assert close_turn.result is None
+        assert close_turn.evidence == "self_resolved"
+
+
 class TestSlackVisibilityFilter:
     """Verify _USER_VISIBLE_TOOL_RESULTS whitelist and conditional logic."""
 

@@ -71,8 +71,8 @@ def _ctx(**overrides) -> GateContext:
 # ---------------------------------------------------------------------------
 
 class TestRegistryStructure:
-    def test_registry_has_29_gates(self):
-        assert len(GATE_REGISTRY) == 29
+    def test_registry_has_30_gates(self):
+        assert len(GATE_REGISTRY) == 30
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -1149,3 +1149,87 @@ class TestObsFlood:
         from src.agents.tool_gates import _pred_obs_plateau, _pred_obs_flood
         assert _pred_obs_plateau(ctx) is True
         assert _pred_obs_flood(ctx) is True
+
+
+# ---------------------------------------------------------------------------
+# CLOSE_RETRY_CIRCUIT_BREAKER gate tests (plan: terminal-state-close-gate, Step 7)
+# ---------------------------------------------------------------------------
+
+class TestCloseRetryCircuitBreaker:
+    """T-8/T-9: any-3-consecutive-rejections streak (accepted trade-off vs
+    _pred_obs_plateau's same-value semantics -- see plan Revision History)."""
+
+    @staticmethod
+    def _rejection_turn() -> SimpleNamespace:
+        return _turn("brain", "tool_result", waitingFor="close_event")
+
+    def test_fires_at_3_consecutive_rejections(self):
+        """T-8: ctx(conversation=[3 turns with waitingFor="close_event"]) -> True (block)."""
+        conv = [self._rejection_turn() for _ in range(3)]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_close_retry_circuit_breaker
+        assert _pred_close_retry_circuit_breaker(ctx) is True
+
+    def test_does_not_fire_at_2(self):
+        conv = [self._rejection_turn() for _ in range(2)]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_close_retry_circuit_breaker
+        assert _pred_close_retry_circuit_breaker(ctx) is False
+
+    def test_resets_on_any_non_matching_turn(self):
+        """T-9: [2 rejections, 1 other tool call, ...] -> False (allow) -- the
+        reverse scan hits a non-matching waitingFor before reaching count 3."""
+        conv = [
+            self._rejection_turn(),
+            self._rejection_turn(),
+            self._rejection_turn(),
+            _turn("brain", "tool_result", waitingFor="select_agent"),
+            self._rejection_turn(),
+            self._rejection_turn(),
+        ]
+        ctx = _ctx(conversation=conv)
+        from src.agents.tool_gates import _pred_close_retry_circuit_breaker
+        assert _pred_close_retry_circuit_breaker(ctx) is False
+
+    def test_empty_conversation_does_not_fire(self):
+        ctx = _ctx(conversation=[])
+        from src.agents.tool_gates import _pred_close_retry_circuit_breaker
+        assert _pred_close_retry_circuit_breaker(ctx) is False
+
+    def test_gate_strips_close_event_when_circuit_open(self):
+        """Integration point between predicate and evaluate_gates(): count>=3
+        actually removes close_event from the active tool list."""
+        conv = [self._rejection_turn() for _ in range(3)]
+        ctx = _ctx(brain_phase="escalate", conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "close_event" not in _names(result)
+
+    def test_gate_keeps_close_event_at_2(self):
+        conv = [self._rejection_turn() for _ in range(2)]
+        ctx = _ctx(brain_phase="escalate", conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "close_event" in _names(result)
+
+    def test_other_tool_call_rearms_close_event_next_attempt(self):
+        """Any non-close_event tool call resets the streak, re-arming close_event."""
+        conv = [
+            self._rejection_turn(),
+            self._rejection_turn(),
+            self._rejection_turn(),
+            _turn("brain", "tool_result", waitingFor="lookup_service"),
+        ]
+        ctx = _ctx(brain_phase="escalate", conversation=conv)
+        result = evaluate_gates(ALL_SCHEMAS, ctx)
+        assert "close_event" in _names(result)
+
+
+class TestGateRegistryCountPlanned:
+    """T-10: GATE_REGISTRY grows to 30 (26 strip + 4 allow) once both the
+    OBS_FLOOD and CLOSE_RETRY_CIRCUIT_BREAKER gates are registered."""
+
+    def test_gate_registry_count_is_30(self):
+        assert len(GATE_REGISTRY) == 30
+
+    def test_strip_mode_gate_count_is_26(self):
+        strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
+        assert len(strip_gates) == 26
