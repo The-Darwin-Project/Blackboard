@@ -146,8 +146,9 @@ _ALL_TOOL_NAMES: frozenset[str] = frozenset(_TOOL_TO_BEHAVIOR.keys())
 def _sanitize_lesson_text(text: str) -> str:
     """Strip Brain tool/function names from lesson text fields.
 
-    Tier 1: Word-bounded regex replace with behavioral equivalents (preserves semantics).
-    Tier 2: Any remaining unmapped tool names stripped to empty string (fallback safety net).
+    All 38 BRAIN_TOOL_SCHEMAS names are mapped to behavioral descriptions via
+    _TOOL_TO_BEHAVIOR. Word-bounded regex replace preserves semantic meaning.
+    Test T-10 asserts the mapping stays complete against BRAIN_TOOL_SCHEMAS.
     """
     if not text:
         return text
