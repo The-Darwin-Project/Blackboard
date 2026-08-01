@@ -11,6 +11,8 @@
 # 8. [Pattern]: 4 allow-mode gates: INTERMEDIATE, PRE_CLASSIFICATION, CHAOTIC, CASUAL.
 # 9. [Pattern]: UNEVALUATED_CLOSE strips close_event when unevaluated jarvis.message or
 #    user.message turns exist. Prevents closing over unread interventions.
+# 10. [Pattern]: OBS_FLOOD is a broader count gate (any 6+ observations without decision),
+#     separate from OBS_PLATEAU (same key/value 3+ times).
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -146,7 +148,7 @@ def _pred_domain_casual(ctx: GateContext) -> bool:
         return False
     if ctx.context_flags.get("event_domain", "complicated") != "casual":
         return False
-    return ctx.event_source in ("chat", "slack")
+    return True
 
 
 def _pred_jarvis_response(ctx: GateContext) -> bool:
@@ -249,11 +251,6 @@ def _pred_silent_park(ctx: GateContext) -> bool:
 
 _OBS_PLATEAU_RE = re.compile(r"Recorded observation '(.+?)' = (.+?) \(point #")
 _OBS_PLATEAU_THRESHOLD = 3
-_OBS_DECISION_TOOLS = frozenset({
-    "defer_event", "close_event", "select_agent", "set_phase",
-    "classify_event", "report_incident", "refresh_gitlab_context",
-    "refresh_kargo_context", "refresh_github_context",
-})
 
 
 def _pred_obs_plateau(ctx: GateContext) -> bool:
@@ -284,6 +281,37 @@ def _pred_obs_plateau(ctx: GateContext) -> bool:
             # be silently skipped over, or two genuinely-separated observation
             # cycles would be miscounted as adjacent (codereview finding, R2/C6/C11).
             break
+    return False
+
+
+_OBS_FLOOD_THRESHOLD = 6
+_OBS_FLOOD_DECISION_TURNS = frozenset({
+    "defer_event", "close_event", "select_agent", "set_phase",
+    "classify_event", "report_incident",
+})
+
+
+def _pred_obs_flood(ctx: GateContext) -> bool:
+    """True if N+ consecutive observation results exist without an intervening decision."""
+    streak = 0
+    for t in reversed(ctx.conversation):
+        actor = t.get("actor") if isinstance(t, dict) else getattr(t, "actor", None)
+        action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
+        waiting = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
+        if action == "tool_result" and waiting == "record_observation":
+            streak += 1
+            if streak >= _OBS_FLOOD_THRESHOLD:
+                return True
+        elif actor == "brain" and waiting in _OBS_FLOOD_DECISION_TURNS:
+            break
+        elif actor in ("brain",) and action == "response":
+            break
+        elif actor in ("user", "jarvis") and action == "message":
+            break
+        elif actor not in ("brain",):
+            break
+        else:
+            continue
     return False
 
 
@@ -457,6 +485,15 @@ def _msg_obs_plateau(tool: str, _ctx: GateContext) -> str:
     )
 
 
+def _msg_obs_flood(tool: str, _ctx: GateContext) -> str:
+    return (
+        f"[GATE] {tool} blocked. Observation flood: {_OBS_FLOOD_THRESHOLD}+ "
+        "observations recorded without a decision. You have enough data — evaluate now: "
+        "defer_event if waiting for an external process, close_event if resolved, "
+        "or dispatch if action needed."
+    )
+
+
 def _msg_phase_jira_comment(tool: str, ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: dispatch, verify, escalate, or close phase."
 
@@ -620,6 +657,14 @@ GATE_REGISTRY: list[GateDefinition] = [
         tools_affected=_tools_obs_plateau,
         message=_msg_obs_plateau,
         hint="record a different metric, or transition to a decision tool.",
+    ),
+    GateDefinition(
+        gate_id="OBS_FLOOD",
+        mode="strip",
+        predicate=_pred_obs_flood,
+        tools_affected=_tools_obs_plateau,
+        message=_msg_obs_flood,
+        hint="defer_event if waiting for external process, close_event if resolved.",
     ),
     GateDefinition(
         gate_id="PHASE_JIRA_COMMENT",

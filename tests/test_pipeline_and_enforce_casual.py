@@ -613,13 +613,42 @@ class TestEnforceCasualRoute:
         resp = unauthed_client.post("/queue/evt-1/enforce-casual")
         assert resp.status_code == 401
 
-    def test_rejects_non_chat_slack_source(self, authed_client, mock_blackboard_route):
-        """T-11c: headhunter-sourced event -> 400."""
+    def test_headhunter_event_no_ownership_check(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """T-1: headhunter-sourced active event + authenticated user → 200.
+        Non-chat/slack events are team-shared — any authenticated user can enforce casual."""
         mock_blackboard_route.get_event = AsyncMock(
-            return_value=_make_event(event_id="evt-1", status="active", source="headhunter"),
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="headhunter",
+                created_by_email="someone-else@example.com",
+            ),
         )
         resp = authed_client.post("/queue/evt-1/enforce-casual")
-        assert resp.status_code == 400
+        assert resp.status_code == 200
+        mock_brain_route.enforce_domain_override.assert_awaited_once()
+
+    def test_chat_event_different_user_rejected(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """T-2: chat-sourced event + different user email → 403 (ownership preserved for chat/slack)."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="chat",
+                created_by_email="someone-else@example.com",
+            ),
+        )
+        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 403
+        mock_brain_route.enforce_domain_override.assert_not_awaited()
+
+    def test_chat_event_matching_owner_succeeds(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """T-3: chat-sourced event + matching owner email → 200 success."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="chat",
+                created_by_email="alice@example.com",
+            ),
+        )
+        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 200
+        mock_brain_route.enforce_domain_override.assert_awaited_once()
 
     def test_rejects_closed_event(self, authed_client, mock_blackboard_route):
         """T-12: closed event -> 409."""

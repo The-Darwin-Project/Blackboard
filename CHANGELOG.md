@@ -10,6 +10,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `POST /queue/{event_id}/enforce-casual` now accepts events from any source (previously restricted to chat/slack). Ownership check retained for chat/slack events only.
+- DOMAIN_CASUAL gate fires for all sources when domain is casual (previously chat/slack only).
+
+### Added
+
+- OBS_FLOOD gate: strips `record_observation` after 6+ consecutive observations without an intervening decision tool call (any key — complements existing OBS_PLATEAU which fires on 3+ identical keys).
+- "Defer Satisfies Keep Monitoring" skill section in flow-engineering.
+- Post-execution skill guidance: pipeline wait = subscribe + defer, not active polling.
+
+### Fixed
+
+- Observation spiral evasion via series-name fragmentation (embedding pipeline IDs in observation names, cycling through synonym aliases).
+
 ## [1.0.0] - 2026-03-20
 
 ### Added

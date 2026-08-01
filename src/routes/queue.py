@@ -390,23 +390,19 @@ async def enforce_casual_domain(
 ):
     """Force event domain to casual from the UI (human override).
 
-    Requires authentication. Source-restricted server-side to chat/slack.
+    Requires authentication. Ownership-checked for chat/slack events only;
+    automated/operational events are team-shared (no ownership restriction).
     """
     event = await blackboard.get_event(event_id)
     if not event:
         raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
     if event.status == EventStatus.CLOSED:
         raise HTTPException(status_code=409, detail="Cannot modify a closed event")
-    # Ownership check (codereview finding: auth-rbac) -- require_auth only proves the
-    # caller is *someone*, not that they own this event. created_by_email is the same
-    # multi-tenant ownership field used for BFF filtering elsewhere (list_active_events).
-    # Deny-by-default: an event with no recorded owner (legacy/automated -- optional for
-    # backward compat per EventDocument.created_by_email) can't be verified as belonging
-    # to this caller, so it is treated the same as an owner mismatch, not left open.
-    if event.created_by_email != user.email:
-        raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
-    if event.source not in ("chat", "slack"):
-        raise HTTPException(status_code=400, detail="Casual domain override is only valid for chat/slack events")
+    # Ownership check for user-initiated events only. Automated/operational events
+    # (headhunter, aligner, timekeeper, etc.) are team-shared — no single owner.
+    if event.source in ("chat", "slack"):
+        if event.created_by_email != user.email:
+            raise HTTPException(status_code=403, detail="Not authorized to override this event's domain")
 
     try:
         brain = await get_brain()

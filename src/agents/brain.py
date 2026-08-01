@@ -4310,6 +4310,12 @@ class Brain:
                 user_name=user_label,
                 thoughts=f"[DOMAIN OVERRIDE] {user_label} enforced {domain.upper()} domain. Reason: {_sanitize_override_reason(reason)}",
             )
+            reclass_condition = (
+                "Do not reclassify unless the user's next message shifts to a task."
+                if event.source in ("chat", "slack")
+                else "Do not reclassify unless new evidence arrives (subscription wake, "
+                "state change) or the user's next message shifts to a task."
+            )
             directive = ConversationTurn(
                 turn=0,
                 actor="brain",
@@ -4317,7 +4323,7 @@ class Brain:
                 waitingFor="enforce_domain_override",
                 evidence=(
                     f"Domain locked: {domain.upper()}. Respond to the user conversationally now. "
-                    "Do not reclassify unless the user's next message shifts to a task."
+                    f"{reclass_condition}"
                 ),
             )
             try:

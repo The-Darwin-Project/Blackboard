@@ -84,6 +84,8 @@ that cannot be trended or compared, diluting the signal from entries that can.
 - Opinions or qualitative assessments (use conversation turns)
 - Unchanged values (only record when the value has changed or time has passed)
 - Raw log lines (observations are numbers, not text)
+- Pipeline IDs or other constant identifiers (an ID never changes — recording it adds zero trajectory information; use `take_note` for identifiers you need to reference later)
+- The same underlying signal under multiple aliases (e.g., `push_pipeline_running` + `push_pipeline_status_running` + `pipeline_status` are all one PV — pick one canonical name)
 
 ## Using Trajectories
 
