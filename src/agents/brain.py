@@ -345,6 +345,15 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "request_user_approval",
 })
 
+# The exhaustive set of close_event's LLM-facing terminal_reason values (types.py's
+# schema enum). Used by _close_and_broadcast's TOCTOU recheck -- must stay an exact
+# superset of that enum, no more, no less: system-driven close_reason values (stale,
+# duplicate, timeout, force_closed, idle_timeout, error) never reach this path from
+# the LLM and must remain excluded from the recheck.
+_LLM_CLOSE_REASONS = frozenset({
+    "resolved", "non_transient_confirmed", "self_resolved", "no_action_needed",
+})
+
 
 import re as _re
 
@@ -4133,7 +4142,7 @@ class Brain:
             pass
         # Tighten TOCTOU: for LLM-driven closes, re-check after task cancellation.
         # System-driven closes (duplicate, timeout, error, force_closed) bypass.
-        if close_reason == "resolved":
+        if close_reason in _LLM_CLOSE_REASONS:
             from .tool_gates import has_unevaluated_close_blocker
             latest = await self.blackboard.get_event(event_id)
             if latest and has_unevaluated_close_blocker(latest.conversation):
