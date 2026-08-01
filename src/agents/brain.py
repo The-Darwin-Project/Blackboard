@@ -2634,12 +2634,18 @@ class Brain:
             new_event_text = header + f"\n\n(No turns yet -- this is a new event. Triage it.)\n{terminal_prompt}"
             return [{"role": "user", "parts": [{"text": new_event_text}]}]
 
+        # JIT freshness: re-fetch conversation from Redis to close the 30-40s gap
+        # between outer-loop fetch and this point (RECALL + skill loading happens between).
+        # Event header metadata (service, evidence, subject_type) uses the param — stable.
+        fresh_event = await self.blackboard.get_event(event.id)
+        conversation = fresh_event.conversation if fresh_event else event.conversation
+
         context_text = header
 
         # -- Pre-scan: find last eligible tool_result/route for skill pointer injection --
         target_skill_turn = None
         if self._skill_loader:
-            for t in reversed(event.conversation):
+            for t in reversed(conversation):
                 if (t.actor == "brain" and t.action in ("tool_result", "route")
                         and t.waitingFor
                         and self._skill_loader.get_tool_skills(t.waitingFor)):
@@ -2649,7 +2655,7 @@ class Brain:
         # -- Build structured conversation messages --
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
 
-        for turn in event.conversation:
+        for turn in conversation:
             # FC/FR reconstruction: tool_result turns become structurally distinct
             # functionCall/functionResponse pairs (never merged with other content)
             if turn.actor == "brain" and turn.action == "tool_result":
