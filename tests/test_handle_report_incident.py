@@ -112,6 +112,47 @@ class TestNightwatcherStagedIncidentReference:
         bb.add_incident_reference.assert_not_awaited()
 
 
+class TestIncidentCreatedOrderingRelativeToReferencePersist:
+    """commit eac8703a: mark_incident_created must fire strictly after
+    add_incident_reference succeeds, in both branches -- not merely "not called
+    on failure" (already covered elsewhere), but actually ordered after on the
+    success path too, since a reordering bug could pass the failure-path tests
+    while still calling mark_incident_created too early on success."""
+
+    @pytest.mark.asyncio
+    async def test_staged_branch_marks_incident_created_after_reference_persist(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        call_order = []
+        bb.add_incident_reference = AsyncMock(side_effect=lambda *a, **k: call_order.append("add_incident_reference"))
+        ctx.mark_incident_created = MagicMock(side_effect=lambda *a, **k: call_order.append("mark_incident_created"))
+
+        await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        assert call_order == ["add_incident_reference", "mark_incident_created"]
+
+    @pytest.mark.asyncio
+    async def test_direct_jira_branch_marks_incident_created_after_reference_persist(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1234", "issue_url": "https://example/browse/VMER-1234"},
+        )
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+        call_order = []
+        bb.add_incident_reference = AsyncMock(side_effect=lambda *a, **k: call_order.append("add_incident_reference"))
+        ctx.mark_incident_created = MagicMock(side_effect=lambda *a, **k: call_order.append("mark_incident_created"))
+
+        await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        assert call_order == ["add_incident_reference", "mark_incident_created"]
+
+
 class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
     """commit a712fc02: add_incident_reference failures must no longer be silently
     swallowed as non-fatal -- a write failure now aborts the rest of the staged-

@@ -380,6 +380,42 @@ class TestTrackingLinkDomainAllowlist:
         untrusted_but_recorded = "https://example.com/incident/42"
         assert _is_valid_tracking_link(untrusted_but_recorded, [untrusted_but_recorded]) is True
 
+    def test_host_match_is_case_insensitive(self):
+        assert _is_valid_tracking_link("https://GitHub.COM/org/repo/issues/1", []) is True
+
+    def test_http_scheme_also_honors_allowlist(self):
+        assert _is_valid_tracking_link("http://github.com/org/repo/issues/1", []) is True
+        assert _is_valid_tracking_link("http://evil.example.com/phish", []) is False
+
+    def test_rejects_subdomain_of_trusted_host(self):
+        # A subdomain is a distinct host -- not implicitly trusted just because it
+        # ends with an allowlisted domain.
+        assert _is_valid_tracking_link("https://sub.github.com/org/repo/issues/1", []) is False
+
+    def test_rejects_userinfo_bypass_attempt(self):
+        # "https://github.com@evil.example.com/phish" parses github.com as userinfo,
+        # not the host -- must resolve on the real host (evil.example.com) and reject.
+        assert _is_valid_tracking_link("https://github.com@evil.example.com/phish", []) is False
+
+    def test_gitlab_host_env_var_strips_scheme_and_trailing_slash(self, monkeypatch):
+        # _allowed_tracking_hosts() strips a "https://"/"http://" prefix and trailing
+        # "/" off GITLAB_HOST before comparing -- verify that normalization actually
+        # runs, not just the already-bare-hostname case covered above.
+        monkeypatch.setenv("GITLAB_HOST", "https://gitlab.example.com/")
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is True
+
+    def test_jira_url_env_var_without_scheme_is_still_parsed(self, monkeypatch):
+        # JIRA_URL may be configured as a bare host (no scheme) -- _allowed_tracking_hosts()
+        # must still extract the hostname correctly.
+        monkeypatch.setenv("JIRA_URL", "jira.example.com")
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is True
+
+    def test_unconfigured_gitlab_and_jira_hosts_are_not_allowed(self, monkeypatch):
+        monkeypatch.delenv("GITLAB_HOST", raising=False)
+        monkeypatch.delenv("JIRA_URL", raising=False)
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is False
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is False
+
 
 class TestEnableTerminalCloseGateFailsClosedOnMisconfig:
     """HIGH finding fix: an unrecognized ENABLE_TERMINAL_CLOSE_GATE value must resolve
