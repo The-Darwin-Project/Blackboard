@@ -116,6 +116,7 @@ class ToolContext(Protocol):
 
     async def close_and_broadcast(
         self, event_id: str, summary: str, close_reason: str | None = None,
+        tracking_link: str | None = None,
     ) -> None: ...
 
     async def run_agent_task(

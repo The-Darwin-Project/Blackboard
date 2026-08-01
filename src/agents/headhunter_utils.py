@@ -23,3 +23,13 @@ def _safe_int(env_key: str, default: int) -> int:
 
 _COMMENT_LIMIT = _safe_int("HEADHUNTER_COMMENT_LIMIT", 2000)
 _DESC_SAFETY_CAP = _safe_int("HEADHUNTER_DESCRIPTION_CAP", 100_000)
+
+# Human-readable labels for close_event's terminal_reason/close_reason values.
+# Display-time-only lookup -- never reassign the raw close_reason variable that
+# feeds control-flow gates (e.g. `close_reason not in ("stale", "duplicate")`).
+CLOSE_REASON_LABELS = {
+    "resolved": "Resolved",
+    "non_transient_confirmed": "Confirmed non-transient",
+    "self_resolved": "Self-resolved",
+    "no_action_needed": "No action needed",
+}

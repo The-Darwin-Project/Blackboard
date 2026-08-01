@@ -45,7 +45,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, CLOSE_REASON_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -872,8 +872,13 @@ class GitHubPlatform:
         close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
         if close_reason not in ("stale", "duplicate"):
             turns = len(event.conversation)
+            # Display-time-only humanization: close_reason above stays raw and continues
+            # to feed the stale/duplicate gate check -- never reassigned.
+            outcome_label = CLOSE_REASON_LABELS.get(close_reason, close_reason)
+            tracking_link_val = (close_turn.result or "") if close_turn else ""
+            tracking_suffix = f"\n**Tracking:** {tracking_link_val}" if tracking_link_val else ""
             await self._post_comment(installation_id, owner, repo, number,
-                f"**Darwin** closed this issue ({turns} turns). Outcome: {close_reason}")
+                f"**Darwin** closed this issue ({turns} turns). Outcome: {outcome_label}{tracking_suffix}")
 
         await self.blackboard.mark_feedback_sent(event.id)
 
@@ -1151,11 +1156,14 @@ class GitHubPlatform:
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_summary = (close_turn.thoughts or "") if close_turn else ""
+        tracking_link = (close_turn.result or "") if close_turn else ""
 
         turns = len(event.conversation)
         lines = [f"**Darwin** ({turns} turns)"]
         if close_summary:
             lines.append(f"\n{close_summary}")
+        if tracking_link:
+            lines.append(f"\n**Tracking:** {tracking_link}")
         if actions:
             lines.append("\n**Trace (UTC):**")
             lines.extend(actions[:5])

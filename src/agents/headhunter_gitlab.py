@@ -751,11 +751,14 @@ class GitLabPlatform:
 
         close_turn = event.conversation[-1] if event.conversation else None
         close_summary = (close_turn.thoughts or "") if close_turn else ""
+        tracking_link = (close_turn.result or "") if close_turn else ""
 
         turns = len(event.conversation)
         lines = [f"**Darwin** ({turns} turns)"]
         if close_summary:
             lines.append(f"\n{close_summary}")
+        if tracking_link:
+            lines.append(f"\n**Tracking:** {tracking_link}")
         if actions:
             lines.append("\n**Trace (UTC):**")
             lines.extend(actions[:5])

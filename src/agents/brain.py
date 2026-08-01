@@ -508,8 +508,13 @@ class _BrainToolContext:
     async def next_turn_number(self, event_id: str) -> int:
         return await self._b._next_turn_number(event_id)
 
-    async def close_and_broadcast(self, event_id: str, summary: str, close_reason: str | None = None) -> None:
-        await self._b._close_and_broadcast(event_id, summary, close_reason=close_reason)
+    async def close_and_broadcast(
+        self, event_id: str, summary: str, close_reason: str | None = None,
+        tracking_link: str | None = None,
+    ) -> None:
+        await self._b._close_and_broadcast(
+            event_id, summary, close_reason=close_reason, tracking_link=tracking_link,
+        )
 
     async def run_agent_task(self, event_id, agent_name, agent, task, event_md_path, routing_turn_num, mode="", parallel=False, effort="") -> None:
         task_coro = self._b._run_agent_task(
@@ -4109,7 +4114,10 @@ class Brain:
             self._orphan_requeue_count.pop(event_id, None)
             logger.error(f"Orphan {event_id} closed after 3 failed re-queue attempts")
 
-    async def _close_and_broadcast(self, event_id: str, summary: str, close_reason: str = "resolved") -> None:
+    async def _close_and_broadcast(
+        self, event_id: str, summary: str, close_reason: str = "resolved",
+        tracking_link: str | None = None,
+    ) -> None:
         """Close an event and broadcast the closure to UI."""
         event = await self.blackboard.get_event(event_id)
         if not event or event.status.value == "closed":
@@ -4131,7 +4139,10 @@ class Brain:
             if latest and has_unevaluated_close_blocker(latest.conversation):
                 logger.info("_close_and_broadcast aborted for %s: late unevaluated message", event_id)
                 return
-        await self.blackboard.close_event(event_id, summary, close_reason=close_reason, token_usage=token_usage)
+        await self.blackboard.close_event(
+            event_id, summary, close_reason=close_reason,
+            token_usage=token_usage, tracking_link=tracking_link,
+        )
         # Persist report snapshot (non-fatal)
         try:
             await self.blackboard.persist_report(event_id)

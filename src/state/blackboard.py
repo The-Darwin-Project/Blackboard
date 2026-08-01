@@ -1922,13 +1922,17 @@ return 0
 
     async def close_event(
         self, event_id: str, summary: str, close_reason: str = "resolved",
-        token_usage: dict | None = None,
+        token_usage: dict | None = None, tracking_link: str | None = None,
     ) -> None:
         """Close an event with summary. Move from active to closed.
 
         close_reason: structured reason for closure. Stored in close turn's evidence field.
         Values: resolved, stale, timeout, force_closed, duplicate, user_closed, error.
         token_usage: pre-drained per-event token totals (caller drains BEFORE calling this).
+        tracking_link: optional external tracking reference (Jira issue key/URL, incident
+        link). Stored in the close turn's unused `result` field -- `evidence` stays exactly
+        `close_reason`, preserving existing exact-match reads in headhunter_gitlab.py/
+        headhunter_github.py.
         Uses WATCH/MULTI/EXEC to prevent losing turns appended between
         GET and SET by concurrent writers (mark_turns_*, append_turn).
         """
@@ -1951,6 +1955,7 @@ return 0
                         action="close",
                         thoughts=summary,
                         evidence=close_reason,
+                        result=tracking_link,
                     )
                     event.conversation.append(close_turn)
                     pipe.multi()
