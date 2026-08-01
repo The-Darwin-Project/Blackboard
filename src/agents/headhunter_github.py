@@ -1155,7 +1155,7 @@ class GitHubPlatform:
                 actions.append(f"- `{ts}` {first_line[:150]}")
 
         close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
-        close_summary = (close_turn.thoughts or "") if close_turn else ""
+        close_summary = sanitize_comment_field((close_turn.thoughts or "") if close_turn else "")
         tracking_link = sanitize_comment_field((close_turn.result or "") if close_turn else "")
 
         turns = len(event.conversation)
