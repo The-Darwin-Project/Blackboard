@@ -515,6 +515,11 @@ class _BrainToolContext:
     def mark_incident_created(self, eid: str) -> None:
         self._b._incident_created.add(eid)
 
+    # --- Cycle snapshot (per-event state from Redis) ---
+    def get_snapshot(self, eid: str):
+        """Return CycleSnapshot for event (or None if not loaded yet)."""
+        return self._b._cycle_snapshots.get(eid)
+
     async def get_cached_journal(self, svc: str) -> list[str]:
         return await self._b._get_journal_cached(svc)
 
@@ -729,6 +734,10 @@ class Brain:
         # Global dispatch WIP cap (flow engineering: Peak Throughput Principle)
         max_dispatches = int(os.getenv("BRAIN_MAX_CONCURRENT_DISPATCHES", "0"))
         self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
+        # Per-event cycle state (Redis-backed via BRAIN_REDIS_STATE_ENABLED)
+        from ..state.event_state import CycleSnapshot, create_event_state
+        self._event_state = create_event_state(redis=self.blackboard.redis)
+        self._cycle_snapshots: dict[str, CycleSnapshot] = {}
 
         self._search_enabled = os.getenv("BRAIN_GOOGLE_SEARCH_ENABLED", "false").lower() == "true"
         self._rag_grounding_corpus = os.getenv("RAG_GROUNDING_CORPUS", "")
@@ -905,6 +914,10 @@ class Brain:
         service, close this one as a duplicate.
         """
         self._last_processed[event_id] = time.time()
+
+        # Load per-event cycle state from Redis (write-through snapshot for sync handler reads)
+        snapshot = await self._event_state.get(event_id)
+        self._cycle_snapshots[event_id] = snapshot
 
         # Generate cycle_id for subscription lifecycle tracking (subscribe + defer in same cycle)
         from uuid import uuid4
@@ -3084,6 +3097,7 @@ class Brain:
         self._waiting_for_agent.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)
+        self._cycle_snapshots.pop(event_id, None)
 
     async def handle_wake_task(self, data: dict, agent_id: str) -> None:
         """Process a self-initiated wake task (teammate message woke an idle agent).
@@ -4229,6 +4243,12 @@ class Brain:
         self._response_emitted_for.discard(event_id)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
+        # Delete per-event Redis state hash + evict local snapshot
+        self._cycle_snapshots.pop(event_id, None)
+        try:
+            await self._event_state.delete(event_id)
+        except Exception as e:
+            logger.warning("EventState.delete failed for %s (non-fatal): %s", event_id, e)
         self._agent_sessions.pop(event_id, None)
         self._agent_session_modes.pop(event_id, None)
         for agent in self.agents.values():

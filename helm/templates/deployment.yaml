@@ -430,6 +430,11 @@ spec:
             - name: BRAIN_GOOGLE_SEARCH_ENABLED
               value: "{{ .Values.googleSearch.enabled }}"
             {{- end }}
+            {{- if .Values.brain }}
+            # Brain per-event state backend (Redis HASH vs in-memory)
+            - name: BRAIN_REDIS_STATE_ENABLED
+              value: "{{ .Values.brain.redisStateEnabled }}"
+            {{- end }}
             {{- if .Values.memoryReflex }}
             # Memory Reflex (real-time lesson search during thinking stream)
             - name: BRAIN_MEMORY_REFLEX
