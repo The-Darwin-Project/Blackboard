@@ -66,7 +66,50 @@ async def handle_close_event(
         logger.info("close_event aborted for %s: late-arriving unevaluated message", event_id)
         return True
     summary = args.get("summary", "Event closed.")
-    await ctx.close_and_broadcast(event_id, summary)
+    terminal_reason = args.get("terminal_reason")
+    tracking_link = args.get("tracking_link")
+
+    if not ENABLE_TERMINAL_CLOSE_GATE:
+        # Legacy behavior, flag disabled: explicit "resolved" (not omitted) so the
+        # TOCTOU recheck in Brain._close_and_broadcast still fires correctly.
+        await ctx.close_and_broadcast(event_id, summary, close_reason="resolved")
+        return False
+
+    if terminal_reason not in _VALID_TERMINAL_REASONS:
+        reject_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts="close_event rejected: terminal_reason is required -- classify as "
+                     "resolved, non_transient_confirmed, self_resolved, or no_action_needed.",
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, reject_turn)
+        logger.info("close_event rejected for %s: missing/invalid terminal_reason", event_id)
+        return True
+
+    open_refs = fresh.incident_references or []
+    if open_refs and fresh.source in AUTOMATED_EVENT_SOURCES and (
+        terminal_reason != "non_transient_confirmed" or not tracking_link
+    ):
+        reject_turn = ConversationTurn(
+            turn=0,
+            actor="brain",
+            action="tool_result",
+            thoughts=(
+                f"close_event rejected: open incident reference(s) {', '.join(open_refs)} "
+                "exist for this event. Provide terminal_reason=non_transient_confirmed together "
+                "with a tracking_link to close, or resolve the incident(s) first."
+            ),
+            waitingFor="close_event",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, reject_turn)
+        logger.info("close_event rejected for %s: open incident reference(s) %s", event_id, open_refs)
+        return True
+
+    await ctx.close_and_broadcast(event_id, summary, close_reason=terminal_reason, tracking_link=tracking_link)
     return False
 
 

@@ -3,10 +3,13 @@
 # 1. [Constraint]: Pure unit tests — mock ToolContext + BlackboardState, no real Redis.
 # 2. [Pattern]: Uses ConversationTurn objects (not dicts) to match production path.
 # 3. [Gotcha]: handle_close_event is async — all tests use pytest-asyncio.
-"""Tests for handle_close_event pessimistic re-check (commit 76803ab0).
+"""Tests for handle_close_event pessimistic re-check (commit 76803ab0) and the
+terminal-state close-gate enforcement (GitHub #155/#156).
 
 Covers: abort on unevaluated user/jarvis message, happy-path close,
-None/closed event fallback, brain.phase scan boundary, response_parts threading.
+None/closed event fallback, brain.phase scan boundary, response_parts threading,
+terminal_reason validation, open-incident-reference blocking + escape valve,
+feature flag, and precedence between the pessimistic guard and the new checks.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import src.agents.handlers_state as handlers_state
 from src.agents.handlers_state import handle_close_event
 from src.models import ConversationTurn, EventStatus, MessageStatus
 
@@ -33,10 +37,17 @@ def _mock_ctx(event=None):
     return ctx, bb
 
 
-def _event(conversation: list[ConversationTurn], status: str = "active"):
+def _event(
+    conversation: list[ConversationTurn],
+    status: str = "active",
+    source: str = "chat",
+    incident_references: list[str] | None = None,
+):
     return SimpleNamespace(
         conversation=conversation,
         status=SimpleNamespace(value=status),
+        source=source,
+        incident_references=incident_references,
     )
 
 
@@ -80,16 +91,20 @@ class TestHappyPathClose:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {"summary": "Done."}, None)
+        result = await handle_close_event(
+            ctx, "evt-1", {"summary": "Done.", "terminal_reason": "resolved"}, None,
+        )
         assert result is False
-        ctx.close_and_broadcast.assert_called_once_with("evt-1", "Done.")
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Done.", close_reason="resolved", tracking_link=None,
+        )
         ctx.append_and_broadcast.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_empty_conversation_closes(self):
         event = _event([])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -124,7 +139,7 @@ class TestScanBoundary:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -136,7 +151,7 @@ class TestScanBoundary:
             _turn("brain", "response"),
         ])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -148,7 +163,7 @@ class TestNonBlockingTurns:
     async def test_user_confirm_ignored(self):
         event = _event([_turn("user", "confirm", MessageStatus.SENT)])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
 
@@ -156,6 +171,138 @@ class TestNonBlockingTurns:
     async def test_sysadmin_message_ignored(self):
         event = _event([_turn("sysadmin", "message", MessageStatus.SENT)])
         ctx, _ = _mock_ctx(event)
-        result = await handle_close_event(ctx, "evt-1", {}, None)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
         assert result is False
         ctx.close_and_broadcast.assert_called_once()
+
+
+class TestTerminalReasonValidation:
+    """T-1, T-2, T-13: terminal_reason is required and must be a valid enum value."""
+
+    @pytest.mark.asyncio
+    async def test_missing_terminal_reason_rejects(self):
+        # T-1
+        event = _event([])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"summary": "done"}, None)
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert turn_arg.waitingFor == "close_event"
+
+    @pytest.mark.asyncio
+    async def test_invalid_terminal_reason_rejects(self):
+        # T-2
+        event = _event([])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1", {"summary": "done", "terminal_reason": "whatever"}, None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_terminal_reason_no_open_incidents_closes(self):
+        # T-3
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.", close_reason="resolved", tracking_link=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_self_resolved_still_works(self):
+        # T-13
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "self_resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
+
+class TestOpenIncidentEscapeValve:
+    """T-4 through T-7: open incident_references block close unless non_transient_confirmed + tracking_link."""
+
+    @pytest.mark.asyncio
+    async def test_open_incident_blocks_close_without_escape_valve(self):
+        # T-4
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "JIRA-1" in turn_arg.thoughts
+        assert turn_arg.waitingFor == "close_event"
+
+    @pytest.mark.asyncio
+    async def test_non_transient_confirmed_without_tracking_link_still_blocks(self):
+        # T-5
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1", {"terminal_reason": "non_transient_confirmed"}, None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_transient_confirmed_with_tracking_link_succeeds(self):
+        # T-6
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "non_transient_confirmed", "tracking_link": "JIRA-1"},
+            None,
+        )
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with(
+            "evt-1", "Event closed.",
+            close_reason="non_transient_confirmed", tracking_link="JIRA-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_incident_on_non_automated_source_does_not_block(self):
+        # T-7
+        event = _event([], source="chat", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
+
+class TestFeatureFlag:
+    """T-14: ENABLE_TERMINAL_CLOSE_GATE=false restores legacy behavior."""
+
+    @pytest.mark.asyncio
+    async def test_feature_flag_disabled_skips_enforcement(self, monkeypatch):
+        monkeypatch.setattr(handlers_state, "ENABLE_TERMINAL_CLOSE_GATE", False)
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"summary": "done"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once_with("evt-1", "done", close_reason="resolved")
+
+
+class TestExistingGuardPrecedence:
+    """T-20: the pre-existing unevaluated-close-blocker still wins over terminal_reason checks."""
+
+    @pytest.mark.asyncio
+    async def test_unevaluated_message_blocks_even_with_valid_terminal_reason(self):
+        event = _event(
+            [_turn("user", "message", MessageStatus.SENT)],
+            source="aligner", incident_references=["JIRA-1"],
+        )
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "non_transient_confirmed", "tracking_link": "JIRA-1"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "unevaluated message" in turn_arg.thoughts
