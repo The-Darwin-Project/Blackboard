@@ -26,6 +26,7 @@ import os
 import re
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from ..event_types import AUTOMATED_EVENT_SOURCES, TERMINAL_REASONS
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
@@ -52,12 +53,36 @@ _VALID_TERMINAL_REASONS = frozenset(TERMINAL_REASONS)
 # match a real incident_references entry to be accepted as a tracking_link.
 _TRACKING_LINK_PATTERN = re.compile(r'^[A-Z]+-\d+$|^https?://')
 
+# URL tracking_links must resolve to one of these hosts. A bare truthy https?:// match is
+# not sufficient on its own: an attacker-supplied tracking_link is later interpolated into
+# bot-authored GitLab/GitHub comments, so an unrestricted host would let a crafted value
+# post an attacker-controlled link (phishing) or content (prompt-injection vector for any
+# agent that later dereferences it) under the bot's identity.
+_STATIC_TRACKING_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+def _allowed_tracking_hosts() -> frozenset[str]:
+    """Trusted hosts for tracking_link URLs: static hosts plus this deployment's
+    configured GitLab/Jira instances, read fresh so env changes apply without a restart.
+    """
+    hosts = set(_STATIC_TRACKING_HOSTS)
+    gitlab_host = os.environ.get("GITLAB_HOST", "").removeprefix("https://").removeprefix("http://").rstrip("/")
+    if gitlab_host:
+        hosts.add(gitlab_host)
+    jira_url = os.environ.get("JIRA_URL", "")
+    if jira_url:
+        jira_host = urlsplit(jira_url if "://" in jira_url else f"https://{jira_url}").hostname
+        if jira_host:
+            hosts.add(jira_host)
+    return frozenset(hosts)
+
 
 def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) -> bool:
     """True if tracking_link references a real tracking artifact.
 
     Either it matches one of the event's actual incident_references entries,
-    or it looks like a real issue key/URL (not just any non-empty string).
+    or it looks like a real issue key/URL (not just any non-empty string) -- and if
+    it's a URL, its host must be in the tracking-link allowlist.
     """
     if not tracking_link:
         return False
@@ -68,7 +93,13 @@ def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) 
         return False
     if tracking_link in incident_references:
         return True
-    return bool(_TRACKING_LINK_PATTERN.match(tracking_link))
+    if not _TRACKING_LINK_PATTERN.match(tracking_link):
+        return False
+    if tracking_link.startswith(("http://", "https://")):
+        host = (urlsplit(tracking_link).hostname or "").lower()
+        if host not in _allowed_tracking_hosts():
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------

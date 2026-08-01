@@ -148,6 +148,21 @@ class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
 
         bb.set_escalation_flag.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_does_not_mark_incident_created(self, monkeypatch):
+        # HIGH finding fix: mark_incident_created must not fire before the
+        # (now-fatal) add_incident_reference call succeeds, otherwise a transient
+        # persistence failure would permanently block retries via
+        # has_incident_been_created's dedup check.
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        ctx.mark_incident_created.assert_not_called()
+
 
 class TestDirectJiraIncidentReference:
     """Direct-Jira branch (NIGHTWATCHER_ENABLED=false): create_incident's
@@ -218,3 +233,23 @@ class TestDirectJiraIncidentReferenceFailureIsFatal:
         )
 
         bb.set_escalation_flag.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_does_not_mark_incident_created(self, monkeypatch):
+        # HIGH finding fix, mirrored for the direct-Jira branch: mark_incident_created
+        # must not fire before add_incident_reference succeeds.
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1234", "issue_url": "https://example/browse/VMER-1234"},
+        )
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        ctx.mark_incident_created.assert_not_called()

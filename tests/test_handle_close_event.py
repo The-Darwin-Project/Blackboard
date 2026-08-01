@@ -339,7 +339,7 @@ class TestIsValidTrackingLinkNewlineRejection:
         assert _is_valid_tracking_link("PROJ-123", []) is True
 
     def test_accepts_clean_url(self):
-        assert _is_valid_tracking_link("https://example.com/incident/42", []) is True
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/42", []) is True
 
     def test_accepts_exact_incident_reference_match_without_newline(self):
         assert _is_valid_tracking_link("JIRA-1", ["JIRA-1"]) is True
@@ -349,6 +349,36 @@ class TestIsValidTrackingLinkNewlineRejection:
 
     def test_rejects_unrecognized_pattern_without_newline(self):
         assert _is_valid_tracking_link("just some text", []) is False
+
+
+class TestTrackingLinkDomainAllowlist:
+    """HIGH finding fix: tracking_link URLs must resolve to an allowlisted host --
+    prevents an attacker-supplied tracking_link from posting an arbitrary phishing/
+    prompt-injection URL under the bot's identity."""
+
+    def test_accepts_github_host(self):
+        assert _is_valid_tracking_link("https://github.com/org/repo/issues/1", []) is True
+
+    def test_rejects_untrusted_host(self):
+        assert _is_valid_tracking_link("https://evil.example.com/phish", []) is False
+
+    def test_rejects_lookalike_host(self):
+        # Host must match exactly, not merely contain the trusted domain as a substring.
+        assert _is_valid_tracking_link("https://github.com.evil.example/x", []) is False
+
+    def test_accepts_configured_gitlab_host(self, monkeypatch):
+        monkeypatch.setenv("GITLAB_HOST", "gitlab.example.com")
+        assert _is_valid_tracking_link("https://gitlab.example.com/org/repo/-/issues/1", []) is True
+
+    def test_accepts_configured_jira_host(self, monkeypatch):
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        assert _is_valid_tracking_link("https://jira.example.com/browse/PROJ-1", []) is True
+
+    def test_exact_incident_reference_match_bypasses_host_check(self):
+        # A URL that's already a recorded incident_references entry is trusted as-is,
+        # regardless of host -- it wasn't attacker-supplied at that point.
+        untrusted_but_recorded = "https://example.com/incident/42"
+        assert _is_valid_tracking_link(untrusted_but_recorded, [untrusted_but_recorded]) is True
 
 
 class TestEnableTerminalCloseGateFailsClosedOnMisconfig:
