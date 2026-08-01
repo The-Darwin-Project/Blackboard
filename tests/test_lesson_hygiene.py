@@ -73,22 +73,12 @@ class TestSanitizeLessonText:
         assert "inspect_event" not in result
         assert "inspecting event state" in result
 
-    # T-9b: truly unmapped tool gets stripped via fallback tier
-    def test_unmapped_tool_stripped_fallback(self):
-        """A tool name in _ALL_TOOL_NAMES but NOT in _TOOL_TO_BEHAVIOR gets stripped."""
-        from src.agents.archivist import _ALL_TOOL_NAMES
-
-        unmapped = None
-        for name in _ALL_TOOL_NAMES:
-            if name not in self.mapping:
-                unmapped = name
-                break
-
-        if unmapped is None:
-            pytest.skip("All tool names are mapped — no fallback tier to test")
-
-        result = self.sanitize(f"use {unmapped} here")
-        assert unmapped not in result
+    # T-9b: coverage guarantee — T-10 catches any future unmapped tool at CI time
+    def test_mapping_completeness_is_ci_enforced(self):
+        """All 38 tools are mapped — T-10 enforces this stays true.
+        This test documents the design decision: no runtime fallback strip needed."""
+        from src.agents.archivist import _TOOL_TO_BEHAVIOR, _ALL_TOOL_NAMES
+        assert _ALL_TOOL_NAMES == frozenset(_TOOL_TO_BEHAVIOR.keys())
 
     # Tier 1 must use word-boundary matching (no partial match on substrings)
     def test_word_boundary_no_partial_match(self):
