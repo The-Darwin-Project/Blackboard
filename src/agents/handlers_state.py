@@ -43,6 +43,7 @@ if _raw_flag not in ("true", "false"):
     logger.warning(
         f"ENABLE_TERMINAL_CLOSE_GATE has unrecognized value '{_raw_flag}', defaulting to enabled"
     )
+    _raw_flag = "true"
 ENABLE_TERMINAL_CLOSE_GATE = _raw_flag == "true"
 
 _VALID_TERMINAL_REASONS = frozenset(TERMINAL_REASONS)
@@ -59,6 +60,11 @@ def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) 
     or it looks like a real issue key/URL (not just any non-empty string).
     """
     if not tracking_link:
+        return False
+    if "\n" in tracking_link or "\r" in tracking_link:
+        # Reject embedded newlines outright: tracking_link is later interpolated into
+        # bot-authored GitLab/GitHub comments, and a newline would let a crafted value
+        # inject additional comment lines (e.g. GitLab quick-actions) under the bot's identity.
         return False
     if tracking_link in incident_references:
         return True
