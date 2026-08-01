@@ -522,6 +522,15 @@ class _BrainToolContext:
 
     def mark_incident_created(self, eid: str) -> None:
         self._b._incident_created.add(eid)
+        # Persist to Redis SET (fire-and-forget, survives pod restart)
+        try:
+            from redis.asyncio import Redis as AsyncRedis
+            redis = self._b.blackboard.redis
+            if isinstance(redis, AsyncRedis):
+                import asyncio
+                asyncio.ensure_future(redis.sadd("darwin:incident_created", eid))
+        except Exception:
+            pass
 
     # --- Cycle snapshot (per-event state from Redis) ---
     def get_snapshot(self, eid: str):
@@ -4879,6 +4888,19 @@ class Brain:
         except Exception as e:
             logger.warning("hold_watch orphan recovery failed (non-fatal): %s", e)
 
+    async def _hydrate_incident_set(self) -> None:
+        """Load darwin:incident_created Redis SET into memory on startup."""
+        try:
+            from redis.asyncio import Redis as AsyncRedis
+            redis = self.blackboard.redis
+            if isinstance(redis, AsyncRedis):
+                members = await redis.smembers("darwin:incident_created")
+                if members:
+                    self._incident_created.update(members)
+                    logger.info("Hydrated _incident_created from Redis: %d entries", len(members))
+        except Exception as e:
+            logger.warning("Failed to hydrate _incident_created (non-fatal): %s", e)
+
     async def start_event_loop(self) -> None:
         """Start the ReconcileScheduler with trigger-based event processing.
 
@@ -4891,6 +4913,8 @@ class Brain:
         self._running = True
         await self._cleanup_stale_events()
         await self._recover_hold_watch_orphans()
+        # Hydrate _incident_created from Redis SET (survives restart)
+        await self._hydrate_incident_set()
 
         self._scheduler = ReconcileScheduler(
             reconcile_fn=self.process_event,
