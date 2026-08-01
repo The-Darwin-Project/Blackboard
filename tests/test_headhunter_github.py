@@ -787,6 +787,52 @@ class TestTrackingLinkInPrFeedbackComment:
         assert "Tracking" not in comment
 
 
+class TestCloseSummarySanitizedInPrFeedbackComment:
+    """close_summary is LLM-controlled free text (close_turn.thoughts) -- it must be
+    routed through sanitize_comment_field() before landing in a bot-authored PR
+    comment, same as tracking_link (commit 7dcb3108)."""
+
+    def test_markdown_link_syntax_stripped_from_close_summary(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="[click me](https://phish.example)")])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "[click me]" not in comment
+        assert "click mehttps://phish.example" in comment
+
+    def test_newline_quick_action_injection_stripped_from_close_summary(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="resolved\n/close\n/assign @maintainer")])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "\n/close" not in comment
+        assert "\n/assign" not in comment
+
+    def test_at_mention_and_backtick_breakout_stripped_from_close_summary(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="cc @octocat `rm -rf /`")])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "@octocat" not in comment
+        assert "`" not in comment
+
+    def test_clean_close_summary_is_unaffected(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="Root cause fixed after retry.")])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "Root cause fixed after retry." in comment
+
+    def test_close_summary_and_tracking_link_both_sanitized_independently(self):
+        from src.agents.headhunter_github import GitHubPlatform
+        event = SimpleNamespace(conversation=[_bfc_turn(
+            result="[evil](https://phish.example)",
+            thoughts="![img](https://phish.example/x.png)\n/close",
+        )])
+        comment = GitHubPlatform._build_feedback_comment(event, "resolved")
+        assert "[evil]" not in comment
+        assert "![img]" not in comment
+        assert "\n/close" not in comment
+        assert "imghttps://phish.example/x.png/close" in comment
+        assert "**Tracking:** evilhttps://phish.example" in comment
+
+
 class TestTrackingLinkInIssueCloseComment:
     """T-18b: post_issue_feedback surfaces the tracking link in the Issue close comment."""
 
