@@ -664,7 +664,6 @@ class Brain:
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
-        self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
         self._agent_session_modes: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> mode}
         self._routing_depth: dict[str, int] = {}  # event_id -> recursion counter
@@ -684,7 +683,6 @@ class Brain:
         self._waiting_for_agent: dict[str, tuple[str, int]] = {}  # event_id -> (agent_name, wait_turn_number)
         # Wait-for-jarvis state (SEPARATE from _waiting_for_user -- never merged)
         self._waiting_for_jarvis: dict[str, float] = {}   # event_id -> respond_jarvis turn timestamp
-        self._jarvis_wait_tasks: dict[str, asyncio.Task] = {}  # event_id -> nudge timer task
         self._jarvis_wait_count: dict[str, int] = {}  # event_id -> escalation counter
         self._incident_created: set[str] = set()
         # Last process_event timestamp per event (for idle safety net)
@@ -3176,46 +3174,9 @@ class Brain:
                 return False
             return await self._execute_function_call(event_id, function_name, args, response_parts)
 
-    async def _jarvis_nudge_loop(self, event_id: str, max_nudges: int) -> None:
-        """Send nudges to JARVIS at 30s intervals. Auto-resolve after final window."""
-        try:
-            for i in range(max_nudges):
-                await asyncio.sleep(30)
-                if event_id not in self._waiting_for_jarvis:
-                    return
-                if self._live_adapter:
-                    try:
-                        await self._live_adapter.receive_brain_response(
-                            event_id,
-                            f"FRIDAY is waiting for your input on this review. (nudge {i + 1}/{max_nudges})",
-                        )
-                        logger.info("Sent JARVIS nudge %d/%d for %s", i + 1, max_nudges, event_id)
-                    except Exception as e:
-                        logger.warning("JARVIS nudge failed (non-fatal): %s", e)
-            await asyncio.sleep(30)
-            if event_id not in self._waiting_for_jarvis:
-                return
-            logger.info("JARVIS wait timed out for %s -- auto-resolving", event_id)
-            self._clear_jarvis_wait(event_id)
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="tool_result",
-                thoughts="JARVIS has not responded after multiple attempts. "
-                         "Proceed with the available information in the conversation. "
-                         "JARVIS will rejoin when available.",
-            )
-            await self._append_and_broadcast(event_id, turn)
-            self._last_processed[event_id] = time.time()
-        except asyncio.CancelledError:
-            return
-
     def _clear_jarvis_wait(self, event_id: str) -> None:
-        """Clear wait_for_jarvis state and cancel the nudge timer."""
+        """Clear wait_for_jarvis state."""
         self._waiting_for_jarvis.pop(event_id, None)
-        task = self._jarvis_wait_tasks.pop(event_id, None)
-        if task and not task.done():
-            task.cancel()
 
     def _get_slack_channel(self):
         """Get the registered Slack channel from broadcast targets, if available."""
@@ -3331,7 +3292,6 @@ class Brain:
         """Clear active task tracking for an event. Used before re-entry and in finally."""
         self._active_tasks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
-        self._routing_turn_for_event.pop(event_id, None)
         self._waiting_for_agent.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)
@@ -3609,7 +3569,6 @@ class Brain:
             logger.info(f"Agent task started: {agent_name}{mode_label}{parallel_label} for {event_id}")
             if not parallel:
                 self._active_agent_for_event[event_id] = agent_name
-                self._routing_turn_for_event[event_id] = routing_turn_num or 0
 
             prior_mode = self._agent_session_modes.get(event_id, {}).get(agent_name, "")
             reuse_session = (prior_mode == mode) if mode and prior_mode else bool(prior_mode)
