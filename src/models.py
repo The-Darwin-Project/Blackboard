@@ -412,6 +412,7 @@ class EventDocument(BaseModel):
     sticky_notes: list[dict] = Field(default_factory=list, description="Notes from FRIDAY-to-FRIDAY via JARVIS close phase")
     unread_notes: int = Field(0, description="Count of unread sticky notes")
     token_usage: Optional[dict[str, int]] = Field(None, description="Token usage totals stamped at event close")
+    incident_references: Optional[list[str]] = Field(None, description="Jira issue keys or placeholder staging refs created by report_incident for this event")
 
 
 # =============================================================================
