@@ -543,6 +543,7 @@ async def handle_defer_event(
             "defer_until": defer_until,
             "defer_started_at": defer_started_at,
         })
+        await ctx.touch_state_ttl(event_id)
     await ctx.record_event(
         EventType.BRAIN_EVENT_DEFERRED,
         {"event_id": event_id, "delay_seconds": delay},

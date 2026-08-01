@@ -447,9 +447,17 @@ class _BrainToolContext:
         return eid in self._b._active_tasks and not self._b._active_tasks[eid].done()
 
     def get_routing_depth(self, eid: str) -> int:
+        snapshot = self._b._cycle_snapshots.get(eid)
+        if snapshot:
+            return snapshot.routing_depth
         return self._b._routing_depth.get(eid, 0)
 
-    def increment_routing_depth(self, eid: str) -> int:
+    async def increment_routing_depth(self, eid: str) -> int:
+        snapshot = self._b._cycle_snapshots.get(eid)
+        if snapshot:
+            depth = snapshot.routing_depth + 1
+            await self._b._event_state.set_fields(eid, snapshot, routing_depth=str(depth))
+            return depth
         depth = self._b._routing_depth.get(eid, 0) + 1
         self._b._routing_depth[eid] = depth
         return depth
@@ -519,6 +527,13 @@ class _BrainToolContext:
     def get_snapshot(self, eid: str):
         """Return CycleSnapshot for event (or None if not loaded yet)."""
         return self._b._cycle_snapshots.get(eid)
+
+    async def touch_state_ttl(self, eid: str) -> None:
+        """Refresh 24h TTL on per-event state hash (defer/wake paths)."""
+        try:
+            await self._b._event_state.touch_ttl(eid)
+        except Exception:
+            pass
 
     async def get_cached_journal(self, svc: str) -> list[str]:
         return await self._b._get_journal_cached(svc)
@@ -919,6 +934,15 @@ class Brain:
         snapshot = await self._event_state.get(event_id)
         self._cycle_snapshots[event_id] = snapshot
 
+        # Stale-handle reconciliation: if snapshot says an agent was running but
+        # no live task handle exists, clear the stale fields (pod restart recovery)
+        if snapshot.agent_task_started_at and event_id not in self._active_tasks:
+            logger.info("Stale agent_task_started_at for %s (pod restart), clearing", event_id)
+            await self._event_state.clear_fields(
+                event_id, snapshot,
+                "agent_name", "agent_task_started_at", "waiting_agent", "wait_turn",
+            )
+
         # Generate cycle_id for subscription lifecycle tracking (subscribe + defer in same cycle)
         from uuid import uuid4
         self._cycle_id_for_event[event_id] = str(uuid4())
@@ -1233,6 +1257,9 @@ class Brain:
                         acknowledged_interrupts.update(t.turn for t in new_user_turns)
                         response_emitted = False
                         self._response_emitted_for.discard(event_id)
+                        snapshot = self._cycle_snapshots.get(event_id)
+                        if snapshot and snapshot.response_emitted:
+                            await self._event_state.clear_fields(event_id, snapshot, "response_emitted")
                         logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
 
                 should_continue = await self._process_with_llm(
@@ -1242,7 +1269,8 @@ class Brain:
                     user_interrupt_turn=user_interrupt_turn,
                 )
                 # Propagate response_emitted state across iterations (RECALL continuation)
-                if event_id in self._response_emitted_for:
+                snapshot = self._cycle_snapshots.get(event_id)
+                if event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted):
                     response_emitted = True
                 if not should_continue:
                     break
@@ -1657,6 +1685,9 @@ class Brain:
                 await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
                 self._last_processed[event_id] = time.time()
                 self._response_emitted_for.add(event_id)
+                snapshot = self._cycle_snapshots.get(event_id)
+                if snapshot:
+                    await self._event_state.set_fields(event_id, snapshot, response_emitted="1")
 
             valid_tool_names = {t["name"] for t in active_tools}
             # SILENT_PARK invalidation: if we just flushed a brain.response above,
@@ -1666,7 +1697,7 @@ class Brain:
             if (
                 function_call.name == "wait_for_user"
                 and "wait_for_user" not in valid_tool_names
-                and event_id in self._response_emitted_for
+                and (event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted))
             ):
                 valid_tool_names.add("wait_for_user")
 
@@ -1699,13 +1730,17 @@ class Brain:
                     reflex_searcher.fire(final_window)
 
             # Memory reflex gate: check for lesson matches before executing tool
-            if reflex_searcher and event_id not in self._reflex_fired_for:
+            snapshot = self._cycle_snapshots.get(event_id)
+            reflex_already = snapshot.reflex_fired if snapshot else (event_id in self._reflex_fired_for)
+            if reflex_searcher and not reflex_already:
                 try:
                     lessons = await reflex_searcher.gather(timeout=0.5)
                     if lessons:
                         titles = [l.get("payload", {}).get("title") or l.get("payload", {}).get("topic", "") for l in lessons]
                         self._recall_lessons[event_id] = lessons
                         self._reflex_fired_for.add(event_id)
+                        if snapshot:
+                            await self._event_state.set_fields(event_id, snapshot, reflex_fired="1")
                         try:
                             await self._broadcast({
                                 "type": "brain_recall_hit",
@@ -1777,7 +1812,11 @@ class Brain:
         event_service scopes the knowledge-fact half of the reflex search --
         lessons remain unscoped (cross-service behavioral patterns are valid).
         """
-        if not self._memory_reflex_enabled or event_id in self._reflex_fired_for:
+        if not self._memory_reflex_enabled:
+            return None, None
+        snapshot = self._cycle_snapshots.get(event_id)
+        reflex_already = snapshot.reflex_fired if snapshot else (event_id in self._reflex_fired_for)
+        if reflex_already:
             return None, None
         try:
             from .brain_reflex import SentenceChunker, ReflexSearcher

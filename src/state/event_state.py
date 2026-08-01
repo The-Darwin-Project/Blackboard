@@ -243,6 +243,18 @@ class EventState:
 
 
 def create_event_state(redis: "Redis | None" = None) -> EventState:
-    """Factory that reads the feature flag from environment."""
+    """Factory that reads the feature flag from environment.
+
+    Falls back to memory backend if the Redis client is not a proper
+    async Redis instance (e.g., test mocks).
+    """
     flag = os.getenv("BRAIN_REDIS_STATE_ENABLED", "true").lower() == "true"
-    return EventState(redis=redis, flag_enabled=flag)
+    if flag and redis is not None:
+        try:
+            from redis.asyncio import Redis as AsyncRedis
+            if isinstance(redis, AsyncRedis):
+                return EventState(redis=redis, flag_enabled=True)
+        except ImportError:
+            pass
+        logger.debug("Redis client not async-compatible for EventState, using memory backend")
+    return EventState(redis=None, flag_enabled=False)
