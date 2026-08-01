@@ -110,3 +110,29 @@ class TestNightwatcherStagedIncidentReference:
         assert result is True
         bb.stage_escalation.assert_not_awaited()
         bb.add_incident_reference.assert_not_awaited()
+
+
+class TestDirectJiraIncidentReference:
+    """Direct-Jira branch (NIGHTWATCHER_ENABLED=false): create_incident's
+    issue_key is persisted via add_incident_reference, mirroring the
+    Nightwatcher-staged branch's placeholder-reference coverage above."""
+
+    @pytest.mark.asyncio
+    async def test_direct_jira_branch_calls_add_incident_reference_with_issue_key(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1234", "issue_url": "https://example/browse/VMER-1234"},
+        )
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+
+        result = await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        assert result is True
+        adapter.create_incident.assert_awaited_once()
+        bb.add_incident_reference.assert_awaited_once_with("evt-1", "VMER-1234")
+        ctx.mark_incident_created.assert_called_once_with("evt-1")

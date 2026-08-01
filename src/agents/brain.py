@@ -211,6 +211,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import httpx
 
+from ..event_types import TERMINAL_REASONS
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
@@ -346,13 +347,12 @@ _CYCLE_ENDING_TOOLS = frozenset({
 })
 
 # The exhaustive set of close_event's LLM-facing terminal_reason values (types.py's
-# schema enum). Used by _close_and_broadcast's TOCTOU recheck -- must stay an exact
-# superset of that enum, no more, no less: system-driven close_reason values (stale,
-# duplicate, timeout, force_closed, idle_timeout, error) never reach this path from
-# the LLM and must remain excluded from the recheck.
-_LLM_CLOSE_REASONS = frozenset({
-    "resolved", "non_transient_confirmed", "self_resolved", "no_action_needed",
-})
+# schema enum, derived from the shared event_types.TERMINAL_REASONS tuple). Used by
+# _close_and_broadcast's TOCTOU recheck -- must stay an exact superset of that enum,
+# no more, no less: system-driven close_reason values (stale, duplicate, timeout,
+# force_closed, idle_timeout, error) never reach this path from the LLM and must
+# remain excluded from the recheck.
+_LLM_CLOSE_REASONS = frozenset(TERMINAL_REASONS)
 
 
 import re as _re

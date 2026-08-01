@@ -19,7 +19,8 @@
 # 12. [Pattern]: queued_prs @property exposes _last_queued_prs for /headhunter/pending REST endpoint.
 # 13. [Gotcha]: Issue dedup uses separate Redis namespace darwin:github:issue:{owner}:{repo}:{number}.
 # 14. [Constraint]: Skill URL 10KB cap -- >10240 bytes falls back to _EMERGENCY_ISSUE_SI + returns warning.
-# 15. [Pattern]: close_reason sanitized via re.sub([<>@`])[:200] before posting to GitHub.
+# 15. [Pattern]: close_reason AND tracking_link sanitized via headhunter_utils.sanitize_comment_field()
+#     ([<>@`] stripped, 200-char cap) before posting to GitHub.
 # 16. [Pattern]: post_issue_feedback guards via is_feedback_sent() at entry (defense-in-depth dedup).
 # 17. [Pattern]: set_github_issue_processed called BEFORE label swap -- dedup survives label API failures.
 # 18. [Pattern]: domain is always "disorder" -- FRIDAY classifies during triage, not headhunter.
@@ -34,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -45,7 +45,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, CLOSE_REASON_LABELS
+from .headhunter_utils import _COMMENT_LIMIT, _DESC_SAFETY_CAP, CLOSE_REASON_LABELS, sanitize_comment_field
 
 logger = logging.getLogger(__name__)
 
@@ -867,15 +867,15 @@ class GitHubPlatform:
         await self._add_labels(installation_id, owner, repo, number, [self._done_label])
         await self._remove_label(installation_id, owner, repo, number, self._active_label)
 
-        close_turn = event.conversation[-1] if event.conversation else None
+        close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
-        close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
+        close_reason = sanitize_comment_field(close_reason)
         if close_reason not in ("stale", "duplicate"):
             turns = len(event.conversation)
             # Display-time-only humanization: close_reason above stays raw and continues
             # to feed the stale/duplicate gate check -- never reassigned.
             outcome_label = CLOSE_REASON_LABELS.get(close_reason, close_reason)
-            tracking_link_val = (close_turn.result or "") if close_turn else ""
+            tracking_link_val = sanitize_comment_field((close_turn.result or "") if close_turn else "")
             tracking_suffix = f"\n**Tracking:** {tracking_link_val}" if tracking_link_val else ""
             await self._post_comment(installation_id, owner, repo, number,
                 f"**Darwin** closed this issue ({turns} turns). Outcome: {outcome_label}{tracking_suffix}")
@@ -897,9 +897,9 @@ class GitHubPlatform:
         if not owner or not repo or not pr_number:
             return
 
-        close_turn = event.conversation[-1] if event.conversation else None
+        close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
-        close_reason = re.sub(r'[<>@`]', '', close_reason)[:200]
+        close_reason = sanitize_comment_field(close_reason)
 
         await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
         await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
@@ -1154,9 +1154,9 @@ class GitHubPlatform:
                 first_line = t.result.strip().split("\n")[0].replace("#", "").strip()
                 actions.append(f"- `{ts}` {first_line[:150]}")
 
-        close_turn = event.conversation[-1] if event.conversation else None
+        close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
         close_summary = (close_turn.thoughts or "") if close_turn else ""
-        tracking_link = (close_turn.result or "") if close_turn else ""
+        tracking_link = sanitize_comment_field((close_turn.result or "") if close_turn else "")
 
         turns = len(event.conversation)
         lines = [f"**Darwin** ({turns} turns)"]

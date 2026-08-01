@@ -13,6 +13,12 @@
 #    user.message turns exist. Prevents closing over unread interventions.
 # 10. [Pattern]: OBS_FLOOD is a broader count gate (any 6+ observations without decision),
 #     separate from OBS_PLATEAU (same key/value 3+ times).
+# 11. [Pattern]: CLOSE_RETRY_CIRCUIT_BREAKER strips close_event after 3+ consecutive
+#     tool_result turns with waitingFor="close_event". Reverse scan only considers actual
+#     tool turns (action in ("tool_result", "execute")) -- non-tool turns (thoughts,
+#     response, triage, phase, route, wait) are skipped, not streak-breakers. Independent
+#     of ENABLE_TERMINAL_CLOSE_GATE -- also guards the pre-existing UNEVALUATED_CLOSE
+#     rejection loop, which writes the same waitingFor="close_event" marker.
 """
 Tool gate evaluation and rejection diagnostics.
 
@@ -332,17 +338,24 @@ def _pred_close_retry_circuit_breaker(ctx: GateContext) -> bool:
     self-correcting cost (one extra round-trip) rather than a stuck state -- any
     other tool call (including a non-close_event tool_result) resets the streak,
     re-arming close_event on the very next attempt.
+
+    Non-tool turns (thoughts, response, triage, phase, route, wait -- anything
+    the LLM emits between tool calls) are skipped, not treated as streak-breakers:
+    only an actual tool call/result for a DIFFERENT tool resets the streak.
     """
     streak = 0
     for t in reversed(ctx.conversation):
         action = t.get("action") if isinstance(t, dict) else getattr(t, "action", None)
         waiting = t.get("waitingFor") if isinstance(t, dict) else getattr(t, "waitingFor", None)
-        if action == "tool_result" and waiting == "close_event":
-            streak += 1
-            if streak >= _CLOSE_RETRY_THRESHOLD:
-                return True
-        else:
+        # Skip non-tool turns (thoughts, response, triage, phase, route, wait)
+        if action not in ("tool_result", "execute"):
+            continue
+        # Only break streak on a tool_result for a different tool
+        if waiting != "close_event":
             break
+        streak += 1
+        if streak >= _CLOSE_RETRY_THRESHOLD:
+            return True
     return False
 
 
@@ -702,6 +715,12 @@ GATE_REGISTRY: list[GateDefinition] = [
         message=_msg_obs_plateau,
         hint="record a different metric, or transition to a decision tool.",
     ),
+    # Intentionally NOT gated by ENABLE_TERMINAL_CLOSE_GATE (handlers_state.py): this is an
+    # independent safety mechanism against repeated close_event rejection loops, regardless of
+    # whether terminal-state enforcement is enabled -- the pre-existing UNEVALUATED_CLOSE gate
+    # above also writes its abort turn with the same waitingFor="close_event" marker, so this
+    # circuit breaker still protects against unevaluated-close-blocker retry loops even with the
+    # feature flag off.
     GateDefinition(
         gate_id="OBS_FLOOD",
         mode="strip",

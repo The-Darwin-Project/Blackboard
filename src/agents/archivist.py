@@ -224,7 +224,7 @@ ARCHIVE_TOOL_SCHEMA = {
 }
 
 
-def _extract_close_fields(event: EventDocument) -> tuple[Optional[str], list[str]]:
+def _extract_close_fields(event: EventDocument) -> tuple[str | None, list[str]]:
     """Derive the closing terminal_reason (from the last close turn's evidence
     field -- never persisted directly on EventDocument) and incident_references
     (a real EventDocument field) for the archival summary payload.
@@ -232,10 +232,14 @@ def _extract_close_fields(event: EventDocument) -> tuple[Optional[str], list[str
     Shared by both archive_event (Claude path) and _archive_event_fallback
     (Gemini path) so terminal_reason/incident_references don't silently drop
     from one path when only the other is updated.
+
+    Scans backward for the last action=="close" turn rather than assuming
+    conversation[-1] is the close turn -- a late message (e.g. jarvis/user)
+    can be appended after closure.
     """
     terminal_reason = None
-    close_turn = event.conversation[-1] if event.conversation else None
-    if close_turn is not None and getattr(close_turn, "action", None) == "close":
+    close_turn = next((t for t in reversed(event.conversation) if getattr(t, "action", None) == "close"), None)
+    if close_turn is not None:
         terminal_reason = close_turn.evidence or None
     return terminal_reason, list(event.incident_references or [])
 

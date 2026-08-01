@@ -83,9 +83,9 @@ class TestRegistryStructure:
         assert len(allow_gates) == 4
         assert {g.gate_id for g in allow_gates} == {"INTERMEDIATE", "PRE_CLASSIFICATION", "DOMAIN_CHAOTIC", "DOMAIN_CASUAL"}
 
-    def test_twentyfive_strip_mode_gates(self):
+    def test_twentysix_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 25
+        assert len(strip_gates) == 26
 
 
 # ---------------------------------------------------------------------------
@@ -1223,13 +1223,3 @@ class TestCloseRetryCircuitBreaker:
         assert "close_event" in _names(result)
 
 
-class TestGateRegistryCountPlanned:
-    """T-10: GATE_REGISTRY grows to 30 (26 strip + 4 allow) once both the
-    OBS_FLOOD and CLOSE_RETRY_CIRCUIT_BREAKER gates are registered."""
-
-    def test_gate_registry_count_is_30(self):
-        assert len(GATE_REGISTRY) == 30
-
-    def test_strip_mode_gate_count_is_26(self):
-        strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 26

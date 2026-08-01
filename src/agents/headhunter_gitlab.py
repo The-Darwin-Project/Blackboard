@@ -8,6 +8,8 @@
 # 5. [Pattern]: _load_gitlab_si() loads from headhunter_skills/gitlab-mr-triage.md with emergency fallback.
 # 6. [Gotcha]: merge_status excluded from state_key (flaps during active pipelines).
 # 7. [Pattern]: GITLAB_HOST normalization: strip scheme BEFORE trailing slash.
+# 8. [Pattern]: tracking_link sanitized via headhunter_utils.sanitize_comment_field()
+#    ([<>@`] stripped, 200-char cap) before posting to GitLab MR notes.
 """
 GitLab Platform Adapter for Headhunter.
 
@@ -27,7 +29,7 @@ import httpx
 if TYPE_CHECKING:
     from ..state.blackboard import BlackboardState
 
-from .headhunter_utils import _DESC_SAFETY_CAP
+from .headhunter_utils import _DESC_SAFETY_CAP, sanitize_comment_field
 
 logger = logging.getLogger(__name__)
 
@@ -399,7 +401,7 @@ class GitLabPlatform:
         if not project_id or not mr_iid:
             return
 
-        close_turn = event.conversation[-1] if event.conversation else None
+        close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
         close_reason = (close_turn.evidence or "resolved") if close_turn else "resolved"
 
         if close_reason in ("stale", "duplicate"):
@@ -749,9 +751,9 @@ class GitLabPlatform:
                 first_line = t.result.strip().split("\n")[0].replace("#", "").strip()
                 actions.append(f"- `{ts}` {first_line[:150]}")
 
-        close_turn = event.conversation[-1] if event.conversation else None
+        close_turn = next((t for t in reversed(event.conversation) if t.action == "close"), None)
         close_summary = (close_turn.thoughts or "") if close_turn else ""
-        tracking_link = (close_turn.result or "") if close_turn else ""
+        tracking_link = sanitize_comment_field((close_turn.result or "") if close_turn else "")
 
         turns = len(event.conversation)
         lines = [f"**Darwin** ({turns} turns)"]

@@ -22,6 +22,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+from ...event_types import TERMINAL_REASONS
+
 
 # =============================================================================
 # Data Types
@@ -372,7 +374,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "terminal_reason": {
                     "type": "string",
-                    "enum": ["resolved", "non_transient_confirmed", "self_resolved", "no_action_needed"],
+                    "enum": list(TERMINAL_REASONS),
                     "description": (
                         "Classify why this event has reached a terminal state. "
                         "'resolved': PV confirms the fix worked. "
@@ -386,6 +388,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 },
                 "tracking_link": {
                     "type": "string",
+                    "maxLength": 300,
                     "description": (
                         "External tracking reference (Jira issue key/URL, incident link) for this "
                         "closure. Required when terminal_reason=non_transient_confirmed and an open "

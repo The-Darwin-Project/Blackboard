@@ -8,6 +8,14 @@
 # 6. [Gotcha]: close_event delegates to ctx.close_and_broadcast() which stays on Brain.
 # 7. [Pattern]: close_event has pessimistic re-check — re-fetches event from Redis, calls
 #    has_unevaluated_close_blocker() (shared with gate) to catch late-arriving messages.
+# 8. [Pattern]: Terminal-reason enforcement (GitHub #155/#156): _VALID_TERMINAL_REASONS is
+#    frozenset(TERMINAL_REASONS) from event_types.py (single source of truth, also used by
+#    brain.py's _LLM_CLOSE_REASONS and llm/types.py's schema enum). The open-incident escape
+#    valve requires terminal_reason=non_transient_confirmed AND a tracking_link that either
+#    matches a real incident_references entry or a recognizable issue-key/URL pattern
+#    (_is_valid_tracking_link) -- a bare truthy string is not sufficient.
+# 9. [Pattern]: All reject-turn writes check append_and_broadcast's return value and log a
+#    warning on persistence failure (matches the close_event abort-turn precedent).
 """Group B+E: 9 wait-state, subscription, and close tool handlers."""
 from __future__ import annotations
 
@@ -15,10 +23,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING
 
-from ..event_types import AUTOMATED_EVENT_SOURCES
+from ..event_types import AUTOMATED_EVENT_SOURCES, TERMINAL_REASONS
 from ..models import ConversationTurn, EventStatus, EventType, _resolve_domain, _resolve_phase
 from .tool_gates import has_unevaluated_close_blocker
 
@@ -29,11 +38,31 @@ logger = logging.getLogger("darwin.brain")
 
 # Feature flag for the terminal-state close-gate enforcement (GitHub #155/#156).
 # Set to "false" for rapid disable without a redeploy of the schema/handler changes.
-ENABLE_TERMINAL_CLOSE_GATE = os.environ.get("ENABLE_TERMINAL_CLOSE_GATE", "true") == "true"
+_raw_flag = os.environ.get("ENABLE_TERMINAL_CLOSE_GATE", "true")
+if _raw_flag not in ("true", "false"):
+    logger.warning(
+        f"ENABLE_TERMINAL_CLOSE_GATE has unrecognized value '{_raw_flag}', defaulting to enabled"
+    )
+ENABLE_TERMINAL_CLOSE_GATE = _raw_flag == "true"
 
-_VALID_TERMINAL_REASONS = frozenset({
-    "resolved", "non_transient_confirmed", "self_resolved", "no_action_needed",
-})
+_VALID_TERMINAL_REASONS = frozenset(TERMINAL_REASONS)
+
+# Accepts a Jira-style issue key (PROJ-123) or any http(s) URL. Anything else must
+# match a real incident_references entry to be accepted as a tracking_link.
+_TRACKING_LINK_PATTERN = re.compile(r'^[A-Z]+-\d+$|^https?://')
+
+
+def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) -> bool:
+    """True if tracking_link references a real tracking artifact.
+
+    Either it matches one of the event's actual incident_references entries,
+    or it looks like a real issue key/URL (not just any non-empty string).
+    """
+    if not tracking_link:
+        return False
+    if tracking_link in incident_references:
+        return True
+    return bool(_TRACKING_LINK_PATTERN.match(tracking_link))
 
 
 # ---------------------------------------------------------------------------
@@ -85,29 +114,52 @@ async def handle_close_event(
             waitingFor="close_event",
             response_parts=response_parts,
         )
-        await ctx.append_and_broadcast(event_id, reject_turn)
+        assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+        if not assigned:
+            logger.warning("close_event reject turn (invalid terminal_reason) failed to persist for %s", event_id)
         logger.info("close_event rejected for %s: missing/invalid terminal_reason", event_id)
         return True
 
     open_refs = fresh.incident_references or []
-    if open_refs and fresh.source in AUTOMATED_EVENT_SOURCES and (
-        terminal_reason != "non_transient_confirmed" or not tracking_link
-    ):
-        reject_turn = ConversationTurn(
-            turn=0,
-            actor="brain",
-            action="tool_result",
-            thoughts=(
-                f"close_event rejected: open incident reference(s) {', '.join(open_refs)} "
-                "exist for this event. Provide terminal_reason=non_transient_confirmed together "
-                "with a tracking_link to close, or resolve the incident(s) first."
-            ),
-            waitingFor="close_event",
-            response_parts=response_parts,
-        )
-        await ctx.append_and_broadcast(event_id, reject_turn)
-        logger.info("close_event rejected for %s: open incident reference(s) %s", event_id, open_refs)
-        return True
+    if open_refs and fresh.source in AUTOMATED_EVENT_SOURCES:
+        if terminal_reason != "non_transient_confirmed" or not tracking_link:
+            reject_turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                thoughts=(
+                    f"close_event rejected: open incident reference(s) {', '.join(open_refs)} "
+                    "exist for this event. Provide terminal_reason=non_transient_confirmed together "
+                    "with a tracking_link to close, or resolve the incident(s) first."
+                ),
+                waitingFor="close_event",
+                response_parts=response_parts,
+            )
+            assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+            if not assigned:
+                logger.warning("close_event reject turn (open incident) failed to persist for %s", event_id)
+            logger.info("close_event rejected for %s: open incident reference(s) %s", event_id, open_refs)
+            return True
+
+        if not _is_valid_tracking_link(tracking_link, open_refs):
+            reject_turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="tool_result",
+                thoughts=(
+                    f"close_event rejected: tracking_link '{tracking_link}' does not match any "
+                    f"open incident reference ({', '.join(open_refs)}) nor a recognizable tracking "
+                    "pattern (an issue key like PROJ-123, or an http(s) URL). Provide a tracking_link "
+                    "that references a real tracking artifact."
+                ),
+                waitingFor="close_event",
+                response_parts=response_parts,
+            )
+            assigned = await ctx.append_and_broadcast(event_id, reject_turn)
+            if not assigned:
+                logger.warning("close_event reject turn (invalid tracking_link) failed to persist for %s", event_id)
+            logger.info("close_event rejected for %s: unrecognizable tracking_link %r", event_id, tracking_link)
+            return True
 
     await ctx.close_and_broadcast(event_id, summary, close_reason=terminal_reason, tracking_link=tracking_link)
     return False
