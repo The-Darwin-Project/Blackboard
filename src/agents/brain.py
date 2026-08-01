@@ -2679,6 +2679,9 @@ class Brain:
         else:
             contents.append({"role": "user", "parts": [action_prompt]})
 
+        # Dedup consecutive identical FR messages (SPIRAL prevention)
+        contents = self._dedup_consecutive_fr(contents)
+
         return self._compress_contents(contents)
 
     @staticmethod
@@ -2802,6 +2805,73 @@ class Brain:
         return (fc_parts, fr_parts)
 
     # =========================================================================
+    # FC/FR Deduplication (SPIRAL prevention)
+    # =========================================================================
+
+    @staticmethod
+    def _dedup_consecutive_fr(contents: list[dict]) -> list[dict]:
+        """Collapse consecutive identical functionResponse messages into one annotated copy.
+
+        N-way collapse: if 3+ consecutive user messages have identical FR (same name +
+        same response.result), keep only the first (deep-copied) with annotation.
+        Never mutates the original parts (uses deep copy).
+        """
+        import copy
+        if len(contents) < 3:
+            return contents
+
+        result: list[dict] = []
+        i = 0
+        while i < len(contents):
+            msg = contents[i]
+            # Check if this is a user message with a functionResponse
+            fr_data = None
+            if msg["role"] == "user" and len(msg.get("parts", [])) == 1:
+                part = msg["parts"][0]
+                if isinstance(part, dict) and "functionResponse" in part:
+                    fr_data = part["functionResponse"]
+
+            if fr_data is None:
+                result.append(msg)
+                i += 1
+                continue
+
+            # Count consecutive identical FR messages
+            run_count = 1
+            j = i + 1
+            while j < len(contents):
+                nxt = contents[j]
+                if nxt["role"] != "user" or len(nxt.get("parts", [])) != 1:
+                    break
+                nxt_part = nxt["parts"][0]
+                if not isinstance(nxt_part, dict) or "functionResponse" not in nxt_part:
+                    break
+                nxt_fr = nxt_part["functionResponse"]
+                if nxt_fr.get("name") != fr_data.get("name"):
+                    break
+                if nxt_fr.get("response") != fr_data.get("response"):
+                    break
+                run_count += 1
+                j += 1
+
+            if run_count >= 3:
+                # Deep-copy first FR and annotate
+                collapsed = copy.deepcopy(msg)
+                fr_resp = collapsed["parts"][0]["functionResponse"]["response"]
+                original_result = fr_resp.get("result", "")
+                fr_resp["result"] = (
+                    f"{original_result}\n\n"
+                    f"(repeated {run_count - 1} times — break this loop)"
+                )
+                result.append(collapsed)
+                i = j
+            else:
+                result.append(msg)
+                i += 1
+
+        return result
+
+    # =========================================================================
     # Conversation Compression (progressive, no LLM call)
     # =========================================================================
 
@@ -2823,7 +2893,9 @@ class Brain:
         """Progressive compression: skeleton/summary/full tiers. No LLM call.
 
         First message (event context) always kept intact.
-        Atomic pair guard: model(functionCall) + user(response) never separated.
+        Atomic pair guard: model(functionCall) + user(functionResponse) never separated.
+        FC/FR messages floor=summary (never skeleton -- structural signal matters).
+        4th tier: pair-delete oldest FC/FR pairs if still over budget (min 5 retained).
         """
         if len(contents) <= 3:
             return contents
@@ -2847,6 +2919,17 @@ class Brain:
                 tiers.append("summary")
             else:
                 tiers.append("full")
+
+        # FC/FR floor: messages with functionCall or functionResponse never go below summary
+        for i in range(n):
+            if tiers[i] == "skeleton":
+                msg = conv_msgs[i]
+                has_fc_fr = any(
+                    isinstance(p, dict) and ("functionCall" in p or "functionResponse" in p)
+                    for p in msg.get("parts", [])
+                )
+                if has_fc_fr:
+                    tiers[i] = "summary"
 
         # Atomic pair guard: if a model msg has functionCall parts, promote
         # it and the next user msg to the same tier (the less compressed one)
@@ -2892,7 +2975,44 @@ class Brain:
                         parts.append(p)
                 compressed.append({"role": role, "parts": parts})
 
+        # 4th tier: pair-delete oldest FC/FR pairs if still over budget
+        if cls._estimate_tokens(compressed) >= max_tokens:
+            compressed = cls._pair_delete_oldest(compressed, max_tokens)
+
         return compressed
+
+    @classmethod
+    def _pair_delete_oldest(cls, contents: list[dict], max_tokens: int) -> list[dict]:
+        """Drop complete FC+FR pairs from oldest first, retaining min 5 most-recent."""
+        MIN_RETAINED_PAIRS = 5
+        # Find all FC/FR pair indices (model with FC at i, user with FR at i+1)
+        pair_indices: list[tuple[int, int]] = []
+        for i in range(1, len(contents) - 1):
+            msg = contents[i]
+            if msg["role"] == "model" and any(
+                isinstance(p, dict) and "functionCall" in p for p in msg.get("parts", [])
+            ):
+                nxt = contents[i + 1] if i + 1 < len(contents) else None
+                if nxt and nxt["role"] == "user" and any(
+                    isinstance(p, dict) and "functionResponse" in p for p in nxt.get("parts", [])
+                ):
+                    pair_indices.append((i, i + 1))
+
+        if len(pair_indices) <= MIN_RETAINED_PAIRS:
+            return contents
+
+        # Delete from oldest (lowest index) first, skip last 5 pairs
+        deletable = pair_indices[:-MIN_RETAINED_PAIRS]
+        indices_to_remove: set[int] = set()
+        for fc_idx, fr_idx in deletable:
+            indices_to_remove.add(fc_idx)
+            indices_to_remove.add(fr_idx)
+            # Check if removing brings us under budget
+            remaining = [c for i, c in enumerate(contents) if i not in indices_to_remove]
+            if cls._estimate_tokens(remaining) < max_tokens:
+                break
+
+        return [c for i, c in enumerate(contents) if i not in indices_to_remove]
 
     # =========================================================================
     # Function Call Dispatcher
