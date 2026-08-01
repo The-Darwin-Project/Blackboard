@@ -1338,6 +1338,8 @@ class Brain:
         Returns True if the caller should re-invoke immediately (e.g., after
         a lookup_service call that needs a follow-up LLM decision).
 
+        response_emitted_local: seeded from param. Set True after flush.
+        Gate rejection returns False if local True (response IS terminal, no retry).
         Precondition: self._adapter is not None (caller checks via _get_adapter()).
         """
         from .llm import BRAIN_TOOL_SCHEMAS
@@ -1345,6 +1347,9 @@ class Brain:
         if not self._adapter:
             logger.error(f"_process_with_llm called without adapter for {event_id}")
             return False
+
+        # Local response_emitted tracking for gate-rejection decisions
+        response_emitted_local = response_emitted
 
         # Sticky note notification injection (iteration 0 only, dedup by existing turn)
         if iteration == 0:
@@ -1685,6 +1690,7 @@ class Brain:
                 await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
                 self._last_processed[event_id] = time.time()
                 self._response_emitted_for.add(event_id)
+                response_emitted_local = True
                 snapshot = self._cycle_snapshots.get(event_id)
                 if snapshot:
                     await self._event_state.set_fields(event_id, snapshot, response_emitted="1")
@@ -1720,7 +1726,9 @@ class Brain:
                     response_parts=captured_parts,
                 )
                 await self._append_and_broadcast(event_id, turn)
-                return True
+                # If response already flushed, this rejection is informational — stop loop
+                # (the flushed text IS the user-facing answer, don't retry and double-message)
+                return not response_emitted_local
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
 
             # Flush remaining thinking buffer for final sentence search
