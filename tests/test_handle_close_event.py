@@ -13,13 +13,14 @@ feature flag, and precedence between the pessimistic guard and the new checks.
 """
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import src.agents.handlers_state as handlers_state
-from src.agents.handlers_state import handle_close_event
+from src.agents.handlers_state import _is_valid_tracking_link, handle_close_event
 from src.models import ConversationTurn, EventStatus, MessageStatus
 
 
@@ -306,3 +307,95 @@ class TestExistingGuardPrecedence:
         ctx.close_and_broadcast.assert_not_called()
         turn_arg = ctx.append_and_broadcast.call_args[0][1]
         assert "unevaluated message" in turn_arg.thoughts
+
+
+class TestIsValidTrackingLinkNewlineRejection:
+    """HIGH finding fix: embedded newlines in tracking_link must be rejected outright,
+    even when they would otherwise match incident_references or the URL/issue-key
+    pattern -- prevents GitLab quick-action/comment injection under the bot's identity."""
+
+    def test_rejects_bare_newline(self):
+        assert _is_valid_tracking_link("PROJ-123\n/close", []) is False
+
+    def test_rejects_bare_carriage_return(self):
+        assert _is_valid_tracking_link("PROJ-123\r/close", []) is False
+
+    def test_rejects_crlf(self):
+        assert _is_valid_tracking_link("https://example.com/x\r\n/assign @bot", []) is False
+
+    def test_rejects_newline_even_when_matching_incident_references(self):
+        # Defense-in-depth: an exact incident_references match must not bypass the
+        # newline check -- an attacker-controlled tracking_link should never be able
+        # to smuggle a newline just because its prefix happens to equal a known ref.
+        assert _is_valid_tracking_link("JIRA-1\n/close", ["JIRA-1\n/close"]) is False
+
+    def test_rejects_newline_in_otherwise_valid_url(self):
+        assert _is_valid_tracking_link("https://example.com/incident/42\ninjected", []) is False
+
+    def test_rejects_trailing_newline(self):
+        assert _is_valid_tracking_link("https://example.com/incident/42\n", []) is False
+
+    def test_accepts_clean_issue_key(self):
+        assert _is_valid_tracking_link("PROJ-123", []) is True
+
+    def test_accepts_clean_url(self):
+        assert _is_valid_tracking_link("https://example.com/incident/42", []) is True
+
+    def test_accepts_exact_incident_reference_match_without_newline(self):
+        assert _is_valid_tracking_link("JIRA-1", ["JIRA-1"]) is True
+
+    def test_rejects_empty_string(self):
+        assert _is_valid_tracking_link("", []) is False
+
+    def test_rejects_unrecognized_pattern_without_newline(self):
+        assert _is_valid_tracking_link("just some text", []) is False
+
+
+class TestEnableTerminalCloseGateFailsClosedOnMisconfig:
+    """HIGH finding fix: an unrecognized ENABLE_TERMINAL_CLOSE_GATE value must resolve
+    to True (gate enabled / fail-closed), matching the warning log emitted at import
+    time -- previously the log claimed fail-closed but _raw_flag was never reset,
+    so ENABLE_TERMINAL_CLOSE_GATE silently evaluated to False (fail-open)."""
+
+    @staticmethod
+    def _reload_with_env(monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv("ENABLE_TERMINAL_CLOSE_GATE", raising=False)
+        else:
+            monkeypatch.setenv("ENABLE_TERMINAL_CLOSE_GATE", value)
+        return importlib.reload(handlers_state)
+
+    def test_unrecognized_value_fails_closed(self, monkeypatch, caplog):
+        with caplog.at_level("WARNING"):
+            reloaded = self._reload_with_env(monkeypatch, "garbage")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+        assert "defaulting to enabled" in caplog.text
+
+    def test_empty_string_value_fails_closed(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_case_variant_value_fails_closed(self, monkeypatch):
+        # Only the exact lowercase "false" disables the gate -- anything else,
+        # including a plausible-looking variant, must fail closed.
+        reloaded = self._reload_with_env(monkeypatch, "False")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_explicit_true_enables_gate(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "true")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def test_explicit_false_disables_gate(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, "false")
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is False
+
+    def test_unset_env_var_defaults_to_enabled(self, monkeypatch):
+        reloaded = self._reload_with_env(monkeypatch, None)
+        assert reloaded.ENABLE_TERMINAL_CLOSE_GATE is True
+
+    def teardown_method(self, method):
+        # Restore the module to its normal (unset-env) state for any other test
+        # in this file that imported handlers_state before this class reloaded it.
+        import os
+        os.environ.pop("ENABLE_TERMINAL_CLOSE_GATE", None)
+        importlib.reload(handlers_state)
