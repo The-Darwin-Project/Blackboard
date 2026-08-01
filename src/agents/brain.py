@@ -3305,6 +3305,20 @@ class Brain:
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)
         self._cycle_snapshots.pop(event_id, None)
+        # HDEL cycle-scoped fields from Redis state hash (fire-and-forget)
+        try:
+            from redis.asyncio import Redis as AsyncRedis
+            redis = self.blackboard.redis
+            if isinstance(redis, AsyncRedis):
+                import asyncio
+                from ..state.event_state import _state_key
+                key = _state_key(event_id)
+                asyncio.ensure_future(redis.hdel(
+                    key, "agent_name", "agent_task_started_at",
+                    "waiting_agent", "wait_turn", "reflex_fired", "response_emitted",
+                ))
+        except Exception:
+            pass
 
     async def handle_wake_task(self, data: dict, agent_id: str) -> None:
         """Process a self-initiated wake task (teammate message woke an idle agent).
