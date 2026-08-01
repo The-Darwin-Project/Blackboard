@@ -613,18 +613,35 @@ class TestEnforceCasualRoute:
         resp = unauthed_client.post("/queue/evt-1/enforce-casual")
         assert resp.status_code == 401
 
-    def test_headhunter_event_no_ownership_check(self, authed_client, mock_blackboard_route, mock_brain_route):
-        """T-1: headhunter-sourced active event + authenticated user → 200.
-        Non-chat/slack events are team-shared — any authenticated user can enforce casual."""
+    def test_headhunter_event_maintainer_succeeds(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """T-1: headhunter-sourced active event + authenticated maintainer → 200.
+        Non-chat/slack events have no single owner, so they're scoped to maintainers
+        (codereview finding, auth-rbac) instead of any authenticated user."""
         mock_blackboard_route.get_event = AsyncMock(
             return_value=_make_event(
                 event_id="evt-1", status="active", source="headhunter",
                 created_by_email="someone-else@example.com",
             ),
         )
-        resp = authed_client.post("/queue/evt-1/enforce-casual")
+        with patch.dict(os.environ, {"HEADHUNTER_MAINTAINERS": "alice@example.com"}):
+            resp = authed_client.post("/queue/evt-1/enforce-casual")
         assert resp.status_code == 200
         mock_brain_route.enforce_domain_override.assert_awaited_once()
+
+    def test_headhunter_event_non_maintainer_rejected(self, authed_client, mock_blackboard_route, mock_brain_route):
+        """Codereview finding (auth-rbac): an authenticated non-maintainer must not be
+        able to force domain=casual on a team-shared automated/incident event -- 403,
+        and Brain must never be invoked."""
+        mock_blackboard_route.get_event = AsyncMock(
+            return_value=_make_event(
+                event_id="evt-1", status="active", source="headhunter",
+                created_by_email="someone-else@example.com",
+            ),
+        )
+        with patch.dict(os.environ, {"HEADHUNTER_MAINTAINERS": "bob@example.com"}):
+            resp = authed_client.post("/queue/evt-1/enforce-casual")
+        assert resp.status_code == 403
+        mock_brain_route.enforce_domain_override.assert_not_awaited()
 
     def test_chat_event_different_user_rejected(self, authed_client, mock_blackboard_route, mock_brain_route):
         """T-2: chat-sourced event + different user email → 403 (ownership preserved for chat/slack)."""
