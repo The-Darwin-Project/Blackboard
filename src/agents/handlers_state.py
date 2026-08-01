@@ -91,6 +91,13 @@ def _is_valid_tracking_link(tracking_link: str, incident_references: list[str]) 
         # bot-authored GitLab/GitHub comments, and a newline would let a crafted value
         # inject additional comment lines (e.g. GitLab quick-actions) under the bot's identity.
         return False
+    if "\\" in tracking_link:
+        # Reject backslashes outright: WHATWG URL parsers (browsers, many HTTP clients)
+        # treat '\' as '/' in special-scheme URLs, but urlsplit() does not -- so a value
+        # like "https://evil.example.com\\@github.com/x" parses here as hostname
+        # "github.com" (passing the allowlist below) while actually navigating to
+        # evil.example.com, bypassing the host check entirely.
+        return False
     if tracking_link in incident_references:
         return True
     if not _TRACKING_LINK_PATTERN.match(tracking_link):
