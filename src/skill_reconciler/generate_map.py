@@ -9,7 +9,7 @@
 """
 Generate brain_skills/always/phase-tool-map.md from GATE_REGISTRY.
 
-Produces a navigation skill with Mermaid diagram, 24-gate table, skill pointers,
+Produces a navigation skill with Mermaid diagram, 25-gate table, skill pointers,
 and behavioral annotations — derived from the single source of truth in tool_gates.py.
 """
 from __future__ import annotations
@@ -41,6 +41,7 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "PHASE_OBSERVATION": "phase is close",
     "OBS_PLATEAU": "same observation recorded 3+ times consecutively without a decision",
     "OBS_FLOOD": "6+ consecutive observations of any key without an intervening decision",
+    "CLOSE_RETRY_CIRCUIT_BREAKER": "3+ consecutive close_event rejections without an intervening tool call",
     "PHASE_JIRA_COMMENT": "phase not in dispatch/verify/escalate/close",
     "NO_KARGO_CONTEXT": "no Kargo evidence on event",
     "NO_GITHUB_CONTEXT": "no GitHub evidence on event",
