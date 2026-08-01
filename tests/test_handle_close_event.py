@@ -311,6 +311,49 @@ class TestTrackingLinkValidatedRegardlessOfOpenIncidents:
             close_reason="resolved", tracking_link="https://github.com/org/repo/issues/1",
         )
 
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_even_with_open_incidents_and_wrong_terminal_reason(self):
+        # The unconditional host check now runs before the open-incident block, so an
+        # untrusted-host tracking_link is rejected on its own merits even in a request
+        # that would also fail the "terminal_reason must be non_transient_confirmed"
+        # gate -- the host-allowlist rejection must not be skippable by also getting
+        # the open-incident escape valve wrong.
+        event = _event([], source="aligner", incident_references=["JIRA-1"])
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "evil.example.com" in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_untrusted_host_tracking_link_rejected_for_non_automated_source(self):
+        # Non-automated sources skip the open-incident escape-valve block entirely,
+        # but the host-allowlist check must still apply to any supplied tracking_link.
+        event = _event([], source="chat", incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(
+            ctx, "evt-1",
+            {"terminal_reason": "resolved", "tracking_link": "https://evil.example.com/phish"},
+            None,
+        )
+        assert result is True
+        ctx.close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_tracking_link_does_not_trigger_host_check(self):
+        # Absence of a tracking_link must not be treated as an invalid one -- the
+        # `if tracking_link and ...` guard should short-circuit cleanly.
+        event = _event([], incident_references=None)
+        ctx, _ = _mock_ctx(event)
+        result = await handle_close_event(ctx, "evt-1", {"terminal_reason": "resolved"}, None)
+        assert result is False
+        ctx.close_and_broadcast.assert_called_once()
+
 
 class TestFeatureFlag:
     """T-14: ENABLE_TERMINAL_CLOSE_GATE=false restores legacy behavior."""

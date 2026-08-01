@@ -153,6 +153,47 @@ class TestIncidentCreatedOrderingRelativeToReferencePersist:
         assert call_order == ["mark_incident_created", "add_incident_reference"]
 
 
+class TestStageEscalationFailureStillSkipsMarkIncidentCreated:
+    """If stage_escalation itself fails, no escalation exists yet, so
+    mark_incident_created must NOT fire -- only a successful create/stage should
+    ever mark the incident as created (the whole point of the duplicate-prevention
+    fix is to mark right after the external side effect succeeds, not before)."""
+
+    @pytest.mark.asyncio
+    async def test_stage_escalation_failure_does_not_mark_incident_created(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        bb.stage_escalation = AsyncMock(side_effect=RuntimeError("blackboard down"))
+
+        result = await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        assert result is True
+        ctx.mark_incident_created.assert_not_called()
+        bb.add_incident_reference.assert_not_awaited()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "Failed to stage escalation" in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_create_incident_failure_does_not_mark_incident_created(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(side_effect=RuntimeError("jira down"))
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+
+        result = await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        assert result is True
+        ctx.mark_incident_created.assert_not_called()
+        bb.add_incident_reference.assert_not_awaited()
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "Failed to create incident" in turn_arg.thoughts
+
+
 class TestNightwatcherStagedIncidentReferenceFailureIsNonFatal:
     """HIGH finding fix: add_incident_reference failures after a successful
     stage_escalation must not be treated as if the escalation itself failed --
