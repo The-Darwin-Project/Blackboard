@@ -276,6 +276,8 @@ export interface EventDocument {
   sticky_notes?: Array<{ timestamp: string; content: string; read: boolean }>;
   unread_notes?: number;
   token_usage?: TokenUsageDict;
+  /** Jira issue keys or Nightwatcher-staging placeholder refs from report_incident. */
+  incident_references?: string[];
 }
 
 // =============================================================================

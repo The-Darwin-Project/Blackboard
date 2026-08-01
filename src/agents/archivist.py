@@ -29,6 +29,10 @@
 #     (see handlers_observations.py) as authoritative overrides of earlier triage/diagnosis. Both the Claude
 #     path (archive_event) and Gemini fallback (_archive_event_fallback) extract reference_facts (with
 #     service) and set corrected_by_field_notes.
+# 21b. [Pattern]: _extract_close_fields(event) derives terminal_reason (from the last close
+#     turn's evidence field -- never persisted directly on EventDocument) and incident_references
+#     (a real EventDocument field). Shared by both archive_event and _archive_event_fallback so
+#     the fields don't silently drop from one path when only the other is updated.
 # 21. [Pattern]: rerank() uses a DEDICATED _ensure_rank_client() lazy-init for RankServiceAsyncClient
 #     (Discovery Engine), NOT shared with _ensure_initialized(). Rank client failures degrade gracefully
 #     to original order without affecting core Archivist (embeddings + Qdrant). Per-collection reranking
@@ -218,6 +222,22 @@ ARCHIVE_TOOL_SCHEMA = {
         },
     },
 }
+
+
+def _extract_close_fields(event: EventDocument) -> tuple[Optional[str], list[str]]:
+    """Derive the closing terminal_reason (from the last close turn's evidence
+    field -- never persisted directly on EventDocument) and incident_references
+    (a real EventDocument field) for the archival summary payload.
+
+    Shared by both archive_event (Claude path) and _archive_event_fallback
+    (Gemini path) so terminal_reason/incident_references don't silently drop
+    from one path when only the other is updated.
+    """
+    terminal_reason = None
+    close_turn = event.conversation[-1] if event.conversation else None
+    if close_turn is not None and getattr(close_turn, "action", None) == "close":
+        terminal_reason = close_turn.evidence or None
+    return terminal_reason, list(event.incident_references or [])
 
 
 class Archivist:
@@ -514,6 +534,9 @@ class Archivist:
             else:
                 summary.setdefault("brain_domain", "complicated")
                 summary.setdefault("source_domain", "complicated")
+            terminal_reason, incident_references = _extract_close_fields(event)
+            summary.setdefault("terminal_reason", terminal_reason)
+            summary.setdefault("incident_references", incident_references)
 
             embed_text = (
                 f"{summary.get('symptom', '')} "
@@ -608,6 +631,9 @@ class Archivist:
         else:
             summary.setdefault("brain_domain", "complicated")
             summary.setdefault("source_domain", "complicated")
+        terminal_reason, incident_references = _extract_close_fields(event)
+        summary.setdefault("terminal_reason", terminal_reason)
+        summary.setdefault("incident_references", incident_references)
 
         embed_text = (
             f"{summary.get('symptom', '')} "
