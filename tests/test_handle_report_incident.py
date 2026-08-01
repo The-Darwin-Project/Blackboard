@@ -112,6 +112,43 @@ class TestNightwatcherStagedIncidentReference:
         bb.add_incident_reference.assert_not_awaited()
 
 
+class TestNightwatcherStagedIncidentReferenceFailureIsFatal:
+    """commit a712fc02: add_incident_reference failures must no longer be silently
+    swallowed as non-fatal -- a write failure now aborts the rest of the staged-
+    escalation branch (skipping set_escalation_flag) and surfaces as a failure
+    result, instead of silently disabling incident-reference tracking while still
+    reporting success."""
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_is_reported_as_failure(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        result = await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        assert result is True
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "Failed to stage escalation" in turn_arg.thoughts
+        assert "redis unavailable" in turn_arg.thoughts
+        assert "Escalation staged" not in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_skips_set_escalation_flag(self, monkeypatch):
+        # The raise now propagates out of the add_incident_reference try/except and
+        # is caught by the outer try/except, so set_escalation_flag (which runs
+        # after the reference persist) must never be reached.
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "true")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        await handle_report_incident(ctx, "evt-1", {"summary": "s"}, None)
+
+        bb.set_escalation_flag.assert_not_awaited()
+
+
 class TestDirectJiraIncidentReference:
     """Direct-Jira branch (NIGHTWATCHER_ENABLED=false): create_incident's
     issue_key is persisted via add_incident_reference, mirroring the
@@ -136,3 +173,48 @@ class TestDirectJiraIncidentReference:
         adapter.create_incident.assert_awaited_once()
         bb.add_incident_reference.assert_awaited_once_with("evt-1", "VMER-1234")
         ctx.mark_incident_created.assert_called_once_with("evt-1")
+
+
+class TestDirectJiraIncidentReferenceFailureIsFatal:
+    """commit a712fc02: the direct-Jira branch's add_incident_reference failure
+    must also be fatal, mirroring the Nightwatcher-staged branch."""
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_is_reported_as_failure(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1234", "issue_url": "https://example/browse/VMER-1234"},
+        )
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        result = await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        assert result is True
+        turn_arg = ctx.append_and_broadcast.call_args[0][1]
+        assert "Failed to create incident" in turn_arg.thoughts
+        assert "redis unavailable" in turn_arg.thoughts
+        assert "Incident created in Jira" not in turn_arg.thoughts
+
+    @pytest.mark.asyncio
+    async def test_add_incident_reference_failure_skips_set_escalation_flag(self, monkeypatch):
+        monkeypatch.setenv("NIGHTWATCHER_ENABLED", "false")
+        event = _event_doc(source="aligner")
+        ctx, bb = _mock_ctx(event)
+        adapter = AsyncMock()
+        adapter.create_incident = AsyncMock(
+            return_value={"issue_key": "VMER-1234", "issue_url": "https://example/browse/VMER-1234"},
+        )
+        ctx.get_incident_adapter = MagicMock(return_value=adapter)
+        bb.add_incident_reference = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        await handle_report_incident(
+            ctx, "evt-1", {"summary": "anomaly detected", "description": "details"}, None,
+        )
+
+        bb.set_escalation_flag.assert_not_awaited()

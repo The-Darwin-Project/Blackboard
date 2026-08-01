@@ -46,6 +46,32 @@ class TestTrackingLinkInMrFeedbackComment:
         assert "VMER-1234" in comment
 
 
+class TestCloseSummaryPrefixedInMrFeedbackComment:
+    """close_summary must be prefixed with 'Summary: ' (commit a712fc02) so a value
+    that starts with a slash cannot be misread as the first line of a GitLab
+    quick-action/slash-command by PaC/GitOps bots scanning the comment body."""
+
+    def test_close_summary_line_is_prefixed(self):
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="Root cause fixed.")])
+        comment = GitLabPlatform._build_feedback_comment(event, "resolved")
+        assert "Summary: Root cause fixed." in comment
+
+    def test_leading_slash_in_close_summary_is_not_first_char_on_its_line(self):
+        # Even a maximally-adversarial close_summary starting with "/" must not
+        # appear as the first character of its own line once prefixed.
+        event = SimpleNamespace(conversation=[_bfc_turn(thoughts="/close")])
+        comment = GitLabPlatform._build_feedback_comment(event, "resolved")
+        summary_line = next(line for line in comment.split("\n") if "close" in line and "Darwin" not in line)
+        assert not summary_line.startswith("/")
+        assert summary_line == "Summary: /close"
+
+    def test_tracking_link_line_is_unaffected_by_summary_prefix(self):
+        event = SimpleNamespace(conversation=[_bfc_turn(result="VMER-1234", thoughts="Root cause fixed.")])
+        comment = GitLabPlatform._build_feedback_comment(event, "resolved")
+        assert "**Tracking:** VMER-1234" in comment
+        assert "Summary: VMER-1234" not in comment
+
+
 class TestCloseSummarySanitizedInMrFeedbackComment:
     """close_summary is LLM-controlled free text (close_turn.thoughts) -- it must be
     routed through sanitize_comment_field() before landing in a bot-authored MR
