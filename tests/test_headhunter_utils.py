@@ -33,6 +33,37 @@ class TestSanitizeCommentFieldMarkdownInjection:
         assert sanitize_comment_field("[[a]](b(c)d)") == "abcd"
 
 
+class TestSanitizeCommentFieldQuickActionInjection:
+    """sanitize_comment_field must strip \\n/\\r so a crafted close_reason or
+    tracking_link cannot inject additional comment lines (e.g. GitLab quick-actions
+    like `/close`, `/assign`) under the bot's identity."""
+
+    def test_strips_bare_newline(self):
+        assert sanitize_comment_field("resolved\n/close") == "resolved/close"
+
+    def test_strips_bare_carriage_return(self):
+        assert sanitize_comment_field("resolved\r/close") == "resolved/close"
+
+    def test_strips_crlf(self):
+        assert sanitize_comment_field("resolved\r\n/assign @bot") == "resolved/assign bot"
+
+    def test_strips_multiple_embedded_newlines(self):
+        payload = "line one\nline two\r\nline three"
+        assert sanitize_comment_field(payload) == "line oneline twoline three"
+
+    def test_quick_action_injection_payload_neutralized(self):
+        payload = "self_resolved\n/close\n/assign @maintainer"
+        result = sanitize_comment_field(payload)
+        assert "\n" not in result
+        assert "\r" not in result
+
+    def test_no_breakout_or_injection_chars_survive_combined_payload(self):
+        payload = "[click](https://evil.com)\n/close\r\n@user `code` <tag>!"
+        result = sanitize_comment_field(payload)
+        for char in "[]()!<>@`\n\r":
+            assert char not in result
+
+
 class TestSanitizeCommentFieldPreExistingBehavior:
     def test_strips_angle_brackets(self):
         assert sanitize_comment_field("<script>alert(1)</script>") == "scriptalert1/script"
