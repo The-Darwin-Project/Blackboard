@@ -767,7 +767,7 @@ class TestCodereviewFixes:
         """
         mock_client = MagicMock()
         created_chat = MagicMock()
-        mock_client.aio.chats.create = AsyncMock(return_value=created_chat)
+        mock_client.aio.chats.create = MagicMock(return_value=created_chat)
         mgr = ChatSessionManager(
             client=mock_client, model_name="gemini-3.1-pro",
             prefill_user="Hello", prefill_model="Hi",
@@ -798,11 +798,11 @@ class TestCodereviewFixes:
         mock_client = MagicMock()
         create_calls = []
 
-        async def _capture_create(*, model, config, history):
+        def _capture_create(*, model, config, history):
             create_calls.append(history)
             return MagicMock()
 
-        mock_client.aio.chats.create = AsyncMock(side_effect=_capture_create)
+        mock_client.aio.chats.create = MagicMock(side_effect=_capture_create)
         mgr = ChatSessionManager(
             client=mock_client, model_name="gemini-3.1-pro",
             prefill_user="Hello", prefill_model="Hi",
@@ -892,7 +892,7 @@ class TestReview2Fixes:
         so send_message doesn't produce consecutive user roles -> 400.
         """
         mock_client = MagicMock()
-        mock_client.aio.chats.create = AsyncMock(return_value=MagicMock())
+        mock_client.aio.chats.create = MagicMock(return_value=MagicMock())
         mgr = ChatSessionManager(
             client=mock_client, model_name="gemini-3.1-pro",
             prefill_user="Hello", prefill_model="Hi",

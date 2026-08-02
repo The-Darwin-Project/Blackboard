@@ -596,14 +596,14 @@ class ChatSessionManager:
         if history and history[-1].role == "user":
             deferred_user = history.pop()
 
-        # M9: bound the session-create call so a stalled request doesn't hold
-        # the caller's per-event lock indefinitely.
-        async with asyncio.timeout(_SESSION_CREATE_TIMEOUT_SEC):
-            chat = await self._client.aio.chats.create(
-                model=self._model_name,
-                config=config,
-                history=history,
-            )
+        # chats.create() is synchronous (returns AsyncChat directly, not a coroutine).
+        # Probe-discovered: await on it produces "object AsyncChat can't be used in
+        # 'await' expression". No asyncio.timeout wrapper needed (synchronous call).
+        chat = self._client.aio.chats.create(
+            model=self._model_name,
+            config=config,
+            history=history,
+        )
         est_tokens = estimate_tokens([_content_to_dict(c) for c in history])
         self._sessions[event_id] = _SessionEntry(
             chat=chat, event_id=event_id, turn_count=len(history),
@@ -906,12 +906,11 @@ class ChatSessionManager:
 
     async def _recreate_session(self, event_id: str, history: list, config) -> None:
         """Destroy current session and create a new one with the given history."""
-        async with asyncio.timeout(_SESSION_CREATE_TIMEOUT_SEC):
-            chat = await self._client.aio.chats.create(
-                model=self._model_name,
-                config=config,
-                history=history,
-            )
+        chat = self._client.aio.chats.create(
+            model=self._model_name,
+            config=config,
+            history=history,
+        )
         est_tokens = estimate_tokens([_content_to_dict(c) for c in history])
         self._sessions[event_id] = _SessionEntry(
             chat=chat, event_id=event_id, turn_count=len(history),
