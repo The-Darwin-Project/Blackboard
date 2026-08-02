@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "407afcb" # Updated by CI to commit SHA
+  tag: "257c103" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -277,8 +277,8 @@ brain:
   # deployment.yaml's .Values.brain.* reads silently resolved to nil and the `| default`
   # fallback masked the mismatch -- the flag could never actually be turned on via this file.
   chatBridgeEnabled: false
-  summarizerModel: "gemini-3.5-flash-lite"  # Flash-Lite for context compression summarization
-  compressKeepRecent: 10  # Recent turns to keep after compression
+  summarizerModel: "gemini-3.5-flash-lite" # Flash-Lite for context compression summarization
+  compressKeepRecent: 10 # Recent turns to keep after compression
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================
