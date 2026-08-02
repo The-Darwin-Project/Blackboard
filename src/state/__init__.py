@@ -4,6 +4,7 @@
 # 2. [Constraint]: No implementation logic — only re-exports.
 """State management layer for Darwin Blackboard."""
 from .blackboard import BlackboardState
+from .event_state import CycleSnapshot, EventState, create_event_state
 from .ports import (
     EscalationRepository,
     EventRepository,
@@ -16,6 +17,9 @@ from .redis_client import get_redis, RedisClient
 
 __all__ = [
     "BlackboardState",
+    "CycleSnapshot",
+    "EventState",
+    "create_event_state",
     "EscalationRepository",
     "EventRepository",
     "MetricsRepository",

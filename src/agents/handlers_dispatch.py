@@ -127,7 +127,7 @@ async def handle_select_agent(
         )
         return False
 
-    depth = ctx.increment_routing_depth(event_id)
+    depth = await ctx.increment_routing_depth(event_id)
     if depth > 30:
         logger.warning(f"Event {event_id} hit routing depth limit (30)")
         await ctx.close_and_broadcast(event_id, "Agent routing loop detected. Force closed.", "force_closed")

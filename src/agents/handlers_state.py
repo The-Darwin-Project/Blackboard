@@ -256,6 +256,7 @@ async def handle_wait_for_user(
                      "Use request_user_approval to pause for human authorization, "
                      "or defer_event to wait for external processes.",
             waitingFor="wait_for_user",
+            response_parts=response_parts,
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
@@ -442,7 +443,7 @@ async def handle_classify_event(
                     "[GATE] casual domain rejected. State: event not found. "
                     "Constraint: cannot verify source. Reclassify with an operational domain."
                 ),
-                response_parts=[],
+                response_parts=response_parts,
             )
             await ctx.append_and_broadcast(event_id, turn)
             return True
@@ -456,7 +457,7 @@ async def handle_classify_event(
                     f"{event_doc.source}. Constraint: casual is only valid for "
                     "chat/slack events. Reclassify with an operational domain."
                 ),
-                response_parts=[],
+                response_parts=response_parts,
             )
             await ctx.append_and_broadcast(event_id, turn)
             return True
@@ -543,6 +544,7 @@ async def handle_defer_event(
             "defer_until": defer_until,
             "defer_started_at": defer_started_at,
         })
+        await ctx.touch_state_ttl(event_id)
     await ctx.record_event(
         EventType.BRAIN_EVENT_DEFERRED,
         {"event_id": event_id, "delay_seconds": delay},
