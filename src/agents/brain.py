@@ -2240,14 +2240,17 @@ class Brain:
             self._chat_sessions.evict(event_id)
             return
 
+        # Suppress text-only responses from synthetic FR follow-ups. The model's
+        # text reaction to a synthetic FR (gate rejection, RECALL block, tool result)
+        # is always filler — acknowledgments ("I understand") or echoed terminal
+        # prompts ("What is the next action? Call one of your functions."). Useful
+        # text is captured in the PRIMARY stream via _stream_chat_and_accumulate.
+        # Production-discovered: evt-9ebce17a echoed terminal_prompt as brain.response.
         if text2 or thoughts2:
-            turn = ConversationTurn(
-                turn=(await self._next_turn_number(event_id)),
-                actor="brain",
-                action="response" if text2 else "thoughts",
-                thoughts=text2 or thoughts2,
+            logger.debug(
+                "Suppressing text-only synthetic FR response for %s (depth=%d): %s",
+                event_id, depth, (text2 or thoughts2)[:80],
             )
-            await self._append_and_broadcast(event_id, turn)
 
     async def _process_with_chat_session(
         self,
