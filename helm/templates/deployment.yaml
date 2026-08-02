@@ -202,6 +202,12 @@ spec:
               value: {{ .Values.brain.contentBudgetTokens | default "800000" | quote }}
             - name: BRAIN_FULL_TIER_MAX_CHARS
               value: {{ .Values.brain.fullTierMaxChars | default "100000" | quote }}
+            - name: CHAT_BRIDGE_ENABLED
+              value: {{ .Values.brain.chatBridgeEnabled | default false | quote }}
+            - name: BRAIN_SUMMARIZER_MODEL
+              value: {{ .Values.brain.summarizerModel | default "gemini-3.5-flash-lite" | quote }}
+            - name: BRAIN_COMPRESS_KEEP_RECENT
+              value: {{ .Values.brain.compressKeepRecent | default 10 | quote }}
             {{- end }}
             {{- if or .Values.sidecars.architect.enabled .Values.sidecars.sysadmin.enabled .Values.sidecars.developer.enabled }}
             # Agent sidecar URLs

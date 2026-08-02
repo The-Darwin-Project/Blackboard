@@ -10,26 +10,13 @@
 # 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
-# 11. [Pattern]: search_enabled/grounding_corpus are per-call keyword args on generate()/generate_stream(),
-#     NOT adapter-instance state. This adapter is a singleton shared across N concurrent ReconcileScheduler
-#     workers (per-event locks, not global) -- instance-attribute toggles would race across unrelated events
-#     processed concurrently. _build_config() receives both as explicit params and appends GoogleSearch/
-#     Tool(retrieval=VertexRagStore) accordingly. Grounding metadata extracted from final candidate and
-#     yielded on the done=True chunk. Graceful fallback: None if not available.
-# 11b. [Pattern]: _build_config appends Tool(retrieval=VertexRagStore) in the 'if tools' branch
-#     (when grounding_corpus is set, search or not) and the 'elif grounding_corpus' branch --
-#     NOT the 'elif search_enabled' branch, since the mutual-exclusion guard above already nulls
-#     grounding_corpus whenever search_enabled is True, making that branch's grounding effectively
-#     unreachable by construction. No store_context (Live API-specific). _build_rag_tool() helper
-#     avoids duplication. Grounding extraction handles both .web (search) and .retrieved_context
-#     (RAG) chunk types. grounding_chunks capped to _MAX_GROUNDING_CHUNKS and title/uri truncated
-#     -- untrusted-size defense.
-# 12. [Pattern]: generate_stream accumulates thought_parts (part.thought=True) separately from last_parts.
-#     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
-#     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
-#     with models that don't clear thought history.
+# 11. [Pattern]: search_enabled/grounding_corpus are per-call keyword args, NOT adapter-instance state.
+#     Singleton shared across N concurrent ReconcileScheduler workers — instance-attribute toggles would race.
+# 12. [Pattern]: generate_stream uses shared _map_one_chunk from chat_session.py. It KEEPS its early-return
+#     on FC (old path behavior preserved). ChatSessionManager.send_stream does NOT early-return (new path).
+#     This is the behavioral split documented in the Chat Session Bridge plan.
 # 13. [Pattern]: Client init configures explicit HttpRetryOptions (5 attempts, exp backoff, 408/429/5xx).
-#     SDK-level retries handle 502/503 before Brain's own retry layer. timeout=180s for long inference.
+# 14. [Pattern]: `client` property exposes the genai.Client for ChatSessionManager to borrow (single pool).
 """
 GeminiAdapter -- LLMPort implementation using google-genai SDK (Vertex AI).
 
@@ -41,12 +28,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
+from .chat_session import _is_thought_part, _map_one_chunk, _MAX_GROUNDING_FIELD_LEN, _truncate_field
 from .types import FunctionCall, LLMChunk, LLMResponse, TokenUsage
 
 logger = logging.getLogger(__name__)
 
 _MAX_GROUNDING_CHUNKS = 20  # defense-in-depth cap on untrusted grounding_chunks count
-_MAX_GROUNDING_FIELD_LEN = 300  # cap on title/uri length before they flow into evidence/logs
+# _MAX_GROUNDING_FIELD_LEN imported from chat_session (shared constant)
 
 
 class GeminiAdapter:
@@ -74,6 +62,11 @@ class GeminiAdapter:
         self._model_name = model_name
         self._tracker = quota_tracker
         logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
+
+    @property
+    def client(self):
+        """Public accessor for ChatSessionManager to borrow the shared genai.Client."""
+        return self._client
 
     # -----------------------------------------------------------------
     # Quota tracking helpers
@@ -333,10 +326,6 @@ class GeminiAdapter:
     # LLMPort: generate_stream (async iterator)
     # -----------------------------------------------------------------
 
-    @staticmethod
-    def _is_thought_part(part) -> bool:
-        return hasattr(part, 'thought') and part.thought
-
     async def generate_stream(
         self,
         system_prompt: str,
@@ -365,77 +354,36 @@ class GeminiAdapter:
             config=config,
         )
         thought_parts: list = []
-        last_parts = None
-        last_usage = None
-        last_grounding = None
+        last_parts_ref: list = [None]
+        last_usage_ref: list = [None]
+        last_grounding_ref: list = [None]
+
         async for chunk in stream:
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                last_usage = chunk.usage_metadata
+            mapped = _map_one_chunk(
+                chunk,
+                thought_parts=thought_parts,
+                last_parts_ref=last_parts_ref,
+                last_usage_ref=last_usage_ref,
+                last_grounding_ref=last_grounding_ref,
+                estimate=estimate,
+                record_usage_fn=self._record_usage,
+            )
+            if mapped:
+                for llm_chunk in mapped:
+                    yield llm_chunk
+                    # OLD PATH: early-return on FC (preserved — this is the
+                    # behavioral split the plan documents)
+                    if llm_chunk.function_call:
+                        return
 
-            if chunk.candidates:
-                for candidate in chunk.candidates:
-                    if candidate.content and candidate.content.parts:
-                        last_parts = candidate.content.parts
-                        for part in candidate.content.parts:
-                            if self._is_thought_part(part):
-                                thought_parts.append(part)
-                                if hasattr(part, 'text') and part.text:
-                                    yield LLMChunk(text=part.text, is_thought=True)
-                    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                        gm = candidate.grounding_metadata
-                        chunks = []
-                        # Cap count: grounding_chunks is untrusted-size API output (defense-in-depth).
-                        for c in (gm.grounding_chunks or [])[:_MAX_GROUNDING_CHUNKS]:
-                            if hasattr(c, 'web') and c.web:
-                                chunks.append({
-                                    "title": self._truncate_field(c.web.title),
-                                    "uri": self._truncate_field(c.web.uri),
-                                    "source": "search",
-                                })
-                            elif hasattr(c, 'retrieved_context') and c.retrieved_context:
-                                chunks.append({
-                                    "title": self._truncate_field(getattr(c.retrieved_context, 'title', '')),
-                                    "uri": self._truncate_field(getattr(c.retrieved_context, 'uri', '')),
-                                    "source": "rag",
-                                })
-                        last_grounding = {
-                            "queries": list(gm.web_search_queries or []) + list(getattr(gm, 'retrieval_queries', None) or []),
-                            "chunks": chunks,
-                        }
-
-            if chunk.text:
-                yield LLMChunk(text=chunk.text)
-
-            if chunk.function_calls:
-                fc = chunk.function_calls[0]
-                token_usage = self._record_usage(last_usage, estimate)
-                output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
-                all_parts = thought_parts + output_parts
-                yield LLMChunk(
-                    function_call=FunctionCall(name=fc.name, args=fc.args or {}),
-                    done=True,
-                    raw_parts=all_parts,
-                    grounding_metadata=last_grounding,
-                    usage=token_usage,
-                )
-                return
-
-        token_usage = self._record_usage(last_usage, estimate)
-        if last_grounding and last_grounding.get("chunks"):
-            logger.debug(f"Grounding: {len(last_grounding.get('chunks', []))} sources, queries={last_grounding.get('queries', [])}")
+        token_usage = self._record_usage(last_usage_ref[0], estimate)
+        if last_grounding_ref[0] and last_grounding_ref[0].get("chunks"):
+            logger.debug(f"Grounding: {len(last_grounding_ref[0].get('chunks', []))} sources, queries={last_grounding_ref[0].get('queries', [])}")
         elif search_enabled or grounding_corpus:
-            # Distinguish "attempted, 0 chunks" from "grounding disabled" -- observability without error noise.
             logger.info(
                 "Grounding attempted (search_enabled=%s, corpus=%s) but no chunks returned",
                 search_enabled, bool(grounding_corpus),
             )
-        output_parts = [p for p in (last_parts or []) if not self._is_thought_part(p)]
+        output_parts = [p for p in (last_parts_ref[0] or []) if not _is_thought_part(p)]
         all_parts = thought_parts + output_parts
-        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding, usage=token_usage)
-
-    @staticmethod
-    def _truncate_field(value: str, max_len: int = _MAX_GROUNDING_FIELD_LEN) -> str:
-        """Truncate an untrusted grounding-chunk field (title/uri) before it flows into evidence/logs."""
-        if not value:
-            return value
-        return value[:max_len]
+        yield LLMChunk(done=True, raw_parts=all_parts, grounding_metadata=last_grounding_ref[0], usage=token_usage)

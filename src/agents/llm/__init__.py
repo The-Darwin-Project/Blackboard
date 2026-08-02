@@ -5,6 +5,9 @@
 # 3. [Pattern]: QuotaTracker is a module-level singleton. Created lazily on first Gemini create_adapter() call.
 # 4. [Constraint]: Claude adapter skips QuotaTracker (separate Anthropic quota via Vertex AI).
 # 5. [Pattern]: TokenMeter is a lazy singleton via get_token_meter(). Unlike QuotaTracker, never returns None.
+# 6. [Pattern]: ChatSessionManager + format_turn_for_chat exported for Chat Session Bridge.
+#    compression.py functions (compress_contents, estimate_tokens, dedup_consecutive_fr) shared
+#    by both old path (brain.py) and new path (chat_session.py) — zero circular import.
 """
 LLM adapter factory and re-exports.
 
@@ -27,6 +30,8 @@ from .types import (
     TokenUsage,
 )
 from .quota_tracker import QuotaExhaustedError, QuotaTracker
+from .chat_session import ChatSessionManager, format_turn_for_chat
+from .compression import compress_contents, estimate_tokens, dedup_consecutive_fr
 
 __all__ = [
     "create_adapter",
@@ -42,6 +47,11 @@ __all__ = [
     "NIGHTWATCHER_TOOL_SCHEMAS",
     "QuotaTracker",
     "QuotaExhaustedError",
+    "ChatSessionManager",
+    "format_turn_for_chat",
+    "compress_contents",
+    "estimate_tokens",
+    "dedup_consecutive_fr",
 ]
 
 _quota_tracker: QuotaTracker | None = None

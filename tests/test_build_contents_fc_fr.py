@@ -183,7 +183,8 @@ class TestCompressionPairDelete:
             contents.append({"role": "model", "parts": [{"text": "final answer " * 500}]})
             contents.append({"role": "user", "parts": [{"text": "follow up " * 500}]})
 
-        compressed = Brain._compress_contents(contents, max_tokens=5000)
+        from src.agents.llm.compression import compress_contents
+        compressed = compress_contents(contents, max_tokens=5000)
 
         # Count surviving FC/FR pairs in compressed output
         fc_count = sum(
@@ -218,7 +219,8 @@ class TestEstimateTokens:
         }
 
         contents = [fc_msg, fr_msg]
-        tokens = Brain._estimate_tokens(contents)
+        from src.agents.llm.compression import estimate_tokens
+        tokens = estimate_tokens(contents)
 
         # FC/FR must contribute tokens (not treated as zero)
         assert tokens > 0
@@ -229,7 +231,8 @@ class TestEstimateTokens:
 
         text_400_chars = "a" * 400
         contents = [{"role": "user", "parts": [{"text": text_400_chars}]}]
-        tokens = Brain._estimate_tokens(contents)
+        from src.agents.llm.compression import estimate_tokens
+        tokens = estimate_tokens(contents)
 
         assert tokens == 100  # 400 chars // 4
 
@@ -281,7 +284,8 @@ class TestNWayDedup:
             contents.append({"role": "model", "parts": [{"functionCall": {"name": f"other_tool_{i}", "args": {}}}]})
             contents.append({"role": "user", "parts": [{"functionResponse": {"name": f"other_tool_{i}", "response": {"ok": True}}}]})
 
-        compressed = Brain._compress_contents(contents, max_tokens=999_999)
+        from src.agents.llm.compression import compress_contents
+        compressed = compress_contents(contents, max_tokens=999_999)
 
         # Non-consecutive: all preserved
         fr_wait = [
@@ -318,7 +322,8 @@ class TestDedupImmutability:
             contents.append({"role": "model", "parts": [fc_part.copy()]})
             contents.append({"role": "user", "parts": [{"functionResponse": {"name": "wait_for_agent", "response": {"ok": True}}}]})
 
-        Brain._compress_contents(contents, max_tokens=999_999)
+        from src.agents.llm.compression import compress_contents
+        compress_contents(contents, max_tokens=999_999)
 
         # Original turn's response_parts must NOT be mutated
         assert turn.response_parts == original_snapshot
@@ -347,7 +352,8 @@ class TestFCFRFloorSummary:
             contents.append({"role": "model", "parts": [{"text": f"response {i} " * 200}]})
             contents.append({"role": "user", "parts": [{"text": f"follow up {i} " * 200}]})
 
-        compressed = Brain._compress_contents(contents, max_tokens=20_000)
+        from src.agents.llm.compression import compress_contents
+        compressed = compress_contents(contents, max_tokens=20_000)
 
         # Find the FC message in compressed output
         fc_msgs = [

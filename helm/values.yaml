@@ -272,6 +272,13 @@ brain:
   contentBudgetTokens: "800000" # Conversation compression trigger budget (Gemini 3.1 Pro 1M context)
   fullTierMaxChars: "100000" # Per-turn ceiling in the uncompressed "full" tier -- caps one oversized message
   redisStateEnabled: true # Per-event state backend: true=Redis HASH (survives restart), false=in-memory (emergency rollback)
+  # Chat Session Bridge (feature flag — default off, enable to use Gemini Chat API).
+  # Codereview fix: these were previously (incorrectly) placed under gcp: above, where
+  # deployment.yaml's .Values.brain.* reads silently resolved to nil and the `| default`
+  # fallback masked the mismatch -- the flag could never actually be turned on via this file.
+  chatBridgeEnabled: false
+  summarizerModel: "gemini-3.5-flash-lite"  # Flash-Lite for context compression summarization
+  compressKeepRecent: 10  # Recent turns to keep after compression
 # =============================================================================
 # GitHub App Configuration (for GitOps authentication)
 # =============================================================================

@@ -700,6 +700,7 @@ class Brain:
         self._agent_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         # Per-event locks -- prevents concurrent process_event calls for same event
         self._event_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._lock_holders: dict[str, asyncio.Task] = {}  # H0: track lock ownership for re-entrancy detection
         # Wait-for-user state: event_id -> wait_start_timestamp (serves idle timeout + on-ice threshold)
         self._waiting_for_user: dict[str, float] = {}
         # Idle timeout manager for chat/slack events (warn + auto-close)
@@ -786,11 +787,16 @@ class Brain:
         self._rag_grounding_corpus = os.getenv("RAG_GROUNDING_CORPUS", "")
         self._rag_grounding_enabled = os.getenv("RAG_GROUNDING_ENABLED", "false").lower() == "true"
 
+        # Chat Session Bridge (feature flag — default off)
+        self._chat_bridge_enabled = os.getenv("CHAT_BRIDGE_ENABLED", "false").lower() == "true"
+        self._chat_sessions = None  # ChatSessionManager | None — lazy-loaded
+
         skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
         wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
         search_status = "search=on" if self._search_enabled else "search=off"
         grounding_status = "grounding=on" if self._rag_grounding_enabled and self._rag_grounding_corpus else "grounding=off"
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, {grounding_status}, agents={list(self.agents.keys())})")
+        chat_bridge_status = "chat_bridge=on" if self._chat_bridge_enabled else "chat_bridge=off"
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, {grounding_status}, {chat_bridge_status}, agents={list(self.agents.keys())})")
 
         # Initialize tool router context — singleton, methods take event_id
         self._tool_ctx = _BrainToolContext(self)
@@ -858,11 +864,46 @@ class Brain:
                 self._llm_available = True
                 logger.info(f"Brain LLM adapter initialized: {self.provider}/{self.model_name}")
 
+                # Initialize ChatSessionManager when chat bridge is enabled + Gemini
+                if self._chat_bridge_enabled and self.provider == "gemini":
+                    self._init_chat_session_manager()
+
             except Exception as e:
                 logger.warning(f"LLM adapter not available: {e}. Brain stays in probe mode.")
                 self._adapter = None
 
         return self._adapter
+
+    def _init_chat_session_manager(self) -> None:
+        """Initialize ChatSessionManager, borrowing the adapter's genai.Client."""
+        if self._chat_sessions is not None:
+            return
+        try:
+            from .llm import ChatSessionManager
+            summarizer = os.getenv("BRAIN_SUMMARIZER_MODEL", "gemini-3.5-flash-lite")
+            keep_recent = int(os.getenv("BRAIN_COMPRESS_KEEP_RECENT", "10"))
+
+            self._chat_sessions = ChatSessionManager(
+                client=self._adapter.client,
+                model_name=self.model_name,
+                prefill_user=BRAIN_PREFILL_USER,
+                prefill_model=BRAIN_PREFILL_MODEL,
+                summarizer_model=summarizer,
+                content_budget=_CONTENT_BUDGET,
+                compress_keep_recent=keep_recent,
+                # Codereview H5: share the SAME QuotaTracker/usage-recording as the
+                # primary GeminiAdapter -- Flash-Lite summarization and Chat streaming
+                # must not be invisible to the shared TPM budget.
+                quota_tracker=self._adapter._tracker,
+                record_usage_fn=self._adapter._record_usage,
+            )
+            logger.info(
+                "ChatSessionManager initialized (summarizer=%s, budget=%d, keep_recent=%d)",
+                summarizer, _CONTENT_BUDGET, keep_recent,
+            )
+        except Exception as e:
+            logger.warning("ChatSessionManager init failed: %s. Falling back to old path.", e)
+            self._chat_sessions = None
 
     # =========================================================================
     # Event Processing
@@ -956,7 +997,11 @@ class Brain:
                 just fetched. All other callers should use the default None.
         """
         async with self._event_locks[event_id]:
-            await self._process_event_inner(event_id, prefetched_event)
+            self._lock_holders[event_id] = asyncio.current_task()
+            try:
+                await self._process_event_inner(event_id, prefetched_event)
+            finally:
+                self._lock_holders.pop(event_id, None)
 
     async def _process_event_inner(
         self, event_id: str, prefetched_event: Optional[EventDocument] = None,
@@ -1267,6 +1312,13 @@ class Brain:
                 and (not last_route or last_defer.timestamp > last_route.timestamp)
             )
 
+            # Chat Session Bridge gate: use new path when enabled + Gemini provider
+            _use_chat_bridge = (
+                self._chat_bridge_enabled
+                and self.provider == "gemini"
+                and self._chat_sessions is not None
+            )
+
             # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
             # returns True, meaning the LLM needs to make a follow-up decision.
             # Bounded to prevent runaway loops.
@@ -1301,12 +1353,20 @@ class Brain:
                             await self._event_state.clear_fields(event_id, snapshot, "response_emitted")
                         logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
 
-                should_continue = await self._process_with_llm(
-                    event_id, event, is_defer_wake=is_defer_wake,
-                    iteration=iteration, is_intermediate=is_intermediate,
-                    response_emitted=response_emitted,
-                    user_interrupt_turn=user_interrupt_turn,
-                )
+                if _use_chat_bridge:
+                    should_continue = await self._process_with_chat_session(
+                        event_id, event, is_defer_wake=is_defer_wake,
+                        iteration=iteration, is_intermediate=is_intermediate,
+                        response_emitted=response_emitted,
+                        user_interrupt_turn=user_interrupt_turn,
+                    )
+                else:
+                    should_continue = await self._process_with_llm(
+                        event_id, event, is_defer_wake=is_defer_wake,
+                        iteration=iteration, is_intermediate=is_intermediate,
+                        response_emitted=response_emitted,
+                        user_interrupt_turn=user_interrupt_turn,
+                    )
                 # Propagate response_emitted state across iterations (RECALL continuation)
                 snapshot = self._cycle_snapshots.get(event_id)
                 if event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted):
@@ -1658,7 +1718,8 @@ class Brain:
                     continue
                 err_str = str(e)
                 if "400" in err_str or "INVALID_ARGUMENT" in err_str:
-                    token_est = self._estimate_tokens(prompt)
+                    from .llm.compression import estimate_tokens as _est_tokens
+                    token_est = _est_tokens(prompt)
                     logger.error(
                         f"Brain LLM 400 for {event_id} "
                         f"(turns={len(event.conversation)}, est_tokens={token_est}): {e}",
@@ -1851,6 +1912,906 @@ class Brain:
         logger.warning(f"Brain LLM returned empty response for {event_id}")
         return False
 
+    # =========================================================================
+    # Chat Session Bridge — new processing path (feature-flagged)
+    # =========================================================================
+
+    async def _build_chat_message(
+        self,
+        event_id: str,
+        event: EventDocument,
+        was_rebuilt: bool,
+        iteration: int,
+        terminal_prompt: str,
+        context_flags: dict,
+    ):
+        """Build the message to send to the Chat session.
+
+        F-A: When was_rebuilt=True, merges the deferred user Content (popped from
+        rebuilt history to avoid consecutive user roles) with the event header +
+        terminal prompt into a single Content(role="user") message.
+        F-G: Injects build_event_header() context so automated events (aligner,
+        headhunter, timekeeper, jarvis) with empty conversation get evidence.
+        """
+        from google.genai import types
+
+        if was_rebuilt:
+            deferred = self._chat_sessions.pop_deferred_user(event_id)
+            # Probe-validated: send_message accepts list[Part], NOT Content.
+            # Deferred may contain FR parts (function_response from a tool_result
+            # turn) or text parts (user message). Either way, merge with event
+            # header + terminal prompt as a flat list of Parts.
+            parts: list = []
+            if deferred:
+                parts.extend(deferred.parts or [])
+
+            header_text = await self._build_chat_event_header(event, context_flags)
+            if header_text:
+                parts.append(types.Part.from_text(text=header_text))
+            parts.append(types.Part.from_text(text=terminal_prompt))
+            return parts
+
+        if iteration == 0 and event.conversation:
+            new_turns = []
+            for t in reversed(event.conversation):
+                if t.actor == "brain" and t.action in (
+                    "response", "tool_result", "triage", "phase",
+                    "defer", "close", "route", "wait", "error",
+                ):
+                    break
+                new_turns.insert(0, t)
+            if new_turns:
+                from .llm.chat_session import format_turn_for_chat
+                formatted = format_turn_for_chat(new_turns)
+                if formatted:
+                    non_user_roles = {c.role for c in formatted if c.role != "user"}
+                    if non_user_roles:
+                        logger.error(
+                            "Single-role invariant violated for %s: formatted tail turns "
+                            "contain non-user roles %s — dropping model-role blocks",
+                            event_id, non_user_roles,
+                        )
+                        formatted = [c for c in formatted if c.role == "user"]
+                    parts = []
+                    for content in formatted:
+                        parts.extend(content.parts or [])
+                    parts.append(types.Part.from_text(text=terminal_prompt))
+                    return parts
+
+        return terminal_prompt
+
+    async def _build_chat_event_header(self, event: EventDocument, context_flags: dict) -> str:
+        """Build event-context header text for the Chat session's first message.
+
+        Mirrors the header built by _build_contents (the old path) so automated
+        events (aligner, headhunter, timekeeper, jarvis) whose conversation is
+        empty at first Brain cycle get the evidence, service, and journal context
+        FRIDAY needs to triage. Lighter than the full _build_contents header:
+        skips the mermaid diagram and uses cached context_flags data.
+        """
+        from ..models import EventEvidence
+        from .llm.prompt import build_event_header
+
+        evidence = event.event.evidence
+        subject_type = event.subject_type
+        svc = None
+        if (subject_type == "service"
+                and event.service not in ("general", "system")
+                and not (isinstance(evidence, EventEvidence) and evidence.gitlab_context)):
+            try:
+                svc = await self.blackboard.get_service(event.service)
+            except Exception:
+                pass
+
+        if context_flags and "_cached_active_ids" in context_flags:
+            active_event_ids = context_flags["_cached_active_ids"]
+        else:
+            active_event_ids = await self.blackboard.get_active_events()
+        related = []
+        for eid in active_event_ids:
+            if eid == event.id:
+                continue
+            other = await self.blackboard.get_event(eid)
+            if not other:
+                continue
+            if other.service == event.service:
+                last_action = other.conversation[-1] if other.conversation else None
+                summary = f"  - {eid} ({other.source}): {other.event.reason}"
+                if last_action:
+                    summary += f" [last: {last_action.actor}.{last_action.action}]"
+                related.append(summary)
+
+        if context_flags and "_cached_recent_closed" in context_flags:
+            recent_closed = context_flags["_cached_recent_closed"]
+        else:
+            recent_closed = await self.blackboard.get_recent_closed_for_service(
+                event.service, minutes=15,
+            )
+
+        journal = await self._get_journal_cached(event.service)
+
+        return build_event_header(
+            event,
+            service_meta=svc,
+            journal_entries=journal if journal else None,
+            related_events=related if related else None,
+            recent_closed=recent_closed if recent_closed else None,
+            mermaid="",
+        )
+
+    async def _stream_chat_and_accumulate(
+        self,
+        event_id: str,
+        message,
+        config,
+        *,
+        reflex_chunker=None,
+        reflex_searcher=None,
+        broadcast_thinking: bool = True,
+    ) -> tuple:
+        """Consume a Chat session stream: broadcast + accumulate text/thoughts/FC.
+
+        Shared between the primary generation call and synthetic-FR follow-up
+        processing (codereview H2) so both paths get identical repetition-guard,
+        broadcast, and usage-recording behavior -- not a stripped-down copy.
+
+        Returns (function_call, accumulated_text, accumulated_thoughts, raw_parts, last_grounding).
+        """
+        accumulated_text = ""
+        accumulated_thoughts = ""
+        function_call = None
+        raw_parts = None
+        last_grounding = None
+
+        # F-I: estimate includes session's last-known total token count so
+        # QuotaTracker.acquire() reserves capacity proportional to the true
+        # request cost (the Gemini Chat API bills the full context on every call,
+        # not just the new message delta).
+        # Finding #8: extract actual text from SDK Content instead of str(repr).
+        if isinstance(message, str):
+            msg_text = message
+        elif hasattr(message, "parts"):
+            msg_text = " ".join(
+                getattr(p, "text", "") or "" for p in (message.parts or [])
+            )
+        else:
+            msg_text = str(message)
+        msg_estimate = self._adapter._estimate_tokens(msg_text)
+        session_estimate = self._chat_sessions.get_estimated_tokens(event_id)
+        acquire_estimate = max(msg_estimate, session_estimate) if session_estimate else msg_estimate
+
+        async for chunk in self._chat_sessions.send_stream(
+            event_id, message, config,
+            record_usage_fn=self._adapter._record_usage,
+            estimate=acquire_estimate,
+        ):
+            if chunk.text:
+                if chunk.is_thought:
+                    accumulated_thoughts += chunk.text
+                    if reflex_chunker:
+                        window = reflex_chunker.feed(chunk.text)
+                        if window and reflex_searcher:
+                            reflex_searcher.fire(window)
+                else:
+                    accumulated_text += chunk.text
+                    if len(accumulated_text) > 2000:
+                        tail = accumulated_text[-200:]
+                        token = tail[:20]
+                        if token and tail.count(token) > 8:
+                            logger.warning(
+                                "Repetition collapse detected for %s — aborting stream (%d chars)",
+                                event_id, len(accumulated_text),
+                            )
+                            accumulated_text = ""
+                            break
+                if broadcast_thinking:
+                    await self._broadcast({
+                        "type": "brain_thinking",
+                        "event_id": event_id,
+                        "text": chunk.text,
+                        "accumulated": accumulated_thoughts + accumulated_text,
+                        "is_thought": chunk.is_thought,
+                    })
+            if chunk.function_call:
+                function_call = chunk.function_call
+            if chunk.raw_parts:
+                raw_parts = chunk.raw_parts
+            if chunk.grounding_metadata:
+                last_grounding = chunk.grounding_metadata
+            if chunk.usage:
+                from .llm import record_token_usage
+                record_token_usage("brain", chunk.usage, event_id)
+
+        return function_call, accumulated_text, accumulated_thoughts, raw_parts, last_grounding
+
+    async def _drain_and_handle_fr_response(
+        self,
+        event_id: str,
+        fr_part,
+        config,
+        active_tools: list[dict],
+        gate_ctx,
+        *,
+        depth: int = 0,
+    ) -> None:
+        """Send a synthetic FunctionResponse and process the model's reaction.
+
+        Codereview H2/M4/M8: the SDK always produces a real model turn in response
+        to a send_message_stream call -- there is no "just register this FR"
+        primitive. Draining with `pass` discards that reaction; if the model reacts
+        with a NEW function_call, it becomes a permanently orphaned FC in curated
+        history (no matching FR), producing a 400 on the next real call.
+
+        This routes the response through the SAME accumulation/broadcast pipeline
+        as the primary stream, and if a new FC comes back, gate-checks and executes
+        it (bounded to depth<=1 -- record_history() has already committed the FC by
+        the time we see it, so it MUST be paired with an FR before returning; a
+        pathological cascade beyond one bounce is deferred to the next natural cycle
+        rather than looping indefinitely).
+        """
+        try:
+            fc2, text2, thoughts2, raw2, _grounding2 = await self._stream_chat_and_accumulate(
+                event_id, fr_part, config,
+                broadcast_thinking=False,
+            )
+        except asyncio.CancelledError:
+            self._chat_sessions.evict(event_id)
+            raise
+        except Exception as e:
+            # M8: reuse _is_transient — only evict on non-transient failures.
+            # A transient 429/503 here shouldn't throw away the whole in-memory
+            # session (Redis is ground truth; rebuild replays the persisted turn).
+            is_transient = self._is_transient(e)
+            logger.warning(
+                "Synthetic FR follow-up failed for %s (depth=%d, transient=%s): %s",
+                event_id, depth, is_transient, e,
+            )
+            if not is_transient:
+                self._chat_sessions.evict(event_id)
+            return
+
+        if fc2 and depth < 1:
+            captured2 = self._normalize_response_parts(raw2) if raw2 else None
+            valid_tool_names = {t["name"] for t in active_tools}
+            from google.genai import types as _gt_follow
+
+            if fc2.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                from .llm import BRAIN_TOOL_SCHEMAS as _bts
+                all_known = {t["name"] for t in _bts}
+                reason = (
+                    f"[UNKNOWN] {fc2.name} is not a recognized tool."
+                    if fc2.name not in all_known
+                    else diagnose_rejection(fc2.name, gate_ctx)
+                )
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="tool_result",
+                    thoughts=reason, response_parts=captured2,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                fr2 = _gt_follow.Part.from_function_response(
+                    name=fc2.name, response={"status": "rejected", "reason": reason},
+                )
+                await self._drain_and_handle_fr_response(
+                    event_id, fr2, config, active_tools, gate_ctx, depth=depth + 1,
+                )
+                return
+
+            await self._execute_function_call(
+                event_id, fc2.name, fc2.args, response_parts=captured2,
+            )
+            # H1 fix (R1 final review): match ANY brain turn — mirrors the primary
+            # dual-write site. The old narrow filter (tool_result only) orphaned
+            # FCs for tools that write phase/wait/route/plan/notify/etc. actions.
+            follow_event = await self.blackboard.get_event(event_id)
+            fr2_sent = False
+            if follow_event and follow_event.conversation:
+                follow_turn = follow_event.conversation[-1]
+                if follow_turn.actor == "brain":
+                    is_error = (follow_turn.thoughts or "").startswith("Internal error executing")
+                    result_text = follow_turn.evidence or follow_turn.thoughts or follow_turn.result or ""
+                    payload = {"error": result_text[:2000]} if is_error else {"result": result_text[:50000]}
+                    fr2b = _gt_follow.Part.from_function_response(name=fc2.name, response=payload)
+                    await self._drain_and_handle_fr_response(
+                        event_id, fr2b, config, active_tools, gate_ctx, depth=depth + 1,
+                    )
+                    fr2_sent = True
+            if not fr2_sent:
+                fr2b = _gt_follow.Part.from_function_response(
+                    name=fc2.name, response={"result": "completed"},
+                )
+                await self._drain_and_handle_fr_response(
+                    event_id, fr2b, config, active_tools, gate_ctx, depth=depth + 1,
+                )
+            return
+
+        if fc2 and depth >= 1:
+            # F-C: the SDK's record_history() has already committed this FC to
+            # curated history. Logging and returning would leave an orphaned FC
+            # (no paired FR) — the next send_message sees model(FC)→user(msg)
+            # without an intervening FR, almost certainly producing a 400.
+            # Evict the session so the next cycle rebuilds cleanly from Redis
+            # (which never recorded this ephemeral FC).
+            logger.warning(
+                "Synthetic FR cascade depth limit reached for %s — evicting session to avoid orphaned FC %s",
+                event_id, fc2.name,
+            )
+            self._chat_sessions.evict(event_id)
+            return
+
+        if text2 or thoughts2:
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="response" if text2 else "thoughts",
+                thoughts=text2 or thoughts2,
+            )
+            await self._append_and_broadcast(event_id, turn)
+
+    async def _process_with_chat_session(
+        self,
+        event_id: str,
+        event: EventDocument,
+        *,
+        is_defer_wake: bool = False,
+        iteration: int = 0,
+        is_intermediate: bool = False,
+        response_emitted: bool = False,
+        user_interrupt_turn: int | None = None,
+    ) -> bool:
+        """Process event using Chat session bridge. Mirrors _process_with_llm semantics.
+
+        Called ONLY when CHAT_BRIDGE_ENABLED=true AND provider=gemini.
+        Returns True if the caller should re-invoke immediately (tool continuation).
+        """
+        from .llm import BRAIN_TOOL_SCHEMAS
+
+        if not self._chat_sessions:
+            logger.error("_process_with_chat_session called without ChatSessionManager for %s", event_id)
+            return False
+
+        response_emitted_local = response_emitted
+
+        # --- Skill loading + context flags (identical to _process_with_llm) ---
+        if self._progressive_skills and self._skill_loader:
+            try:
+                redis_version = await self.blackboard.redis.get("darwin:skills:version")
+            except Exception:
+                redis_version = None
+            if redis_version and redis_version != self._skills_version:
+                async with self._skills_reload_lock:
+                    try:
+                        inner_version = await self.blackboard.redis.get("darwin:skills:version")
+                    except Exception:
+                        inner_version = None
+                    if inner_version and inner_version != self._skills_version:
+                        loaded_from_redis = await self._skill_loader.reload_from_redis()
+                        if loaded_from_redis:
+                            self._skills_version = inner_version
+                            logger.info(f"Brain skills reloaded from Redis (version={inner_version[:8]})")
+                        else:
+                            logger.info("Skill reload fell back to filesystem -- version not updated")
+
+            context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
+            if is_defer_wake:
+                context_flags["is_defer_wakeup"] = True
+                context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
+            active_phases = self._match_phases(event, context_flags)
+            system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+            thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
+            if event.source == "jarvis":
+                call_temp = max(call_temp, 1.7)
+            elif event.source in ("chat", "slack"):
+                call_temp = max(call_temp, 1.3)
+        else:
+            raise RuntimeError("BrainSkillLoader is required.")
+
+        # --- Tool gate evaluation ---
+        from .tool_gates import evaluate_gates, build_gate_context
+
+        brain_phase = _resolve_phase(event.brain_phase)
+        gate_ctx = build_gate_context(
+            event=event,
+            brain_phase=brain_phase,
+            context_flags=context_flags,
+            is_defer_wake=is_defer_wake,
+            iteration=iteration,
+            jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+            jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+        )
+        active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+
+        if not active_tools:
+            logger.error(
+                "EMPTY TOOLSET after gate evaluation for %s (phase=%s, source=%s)",
+                event_id, brain_phase, event.source,
+            )
+            if context_flags.get("is_intermediate"):
+                active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in {"wait_for_agent"}]
+            else:
+                active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in {"classify_event", "set_phase", "lookup_journal"}]
+
+        if brain_phase in ("escalate", "close"):
+            maintainer_emails = self._resolve_maintainer_enum(event)
+            if maintainer_emails:
+                active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
+
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
+        _phase_tool_priority: dict[str, set[str]] = {
+            "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
+            "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
+            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context", "get_plan_progress", "defer_event"},
+            "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
+            "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
+        }
+        priority_names = _phase_tool_priority.get(brain_phase, set())
+        tier_always = [t for t in active_tools if t["name"] in _always_tools]
+        tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
+        tier_rest = [t for t in active_tools if t["name"] not in _always_tools and t["name"] not in priority_names]
+        unread = getattr(event, "unread_notes", 0) or 0
+        if unread > 0:
+            tier_sticky = [t for t in tier_always if t["name"] == "read_sticky_notes"]
+            tier_always = [t for t in tier_always if t["name"] != "read_sticky_notes"]
+            active_tools = tier_sticky + tier_always + tier_phase + tier_rest
+        else:
+            active_tools = tier_always + tier_phase + tier_rest
+
+        if context_flags.get("is_intermediate"):
+            allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+            final_names = {t["name"] for t in active_tools}
+            if not final_names <= allowed:
+                leaked = final_names - allowed
+                active_tools = [t for t in active_tools if t["name"] in allowed]
+                logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
+
+        # --- Build per-call config (TOTAL replacement on every send_message) ---
+        want_search, grounding_corpus = self._resolve_grounding_mode(
+            self._search_enabled, brain_phase, self._rag_grounding_enabled, self._rag_grounding_corpus,
+        )
+        config = self._adapter._build_config(
+            system_prompt=system_prompt,
+            tools=active_tools,
+            temperature=call_temp,
+            top_p=0.95,
+            max_output_tokens=phase_max_tokens,
+            thinking_level=thinking_level,
+            search_enabled=want_search,
+            grounding_corpus=grounding_corpus,
+        )
+
+        # --- Get or create Chat session (rebuild from Redis if needed) ---
+        try:
+            _chat, was_rebuilt = await self._chat_sessions.get_or_create(event_id, config, event.conversation)
+        except Exception as e:
+            # M6: bounded single retry on transient rebuild failures before giving up —
+            # rebuild happens often enough (post-eviction, cold start) that this
+            # deserved the same resilience as the streaming retry loop.
+            if self._is_transient(e):
+                logger.warning("Chat session create/rebuild transient failure for %s, retrying once: %s", event_id, e)
+                await asyncio.sleep(2)
+                try:
+                    _chat, was_rebuilt = await self._chat_sessions.get_or_create(event_id, config, event.conversation)
+                except Exception as e2:
+                    logger.error("Chat session create/rebuild failed for %s after retry: %s", event_id, e2)
+                    self._chat_sessions.evict(event_id)
+                    return False
+            else:
+                logger.error("Chat session create/rebuild failed for %s: %s", event_id, e)
+                self._chat_sessions.evict(event_id)
+                return False
+
+        # --- Build the message to send ---
+        # L3: reuse active_phases already computed above — no need to recompute.
+        terminal_prompt = self._resolve_terminal_prompt(
+            active_phases,
+            domain=context_flags.get("event_domain"),
+        )
+
+        message = await self._build_chat_message(
+            event_id, event, was_rebuilt, iteration, terminal_prompt, context_flags,
+        )
+
+        if user_interrupt_turn is not None:
+            from google.genai import types as _gtypes
+            priority_text = (
+                f"PRIORITY: User sent a new message (turn {user_interrupt_turn}) "
+                f"during your tool chain. Address their message NOW before continuing."
+            )
+            if isinstance(message, str):
+                message = f"{priority_text}\n\n{message}"
+            elif isinstance(message, list):
+                message.insert(0, _gtypes.Part.from_text(text=priority_text))
+            else:
+                message.parts.insert(0, _gtypes.Part.from_text(text=priority_text))
+
+        # --- Signal UI ---
+        await self._broadcast({
+            "type": "brain_thinking",
+            "event_id": event_id,
+            "text": "",
+            "accumulated": "",
+            "is_thought": True,
+        })
+
+        # --- Stream with retry ---
+        max_retries = 3
+        last_error = None
+        accumulated_text = ""
+        accumulated_thoughts = ""
+        function_call = None
+        raw_parts = None
+        last_grounding = None
+
+        reflex_chunker, reflex_searcher = self._create_reflex_pair(
+            event_id,
+            event_domain=context_flags.get("event_domain") or "",
+            event_service=event.service or "",
+        )
+
+        for attempt in range(max_retries + 1):
+            accumulated_text = ""
+            accumulated_thoughts = ""
+            function_call = None
+            raw_parts = None
+            last_grounding = None
+
+            try:
+                function_call, accumulated_text, accumulated_thoughts, raw_parts, last_grounding = (
+                    await self._stream_chat_and_accumulate(
+                        event_id, message, config,
+                        reflex_chunker=reflex_chunker,
+                        reflex_searcher=reflex_searcher,
+                    )
+                )
+                last_error = None
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_error = e
+                is_timeout = isinstance(e, asyncio.TimeoutError)
+                if is_timeout:
+                    logger.warning("Chat session stream timed out for %s", event_id)
+                accumulated_text = ""
+                accumulated_thoughts = ""
+                function_call = None
+                raw_parts = None
+                last_grounding = None
+
+                should_retry = (attempt < max_retries) and (is_timeout or self._is_transient(e))
+                if not should_retry:
+                    logger.error("Chat session failed for %s: %s", event_id, e, exc_info=True)
+                    self._chat_sessions.evict(event_id)
+                    break
+
+                if is_timeout:
+                    delay = 5
+                else:
+                    is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                    base = 30 if is_rate_limit else 5
+                    delay = min(base * (2 ** attempt), 120)
+                logger.warning(
+                    "Chat session %s for %s (attempt %d): %s. Retrying in %ds",
+                    "timeout" if is_timeout else "transient error", event_id, attempt + 1, e, delay,
+                )
+                await asyncio.sleep(delay)
+
+                # H6: a timeout OR non-transient-adjacent failure inside send_stream
+                # evicts the in-memory session before re-raising. Without rebuilding
+                # here, the NEXT retry attempt hits ChatSessionManager's "no session"
+                # RuntimeError immediately. Rebuild before continuing.
+                # F-B: capture was_rebuilt from the mid-loop rebuild so message is
+                # reset — the old stale pre-loop message may contain tail turns that
+                # are now baked into the freshly-rebuilt session's history.
+                # F-K: bounded single retry on transient rebuild failures (matching M6).
+                if not self._chat_sessions.has_session(event_id):
+                    rebuild_ok = False
+                    for _rb_attempt in range(2):
+                        try:
+                            fresh_event = await self.blackboard.get_event(event_id)
+                            _chat, mid_rebuilt = await self._chat_sessions.get_or_create(
+                                event_id, config, fresh_event.conversation if fresh_event else event.conversation,
+                            )
+                            rebuild_ok = True
+                            logger.info("Chat session rebuilt for %s before retry attempt %d", event_id, attempt + 2)
+                            if mid_rebuilt:
+                                message = await self._build_chat_message(
+                                    event_id, fresh_event or event, True, iteration, terminal_prompt, context_flags,
+                                )
+                            break
+                        except Exception as rebuild_err:
+                            if _rb_attempt == 0 and self._is_transient(rebuild_err):
+                                logger.warning("Mid-loop rebuild transient failure for %s, retrying: %s", event_id, rebuild_err)
+                                await asyncio.sleep(2)
+                                continue
+                            logger.error("Chat session rebuild failed for %s before retry: %s", event_id, rebuild_err)
+                            last_error = rebuild_err
+                            break
+                    if not rebuild_ok:
+                        break
+                continue
+
+        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+
+        # Error handling — identical to _process_with_llm
+        if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
+            self._reasoning_by_event.pop(event_id, None)
+            error_text = f"Chat session failed after {attempt + 1} attempts: {_sanitize_error_text(last_error)}"
+            turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="error",
+                thoughts=error_text,
+            )
+            await self._append_and_broadcast(event_id, turn)
+            return False
+
+        captured_parts = self._normalize_response_parts(raw_parts) if raw_parts else None
+
+        if await self._is_event_closed(event_id):
+            logger.info("Event %s closed during chat session call — discarding result", event_id)
+            return False
+
+        grounding_evidence = ""
+        if last_grounding and last_grounding.get("chunks"):
+            resolved_chunks = await self._resolve_grounding_urls(last_grounding["chunks"])
+            sources = "\n".join(
+                f"- {'[internal] ' if c.get('source') == 'rag' else ''}[{c['title']}]({c['uri']})"
+                for c in resolved_chunks if c.get("uri")
+            )
+            queries = ", ".join(last_grounding.get("queries", []))
+            grounding_evidence = f"\n\n## Grounding Context\n\nQueries: {queries}\n\nSources:\n{sources}"
+
+        # --- Process result (mirrors _process_with_llm) ---
+        if function_call:
+            is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
+            snapshot = self._cycle_snapshots.get(event_id)
+            if accumulated_text and not response_emitted:
+                response_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="response",
+                    thoughts=accumulated_text,
+                    evidence=grounding_evidence if grounding_evidence else None,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, response_turn)
+                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                self._last_processed[event_id] = time.time()
+                self._response_emitted_for.add(event_id)
+                response_emitted_local = True
+                if snapshot:
+                    await self._event_state.set_fields(event_id, snapshot, response_emitted="1")
+
+            valid_tool_names = {t["name"] for t in active_tools}
+            if (
+                function_call.name == "wait_for_user"
+                and "wait_for_user" not in valid_tool_names
+                and (event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted))
+            ):
+                valid_tool_names.add("wait_for_user")
+
+            if function_call.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+                if function_call.name not in all_known:
+                    rejection_reason = f"[UNKNOWN] {function_call.name} is not a recognized tool."
+                else:
+                    rejection_reason = diagnose_rejection(function_call.name, gate_ctx)
+                logger.warning("Tool rejection [%r] for %s: %s", function_call.name, event_id, rejection_reason)
+
+                # Synthetic FR for gate rejection (Chat session has FC in history)
+                from google.genai import types as _gt
+                fr_part = _gt.Part.from_function_response(
+                    name=function_call.name,
+                    response={"status": "rejected", "reason": rejection_reason},
+                )
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=rejection_reason,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+
+                # H2/M4/M8: route the synthetic FR's response through the same
+                # accumulation/gate/execute pipeline as a normal call — not a fire-
+                # and-forget drain. See _drain_and_handle_fr_response docstring.
+                await self._drain_and_handle_fr_response(
+                    event_id, fr_part, config, active_tools, gate_ctx,
+                )
+
+                # F-F: compress on ALL exit branches, not just tool-success/text-only.
+                # F-J: heartbeat before compression to prevent Slack badge timeout.
+                await self._compress_chat_session(event_id, config)
+
+                return not response_emitted_local
+
+            logger.info("Brain Chat decision for %s: %s", event_id, function_call.name)
+
+            if reflex_chunker and reflex_searcher:
+                final_window = reflex_chunker.flush()
+                if final_window:
+                    reflex_searcher.fire(final_window)
+
+            snapshot = self._cycle_snapshots.get(event_id)
+            reflex_already = snapshot.reflex_fired if snapshot else (event_id in self._reflex_fired_for)
+            if reflex_searcher and not reflex_already:
+                try:
+                    lessons = await reflex_searcher.gather(timeout=0.5)
+                    if lessons:
+                        titles = [l.get("payload", {}).get("title") or l.get("payload", {}).get("topic", "") for l in lessons]
+                        self._recall_lessons[event_id] = lessons
+                        self._reflex_fired_for.add(event_id)
+                        if snapshot:
+                            await self._event_state.set_fields(event_id, snapshot, reflex_fired="1")
+                        try:
+                            await self._broadcast({
+                                "type": "brain_recall_hit",
+                                "event_id": event_id,
+                                "lesson_count": len(lessons),
+                                "titles": titles,
+                                "blocked_tool": function_call.name,
+                            })
+                        except Exception:
+                            pass
+                        logger.info("Brain RECALL (chat): gate fired for %s, blocked %s, %d hits", event_id, function_call.name, len(lessons))
+
+                        # F-H: rebuild config AFTER lessons are populated so the
+                        # RECALL lesson content rides on the same SI as the block
+                        # signal. The plan calls this "load-bearing, not optional"
+                        # — probe evidence showed bare-payload FR without lessons
+                        # in SI produces "I am sorry, I cannot fulfill this request."
+                        recall_system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+                        recall_config = self._adapter._build_config(
+                            system_prompt=recall_system_prompt,
+                            tools=active_tools,
+                            temperature=call_temp,
+                            top_p=0.95,
+                            max_output_tokens=phase_max_tokens,
+                            thinking_level=thinking_level,
+                            search_enabled=want_search,
+                            grounding_corpus=grounding_corpus,
+                        )
+
+                        from google.genai import types as _gt2
+                        fr_part = _gt2.Part.from_function_response(
+                            name=function_call.name,
+                            response={"status": "blocked", "reason": "recall_override"},
+                        )
+                        await self._drain_and_handle_fr_response(
+                            event_id, fr_part, recall_config, active_tools, gate_ctx,
+                        )
+
+                        # F-F: compress on ALL exit branches.
+                        await self._compress_chat_session(event_id, recall_config)
+
+                        return True
+                except Exception as e:
+                    logger.warning("Memory reflex gate error for %s: %s", event_id, e)
+
+            self._reasoning_by_event[event_id] = accumulated_thoughts or None
+
+            # Execute the tool — dual-write FR to Redis (via _execute_function_call)
+            # AND to Chat session (synthetic FR after execution)
+            # M3: capture the pre-execution turn count so the post-execution scan
+            # looks at NEW turns only, rather than blindly trusting conversation[-1]
+            # (which races against any concurrently-connected actor appending a turn
+            # between _execute_function_call returning and this re-fetch).
+            pre_exec_event = await self.blackboard.get_event(event_id)
+            turn_count_before = len(pre_exec_event.conversation) if pre_exec_event else len(event.conversation)
+
+            should_continue = await self._execute_function_call(
+                event_id, function_call.name, function_call.args,
+                response_parts=captured_parts,
+                grounding_evidence=grounding_evidence or None,
+            )
+
+            # Dual-write: send the tool result as synthetic FR to the Chat session.
+            # Blocker 3: scan ALL new brain turns (not just tool_result) — tools like
+            # set_phase, close_event, wait_for_user, select_agent write different action
+            # types (phase, close, wait, route). If only tool_result matches, these
+            # orphan the FC in Chat history.
+            tool_result_event = await self.blackboard.get_event(event_id)
+            fr_sent = False
+            if tool_result_event and tool_result_event.conversation:
+                new_turns_since_exec = tool_result_event.conversation[turn_count_before:]
+                # R2 final review: match ANY brain turn — don't enumerate action
+                # types. Tool handlers write many different actions (tool_result,
+                # phase, close, wait, route, defer, error, plan, notify, message,
+                # reply, verify, confirm, hold_watch, respond_jarvis...). A
+                # hardcoded list inevitably misses some, orphaning the FC.
+                outcome_turn = next(
+                    (t for t in new_turns_since_exec if t.actor == "brain"),
+                    None,
+                )
+                if outcome_turn:
+                    is_error = (outcome_turn.thoughts or "").startswith("Internal error executing")
+                    result_text = outcome_turn.evidence or outcome_turn.thoughts or outcome_turn.result or ""
+                    from google.genai import types as _gt3
+                    payload = {"error": result_text[:2000]} if is_error else {"result": result_text[:50000]}
+                    fr_part = _gt3.Part.from_function_response(
+                        name=function_call.name,
+                        response=payload,
+                    )
+                    await self._drain_and_handle_fr_response(
+                        event_id, fr_part, config, active_tools, gate_ctx,
+                    )
+                    fr_sent = True
+
+            if not fr_sent:
+                # Fallback: no recognizable outcome turn found — send a generic FR
+                # to prevent orphaning the FC in Chat history.
+                from google.genai import types as _gt3_fb
+                fr_part = _gt3_fb.Part.from_function_response(
+                    name=function_call.name,
+                    response={"result": "completed"},
+                )
+                await self._drain_and_handle_fr_response(
+                    event_id, fr_part, config, active_tools, gate_ctx,
+                )
+
+            await self._compress_chat_session(event_id, config)
+
+            return should_continue
+
+        # Text-only response
+        if accumulated_thoughts:
+            thoughts_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="thoughts",
+                thoughts=accumulated_thoughts,
+            )
+            await self._append_and_broadcast(event_id, thoughts_turn)
+
+        if accumulated_text:
+            response_turn = ConversationTurn(
+                turn=(await self._next_turn_number(event_id)),
+                actor="brain",
+                action="response",
+                thoughts=accumulated_text,
+                evidence=grounding_evidence if grounding_evidence else None,
+                response_parts=captured_parts,
+            )
+            await self._append_and_broadcast(event_id, response_turn)
+            await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+            self._last_processed[event_id] = time.time()
+            if event.source in ("slack", "chat"):
+                self._waiting_for_user[event_id] = time.time()
+                self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
+
+        await self._compress_chat_session(event_id, config)
+
+        self._reasoning_by_event.pop(event_id, None)
+        if accumulated_text or accumulated_thoughts:
+            return False
+
+        logger.warning("Brain Chat returned empty response for %s", event_id)
+        return False
+
+    async def _compress_chat_session(self, event_id: str, config) -> None:
+        """Single funnel point for Chat session compression (F-F + F-J).
+
+        Called from ALL exit branches in _process_with_chat_session:
+        tool-success, text-only, gate-rejection, and RECALL-blocked.
+        Emits brain_thinking heartbeat before compression to prevent
+        Slack badge timeout (up to 5 min for Flash-Lite summarization).
+        """
+        try:
+            await self._broadcast({
+                "type": "brain_thinking",
+                "event_id": event_id,
+                "text": "",
+                "accumulated": "",
+                "is_thought": True,
+            })
+            await self._chat_sessions.compress_if_needed(event_id, config)
+        except Exception as ce:
+            logger.warning("Compression check failed for %s: %s", event_id, ce)
+
     def _create_reflex_pair(self, event_id: str, event_domain: str = "", event_service: str = ""):
         """Create (SentenceChunker, ReflexSearcher) or (None, None).
 
@@ -1888,12 +2849,21 @@ class Brain:
 
     @staticmethod
     def _is_transient(e: Exception) -> bool:
-        """Check if exception is a transient rate-limit or availability error."""
-        from .llm.quota_tracker import QuotaExhaustedError
-        if isinstance(e, QuotaExhaustedError):
-            return True
-        err_str = str(e)
-        return any(code in err_str for code in ["429", "502", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+        """Check if exception is a transient rate-limit or availability error.
+
+        F-Q7: wrapped in try/except — if str(e) or the import ever raised,
+        the caller's CancelledError/Exception boundary must not be broken.
+        """
+        try:
+            if isinstance(e, asyncio.TimeoutError):
+                return True
+            from .llm.quota_tracker import QuotaExhaustedError
+            if isinstance(e, QuotaExhaustedError):
+                return True
+            err_str = str(e)
+            return any(code in err_str for code in ["429", "502", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+        except Exception:
+            return False
 
     @staticmethod
     def _resolve_grounding_mode(
@@ -1914,7 +2884,7 @@ class Brain:
     @staticmethod
     async def _resolve_grounding_urls(chunks: list[dict]) -> list[dict]:
         """Follow redirect URLs from Vertex AI Search grounding and deduplicate."""
-        from .llm.gemini_client import _MAX_GROUNDING_FIELD_LEN
+        from .llm.chat_session import _MAX_GROUNDING_FIELD_LEN
 
         REDIRECT_PREFIX = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
         # Defense-in-depth: the adapter layer already caps chunk count, but never fan out
@@ -2736,7 +3706,8 @@ class Brain:
         # Dedup consecutive identical FR messages (SPIRAL prevention)
         contents = self._dedup_consecutive_fr(contents)
 
-        return self._compress_contents(contents)
+        from .llm.compression import compress_contents as _compress
+        return _compress(contents, max_tokens=_CONTENT_BUDGET, full_tier_max_chars=_FULL_TIER_MAX_CHARS)
 
     @staticmethod
     def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
@@ -2920,147 +3891,10 @@ class Brain:
         return result
 
     # =========================================================================
-    # Conversation Compression (progressive, no LLM call)
+    # Conversation Compression — relocated to src/agents/llm/compression.py
+    # (shared by both old generate_content path and new Chat Session Bridge)
+    # Call sites use: from .llm.compression import compress_contents, estimate_tokens
     # =========================================================================
-
-    @staticmethod
-    def _estimate_tokens(contents: list[dict]) -> int:
-        """Rough token estimate: ~4 chars per token. Handles FC/FR dicts."""
-        total_chars = 0
-        for msg in contents:
-            for part in msg.get("parts", []):
-                text = part.get("text")
-                if text:
-                    total_chars += len(text)
-                elif "functionCall" in part or "functionResponse" in part:
-                    total_chars += len(json.dumps(part))
-        return total_chars // 4
-
-    @classmethod
-    def _compress_contents(cls, contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -> list[dict]:
-        """Progressive compression: skeleton/summary/full tiers. No LLM call.
-
-        First message (event context) always kept intact.
-        Atomic pair guard: model(functionCall) + user(functionResponse) never separated.
-        FC/FR messages floor=summary (never skeleton -- structural signal matters).
-        4th tier: pair-delete oldest FC/FR pairs if still over budget (min 5 retained).
-        """
-        if len(contents) <= 3:
-            return contents
-
-        if cls._estimate_tokens(contents) < max_tokens:
-            return contents
-
-        context_msg = contents[0]
-        conv_msgs = contents[1:]
-        n = len(conv_msgs)
-
-        skeleton_end = max(0, n - 20)
-        summary_end = max(skeleton_end, n - 10)
-
-        # Build tier assignment per message, then enforce atomic pairs
-        tiers = []
-        for i in range(n):
-            if i < skeleton_end:
-                tiers.append("skeleton")
-            elif i < summary_end:
-                tiers.append("summary")
-            else:
-                tiers.append("full")
-
-        # FC/FR floor: messages with functionCall or functionResponse never go below summary
-        for i in range(n):
-            if tiers[i] == "skeleton":
-                msg = conv_msgs[i]
-                has_fc_fr = any(
-                    isinstance(p, dict) and ("functionCall" in p or "functionResponse" in p)
-                    for p in msg.get("parts", [])
-                )
-                if has_fc_fr:
-                    tiers[i] = "summary"
-
-        # Atomic pair guard: if a model msg has functionCall parts, promote
-        # it and the next user msg to the same tier (the less compressed one)
-        for i in range(n - 1):
-            msg = conv_msgs[i]
-            if msg["role"] == "model" and any(
-                isinstance(p, dict) and ("functionCall" in p or "function_call" in p)
-                for p in msg.get("parts", [])
-            ):
-                better = min(tiers[i], tiers[i + 1], key=["full", "summary", "skeleton"].index)
-                tiers[i] = better
-                tiers[i + 1] = better
-
-        compressed = [context_msg]
-        for i, msg in enumerate(conv_msgs):
-            tier = tiers[i]
-            if tier == "skeleton":
-                role = msg["role"]
-                first_text = ""
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p:
-                        first_text = p["text"][:300]
-                        break
-                compressed.append({"role": role, "parts": [{"text": f"(earlier turn: {first_text}...)"}]})
-            elif tier == "summary":
-                role = msg["role"]
-                parts = []
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p:
-                        sentences = p["text"].split(". ")
-                        parts.append({"text": sentences[0] + ("." if len(sentences) > 1 else "")})
-                    else:
-                        parts.append(p)
-                compressed.append({"role": role, "parts": parts or msg["parts"]})
-            else:
-                role = msg["role"]
-                parts = []
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p and len(p["text"]) > _FULL_TIER_MAX_CHARS:
-                        truncated = p["text"][:_FULL_TIER_MAX_CHARS]
-                        parts.append({"text": f"{truncated}\n...(turn truncated at {_FULL_TIER_MAX_CHARS} chars)"})
-                    else:
-                        parts.append(p)
-                compressed.append({"role": role, "parts": parts})
-
-        # 4th tier: pair-delete oldest FC/FR pairs if still over budget
-        if cls._estimate_tokens(compressed) >= max_tokens:
-            compressed = cls._pair_delete_oldest(compressed, max_tokens)
-
-        return compressed
-
-    @classmethod
-    def _pair_delete_oldest(cls, contents: list[dict], max_tokens: int) -> list[dict]:
-        """Drop complete FC+FR pairs from oldest first, retaining min 5 most-recent."""
-        MIN_RETAINED_PAIRS = 5
-        # Find all FC/FR pair indices (model with FC at i, user with FR at i+1)
-        pair_indices: list[tuple[int, int]] = []
-        for i in range(1, len(contents) - 1):
-            msg = contents[i]
-            if msg["role"] == "model" and any(
-                isinstance(p, dict) and "functionCall" in p for p in msg.get("parts", [])
-            ):
-                nxt = contents[i + 1] if i + 1 < len(contents) else None
-                if nxt and nxt["role"] == "user" and any(
-                    isinstance(p, dict) and "functionResponse" in p for p in nxt.get("parts", [])
-                ):
-                    pair_indices.append((i, i + 1))
-
-        if len(pair_indices) <= MIN_RETAINED_PAIRS:
-            return contents
-
-        # Delete from oldest (lowest index) first, skip last 5 pairs
-        deletable = pair_indices[:-MIN_RETAINED_PAIRS]
-        indices_to_remove: set[int] = set()
-        for fc_idx, fr_idx in deletable:
-            indices_to_remove.add(fc_idx)
-            indices_to_remove.add(fr_idx)
-            # Check if removing brings us under budget
-            remaining = [c for i, c in enumerate(contents) if i not in indices_to_remove]
-            if cls._estimate_tokens(remaining) < max_tokens:
-                break
-
-        return [c for i, c in enumerate(contents) if i not in indices_to_remove]
 
     # =========================================================================
     # Function Call Dispatcher
@@ -3355,11 +4189,16 @@ class Brain:
         On lock timeout: log and skip — the 24h TTL will expire the hash.
         Never delete without the lock (defeats the race protection).
         """
+        # Codereview H7: acquire the lock BEFORE evicting the chat session, so no
+        # concurrently-running task can resurrect self._sessions[event_id] after
+        # eviction but before this function's cleanup completes.
         lock = self._event_locks.get(event_id)
         if lock:
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=15)
                 try:
+                    if self._chat_sessions:
+                        self._chat_sessions.evict(event_id)
                     await self._event_state.delete(event_id)
                     self._cycle_snapshots.pop(event_id, None)
                 finally:
@@ -3370,6 +4209,8 @@ class Brain:
                     event_id,
                 )
         else:
+            if self._chat_sessions:
+                self._chat_sessions.evict(event_id)
             await self._event_state.delete(event_id)
             self._cycle_snapshots.pop(event_id, None)
 
@@ -4471,7 +5312,28 @@ class Brain:
             return
         if self._ephemeral_provisioner:
             await self._ephemeral_provisioner.terminate_agent(event_id)
+        # R5: capture lock ref BEFORE cancel_active_task (which pops _event_locks).
+        lock = self._event_locks.get(event_id)
         await self.cancel_active_task(event_id, f"Event closing: {summary}")
+        # H0 fix (R1 final review): asyncio.Lock is non-reentrant. In-loop
+        # callers (close_event tool, routing-depth force-close) already hold
+        # the lock via process_event's `async with`. Trying to acquire it
+        # again self-deadlocks for the full timeout. _lock_holders tracks
+        # ownership — skip acquisition when the current task already holds it.
+        lock_acquired = False
+        caller_holds = self._lock_holders.get(event_id) is asyncio.current_task()
+        if lock and not caller_holds:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=15)
+                lock_acquired = True
+            except (asyncio.TimeoutError, Exception):
+                logger.debug("_close_and_broadcast: lock busy for %s, evicting best-effort", event_id)
+        try:
+            if self._chat_sessions:
+                self._chat_sessions.evict(event_id)
+        finally:
+            if lock_acquired:
+                lock.release()
         token_usage = None
         try:
             from .llm import get_token_meter
