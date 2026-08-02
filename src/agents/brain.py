@@ -2702,10 +2702,13 @@ class Brain:
             # functionCall/functionResponse pairs (never merged with other content)
             if turn.actor == "brain" and turn.action == "tool_result":
                 fc_parts, fr_parts = self._emit_fc_fr(turn)
-                if fc_parts:
+                if fc_parts and fr_parts:
+                    # Native FC/FR pair (has thought_signature — valid for Gemini 3)
                     contents.append({"role": "model", "parts": fc_parts})
-                contents.append({"role": "user", "parts": fr_parts})
-                continue
+                    contents.append({"role": "user", "parts": fr_parts})
+                    continue
+                # Fallback: no valid thought_signature — use text-based format
+                # (falls through to _turn_to_parts below)
 
             role = "model" if turn.actor == "brain" else "user"
             parts = self._turn_to_parts(turn)
@@ -2809,46 +2812,36 @@ class Brain:
     @staticmethod
     def _emit_fc_fr(
         turn: ConversationTurn,
-    ) -> tuple[list[dict], list[dict]]:
+    ) -> tuple[list[dict] | None, list[dict] | None]:
         """Reconstruct native functionCall + functionResponse pair from a tool_result turn.
 
-        Returns (fc_parts, fr_parts). Always emits both FC and FR to prevent
-        stale-FC matching when consecutive tool_results share the same tool name.
+        Returns (fc_parts, fr_parts) or (None, None) if reconstruction is not possible
+        (e.g., no thought_signature available — required by Gemini when thinking is enabled).
+        Caller falls back to text-based format on None.
 
-        2 cases:
-          (1) turn.response_parts has FC data → return ([FC], [FR])
-          (2) Synthesize FC from turn.waitingFor → return ([FC], [FR])
+        Only emits native FC/FR when response_parts contains a functionCall WITH
+        thought_signature. Otherwise returns None to signal graceful degradation.
         """
         tool_name = turn.waitingFor or "tool"
         result_text = turn.evidence or turn.thoughts or turn.result or ""
 
-        fr_part: dict = {
-            "functionResponse": {
-                "name": tool_name,
-                "response": {"result": result_text},
-            }
-        }
-        fr_parts = [fr_part]
-
-        # Case 2: response_parts on the turn contains FC data
+        # Only reconstruct as native FC/FR if we have the real thought_signature
+        # (Gemini rejects functionCall parts without it when thinking mode is enabled)
         if turn.response_parts:
             for rp in turn.response_parts:
                 fc = rp.get("functionCall")
-                if fc and fc.get("name") == tool_name:
-                    fc_entry: dict = {"functionCall": fc}
-                    if rp.get("thought_signature"):
-                        fc_entry["thought_signature"] = rp["thought_signature"]
-                    fc_parts = [fc_entry]
-                    return (fc_parts, fr_parts)
+                if fc and rp.get("thought_signature"):
+                    fc_entry: dict = {"functionCall": fc, "thought_signature": rp["thought_signature"]}
+                    fr_part: dict = {
+                        "functionResponse": {
+                            "name": fc.get("name", tool_name),
+                            "response": {"result": result_text},
+                        }
+                    }
+                    return ([fc_entry], [fr_part])
 
-        # Case 3: synthesize FC from waitingFor
-        fc_parts = [{
-            "functionCall": {
-                "name": tool_name,
-                "args": {"_synthesized": True},
-            }
-        }]
-        return (fc_parts, fr_parts)
+        # No valid FC with thought_signature — signal fallback to text-based format
+        return (None, None)
 
     # =========================================================================
     # FC/FR Deduplication (SPIRAL prevention)
