@@ -327,7 +327,17 @@ def _turn_to_parts_for_chat(turn: ConversationTurn) -> list[dict]:
         return parts
 
     if turn.actor == "brain" and turn.response_parts:
-        return list(turn.response_parts)
+        # Filter out functionCall parts — they are handled by the corresponding
+        # tool_result turn's _emit_fc_fr_for_chat (which produces the proper
+        # model(FC) + user(FR) pair). Including them here AND in _emit_fc_fr_for_chat
+        # causes duplicate FCs after role-merge → API rejects with 400 ("number of
+        # function response parts != number of function call parts").
+        # Production-discovered: evt-7c58450f on kubevirt-plugin.
+        filtered = [
+            p for p in turn.response_parts
+            if not (isinstance(p, dict) and "functionCall" in p)
+        ]
+        return filtered if filtered else [{"text": f"[{turn.actor}.{turn.action}]"}]
 
     text = ""
     if turn.actor == "brain":
