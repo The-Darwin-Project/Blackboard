@@ -2810,16 +2810,15 @@ class Brain:
     @staticmethod
     def _emit_fc_fr(
         turn: ConversationTurn, prev_model_parts: list[dict] | None,
-    ) -> tuple[list[dict] | None, list[dict]]:
+    ) -> tuple[list[dict], list[dict]]:
         """Reconstruct native functionCall + functionResponse pair from a tool_result turn.
 
-        Returns (fc_parts_or_None, fr_parts). When fc_parts is None, the preceding
-        model message already contains the matching functionCall.
+        Returns (fc_parts, fr_parts). Always emits both FC and FR to prevent
+        stale-FC matching when consecutive tool_results share the same tool name.
 
-        3 cases:
-          (1) prev_model_parts has matching FC → return (None, [FR])
-          (2) turn.response_parts has FC data → return ([FC], [FR])
-          (3) Synthesize FC from turn.waitingFor → return ([FC], [FR])
+        2 cases:
+          (1) turn.response_parts has FC data → return ([FC], [FR])
+          (2) Synthesize FC from turn.waitingFor → return ([FC], [FR])
         """
         tool_name = turn.waitingFor or "tool"
         result_text = turn.evidence or turn.thoughts or turn.result or ""
@@ -2831,13 +2830,6 @@ class Brain:
             }
         }
         fr_parts = [fr_part]
-
-        # Case 1: previous model message already has matching functionCall
-        if prev_model_parts:
-            for p in prev_model_parts:
-                fc = p.get("functionCall")
-                if fc and fc.get("name") == tool_name:
-                    return (None, fr_parts)
 
         # Case 2: response_parts on the turn contains FC data
         if turn.response_parts:
@@ -3366,7 +3358,11 @@ class Brain:
             pass
 
     async def delete_event_state_locked(self, event_id: str) -> None:
-        """Delete per-event state under the event lock (prevents resurrection by concurrent workers)."""
+        """Delete per-event state under the event lock (prevents resurrection by concurrent workers).
+
+        On lock timeout: log and skip — the 24h TTL will expire the hash.
+        Never delete without the lock (defeats the race protection).
+        """
         lock = self._event_locks.get(event_id)
         if lock:
             try:
@@ -3377,8 +3373,10 @@ class Brain:
                 finally:
                     lock.release()
             except asyncio.TimeoutError:
-                logger.warning("Lock timeout for state delete on %s", event_id)
-                await self._event_state.delete(event_id)
+                logger.warning(
+                    "Lock timeout for state delete on %s — skipping (24h TTL will expire)",
+                    event_id,
+                )
         else:
             await self._event_state.delete(event_id)
             self._cycle_snapshots.pop(event_id, None)
