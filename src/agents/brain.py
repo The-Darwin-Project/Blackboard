@@ -474,7 +474,10 @@ class _BrainToolContext:
         snapshot = self._b._cycle_snapshots.get(eid)
         if snapshot:
             depth = snapshot.routing_depth + 1
-            await self._b._event_state.set_fields(eid, snapshot, routing_depth=str(depth))
+            try:
+                await self._b._event_state.set_fields(eid, snapshot, routing_depth=str(depth))
+            except Exception as e:
+                logger.warning("Failed to persist routing_depth for %s (non-fatal): %s", eid, e)
             return depth
         depth = self._b._routing_depth.get(eid, 0) + 1
         self._b._routing_depth[eid] = depth
@@ -2698,11 +2701,7 @@ class Brain:
             # FC/FR reconstruction: tool_result turns become structurally distinct
             # functionCall/functionResponse pairs (never merged with other content)
             if turn.actor == "brain" and turn.action == "tool_result":
-                prev_model_parts = next(
-                    (c["parts"] for c in reversed(contents) if c["role"] == "model"),
-                    None,
-                )
-                fc_parts, fr_parts = self._emit_fc_fr(turn, prev_model_parts)
+                fc_parts, fr_parts = self._emit_fc_fr(turn)
                 if fc_parts:
                     contents.append({"role": "model", "parts": fc_parts})
                 contents.append({"role": "user", "parts": fr_parts})
@@ -2809,7 +2808,7 @@ class Brain:
 
     @staticmethod
     def _emit_fc_fr(
-        turn: ConversationTurn, prev_model_parts: list[dict] | None,
+        turn: ConversationTurn,
     ) -> tuple[list[dict], list[dict]]:
         """Reconstruct native functionCall + functionResponse pair from a tool_result turn.
 
