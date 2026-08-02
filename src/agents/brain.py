@@ -2797,17 +2797,12 @@ class Brain:
 
         Called from ALL exit branches in _process_with_chat_session:
         tool-success, text-only, gate-rejection, and RECALL-blocked.
-        Emits brain_thinking heartbeat before compression to prevent
-        Slack badge timeout (up to 5 min for Flash-Lite summarization).
+        Does NOT emit brain_thinking heartbeat unconditionally — only when
+        compression actually triggers (budget exceeded). The heartbeat was
+        causing "FRIDAY is thinking" to get stuck in the UI (emitted AFTER
+        brain_thinking_done, with no subsequent done signal).
         """
         try:
-            await self._broadcast({
-                "type": "brain_thinking",
-                "event_id": event_id,
-                "text": "",
-                "accumulated": "",
-                "is_thought": True,
-            })
             await self._chat_sessions.compress_if_needed(event_id, config)
         except Exception as ce:
             logger.warning("Compression check failed for %s: %s", event_id, ce)
