@@ -2366,9 +2366,13 @@ class Brain:
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
 
         # --- Build per-call config (TOTAL replacement on every send_message) ---
-        want_search, grounding_corpus = self._resolve_grounding_mode(
-            self._search_enabled, brain_phase, self._rag_grounding_enabled, self._rag_grounding_corpus,
-        )
+        # DISABLE grounding for the Chat Bridge path. The Chat API's stateful
+        # session records grounding tool responses in curated_history with a role
+        # the API itself doesn't accept on subsequent calls ("Please use a valid
+        # role: user, model."). The old generate_content path is stateless and
+        # doesn't hit this — each call is fresh. Re-enable once we confirm
+        # grounding works with the Chat API via probe.
+        # Production-discovered: evt-d67d3d91, evt-7c58450f.
         config = self._adapter._build_config(
             system_prompt=system_prompt,
             tools=active_tools,
@@ -2376,8 +2380,8 @@ class Brain:
             top_p=0.95,
             max_output_tokens=phase_max_tokens,
             thinking_level=thinking_level,
-            search_enabled=want_search,
-            grounding_corpus=grounding_corpus,
+            search_enabled=False,
+            grounding_corpus=None,
         )
 
         # --- Get or create Chat session (rebuild from Redis if needed) ---
@@ -2672,8 +2676,8 @@ class Brain:
                             top_p=0.95,
                             max_output_tokens=phase_max_tokens,
                             thinking_level=thinking_level,
-                            search_enabled=want_search,
-                            grounding_corpus=grounding_corpus,
+                            search_enabled=False,
+                            grounding_corpus=None,
                         )
 
                         from google.genai import types as _gt2
