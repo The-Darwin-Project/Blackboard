@@ -182,6 +182,24 @@
 #     use .get(agent_name, default) -- never bracket access -- so an out-of-vocabulary role fails safe.
 #     `effort` (FRIDAY's optional select_agent param) passes through for BOTH local + ephemeral dispatch
 #     and never invalidates --resume (unlike mode, which does on change).
+# 47. [Pattern]: FC/FR reconstruction (_emit_fc_fr) preserves thought_signature from response_parts
+#     in Case 2 (turn-stored FC data). Case 1 (prev model has FC) is passthrough.
+# 48. [Pattern]: _dedup_consecutive_fr matches FC+FR pairs as atomic 2-message units, not bare FR
+#     messages. Real SPIRALs interleave model(FC)+user(FR). Collapse 3+ identical pairs.
+# 49. [Pattern]: prev_model_parts lookup uses reversed() scan to find most recent model message
+#     (not just contents[-1]), since consecutive tool_results push user FRs between.
+# 50. [Gotcha]: snapshot for SILENT_PARK re-admission must be fetched unconditionally before the
+#     accumulated_text guard — the guard may skip, leaving snapshot unbound at the check below.
+# 51. [Pattern]: _spawn_background(coro, label) wraps fire-and-forget with GC-safe task set +
+#     exception logging. Replaces bare asyncio.ensure_future in mark_incident_created + _release_task_state.
+# 52. [Pattern]: delete_event_state_locked acquires _event_locks before state deletion (REST close path).
+#     Prevents concurrent process_event from resurrecting state after REST-initiated delete.
+# 53. [Pattern]: _run_agent_task + handle_wake_task write agent_name/agent_task_started_at to Redis
+#     state via EventState.set_fields (write-through to CycleSnapshot). _release_task_state HDELs them.
+# 54. [Pattern]: _build_contents JIT re-fetch gated to iteration==0 only. Subsequent iterations
+#     already have fresh conversation from the prior tool cycle.
+# 55. [Pattern]: Incident dedup goes through EventState facade (mark_incident_created /
+#     is_incident_created) backed by Redis SET darwin:incident_created.
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -522,13 +540,11 @@ class _BrainToolContext:
 
     def mark_incident_created(self, eid: str) -> None:
         self._b._incident_created.add(eid)
-        # Persist to Redis SET (fire-and-forget, survives pod restart)
         try:
-            from redis.asyncio import Redis as AsyncRedis
-            redis = self._b.blackboard.redis
-            if isinstance(redis, AsyncRedis):
-                import asyncio
-                asyncio.ensure_future(redis.sadd("darwin:incident_created", eid))
+            self._b._spawn_background(
+                self._b._event_state.mark_incident_created(eid),
+                label=f"incident_created:{eid}",
+            )
         except Exception:
             pass
 
@@ -761,6 +777,8 @@ class Brain:
         self._event_state = create_event_state(redis=self.blackboard.redis)
         self._cycle_snapshots: dict[str, CycleSnapshot] = {}
 
+        self._background_tasks: set[asyncio.Task] = set()
+
         self._search_enabled = os.getenv("BRAIN_GOOGLE_SEARCH_ENABLED", "false").lower() == "true"
         self._rag_grounding_corpus = os.getenv("RAG_GROUNDING_CORPUS", "")
         self._rag_grounding_enabled = os.getenv("RAG_GROUNDING_ENABLED", "false").lower() == "true"
@@ -775,6 +793,17 @@ class Brain:
         self._tool_ctx = _BrainToolContext(self)
 
     JOURNAL_CACHE_TTL = 60  # seconds
+
+    def _spawn_background(self, coro, label: str = "") -> None:
+        """Fire-and-forget with GC protection and exception logging."""
+        task = asyncio.ensure_future(coro)
+        self._background_tasks.add(task)
+        def _done(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            exc = t.exception() if not t.cancelled() else None
+            if exc:
+                logger.warning("Background task %s failed: %s", label, exc)
+        task.add_done_callback(_done)
 
     @property
     def skill_loader(self) -> BrainSkillLoader | None:
@@ -1482,7 +1511,7 @@ class Brain:
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
 
         terminal_prompt = self._resolve_terminal_prompt(active_phases, domain=context_flags.get("event_domain"))
-        prompt = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt)
+        prompt = await self._build_contents(event, context_cache=context_flags, terminal_prompt=terminal_prompt, iteration=iteration)
 
         prompt = [
             {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
@@ -1684,6 +1713,7 @@ class Brain:
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
+            snapshot = self._cycle_snapshots.get(event_id)
             if accumulated_text and not response_emitted:
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
@@ -1698,7 +1728,6 @@ class Brain:
                 self._last_processed[event_id] = time.time()
                 self._response_emitted_for.add(event_id)
                 response_emitted_local = True
-                snapshot = self._cycle_snapshots.get(event_id)
                 if snapshot:
                     await self._event_state.set_fields(event_id, snapshot, response_emitted="1")
 
@@ -2569,6 +2598,7 @@ class Brain:
     async def _build_contents(
         self, event: EventDocument, context_cache: ContextFlags | None = None,
         terminal_prompt: str = _TERMINAL_PROMPT_FALLBACK,
+        *, iteration: int = 0,
     ) -> list[dict]:
         """Build structured Gemini-format contents array from Redis conversation.
 
@@ -2641,11 +2671,13 @@ class Brain:
             new_event_text = header + f"\n\n(No turns yet -- this is a new event. Triage it.)\n{terminal_prompt}"
             return [{"role": "user", "parts": [{"text": new_event_text}]}]
 
-        # JIT freshness: re-fetch conversation from Redis to close the 30-40s gap
-        # between outer-loop fetch and this point (RECALL + skill loading happens between).
-        # Event header metadata (service, evidence, subject_type) uses the param — stable.
-        fresh_event = await self.blackboard.get_event(event.id)
-        conversation = fresh_event.conversation if fresh_event else event.conversation
+        # JIT freshness: re-fetch on iteration 0 only (RECALL + skill loading gap).
+        # Subsequent iterations already have fresh conversation from the prior tool cycle.
+        if iteration == 0:
+            fresh_event = await self.blackboard.get_event(event.id)
+            conversation = fresh_event.conversation if fresh_event else event.conversation
+        else:
+            conversation = event.conversation
 
         context_text = header
 
@@ -2666,10 +2698,9 @@ class Brain:
             # FC/FR reconstruction: tool_result turns become structurally distinct
             # functionCall/functionResponse pairs (never merged with other content)
             if turn.actor == "brain" and turn.action == "tool_result":
-                prev_model_parts = (
-                    contents[-1]["parts"]
-                    if contents and contents[-1]["role"] == "model"
-                    else None
+                prev_model_parts = next(
+                    (c["parts"] for c in reversed(contents) if c["role"] == "model"),
+                    None,
                 )
                 fc_parts, fr_parts = self._emit_fc_fr(turn, prev_model_parts)
                 if fc_parts:
@@ -2813,7 +2844,10 @@ class Brain:
             for rp in turn.response_parts:
                 fc = rp.get("functionCall")
                 if fc and fc.get("name") == tool_name:
-                    fc_parts = [{"functionCall": fc}]
+                    fc_entry: dict = {"functionCall": fc}
+                    if rp.get("thought_signature"):
+                        fc_entry["thought_signature"] = rp["thought_signature"]
+                    fc_parts = [fc_entry]
                     return (fc_parts, fr_parts)
 
         # Case 3: synthesize FC from waitingFor
@@ -2831,63 +2865,72 @@ class Brain:
 
     @staticmethod
     def _dedup_consecutive_fr(contents: list[dict]) -> list[dict]:
-        """Collapse consecutive identical functionResponse messages into one annotated copy.
+        """Collapse consecutive identical FC+FR pairs into one annotated copy.
 
-        N-way collapse: if 3+ consecutive user messages have identical FR (same name +
-        same response.result), keep only the first (deep-copied) with annotation.
+        Real SPIRALs produce [model(FC), user(FR), model(FC), user(FR)...] —
+        pairs are the atomic unit.  We compare (fc_name, fr_response_result)
+        across consecutive pairs and collapse 3+ identical pairs to 1 pair
+        with an annotation on the FR result text.
         Never mutates the original parts (uses deep copy).
         """
         import copy
-        if len(contents) < 3:
+        if len(contents) < 6:
             return contents
+
+        def _extract_pair_key(fc_msg: dict, fr_msg: dict) -> tuple[str, str] | None:
+            """Return (fc_name, fr_result) if msgs form a valid FC+FR pair."""
+            if fc_msg.get("role") != "model" or fr_msg.get("role") != "user":
+                return None
+            fc_parts = fc_msg.get("parts", [])
+            fr_parts = fr_msg.get("parts", [])
+            if len(fc_parts) != 1 or len(fr_parts) != 1:
+                return None
+            fc_part = fc_parts[0]
+            fr_part = fr_parts[0]
+            if not isinstance(fc_part, dict) or "functionCall" not in fc_part:
+                return None
+            if not isinstance(fr_part, dict) or "functionResponse" not in fr_part:
+                return None
+            fc_name = fc_part["functionCall"].get("name", "")
+            fr_result = str(fr_part["functionResponse"].get("response", {}).get("result", ""))
+            return (fc_name, fr_result)
 
         result: list[dict] = []
         i = 0
         while i < len(contents):
-            msg = contents[i]
-            # Check if this is a user message with a functionResponse
-            fr_data = None
-            if msg["role"] == "user" and len(msg.get("parts", [])) == 1:
-                part = msg["parts"][0]
-                if isinstance(part, dict) and "functionResponse" in part:
-                    fr_data = part["functionResponse"]
+            if i + 1 < len(contents):
+                pair_key = _extract_pair_key(contents[i], contents[i + 1])
+            else:
+                pair_key = None
 
-            if fr_data is None:
-                result.append(msg)
+            if pair_key is None:
+                result.append(contents[i])
                 i += 1
                 continue
 
-            # Count consecutive identical FR messages
             run_count = 1
-            j = i + 1
-            while j < len(contents):
-                nxt = contents[j]
-                if nxt["role"] != "user" or len(nxt.get("parts", [])) != 1:
-                    break
-                nxt_part = nxt["parts"][0]
-                if not isinstance(nxt_part, dict) or "functionResponse" not in nxt_part:
-                    break
-                nxt_fr = nxt_part["functionResponse"]
-                if nxt_fr.get("name") != fr_data.get("name"):
-                    break
-                if nxt_fr.get("response") != fr_data.get("response"):
+            j = i + 2
+            while j + 1 < len(contents):
+                next_key = _extract_pair_key(contents[j], contents[j + 1])
+                if next_key != pair_key:
                     break
                 run_count += 1
-                j += 1
+                j += 2
 
             if run_count >= 3:
-                # Deep-copy first FR and annotate
-                collapsed = copy.deepcopy(msg)
-                fr_resp = collapsed["parts"][0]["functionResponse"]["response"]
+                collapsed_fc = copy.deepcopy(contents[i])
+                collapsed_fr = copy.deepcopy(contents[i + 1])
+                fr_resp = collapsed_fr["parts"][0]["functionResponse"]["response"]
                 original_result = fr_resp.get("result", "")
                 fr_resp["result"] = (
                     f"{original_result}\n\n"
                     f"(repeated {run_count - 1} times — break this loop)"
                 )
-                result.append(collapsed)
+                result.append(collapsed_fc)
+                result.append(collapsed_fr)
                 i = j
             else:
-                result.append(msg)
+                result.append(contents[i])
                 i += 1
 
         return result
@@ -3310,15 +3353,35 @@ class Brain:
             from redis.asyncio import Redis as AsyncRedis
             redis = self.blackboard.redis
             if isinstance(redis, AsyncRedis):
-                import asyncio
                 from ..state.event_state import _state_key
                 key = _state_key(event_id)
-                asyncio.ensure_future(redis.hdel(
-                    key, "agent_name", "agent_task_started_at",
-                    "waiting_agent", "wait_turn", "reflex_fired", "response_emitted",
-                ))
+                self._spawn_background(
+                    redis.hdel(
+                        key, "agent_name", "agent_task_started_at",
+                        "waiting_agent", "wait_turn", "reflex_fired", "response_emitted",
+                    ),
+                    label=f"release_state:{event_id}",
+                )
         except Exception:
             pass
+
+    async def delete_event_state_locked(self, event_id: str) -> None:
+        """Delete per-event state under the event lock (prevents resurrection by concurrent workers)."""
+        lock = self._event_locks.get(event_id)
+        if lock:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=15)
+                try:
+                    await self._event_state.delete(event_id)
+                    self._cycle_snapshots.pop(event_id, None)
+                finally:
+                    lock.release()
+            except asyncio.TimeoutError:
+                logger.warning("Lock timeout for state delete on %s", event_id)
+                await self._event_state.delete(event_id)
+        else:
+            await self._event_state.delete(event_id)
+            self._cycle_snapshots.pop(event_id, None)
 
     async def handle_wake_task(self, data: dict, agent_id: str) -> None:
         """Process a self-initiated wake task (teammate message woke an idle agent).
@@ -3398,6 +3461,16 @@ class Brain:
         current_task = asyncio.current_task()
         self._active_tasks[event_id] = current_task
         self._active_agent_for_event[event_id] = role
+        snapshot = self._cycle_snapshots.get(event_id)
+        if snapshot:
+            try:
+                await self._event_state.set_fields(
+                    event_id, snapshot,
+                    agent_name=role,
+                    agent_task_started_at=str(time.time()),
+                )
+            except Exception:
+                pass
 
         try:
             await self._broadcast({
@@ -3592,6 +3665,16 @@ class Brain:
             logger.info(f"Agent task started: {agent_name}{mode_label}{parallel_label} for {event_id}")
             if not parallel:
                 self._active_agent_for_event[event_id] = agent_name
+                snapshot = self._cycle_snapshots.get(event_id)
+                if snapshot:
+                    try:
+                        await self._event_state.set_fields(
+                            event_id, snapshot,
+                            agent_name=agent_name,
+                            agent_task_started_at=str(time.time()),
+                        )
+                    except Exception:
+                        pass
 
             prior_mode = self._agent_session_modes.get(event_id, {}).get(agent_name, "")
             reuse_session = (prior_mode == mode) if mode and prior_mode else bool(prior_mode)

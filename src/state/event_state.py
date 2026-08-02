@@ -7,6 +7,9 @@
 # 3. [Constraint]: Fail-closed on Redis errors — raise, let ResyncTrigger retry in 5s.
 # 4. [Gotcha]: All values stored as strings (Redis HASH native type). Callers convert.
 # 5. [Pattern]: Redis key: darwin:event:{id}:state. TTL 24h, touched on write/defer/wake/entry.
+# 6. [Pattern]: hset+expire and hgetall+expire are atomic (Redis pipeline transaction).
+# 7. [Pattern]: mark_incident_created/is_incident_created use Redis SET darwin:incident_created
+#    (separate from per-event HASH). Facade over sadd_incident/sismember_incident backend methods.
 """
 Per-event cycle state backed by Redis HASH (or in-memory dict for emergency rollback).
 
@@ -43,6 +46,8 @@ class _Backend(Protocol):
     async def delete(self, event_id: str) -> None: ...
     async def touch_ttl(self, event_id: str) -> None: ...
     async def scan_keys(self) -> list[str]: ...
+    async def sadd_incident(self, event_id: str) -> None: ...
+    async def sismember_incident(self, event_id: str) -> bool: ...
 
 
 class _RedisBackend:
@@ -55,16 +60,19 @@ class _RedisBackend:
 
     async def hgetall(self, event_id: str) -> dict[str, str]:
         key = _state_key(event_id)
-        data = await self._redis.hgetall(key)
-        if data:
-            await self._redis.expire(key, STATE_TTL_SECONDS)
-        return data or {}
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.hgetall(key)
+        pipe.expire(key, STATE_TTL_SECONDS)
+        results = await pipe.execute()
+        return results[0] or {}
 
     async def hset(self, event_id: str, mapping: dict[str, str]) -> None:
         key = _state_key(event_id)
         if mapping:
-            await self._redis.hset(key, mapping=mapping)
-            await self._redis.expire(key, STATE_TTL_SECONDS)
+            pipe = self._redis.pipeline(transaction=True)
+            pipe.hset(key, mapping=mapping)
+            pipe.expire(key, STATE_TTL_SECONDS)
+            await pipe.execute()
 
     async def hdel(self, event_id: str, *fields: str) -> None:
         if fields:
@@ -86,14 +94,21 @@ class _RedisBackend:
                 keys.append(eid)
         return keys
 
+    async def sadd_incident(self, event_id: str) -> None:
+        await self._redis.sadd("darwin:incident_created", event_id)
+
+    async def sismember_incident(self, event_id: str) -> bool:
+        return bool(await self._redis.sismember("darwin:incident_created", event_id))
+
 
 class _MemoryBackend:
     """In-memory dict backend — emergency rollback only."""
 
-    __slots__ = ("_store",)
+    __slots__ = ("_store", "_incidents")
 
     def __init__(self) -> None:
         self._store: dict[str, dict[str, str]] = {}
+        self._incidents: set[str] = set()
 
     async def hgetall(self, event_id: str) -> dict[str, str]:
         return dict(self._store.get(event_id, {}))
@@ -117,6 +132,12 @@ class _MemoryBackend:
 
     async def scan_keys(self) -> list[str]:
         return list(self._store.keys())
+
+    async def sadd_incident(self, event_id: str) -> None:
+        self._incidents.add(event_id)
+
+    async def sismember_incident(self, event_id: str) -> bool:
+        return event_id in self._incidents
 
 
 class CycleSnapshot:
@@ -240,6 +261,14 @@ class EventState:
     async def scan_stale_events(self) -> list[str]:
         """Return event IDs with active state hashes (for startup reconciliation)."""
         return await self._backend.scan_keys()
+
+    async def mark_incident_created(self, event_id: str) -> None:
+        """Persist incident-created flag to Redis SET (survives pod restart)."""
+        await self._backend.sadd_incident(event_id)
+
+    async def is_incident_created(self, event_id: str) -> bool:
+        """Check if incident was already created (Redis SET lookup)."""
+        return await self._backend.sismember_incident(event_id)
 
 
 def create_event_state(redis: "Redis | None" = None) -> EventState:

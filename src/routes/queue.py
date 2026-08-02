@@ -358,10 +358,10 @@ async def close_event_by_user(
     except Exception:
         pass
     await blackboard.close_event(event_id, close_summary, close_reason="user_closed", token_usage=token_usage)
-    # Clean up per-event Redis state hash
+    # Clean up per-event Redis state hash (lock-guarded to prevent resurrection)
     try:
         brain = await get_brain()
-        await brain._event_state.delete(event_id)
+        await brain.delete_event_state_locked(event_id)
     except (RuntimeError, Exception):
         pass
     # Clean up Slack thread mapping if event had Slack context
