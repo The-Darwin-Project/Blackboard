@@ -2369,13 +2369,13 @@ class Brain:
                 logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
 
         # --- Build per-call config (TOTAL replacement on every send_message) ---
-        # DISABLE grounding for the Chat Bridge path. The Chat API's stateful
-        # session records grounding tool responses in curated_history with a role
-        # the API itself doesn't accept on subsequent calls ("Please use a valid
-        # role: user, model."). The old generate_content path is stateless and
-        # doesn't hit this — each call is fresh. Re-enable once we confirm
-        # grounding works with the Chat API via probe.
-        # Production-discovered: evt-d67d3d91, evt-7c58450f.
+        # Grounding RE-ENABLED: the Chat API's curated_history records grounding
+        # artifacts with roles the API rejects on replay. Fix: evict session after
+        # any call that returns grounding_metadata — the rebuild from Redis is clean.
+        # Production-discovered: evt-d67d3d91, evt-7c58450f. Fixed: evict-after-grounding.
+        want_search, grounding_corpus = self._resolve_grounding_mode(
+            self._search_enabled, brain_phase, self._rag_grounding_enabled, self._rag_grounding_corpus,
+        )
         config = self._adapter._build_config(
             system_prompt=system_prompt,
             tools=active_tools,
@@ -2383,8 +2383,8 @@ class Brain:
             top_p=0.95,
             max_output_tokens=phase_max_tokens,
             thinking_level=thinking_level,
-            search_enabled=False,
-            grounding_corpus=None,
+            search_enabled=want_search,
+            grounding_corpus=grounding_corpus,
         )
 
         # --- Get or create Chat session (rebuild from Redis if needed) ---
@@ -2569,12 +2569,22 @@ class Brain:
             )
             queries = ", ".join(last_grounding.get("queries", []))
             grounding_evidence = f"\n\n## Grounding Context\n\nQueries: {queries}\n\nSources:\n{sources}"
+            # Evict session: grounding artifacts in curated_history have roles the
+            # API rejects on replay. Rebuild from Redis (clean) on next call.
+            self._chat_sessions.evict(event_id)
+            logger.info("Evicted chat session for %s after grounding response (curated_history hygiene)", event_id)
 
         # --- Process result (mirrors _process_with_llm) ---
         if function_call:
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
             snapshot = self._cycle_snapshots.get(event_id)
-            if accumulated_text and not response_emitted:
+            # Suppress SI-echo after rebuild: the model's text preamble after a
+            # session rebuild is instruction acknowledgment (repeating skill content
+            # or terminal_prompt), not a user-facing answer. Terminal tools are exempt
+            # — their text IS the answer (close summary, escalation notice).
+            # Production-discovered: evt-20372964 echoed "You have N refresh tokens..."
+            suppress_rebuild_echo = was_rebuilt and not is_terminal
+            if accumulated_text and not response_emitted and not suppress_rebuild_echo:
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
                     actor="brain",
@@ -2590,6 +2600,11 @@ class Brain:
                 response_emitted_local = True
                 if snapshot:
                     await self._event_state.set_fields(event_id, snapshot, response_emitted="1")
+            elif accumulated_text and suppress_rebuild_echo:
+                logger.debug(
+                    "Suppressed rebuild SI-echo for %s (%d chars, tool=%s): %s",
+                    event_id, len(accumulated_text), function_call.name, accumulated_text[:80],
+                )
 
             valid_tool_names = {t["name"] for t in active_tools}
             if (
