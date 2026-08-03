@@ -5923,6 +5923,7 @@ class Brain:
         self._recall_lessons.pop(event_id, None)
         self._reflex_fired_for.discard(event_id)
         self._response_emitted_for.discard(event_id)
+        self._last_reconciled_cursor.pop(event_id, None)
         self._event_locks.pop(event_id, None)
         self._active_agent_for_event.pop(event_id, None)
         # Delete per-event Redis state hash + evict local snapshot

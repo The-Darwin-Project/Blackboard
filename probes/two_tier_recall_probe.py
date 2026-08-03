@@ -22,13 +22,13 @@ from pathlib import Path
 
 os.environ.setdefault(
     "GOOGLE_APPLICATION_CREDENTIALS",
-    "/home/thason/Git/GitHub/The-Darwin-Project/cnv-ai-insights-8502f29094a2.json",
+    os.environ.get("GCP_SA_KEY_PATH", ""),
 )
 
 from google import genai
 from google.genai import types
 
-PROJECT_ID = "cnv-ai-insights"
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
 MODEL = "gemini-2.5-flash"
 BLACKBOARD_FILE = Path("/tmp/two_tier_recall_probe.json")
 MAX_TOOL_CALLS = 8
