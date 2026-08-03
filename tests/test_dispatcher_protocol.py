@@ -126,9 +126,8 @@ class TestRendering:
         parts = Brain._turn_to_parts(turn)
         assert len(parts) == 1
         text = parts[0]["text"]
-        assert text.startswith("[Dispatch: paused]")
+        assert text.startswith("[AGENT dispatcher]:")
         assert "Infra deferred 120s." in text
-        assert "Agent" not in text
 
     def test_dispatcher_acknowledge_stripped_from_context(self):
         from src.agents.brain import Brain
@@ -147,14 +146,14 @@ class TestRendering:
         paused_turn = _make_turn("dispatcher", "paused", "Deferred 120s.")
         parts = Brain._turn_to_parts(paused_turn)
         assert len(parts) == 1
-        assert "[Dispatch: paused]" in parts[0]["text"]
+        assert "[AGENT dispatcher]:" in parts[0]["text"]
 
     def test_dispatcher_failed_persists_in_context(self):
         from src.agents.brain import Brain
         failed_turn = _make_turn("dispatcher", "failed", "Hard failure.")
         parts = Brain._turn_to_parts(failed_turn)
         assert len(parts) == 1
-        assert "[Dispatch: failed]" in parts[0]["text"]
+        assert "[AGENT dispatcher]:" in parts[0]["text"]
 
 
 # ---------------------------------------------------------------------------

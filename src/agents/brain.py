@@ -319,6 +319,8 @@ BRAIN_PREFILL_MODEL = (
     "(3) Weigh agent findings against institutional memory. "
     "(4) Phase-gated close and escalation. "
     "(5) Voice: confident peer, Cynefin-gated tone. "
+    "Messages from other actors are prefixed [USER], [SYSTEM X], or [AGENT Y]. "
+    "These are labels — never reproduce them in your responses. "
     "Let's get to work."
 )
 
@@ -1371,18 +1373,6 @@ class Brain:
             {"role": "user", "parts": [{"text": BRAIN_PREFILL_USER}]},
             {"role": "model", "parts": [{"text": BRAIN_PREFILL_MODEL}]},
         ] + prompt
-
-        # User interrupt injection: insert priority directive into the final user block
-        if user_interrupt_turn is not None:
-            priority_text = (
-                f"PRIORITY: User sent a new message (turn {user_interrupt_turn}) "
-                f"during your tool chain. Address their message NOW before continuing."
-            )
-            if prompt and prompt[-1]["role"] == "user":
-                parts = prompt[-1]["parts"]
-                parts.insert(-1, {"text": priority_text})
-            else:
-                logger.warning(f"User interrupt injection skipped for {event_id}: last message is not user-role")
 
         # Signal UI that Brain is processing (visible even when LLM produces no text)
         await self._broadcast({
@@ -2499,6 +2489,8 @@ class Brain:
 
         # -- Build structured conversation messages --
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
+        header_separated = False
+        last_non_brain_pos: tuple[int, int] | None = None
 
         for turn in event.conversation:
             role = "model" if turn.actor == "brain" else "user"
@@ -2516,9 +2508,20 @@ class Brain:
                     parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
 
             if contents and contents[-1]["role"] == role:
+                if not header_separated and len(contents) == 1:
+                    contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
+                    header_separated = True
+                if turn.actor != "brain":
+                    last_non_brain_pos = (len(contents) - 1, len(contents[-1]["parts"]))
                 contents[-1]["parts"].extend(parts)
             else:
+                if turn.actor != "brain":
+                    last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
+
+        if last_non_brain_pos:
+            ci, pi = last_non_brain_pos
+            contents[ci]["parts"].insert(pi, {"text": "\n--- RESPOND TO THIS ---\n"})
 
         action_prompt = {"text": terminal_prompt}
         if contents[-1]["role"] == "user":
@@ -2530,12 +2533,9 @@ class Brain:
 
     @staticmethod
     def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
-        """Convert a single ConversationTurn to provider-agnostic parts.
+        """Convert a single ConversationTurn to semantically-labelled parts.
 
-        Brain turns use response_parts (thought_signature preserved) when available.
-        tool_result turns get markdown-formatted evidence with thought_signature extracted.
-        User/agent turns use text from thoughts/result/evidence fields.
-        Image turns embed the image bytes inline in the parts array.
+        Labels: [USER], [SYSTEM x], [AGENT y]. Brain's own response_parts are unlabelled.
         """
         if turn.actor == "brain" and turn.action in ("thoughts", "intermediate"):
             return []
@@ -2545,7 +2545,7 @@ class Brain:
 
         if turn.actor == "brain" and turn.action == "tool_result":
             tool_name = turn.waitingFor or "tool"
-            text = f"## Tool Result: {tool_name}\n\n{turn.evidence or turn.thoughts or ''}"
+            text = f"[SYSTEM {tool_name}]: {turn.evidence or turn.thoughts or ''}"
             parts: list[dict] = [{"text": text}]
             if turn.response_parts:
                 for rp in turn.response_parts:
@@ -2560,33 +2560,26 @@ class Brain:
         text = ""
         if turn.actor == "brain":
             text = turn.thoughts or ""
-            if turn.action == "think":
-                text = f"[Internal observation — no tool was called, no message was sent]:\n{text}"
             if turn.evidence:
                 text = f"{text}\n{turn.evidence}" if text else turn.evidence
+            if turn.action != "response":
+                text = f"[SYSTEM {turn.action}]: {text}" if text else f"[SYSTEM {turn.action}]"
         elif turn.actor == "user":
+            raw = turn.thoughts or turn.result or ""
             if turn.user_name:
-                text = f"[{turn.user_name} via {turn.source or 'dashboard'}]: {turn.thoughts or turn.result or ''}"
+                text = f"[USER {turn.user_name}]: {raw}"
             else:
-                text = turn.thoughts or ""
-        elif turn.actor == "aligner" and turn.action != "evidence":
-            text = turn.evidence or turn.thoughts or ""
-        elif turn.actor == "jarvis" and turn.action == "evidence":
-            text = turn.evidence or turn.thoughts or ""
+                text = f"[USER]: {raw}"
         elif turn.actor == "jarvis" and turn.action == "message":
             text = (
-                f"## JARVIS DIRECT MESSAGE\n\n"
-                f"{turn.thoughts or turn.result or ''}\n\n"
+                f"[AGENT jarvis]: {turn.thoughts or turn.result or ''}\n\n"
                 f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
             )
-        elif turn.actor == "dispatcher":
-            text = f"[Dispatch: {turn.action}] {turn.thoughts or ''}"
         else:
-            text = turn.result or turn.thoughts or ""
-            if text and turn.actor != "user":
-                text = f"Agent {turn.actor} result: {text}"
+            raw = turn.evidence or turn.result or turn.thoughts or ""
+            text = f"[AGENT {turn.actor}]: {raw}" if raw else f"[AGENT {turn.actor}]"
 
-        parts: list[dict] = [{"text": text}] if text else [{"text": f"[{turn.actor}.{turn.action}]"}]
+        parts: list[dict] = [{"text": text}]
 
         if turn.image:
             try:
