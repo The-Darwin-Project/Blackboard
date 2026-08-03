@@ -1629,6 +1629,21 @@ class Brain:
                 return True
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
 
+            # Runtime gate enforcement: reject FCs for tools stripped by gates
+            valid_tool_names = {t["name"] for t in active_tools}
+            if function_call.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                rejection = diagnose_rejection(function_call.name, gate_ctx)
+                logger.warning("Runtime gate rejection for %s: %s (%s)", event_id, function_call.name, rejection)
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="tool_result",
+                    thoughts=rejection,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
+
             # Flush remaining thinking buffer for final sentence search
             if reflex_chunker and reflex_searcher:
                 final_window = reflex_chunker.flush()
