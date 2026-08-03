@@ -6,6 +6,7 @@
 # 4. [Pattern]: EventInput.evidence uses field_validator to coerce plain str -> EventEvidence for backward compat with existing Redis data.
 # 5. [Pattern]: EventDocument.slack_* fields and ConversationTurn.source are Optional for backward compat with existing Redis data (pre-Slack events have None).
 # 6. [Pattern]: EventDocument.created_by_email is Optional[str] for backward compat -- existing Redis events deserialize with None.
+# 7. [Pattern]: ConversationTurn.chat_role two-tier: "user"/"model" = macro (replayed), None = progress (UI only). Default None is safe upgrade.
 """Pydantic schemas for Darwin Blackboard state layers."""
 from __future__ import annotations
 
@@ -332,6 +333,10 @@ class ConversationTurn(BaseModel):
     user_name: Optional[str] = Field(None, description="Display name for multi-user conversations (e.g., 'Albert O.')")
     timestamp: float = Field(default_factory=time.time)
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
+    chat_role: Optional[Literal["user", "model"]] = Field(
+        None,
+        description="Two-tier classification: 'user'/'model' = macro (replayed on rebuild), None = progress (UI only)",
+    )
 
 
 _PHASE_ALIASES: dict[str, str] = {

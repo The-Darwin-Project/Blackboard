@@ -324,7 +324,7 @@ async def handle_message_agent(
                     response_parts=response_parts,
                 )
                 await ctx.append_and_broadcast(event_id, followup)
-    return False
+    return True
 
 
 # ---------------------------------------------------------------------------

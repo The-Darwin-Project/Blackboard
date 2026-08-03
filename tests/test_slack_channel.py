@@ -273,7 +273,7 @@ class TestBroadcastDedup:
             "type": "turn",
             "event_id": eid,
             "turn": {"turn": 1, "actor": "brain", "action": "response",
-                     "thoughts": "Done."},
+                     "thoughts": "Done.", "chat_role": "model"},
         })
 
         assert eid not in sc._stream_delivered

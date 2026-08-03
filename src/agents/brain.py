@@ -389,7 +389,10 @@ _CYCLE_ENDING_TOOLS = frozenset({
     "wait_for_user", "close_event", "defer_event",
     "select_agent", "wait_for_agent",
     "request_user_approval",
+    "hold_watch", "wait_for_jarvis",
 })
+
+_STATE_MUTATING_TOOLS = frozenset({"set_phase", "classify_event"})
 
 # The exhaustive set of close_event's LLM-facing terminal_reason values (types.py's
 # schema enum, derived from the shared event_types.TERMINAL_REASONS tuple). Used by
@@ -727,6 +730,7 @@ class Brain:
         self._defer_safety_failures: int = 0
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
+        self._last_reconciled_cursor: dict[str, int] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
         self._defer_wake_events: set[str] = set()
         # hold_watch: zero-cost FRIDAY parking for jarvis meta-events
@@ -1319,63 +1323,60 @@ class Brain:
                 and self._chat_sessions is not None
             )
 
-            # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
-            # returns True, meaning the LLM needs to make a follow-up decision.
-            # Bounded to prevent runaway loops.
-            is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
-            max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
-            response_emitted = False  # Track if brain.response was already flushed this cycle
-            acknowledged_interrupts: set[int] = set()
-            for iteration in range(max_llm_iterations):
-                # Re-fetch event to pick up turns appended by the previous iteration
-                if iteration > 0:
-                    event = await self.blackboard.get_event(event_id)
-                    if not event:
-                        return
+            if _use_chat_bridge:
+                # Two-tier scheduling gate: no new macro user turns = no reconcile
+                # (replaces is_intermediate for cost control on ResyncTrigger ticks)
+                macro_user_turns = [t for t in event.conversation if t.chat_role == "user"]
+                last_cursor = self._last_reconciled_cursor.get(event_id, -1)
+                has_delta = len(macro_user_turns) > last_cursor
+                is_cold_start = event_id not in self._last_reconciled_cursor
+                if not has_delta and not is_cold_start and not is_defer_wake:
+                    return
+                await self._reconcile_chat(event_id, event, is_defer_wake=is_defer_wake)
+                self._last_reconciled_cursor[event_id] = len(macro_user_turns)
+            else:
+                # Old path: iterative LLM loop for _process_with_llm (Claude/non-bridge)
+                is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+                max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
+                response_emitted = False
+                acknowledged_interrupts: set[int] = set()
+                for iteration in range(max_llm_iterations):
+                    if iteration > 0:
+                        event = await self.blackboard.get_event(event_id)
+                        if not event:
+                            return
 
-                # User interrupt detection: new user turns after turn_snapshot.
-                # Iteration 0 has no re-fetch — interrupts arriving during iteration 0
-                # are only detectable on iteration 1 (after re-fetch) or by the scan safety net.
-                user_interrupt_turn: int | None = None
-                if not is_intermediate:
-                    new_user_turns = [
-                        t for t in event.conversation[turn_snapshot:]
-                        if t.actor == "user" and t.status.value in ("sent", "delivered")
-                        and t.turn not in acknowledged_interrupts
-                    ]
-                    if new_user_turns:
-                        user_interrupt_turn = new_user_turns[-1].turn
-                        acknowledged_interrupts.update(t.turn for t in new_user_turns)
-                        response_emitted = False
-                        self._response_emitted_for.discard(event_id)
-                        snapshot = self._cycle_snapshots.get(event_id)
-                        if snapshot and snapshot.response_emitted:
-                            await self._event_state.clear_fields(event_id, snapshot, "response_emitted")
-                        logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
+                    user_interrupt_turn: int | None = None
+                    if not is_intermediate:
+                        new_user_turns = [
+                            t for t in event.conversation[turn_snapshot:]
+                            if t.actor == "user" and t.status.value in ("sent", "delivered")
+                            and t.turn not in acknowledged_interrupts
+                        ]
+                        if new_user_turns:
+                            user_interrupt_turn = new_user_turns[-1].turn
+                            acknowledged_interrupts.update(t.turn for t in new_user_turns)
+                            response_emitted = False
+                            self._response_emitted_for.discard(event_id)
+                            snapshot = self._cycle_snapshots.get(event_id)
+                            if snapshot and snapshot.response_emitted:
+                                await self._event_state.clear_fields(event_id, snapshot, "response_emitted")
+                            logger.info(f"User interrupt detected for {event_id} at iteration {iteration}, turn {user_interrupt_turn}")
 
-                if _use_chat_bridge:
-                    should_continue = await self._process_with_chat_session(
-                        event_id, event, is_defer_wake=is_defer_wake,
-                        iteration=iteration, is_intermediate=is_intermediate,
-                        response_emitted=response_emitted,
-                        user_interrupt_turn=user_interrupt_turn,
-                    )
-                else:
                     should_continue = await self._process_with_llm(
                         event_id, event, is_defer_wake=is_defer_wake,
                         iteration=iteration, is_intermediate=is_intermediate,
                         response_emitted=response_emitted,
                         user_interrupt_turn=user_interrupt_turn,
                     )
-                # Propagate response_emitted state across iterations (RECALL continuation)
-                snapshot = self._cycle_snapshots.get(event_id)
-                if event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted):
-                    response_emitted = True
-                if not should_continue:
-                    break
-                logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
-            else:
-                logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
+                    snapshot = self._cycle_snapshots.get(event_id)
+                    if event_id in self._response_emitted_for or (snapshot and snapshot.response_emitted):
+                        response_emitted = True
+                    if not should_continue:
+                        break
+                    logger.debug(f"LLM loop iteration {iteration + 1} for {event_id} (tool requested continuation)")
+                else:
+                    logger.warning(f"Event {event_id} hit max LLM iterations ({max_llm_iterations})")
 
             # After LLM loop exits -- mark turns as PROCESSED (cycle complete).
             # Brain turns appended during the loop (tool results) also get PROCESSED.
@@ -2124,6 +2125,11 @@ class Brain:
 
         return function_call, accumulated_text, accumulated_thoughts, raw_parts, last_grounding
 
+    # DEPRECATED: _drain_and_handle_fr_response, _build_chat_message, _build_chat_event_header,
+    # and _process_with_chat_session are dead code after the two-tier reconciler
+    # (_reconcile_chat). Retained temporarily for rollback safety behind CHAT_BRIDGE_ENABLED.
+    # Remove once the reconciler is validated in production.
+
     async def _drain_and_handle_fr_response(
         self,
         event_id: str,
@@ -2828,6 +2834,507 @@ class Brain:
             await self._chat_sessions.compress_if_needed(event_id, config)
         except Exception as ce:
             logger.warning("Compression check failed for %s: %s", event_id, ce)
+
+    async def _reconcile_chat(
+        self,
+        event_id: str,
+        event: EventDocument,
+        *,
+        is_defer_wake: bool = False,
+    ) -> None:
+        """Two-tier reconciler: bridge between Blackboard (Redis) and Chat session.
+
+        Replaces the outer iteration loop + _process_with_chat_session for the
+        Chat bridge path. Produces exactly ONE macro model turn per cycle.
+        """
+        from .llm import BRAIN_TOOL_SCHEMAS
+        from google.genai import types as _gt
+
+        if not self._chat_sessions:
+            logger.error("_reconcile_chat called without ChatSessionManager for %s", event_id)
+            return
+
+        # --- Skill loading + context flags ---
+        if self._progressive_skills and self._skill_loader:
+            try:
+                redis_version = await self.blackboard.redis.get("darwin:skills:version")
+            except Exception:
+                redis_version = None
+            if redis_version and redis_version != self._skills_version:
+                async with self._skills_reload_lock:
+                    try:
+                        inner_version = await self.blackboard.redis.get("darwin:skills:version")
+                    except Exception:
+                        inner_version = None
+                    if inner_version and inner_version != self._skills_version:
+                        loaded_from_redis = await self._skill_loader.reload_from_redis()
+                        if loaded_from_redis:
+                            self._skills_version = inner_version
+                            logger.info(f"Brain skills reloaded from Redis (version={inner_version[:8]})")
+                        else:
+                            logger.info("Skill reload fell back to filesystem -- version not updated")
+
+            is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+            context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
+            if is_defer_wake:
+                context_flags["is_defer_wakeup"] = True
+                context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
+            active_phases = self._match_phases(event, context_flags)
+            system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+            thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
+            if event.source == "jarvis":
+                call_temp = max(call_temp, 1.7)
+            elif event.source in ("chat", "slack"):
+                call_temp = max(call_temp, 1.3)
+        else:
+            raise RuntimeError("BrainSkillLoader is required.")
+
+        # --- Tool gate evaluation ---
+        from .tool_gates import evaluate_gates, build_gate_context
+
+        brain_phase = _resolve_phase(event.brain_phase)
+        gate_ctx = build_gate_context(
+            event=event,
+            brain_phase=brain_phase,
+            context_flags=context_flags,
+            is_defer_wake=is_defer_wake,
+            iteration=0,
+            jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+            jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+        )
+        active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+
+        if not active_tools:
+            logger.error(
+                "EMPTY TOOLSET after gate evaluation for %s (phase=%s, source=%s)",
+                event_id, brain_phase, event.source,
+            )
+            if context_flags.get("is_intermediate"):
+                active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in {"wait_for_agent"}]
+            else:
+                active_tools = [t for t in BRAIN_TOOL_SCHEMAS if t["name"] in {"classify_event", "set_phase", "lookup_journal"}]
+
+        if brain_phase in ("escalate", "close"):
+            maintainer_emails = self._resolve_maintainer_enum(event)
+            if maintainer_emails:
+                active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
+
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
+        _phase_tool_priority: dict[str, set[str]] = {
+            "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
+            "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
+            "verify":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context", "get_plan_progress", "defer_event"},
+            "escalate":  {"report_incident", "notify_user_slack", "notify_gitlab_result", "close_event", "defer_event"},
+            "close":     {"close_event", "notify_gitlab_result", "notify_user_slack", "post_sticky_note", "hold_watch"},
+        }
+        priority_names = _phase_tool_priority.get(brain_phase, set())
+        tier_always = [t for t in active_tools if t["name"] in _always_tools]
+        tier_phase = [t for t in active_tools if t["name"] in priority_names and t["name"] not in _always_tools]
+        tier_rest = [t for t in active_tools if t["name"] not in _always_tools and t["name"] not in priority_names]
+        unread = getattr(event, "unread_notes", 0) or 0
+        if unread > 0:
+            tier_sticky = [t for t in tier_always if t["name"] == "read_sticky_notes"]
+            tier_always = [t for t in tier_always if t["name"] != "read_sticky_notes"]
+            active_tools = tier_sticky + tier_always + tier_phase + tier_rest
+        else:
+            active_tools = tier_always + tier_phase + tier_rest
+
+        if context_flags.get("is_intermediate"):
+            allowed = {"reply_to_agent", "message_agent", "wait_for_agent", "respond_to_jarvis"}
+            final_names = {t["name"] for t in active_tools}
+            if not final_names <= allowed:
+                leaked = final_names - allowed
+                active_tools = [t for t in active_tools if t["name"] in allowed]
+                logger.error("TOOL LEAK: intermediate gate allowed %s for %s", leaked, event_id)
+
+        # --- Build config (no SDK grounding — web_search tool replaces it) ---
+        config = self._adapter._build_config(
+            system_prompt=system_prompt,
+            tools=active_tools,
+            temperature=call_temp,
+            top_p=0.95,
+            max_output_tokens=phase_max_tokens,
+            thinking_level=thinking_level,
+            search_enabled=False,
+            grounding_corpus=None,
+        )
+
+        # --- Get or create Chat session (macro-only rebuild for two-tier) ---
+        try:
+            _chat, was_rebuilt = await self._chat_sessions.get_or_create(event_id, config, event.conversation, use_macros=True)
+        except Exception as e:
+            if self._is_transient(e):
+                logger.warning("Chat session create/rebuild transient failure for %s, retrying once: %s", event_id, e)
+                await asyncio.sleep(2)
+                try:
+                    _chat, was_rebuilt = await self._chat_sessions.get_or_create(event_id, config, event.conversation, use_macros=True)
+                except Exception as e2:
+                    logger.error("Chat session create/rebuild failed for %s after retry: %s", event_id, e2)
+                    self._chat_sessions.evict(event_id)
+                    return
+            else:
+                logger.error("Chat session create/rebuild failed for %s: %s", event_id, e)
+                self._chat_sessions.evict(event_id)
+                return
+
+        # --- Build message from macro delta ---
+        terminal_prompt = self._resolve_terminal_prompt(
+            active_phases,
+            domain=context_flags.get("event_domain"),
+        )
+
+        if was_rebuilt:
+            macro_turns = [t for t in event.conversation if t.chat_role is not None]
+            if not macro_turns:
+                header = await self._build_chat_event_header(event, context_flags)
+                message = (header + "\n\n" + terminal_prompt) if header else terminal_prompt
+            else:
+                message = terminal_prompt
+        else:
+            message = self._format_macro_delta(event, event_id) + "\n\n" + terminal_prompt
+
+        # --- Signal UI ---
+        await self._broadcast({
+            "type": "brain_thinking",
+            "event_id": event_id,
+            "text": "",
+            "accumulated": "",
+            "is_thought": True,
+        })
+
+        # --- RECALL entry-point ---
+        reflex_chunker, reflex_searcher = self._create_reflex_pair(
+            event_id,
+            event_domain=context_flags.get("event_domain") or "",
+            event_service=event.service or "",
+        )
+
+        # --- First send (stream_and_drain) ---
+        fc, text, thoughts = await self._stream_and_drain(
+            event_id, message, config,
+            reflex_chunker=reflex_chunker,
+            reflex_searcher=reflex_searcher,
+        )
+        if fc is None and not text and not thoughts:
+            await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+            logger.warning("Brain reconciler: empty first response for %s", event_id)
+            fallback = ConversationTurn(
+                turn=0, actor="brain", action="response",
+                thoughts="Processing — retrying shortly.",
+                chat_role="model",
+            )
+            await self._append_and_broadcast(event_id, fallback)
+            return
+
+        # --- RECALL mid-stream ---
+        if reflex_chunker and reflex_searcher:
+            final_window = reflex_chunker.flush()
+            if final_window:
+                reflex_searcher.fire(final_window)
+
+        snapshot = self._cycle_snapshots.get(event_id)
+        reflex_already = snapshot.reflex_fired if snapshot else (event_id in self._reflex_fired_for)
+        if fc and reflex_searcher and not reflex_already:
+            try:
+                lessons = await reflex_searcher.gather(timeout=0.5)
+                if lessons:
+                    self._recall_lessons[event_id] = lessons
+                    self._reflex_fired_for.add(event_id)
+                    if snapshot:
+                        await self._event_state.set_fields(event_id, snapshot, reflex_fired="1")
+                    logger.info("Brain RECALL (reconciler): blocked %s, %d hits for %s", fc.name, len(lessons), event_id)
+
+                    recall_system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+                    config = self._adapter._build_config(
+                        system_prompt=recall_system_prompt,
+                        tools=active_tools,
+                        temperature=call_temp,
+                        top_p=0.95,
+                        max_output_tokens=phase_max_tokens,
+                        thinking_level=thinking_level,
+                        search_enabled=False,
+                        grounding_corpus=None,
+                    )
+                    blocked_fr = _gt.Part.from_function_response(
+                        name=fc.name,
+                        response={"status": "blocked", "reason": "recall_override"},
+                    )
+                    fc, text, thoughts = await self._stream_and_drain(
+                        event_id, blocked_fr, config,
+                    )
+            except Exception as e:
+                logger.warning("Memory reflex gate error for %s: %s", event_id, e)
+
+        # --- Internal FC/FR loop ---
+        max_tool_calls = 2 if context_flags.get("is_intermediate") else (8 if event.source == "jarvis" else 5)
+        wrote_macro = False
+
+        for tool_idx in range(max_tool_calls):
+            # Text + FC: flush text as PROGRESS narration (not macro)
+            if text and fc:
+                progress_turn = ConversationTurn(
+                    turn=0,
+                    actor="brain",
+                    action="response",
+                    thoughts=text,
+                    chat_role=None,
+                )
+                await self._append_and_broadcast(event_id, progress_turn)
+                text = ""
+
+            # Text-only: this IS the macro outcome, done
+            if text and not fc:
+                macro_turn = ConversationTurn(
+                    turn=0,
+                    actor="brain",
+                    action="response",
+                    thoughts=text,
+                    chat_role="model",
+                )
+                await self._append_and_broadcast(event_id, macro_turn)
+                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                self._last_processed[event_id] = time.time()
+                if event.source in ("slack", "chat"):
+                    self._waiting_for_user[event_id] = time.time()
+                    self._idle_timeout.schedule(event_id, warning_sec=self._get_conversation_timeout(event))
+                wrote_macro = True
+                break
+
+            # Empty (no FC, no text): done
+            if not fc:
+                break
+
+            is_terminal = fc.name in _CYCLE_ENDING_TOOLS
+            is_state_mutating = fc.name in _STATE_MUTATING_TOOLS
+
+            # Gate check
+            valid_tool_names = {t["name"] for t in active_tools}
+            if fc.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                all_known = {t["name"] for t in BRAIN_TOOL_SCHEMAS}
+                if fc.name not in all_known:
+                    rejection_reason = f"[UNKNOWN] {fc.name} is not a recognized tool."
+                else:
+                    rejection_reason = diagnose_rejection(fc.name, gate_ctx)
+                logger.warning("Tool rejection [%r] for %s: %s", fc.name, event_id, rejection_reason)
+                fr_part = _gt.Part.from_function_response(
+                    name=fc.name,
+                    response={"status": "rejected", "reason": rejection_reason},
+                )
+                progress_turn = ConversationTurn(
+                    turn=0,
+                    actor="brain",
+                    action="tool_result",
+                    thoughts=rejection_reason,
+                    chat_role=None,
+                )
+                await self._append_and_broadcast(event_id, progress_turn)
+                fc, text, thoughts = await self._stream_and_drain(event_id, fr_part, config)
+                continue
+
+            logger.info("Brain reconciler decision for %s: %s", event_id, fc.name)
+            self._reasoning_by_event[event_id] = thoughts or None
+
+            # Snapshot turn count BEFORE execution for scoped readback
+            turn_count_before = len(event.conversation) if event.conversation else 0
+
+            # Execute tool (reuse existing handler machinery)
+            try:
+                await self._execute_function_call(
+                    event_id, fc.name, fc.args,
+                )
+            except Exception as e:
+                logger.error("Handler %s failed for %s: %s", fc.name, event_id, e, exc_info=True)
+
+            # Read back handler's written turn for FR payload (scoped to new turns only)
+            tool_result_event = await self.blackboard.get_event(event_id)
+            result_text = ""
+            if tool_result_event and tool_result_event.conversation:
+                new_turns = tool_result_event.conversation[turn_count_before:]
+                outcome_turn = next(
+                    (t for t in reversed(new_turns) if t.actor == "brain" and t.action == "tool_result"),
+                    None,
+                )
+                if outcome_turn:
+                    result_text = outcome_turn.evidence or outcome_turn.thoughts or outcome_turn.result or ""
+                elif not new_turns:
+                    result_text = '{"result": "completed"}'
+
+            # Progress turn already written by handler (chat_role=None by default)
+
+            # Config rebuild after state-mutating tools
+            if is_state_mutating:
+                event = await self.blackboard.get_event(event_id) or event
+                context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
+                active_phases = self._match_phases(event, context_flags)
+                system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+                brain_phase = _resolve_phase(event.brain_phase)
+                gate_ctx = build_gate_context(
+                    event=event,
+                    brain_phase=brain_phase,
+                    context_flags=context_flags,
+                    is_defer_wake=is_defer_wake,
+                    iteration=tool_idx,
+                    jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+                    jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                )
+                active_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                config = self._adapter._build_config(
+                    system_prompt=system_prompt,
+                    tools=active_tools,
+                    temperature=call_temp,
+                    top_p=0.95,
+                    max_output_tokens=phase_max_tokens,
+                    thinking_level=thinking_level,
+                    search_enabled=False,
+                    grounding_corpus=None,
+                )
+
+            # FR + drain
+            is_error = result_text.startswith("Internal error executing")
+            payload = {"error": result_text[:2000]} if is_error else {"result": result_text[:50000]}
+            fr_part = _gt.Part.from_function_response(name=fc.name, response=payload)
+            fc, text, thoughts = await self._stream_and_drain(event_id, fr_part, config)
+
+            # Terminal: suppress post-FR orphans, write macro, break
+            if is_terminal:
+                suppress_count = 0
+                while fc and suppress_count < 3:
+                    suppress_fr = _gt.Part.from_function_response(
+                        name=fc.name,
+                        response={"status": "suppressed"},
+                    )
+                    fc, text, thoughts = await self._stream_and_drain(event_id, suppress_fr, config)
+                    suppress_count += 1
+                if fc:
+                    self._chat_sessions.evict(event_id)
+                    logger.warning("Emergency evict after terminal suppress exhausted for %s", event_id)
+                macro_turn = ConversationTurn(
+                    turn=0,
+                    actor="brain",
+                    action="response",
+                    thoughts=result_text or text or "Action completed.",
+                    chat_role="model",
+                )
+                await self._append_and_broadcast(event_id, macro_turn)
+                wrote_macro = True
+                break
+
+            # User interrupt (chat/slack only)
+            if event.source in ("chat", "slack") and tool_idx % 2 == 0 and tool_idx > 0:
+                event = await self.blackboard.get_event(event_id) or event
+                new_user_turns = [
+                    t for t in event.conversation
+                    if t.actor == "user" and t.chat_role == "user"
+                    and t.status.value in ("sent", "delivered")
+                ]
+                if new_user_turns:
+                    macro_turn = ConversationTurn(
+                        turn=0,
+                        actor="brain",
+                        action="response",
+                        thoughts="Interrupted — new input received.",
+                        chat_role="model",
+                    )
+                    await self._append_and_broadcast(event_id, macro_turn)
+                    wrote_macro = True
+                    break
+
+        else:
+            # Cap: pair pending FC, write macro
+            if fc:
+                cap_fr = _gt.Part.from_function_response(
+                    name=fc.name,
+                    response={"status": "capped", "reason": "tool_limit_reached"},
+                )
+                await self._stream_and_drain(event_id, cap_fr, config)
+            macro_turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="response",
+                thoughts=text or "Tool call limit reached.",
+                chat_role="model",
+            )
+            await self._append_and_broadcast(event_id, macro_turn)
+            wrote_macro = True
+
+        # Fallback: if loop exited without writing macro (empty FC/text on first pass)
+        if not wrote_macro:
+            macro_turn = ConversationTurn(
+                turn=0,
+                actor="brain",
+                action="response",
+                thoughts="Processing complete.",
+                chat_role="model",
+            )
+            await self._append_and_broadcast(event_id, macro_turn)
+
+        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+
+        # Compression + cursor update
+        await self._compress_chat_session(event_id, config)
+        self._reasoning_by_event.pop(event_id, None)
+
+    async def _stream_and_drain(
+        self,
+        event_id: str,
+        message,
+        config,
+        *,
+        reflex_chunker=None,
+        reflex_searcher=None,
+    ) -> tuple:
+        """Atomic send + fully iterate. Wraps _stream_chat_and_accumulate with retry.
+
+        Returns (function_call_or_None, text, thoughts).
+        """
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                fc, text, thoughts, _parts, _grounding = (
+                    await self._stream_chat_and_accumulate(
+                        event_id, message, config,
+                        reflex_chunker=reflex_chunker,
+                        reflex_searcher=reflex_searcher,
+                        broadcast_thinking=(attempt == 0),
+                    )
+                )
+                return fc, text, thoughts
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if attempt >= max_retries or not self._is_transient(e):
+                    logger.error("stream_and_drain failed for %s: %s", event_id, e, exc_info=True)
+                    self._chat_sessions.evict(event_id)
+                    return None, "", ""
+                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                delay = min((30 if is_rate_limit else 5) * (2 ** attempt), 120)
+                logger.warning("stream_and_drain transient error for %s (attempt %d): %s. Retry in %ds", event_id, attempt + 1, e, delay)
+                await asyncio.sleep(delay)
+                if not self._chat_sessions.has_session(event_id):
+                    try:
+                        fresh_event = await self.blackboard.get_event(event_id)
+                        await self._chat_sessions.get_or_create(
+                            event_id, config, fresh_event.conversation if fresh_event else [],
+                            use_macros=True,
+                        )
+                    except Exception:
+                        return None, "", ""
+        return None, "", ""
+
+    def _format_macro_delta(self, event: EventDocument, event_id: str) -> str:
+        """Format new macro user turns since last reconcile as message text."""
+        macro_user_turns = [t for t in event.conversation if t.chat_role == "user"]
+        if not macro_user_turns:
+            return ""
+        parts = []
+        for t in macro_user_turns[-3:]:
+            content = t.evidence or t.thoughts or t.result or ""
+            if t.actor != "brain":
+                parts.append(f"[{t.actor}/{t.action}]: {content[:5000]}")
+            else:
+                parts.append(content[:5000])
+        return "\n\n".join(parts)
 
     def _create_reflex_pair(self, event_id: str, event_domain: str = "", event_service: str = ""):
         """Create (SentenceChunker, ReflexSearcher) or (None, None).
@@ -4374,6 +4881,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor=role, action="execute",
                 result=result_str[:self._agent_result_max],
+                chat_role="user",
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)
@@ -4713,6 +5221,7 @@ class Brain:
                                     actor="dispatcher",
                                     action="connected",
                                     thoughts=f"Agent {agent_name} registered. Executing your task.",
+                                    chat_role="user",
                                 )
                                 await self._append_and_broadcast(event_id, conn_turn)
                                 await self._emit_executive_pulse(event_id, [("dispatcher:connected", "system")])
@@ -4940,6 +5449,7 @@ class Brain:
                 result=result_for_turn,
                 plan=body if has_structured_plan else None,
                 taskForAgent=task_for_agent,
+                chat_role="user",
             )
             await self._append_and_broadcast(event_id, turn)
             self._release_task_state(event_id)

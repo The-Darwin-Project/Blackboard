@@ -72,7 +72,7 @@ def _ctx(**overrides) -> GateContext:
 
 class TestRegistryStructure:
     def test_registry_has_30_gates(self):
-        assert len(GATE_REGISTRY) == 30
+        assert len(GATE_REGISTRY) == 32
 
     def test_all_gate_ids_unique(self):
         ids = [g.gate_id for g in GATE_REGISTRY]
@@ -85,7 +85,7 @@ class TestRegistryStructure:
 
     def test_twentysix_strip_mode_gates(self):
         strip_gates = [g for g in GATE_REGISTRY if g.mode == "strip"]
-        assert len(strip_gates) == 26
+        assert len(strip_gates) == 28
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ class TestDomainCasual:
             "classify_event", "set_phase", "wait_for_user",
             "consult_deep_memory", "lookup_service", "lookup_journal",
             "respond_to_jarvis", "read_sticky_notes",
-            "take_note", "review_notes",
+            "take_note", "review_notes", "web_search",
         }
         assert names <= expected
         assert {"classify_event", "set_phase", "wait_for_user",

@@ -45,6 +45,7 @@ EXPECTED_HANDLERS = {
     "wait_for_jarvis",
     "wait_for_user",
     "wait_for_verification",
+    "web_search",
 }
 
 
@@ -65,6 +66,6 @@ def test_handler_registry_count():
     import src.agents.brain  # noqa: F401
     from src.agents.tool_router import HANDLER_REGISTRY
 
-    assert len(HANDLER_REGISTRY) == 38, (
-        f"Expected 38 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
+    assert len(HANDLER_REGISTRY) == 39, (
+        f"Expected 39 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
     )

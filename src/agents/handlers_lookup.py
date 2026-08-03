@@ -55,7 +55,7 @@ async def handle_lookup_service(
             response_parts=response_parts,
         )
         await ctx.append_and_broadcast(event_id, turn)
-        return False
+        return True
 
     svc = await bb.get_service(service_name)
     if not svc and "/" not in service_name:
@@ -357,6 +357,100 @@ async def handle_lookup_journal(
     return True
 
 
+async def handle_web_search(
+    ctx: "ToolContext", event_id: str, args: dict, response_parts=None,
+) -> bool:
+    """Search the web via Vertex AI Search (Discovery Engine). Returns True (continue)."""
+    import asyncio
+    import os
+
+    _WEB_SEARCH_TIMEOUT_SEC = 15.0
+
+    query = args.get("query", "").strip()[:500]
+    if not query:
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            thoughts="web_search requires a 'query' argument.",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    datastore_id = os.getenv("VERTEX_SEARCH_DATASTORE_ID", "")
+    project_id = os.environ.get("GCP_PROJECT_ID", "")
+    if not datastore_id or not project_id:
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            thoughts=f"Web search for: {query}\n\n(Search API not configured)",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    try:
+        from google.cloud import discoveryengine_v1 as discoveryengine
+
+        client = discoveryengine.SearchServiceAsyncClient()
+        serving_config = (
+            f"projects/{project_id}"
+            f"/locations/global/collections/default_collection"
+            f"/dataStores/{datastore_id}/servingConfigs/default_config"
+        )
+        request = discoveryengine.SearchRequest(
+            serving_config=serving_config,
+            query=query,
+            page_size=5,
+        )
+
+        async def _do_search():
+            response = await client.search(request=request)
+            results = []
+            async for result in response:
+                doc = result.document
+                title = (doc.derived_struct_data.get("title", "") if doc.derived_struct_data else "")[:200]
+                snippet = ""
+                snippets = doc.derived_struct_data.get("snippets", []) if doc.derived_struct_data else []
+                if snippets:
+                    snippet = snippets[0].get("snippet", "")[:500]
+                link = (doc.derived_struct_data.get("link", "") if doc.derived_struct_data else "")[:500]
+                results.append(f"- [{title}]({link})\n  {snippet}")
+                if len(results) >= 5:
+                    break
+            return results
+
+        results = await asyncio.wait_for(_do_search(), timeout=_WEB_SEARCH_TIMEOUT_SEC)
+
+        result_text = "\n\n".join(results) if results else "No results found."
+        fenced = (
+            f"<web_search_results untrusted=\"true\">\n"
+            f"{result_text}\n"
+            f"</web_search_results>"
+        )
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            evidence=f"Web search: {query}\n\n{fenced}",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+    except asyncio.TimeoutError:
+        logger.warning("web_search timed out for %s (query=%s)", event_id, query[:50])
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            thoughts=f"Web search for '{query}' timed out.",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+    except Exception as e:
+        logger.warning("web_search failed for %s: %s", event_id, e)
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            thoughts="Web search backend unavailable.",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
@@ -365,3 +459,4 @@ from .tool_router import HANDLER_REGISTRY
 HANDLER_REGISTRY["lookup_service"] = handle_lookup_service
 HANDLER_REGISTRY["consult_deep_memory"] = handle_consult_deep_memory
 HANDLER_REGISTRY["lookup_journal"] = handle_lookup_journal
+HANDLER_REGISTRY["web_search"] = handle_web_search

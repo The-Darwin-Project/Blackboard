@@ -97,6 +97,18 @@ def _pred_phase_jira_comment(ctx: GateContext) -> bool:
     return ctx.brain_phase not in ("dispatch", "verify", "escalate", "close")
 
 
+def _pred_web_search_phase(ctx: GateContext) -> bool:
+    """Strip web_search outside triage/dispatch."""
+    return ctx.brain_phase not in ("triage", "dispatch")
+
+
+def _pred_web_search_domain(ctx: GateContext) -> bool:
+    """Strip web_search outside CASUAL domain (pre-classification passes via PRE_CLASSIFICATION allowlist)."""
+    if not ctx.context_flags or not ctx.context_flags.get("brain_has_classified", False):
+        return False
+    return ctx.context_flags.get("event_domain", "complicated") != "casual"
+
+
 def _pred_no_kargo_context(ctx: GateContext) -> bool:
     return not ctx.has_kargo_context
 
@@ -399,6 +411,10 @@ def _tools_close(_ctx: GateContext) -> set[str]:
     return {"close_event", "notify_gitlab_result"}
 
 
+def _tools_web_search(_ctx: GateContext) -> set[str]:
+    return {"web_search"}
+
+
 def _tools_observation(_ctx: GateContext) -> set[str]:
     return {"record_observation", "list_observations", "take_note", "review_notes"}
 
@@ -440,6 +456,7 @@ def _tools_pre_classification(ctx: GateContext) -> set[str]:
                "classify_event", "set_phase"}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
+        allowed.add("web_search")
     return allowed
 
 
@@ -465,7 +482,7 @@ def _tools_domain_casual(_ctx: GateContext) -> set[str]:
         "classify_event", "set_phase", "wait_for_user",
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
-        "take_note", "review_notes",
+        "take_note", "review_notes", "web_search",
     }
 
 
@@ -519,6 +536,15 @@ def _msg_phase_notify(tool: str, ctx: GateContext) -> str:
 
 def _msg_phase_close(tool: str, ctx: GateContext) -> str:
     return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: escalate or close phase."
+
+
+def _msg_web_search_phase(tool: str, ctx: GateContext) -> str:
+    return f"[GATE] {tool} unavailable. State: phase is {ctx.brain_phase}. Prerequisite: triage or dispatch phase."
+
+
+def _msg_web_search_domain(tool: str, ctx: GateContext) -> str:
+    domain = ctx.context_flags.get("event_domain", "unknown") if ctx.context_flags else "unknown"
+    return f"[GATE] {tool} unavailable. State: domain is {domain}. Prerequisite: CASUAL domain."
 
 
 def _msg_phase_observation(tool: str, _ctx: GateContext) -> str:
@@ -699,6 +725,20 @@ GATE_REGISTRY: list[GateDefinition] = [
         predicate=_pred_phase_close,
         tools_affected=_tools_close,
         message=_msg_phase_close,
+    ),
+    GateDefinition(
+        gate_id="WEB_SEARCH_PHASE",
+        mode="strip",
+        predicate=_pred_web_search_phase,
+        tools_affected=_tools_web_search,
+        message=_msg_web_search_phase,
+    ),
+    GateDefinition(
+        gate_id="WEB_SEARCH_DOMAIN",
+        mode="strip",
+        predicate=_pred_web_search_domain,
+        tools_affected=_tools_web_search,
+        message=_msg_web_search_domain,
     ),
     GateDefinition(
         gate_id="PHASE_OBSERVATION",

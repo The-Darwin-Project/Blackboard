@@ -63,6 +63,8 @@ _CONDITION_SUMMARIES: dict[str, str] = {
     "SILENT_PARK": "no brain.response after last user.message (chat/slack only)",
     "HARD_STRIP_DEFER": "triage phase OR jarvis source",
     "HARD_STRIP_WAIT_USER": "triage phase OR non-user source",
+    "WEB_SEARCH_PHASE": "phase not in triage/dispatch",
+    "WEB_SEARCH_DOMAIN": "domain is not CASUAL (post-classification)",
 }
 
 _MERMAID_DIAGRAM = (

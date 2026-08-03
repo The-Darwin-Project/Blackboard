@@ -530,6 +530,8 @@ class ChatSessionManager:
         event_id: str,
         config,
         conversation: list[ConversationTurn],
+        *,
+        use_macros: bool = False,
     ) -> tuple[object, bool]:
         """Return (chat, was_rebuilt).
 
@@ -544,7 +546,10 @@ class ChatSessionManager:
         if event_id in self._sessions:
             return self._sessions[event_id].chat, False
 
-        chat = await self._rebuild_from_redis(event_id, config, conversation)
+        if use_macros:
+            chat = await self.rebuild_from_macros(event_id, config, conversation)
+        else:
+            chat = await self._rebuild_from_redis(event_id, config, conversation)
         return chat, True
 
     # ------------------------------------------------------------------
@@ -623,6 +628,72 @@ class ChatSessionManager:
         logger.info(
             "Chat session rebuilt for %s from %d Redis turns (%d history entries, ~%d tokens, deferred_user=%s)",
             event_id, len(conversation), len(history), est_tokens, deferred_user is not None,
+        )
+        return chat
+
+    async def rebuild_from_macros(
+        self,
+        event_id: str,
+        config,
+        conversation: list[ConversationTurn],
+    ):
+        """Build a new Chat session from macro turns only (two-tier reconciler path).
+
+        Filters conversation by chat_role != None. No FC/FR reconstruction, no
+        role-merge (alternation guaranteed by design). PREFILL prepended.
+        H4 budget check retained.
+        """
+        from google.genai import types
+
+        prefill_u, prefill_m = self._get_prefill()
+
+        macro_turns = [t for t in conversation if t.chat_role is not None]
+
+        history: list = []
+        if prefill_u is not None:
+            history.append(prefill_u)
+        if prefill_m is not None:
+            history.append(prefill_m)
+
+        for turn in macro_turns:
+            role = turn.chat_role
+            text = turn.evidence or turn.thoughts or turn.result or ""
+            if not text:
+                continue
+            if turn.actor != "brain":
+                text = f"[{turn.actor}/{turn.action}]: {text}"
+            history.append(types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=text[:50000])],
+            ))
+
+        dict_history = [_content_to_dict(c) for c in history]
+        tokens = estimate_tokens(dict_history)
+        if tokens >= self._content_budget:
+            logger.warning(
+                "Macro rebuild for %s exceeds budget (%d >= %d tokens, %d entries) — compressing",
+                event_id, tokens, self._content_budget, len(history),
+            )
+            compressed_dicts = compress_contents(
+                dict_history, max_tokens=self._content_budget,
+                full_tier_max_chars=self._full_tier_max_chars,
+            )
+            history = _dicts_to_sdk_contents(compressed_dicts, types)
+
+        chat = self._client.aio.chats.create(
+            model=self._model_name,
+            config=config,
+            history=history,
+        )
+        est_tokens = estimate_tokens([_content_to_dict(c) for c in history])
+        self._sessions[event_id] = _SessionEntry(
+            chat=chat, event_id=event_id, turn_count=len(history),
+            estimated_tokens=est_tokens,
+            deferred_user_content=None,
+        )
+        logger.info(
+            "Chat session rebuilt from macros for %s: %d macro turns -> %d history entries (~%d tokens)",
+            event_id, len(macro_turns), len(history), est_tokens,
         )
         return chat
 
