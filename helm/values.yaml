@@ -432,12 +432,14 @@ ephemeralAgents:
     developer: "claude-sonnet-5"
     qe: "claude-sonnet-5"
     security_analyst: "claude-sonnet-5"
+    code_reviewer: "claude-sonnet-5"
   roleEffort:
     architect: "high"
     sysadmin: "medium"
     developer: "high"
     qe: "high"
     security_analyst: "high"
+    code_reviewer: "high"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
   pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup

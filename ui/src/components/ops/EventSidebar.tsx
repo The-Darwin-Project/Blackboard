@@ -131,6 +131,11 @@ export default function EventSidebar() {
                 const isBusy = reg?.busy || false;
                 const isRegistered = !!reg;
                 const color = ACTOR_COLORS[name] || '#6b7280';
+                // code_reviewer is EPHEMERAL_ONLY (no persistent sidecar) and never appears in
+                // AGENTS (OpsStateContext.tsx tracks persistent-sidecar busy/idle state only) --
+                // no icon mapped here for it; adding one would be dead code until AGENTS itself
+                // is extended to cover ephemeral-only roles. (security_analyst below shares this
+                // same property but predates this PR -- out of scope here.)
                 const AgentIcon = ({ architect: Compass, sysadmin: Terminal, developer: Code2, qe: FlaskConical, security_analyst: Shield } as Record<string, typeof Compass>)[name];
                 return (
                   <TreeNode key={name}

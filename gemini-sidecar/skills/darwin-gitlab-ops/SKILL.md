@@ -1,7 +1,7 @@
 ---
 name: darwin-gitlab-ops
 description: "GitLab environment context: project resolution, authentication, and API conventions for GitLab instances."
-roles: [architect, sysadmin, developer, qe, security_analyst]
+roles: [architect, sysadmin, developer, qe, security_analyst, code_reviewer]
 ---
 
 # GitLab Operations

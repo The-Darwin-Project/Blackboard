@@ -82,7 +82,7 @@ async def main():
             parameters_json_schema={
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string", "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"]},
+                    "agent_name": {"type": "string", "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"]},
                     "task_instruction": {"type": "string"},
                 },
                 "required": ["agent_name", "task_instruction"],

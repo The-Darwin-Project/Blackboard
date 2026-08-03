@@ -14,7 +14,15 @@ jobs:
     runs-on: ubuntu-latest
     # Only run on internal PRs (fork PRs don't have secrets)
     if: github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 20
+    # Raised from 20 (codereview finding, live-reproduced): job-level timeout is NOT
+    # covered by the step-level `continue-on-error` below -- a job-level timeout hard
+    # `context canceled`s the whole job mid-run, discarding partial results (no
+    # ci-results/ artifact, no PR comment update), which continue-on-error can only
+    # ever mask for a clean step FAILURE, not an external cancellation. The reviewer's
+    # own two-phase pipeline (REVIEW then SIGN-OFF) measurably needed >20 min end to
+    # end on this PR's diff size (phase 1 alone: ~14 min); 40 min gives real headroom
+    # instead of another guess.
+    timeout-minutes: 40
 
     permissions:
       contents: read

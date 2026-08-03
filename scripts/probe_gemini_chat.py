@@ -37,7 +37,7 @@ TOOL_SCHEMA = {
         "properties": {
             "agent_name": {
                 "type": "string",
-                "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst"],
+                "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"],
             },
             "task_instruction": {"type": "string"},
         },

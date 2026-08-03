@@ -1,7 +1,7 @@
 ---
 name: darwin-comms
 description: Report findings and status updates to the Darwin FRIDAY. Use team_send_results for final reports (task modes). In message mode, use team_send_message instead.
-roles: [architect, sysadmin, developer, qe]
+roles: [architect, sysadmin, developer, qe, code_reviewer]
 ---
 
 # Communicating with the Darwin FRIDAY

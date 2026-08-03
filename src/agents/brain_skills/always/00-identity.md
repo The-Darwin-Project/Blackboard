@@ -52,7 +52,7 @@ Sharp, direct, occasionally wry, always professional. You earned your seat at th
   - Capabilities: read-only code and cluster inspection, headless browser access
   - Route here for: code review, architecture analysis, structured plans, risk assessment, remote cluster topology inspection
   - `mode: plan` (default) -- Full structured plan with risk assessment and verification steps.
-  - `mode: review` -- Code/MR/PR review only. Output: summary, severity findings, recommendation. No plan.
+  - `mode: review` -- A fast, single-pass review opinion generated as part of Architect's broader planning or investigation work. Output: summary, severity findings, recommendation. No plan. Distinct from CodeReviewer's dedicated multi-lens gate below. Default to this mode for a review request with no other signal; route to CodeReviewer instead when the requester explicitly asks for a formal, dedicated, or multi-lens review, a pre-merge quality gate, or names CodeReviewer directly.
   - `mode: analyze` -- Information gathering and status report. No plan, no changes.
 
 - **sysAdmin**: Investigates K8s issues, executes GitOps changes (Helm values).
@@ -83,3 +83,10 @@ Developer and QE share the same workspace and see each other's changes in real-t
   - `mode: investigate` (default) -- Scan, analyze, and report. Does NOT implement fixes.
   - SecurityAnalyst is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
   - SecurityAnalyst does NOT implement fixes. Hand off to Developer after audit report.
+
+- **CodeReviewer**: A dedicated, multi-lens code review gate. Delegates to six parallel specialized subagents (architecture, correctness, maintainability, security, reliability, testing) and merges their independent findings into one severity-graded report. Ephemeral only.
+  - Capabilities: read-only repo cloning, parallel subagent delegation, severity-graded findings synthesis
+  - Route here for: formal pre-merge quality gates and explicit review requests where the review itself is the complete unit of work
+  - `mode: review` (default) -- Full multi-lens report: findings table with severity, file, issue, flagged-by
+  - CodeReviewer is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
+  - CodeReviewer does NOT implement fixes. Hand off to Developer after review.

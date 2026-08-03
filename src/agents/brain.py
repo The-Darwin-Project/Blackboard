@@ -287,6 +287,7 @@ VOLUME_PATHS = {
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
     "security_analyst": "/data/workspace",
+    "code_reviewer": "/data/workspace",
 }
 
 # Brain-declared phase -> additional skill folders to load alongside plumbing phases.
@@ -559,6 +560,7 @@ _ROLE_MODEL_MAP = {
     "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5"),
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
+    "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
@@ -566,6 +568,7 @@ _ROLE_EFFORT_MAP = {
     "developer": os.getenv("EPHEMERAL_EFFORT_DEVELOPER", "low"),
     "qe": os.getenv("EPHEMERAL_EFFORT_QE", "high"),
     "security_analyst": os.getenv("EPHEMERAL_EFFORT_SECURITY", "high"),
+    "code_reviewer": os.getenv("EPHEMERAL_EFFORT_CODE_REVIEWER", "high"),
 }
 
 
@@ -619,6 +622,13 @@ class Brain:
         self._last_processed: dict[str, float] = {}
         # Orphan re-queue attempts per event (blank events stuck in active set)
         self._orphan_requeue_count: dict[str, int] = {}
+        # In-process counter: how many times _defer_event_safely swallowed a failed
+        # defer_event call. Sensing signal for the codereview finding that relying
+        # solely on a log line + ResyncTrigger rediscovery had no persistent,
+        # queryable observability -- a sustained non-zero rate here (surfaceable via
+        # /flow or similar in a future pass) indicates the circuit-breaker defer path
+        # itself is degraded, not just the agent it was trying to defer.
+        self._defer_safety_failures: int = 0
         # LLM reasoning (thinking) per event -- consumed by _emit_executive_pulse for JARVIS
         self._reasoning_by_event: dict[str, str | None] = {}
         # Defer-wake one-shot flag: first pulse after defer re-activation gets is_defer_wake=True
@@ -704,7 +714,7 @@ class Brain:
     _BYPASS_SOURCES = frozenset({"chat", "slack", "jarvis"})
 
     # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
-    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst"})
+    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst", "code_reviewer"})
 
     async def _count_global_wip(self) -> int:
         """Count all events in WIP (active + deferred), minus _waiting_for_user.
@@ -979,7 +989,7 @@ class Brain:
         # Circuit breaker: count only agent execution turns (not brain routing, aligner, user)
         agent_turns = sum(
             1 for t in event.conversation
-            if t.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst")
+            if t.actor in ("architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer")
         )
         if agent_turns >= MAX_TURNS_PER_EVENT:
             logger.warning(f"Event {event_id} hit max agent turns ({agent_turns}/{MAX_TURNS_PER_EVENT})")
@@ -3149,6 +3159,45 @@ class Brain:
             if self._active_tasks.get(event_id) is current_task:
                 self._release_task_state(event_id)
 
+    async def _defer_event_safely(self, event_id: str, delay_seconds: int, reason: str) -> bool:
+        """Guard a circuit-breaker defer_event call against its own failure (C4-F5).
+
+        execute_tool_locked calls blackboard.get_event() before entering
+        _execute_function_call's internal try/except -- if that raises (e.g. a Redis
+        blip), the exception previously propagated to _run_agent_task's outer handler,
+        which unconditionally re-enqueues with ZERO backoff, discarding the intended
+        defer delay and risking a tight retry loop against the exact dependency that's
+        already unhealthy. On failure here, deliberately do NOT re-enqueue -- the
+        ResyncTrigger's periodic scan will naturally rediscover the event.
+
+        Verified (codereview follow-up, not just asserted): a failed defer_event call
+        never transitions the event's status to DEFERRED (that write is inside the
+        handler this call never reached) -- the event's status stays whatever it was
+        before this dispatch attempt (ACTIVE, since _run_agent_task only runs for
+        active events). _scan_active_for_reconcile's active-events loop (every 5s) has
+        no path that skips a still-ACTIVE event with no running task in _active_tasks
+        (Guard 1 only special-cases events WITH a live task; this one's task already
+        finished by the time the scan runs, per _release_task_state in the finally
+        block) -- it falls through to the default "active, no task running" handling
+        and gets appended to to_enqueue. Rediscovery does NOT depend on any state this
+        failed call would have written; only on the event remaining ACTIVE, which it
+        already is by construction. See src/scheduling/triggers.py ResyncTrigger and
+        brain.py _scan_active_for_reconcile.
+        """
+        try:
+            await self.execute_tool_locked(
+                event_id, "defer_event", {"delay_seconds": delay_seconds, "reason": reason},
+            )
+            return True
+        except Exception:
+            self._defer_safety_failures += 1
+            logger.warning(
+                "defer_event call failed for %s (reason=%s, total_failures=%d) -- not "
+                "re-enqueueing immediately; ResyncTrigger will rediscover this event",
+                event_id, reason, self._defer_safety_failures, exc_info=True,
+            )
+            return False
+
     async def _run_agent_task(
         self,
         event_id: str,
@@ -3314,9 +3363,8 @@ class Brain:
                             "Ephemeral-only role %s selected but provisioner unavailable for %s -- deferring",
                             agent_name, event_id,
                         )
-                        await self.execute_tool_locked(
-                            event_id, "defer_event",
-                            {"delay_seconds": 60, "reason": f"Role {agent_name} requires ephemeral provisioner (disabled)"},
+                        await self._defer_event_safely(
+                            event_id, 60, f"Role {agent_name} requires ephemeral provisioner (disabled)",
                         )
                         return
 
@@ -3358,9 +3406,8 @@ class Brain:
                                     await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                                 except Exception:
                                     logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                                await self.execute_tool_locked(
-                                    event_id, "defer_event",
-                                    {"delay_seconds": 60, "reason": "Ephemeral circuit breaker, no fallback"},
+                                await self._defer_event_safely(
+                                    event_id, 60, "Ephemeral circuit breaker, no fallback",
                                 )
                                 return
                             elif ephemeral_is_overflow:
@@ -3380,9 +3427,8 @@ class Brain:
                                     await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                                 except Exception:
                                     logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                                await self.execute_tool_locked(
-                                    event_id, "defer_event",
-                                    {"delay_seconds": 30, "reason": "All agents busy (local full + ephemeral circuit breaker)"},
+                                await self._defer_event_safely(
+                                    event_id, 30, "All agents busy (local full + ephemeral circuit breaker)",
                                 )
                                 return
                             else:
@@ -3403,9 +3449,8 @@ class Brain:
                                 await self._emit_executive_pulse(event_id, [("dispatcher:paused", "system")])
                             except Exception:
                                 logger.debug("Dispatcher turn write failed for %s, continuing", event_id)
-                            await self.execute_tool_locked(
-                                event_id, "defer_event",
-                                {"delay_seconds": infra_wait, "reason": "Tekton infrastructure unavailable"},
+                            await self._defer_event_safely(
+                                event_id, infra_wait, "Tekton infrastructure unavailable",
                             )
                             return
                         else:

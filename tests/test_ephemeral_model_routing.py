@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.agents.brain import Brain
+from src.agents.llm.types import BRAIN_TOOL_SCHEMAS
 from src.models import EventDocument, EventEvidence, EventInput
 
 
@@ -193,3 +194,143 @@ class TestCircuitBreakerFallbackGate:
 
         assert mock_dispatch.call_args.kwargs["model"] == ""
         assert mock_dispatch.call_args.kwargs["effort"] == "low"
+
+
+class TestCodeReviewerRouting:
+    """code_reviewer (code-reviewer-agent plan) is EPHEMERAL_ONLY_ROLES like security_analyst --
+    no persistent sidecar exists. T-1 mirrors TestEphemeralHappyPath's happy-path pattern; T-2
+    mirrors the Tier-0 circuit-breaker defer path (distinct from TestCircuitBreakerFallbackGate's
+    sysadmin case, which DOES have a local sidecar to fall back to); T-3 is a schema smoke test.
+    """
+
+    @pytest.mark.asyncio
+    async def test_code_reviewer_gets_sonnet_and_high_effort(self, registry_and_bridge):
+        """T-1: agent_id_override is not None -> code_reviewer resolves via _ROLE_MODEL_MAP/
+        _ROLE_EFFORT_MAP to claude-sonnet-5/high (EPHEMERAL_MODEL_CODE_REVIEWER/
+        EPHEMERAL_EFFORT_CODE_REVIEWER env defaults, per plan Step 2/18)."""
+        brain = _make_brain()
+        brain._ephemeral_provisioner = AsyncMock()
+        brain._ephemeral_provisioner.ensure_agent = AsyncMock(
+            return_value=MagicMock(agent_id="agent-code_reviewer-1"),
+        )
+        brain._ephemeral_provisioner.record_dispatch_success = MagicMock()
+
+        with patch(
+            "src.agents.brain.dispatch_to_agent",
+            new_callable=AsyncMock,
+            return_value=("Findings ready.", None),
+        ) as mock_dispatch:
+            await brain._run_agent_task(
+                event_id="evt-hh0001", agent_name="code_reviewer", agent=None,
+                task="Review the recent changes", event_md_path="/tmp/x.md",
+                routing_turn_num=1, mode="review", effort="",
+            )
+
+        assert mock_dispatch.call_args.kwargs["model"] == "claude-sonnet-5"
+        assert mock_dispatch.call_args.kwargs["effort"] == "high"
+        assert mock_dispatch.call_args.kwargs["agent_id"] == "agent-code_reviewer-1"
+
+    @pytest.mark.asyncio
+    async def test_code_reviewer_provisioner_disabled_defers_safely(self, registry_and_bridge):
+        """T-2: code_reviewer has NO local sidecar to fall back to (EPHEMERAL_ONLY_ROLES member).
+        ensure_agent returning None must fire the Tier-0 circuit-breaker defer guard --
+        record_dispatch_circuit_break() + execute_tool_locked(event_id, "defer_event", ...) --
+        NOT the sysadmin-style record_dispatch_sidecar_fallback + local dispatch_to_agent path
+        (that path only exists for roles WITH a persistent sidecar). dispatch_to_agent must
+        never be called; there is no sidecar for code_reviewer to dispatch to.
+        """
+        brain = _make_brain()
+        brain._ephemeral_provisioner = AsyncMock()
+        brain._ephemeral_provisioner.ensure_agent = AsyncMock(return_value=None)
+        brain._ephemeral_provisioner.record_dispatch_circuit_break = MagicMock()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback = MagicMock()
+        brain.execute_tool_locked = AsyncMock(return_value=True)
+
+        with patch(
+            "src.agents.brain.dispatch_to_agent",
+            new_callable=AsyncMock,
+            return_value=("Findings ready.", None),
+        ) as mock_dispatch:
+            await brain._run_agent_task(
+                event_id="evt-hh0001", agent_name="code_reviewer", agent=None,
+                task="Review the recent changes", event_md_path="/tmp/x.md",
+                routing_turn_num=1, mode="review", effort="",
+            )
+
+        mock_dispatch.assert_not_called()
+        brain._ephemeral_provisioner.record_dispatch_circuit_break.assert_called_once()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback.assert_not_called()
+        brain.execute_tool_locked.assert_called_once()
+        defer_args = brain.execute_tool_locked.call_args.args
+        assert defer_args[0] == "evt-hh0001"
+        assert defer_args[1] == "defer_event"
+
+    def test_code_reviewer_present_in_tool_schema_enums(self):
+        """T-3: types.py parses with code_reviewer present in all 3 agent-name enum sites
+        (select_agent, ask_agent_for_state, create_plan step agent)."""
+        schemas_by_name = {tool["name"]: tool for tool in BRAIN_TOOL_SCHEMAS}
+
+        select_agent_enum = schemas_by_name["select_agent"]["input_schema"]["properties"]["agent_name"]["enum"]
+        assert "code_reviewer" in select_agent_enum
+
+        ask_agent_enum = schemas_by_name["ask_agent_for_state"]["input_schema"]["properties"]["agent_name"]["enum"]
+        assert "code_reviewer" in ask_agent_enum
+
+        create_plan_agent_schema = schemas_by_name["create_plan"]["input_schema"]["properties"]["steps"]["items"][
+            "properties"
+        ]["agent"]
+        assert "code_reviewer" in create_plan_agent_schema["enum"]
+
+
+class TestDeferEventSafely:
+    """_defer_event_safely (C4-F5 fix): a defer_event failure must not fall through to
+    _run_agent_task's outer handler's zero-backoff immediate re-enqueue."""
+
+    @pytest.mark.asyncio
+    async def test_defer_failure_does_not_raise(self, registry_and_bridge):
+        """execute_tool_locked raising (e.g. Redis blip during get_event) is swallowed --
+        the circuit-breaker defer call-site must not propagate to the outer handler."""
+        brain = _make_brain()
+        brain.execute_tool_locked = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        result = await brain._defer_event_safely("evt-hh0001", 60, "test reason")
+
+        assert result is False
+        brain.execute_tool_locked.assert_called_once_with(
+            "evt-hh0001", "defer_event", {"delay_seconds": 60, "reason": "test reason"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_defer_success_returns_true(self, registry_and_bridge):
+        brain = _make_brain()
+        brain.execute_tool_locked = AsyncMock(return_value=True)
+
+        result = await brain._defer_event_safely("evt-hh0001", 30, "test reason")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_code_reviewer_defer_failure_does_not_crash_run_agent_task(self, registry_and_bridge):
+        """End-to-end: circuit-breaker path for an EPHEMERAL_ONLY role whose defer_event
+        call itself fails must return cleanly (no exception surfaces to the caller), not
+        fall through to the generic error-turn + immediate-re-enqueue path."""
+        brain = _make_brain()
+        brain._ephemeral_provisioner = AsyncMock()
+        brain._ephemeral_provisioner.ensure_agent = AsyncMock(return_value=None)
+        brain._ephemeral_provisioner.record_dispatch_circuit_break = MagicMock()
+        brain._ephemeral_provisioner.record_dispatch_sidecar_fallback = MagicMock()
+        brain.execute_tool_locked = AsyncMock(side_effect=RuntimeError("redis unavailable"))
+
+        with patch(
+            "src.agents.brain.dispatch_to_agent",
+            new_callable=AsyncMock,
+            return_value=("Findings ready.", None),
+        ) as mock_dispatch:
+            # Must not raise -- the defer failure is caught inside _defer_event_safely.
+            await brain._run_agent_task(
+                event_id="evt-hh0001", agent_name="code_reviewer", agent=None,
+                task="Review the recent changes", event_md_path="/tmp/x.md",
+                routing_turn_num=1, mode="review", effort="",
+            )
+
+        mock_dispatch.assert_not_called()

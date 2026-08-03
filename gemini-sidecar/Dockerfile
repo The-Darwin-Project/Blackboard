@@ -204,10 +204,50 @@ RUN mkdir -p /home/default/.claude/skills && \
       ln -s "$skill" /home/default/.claude/skills/"$(basename "$skill")"; \
     done
 
+# Install Claude subagent definitions (code review reviewers) -- Claude-only, no Gemini equivalent
+COPY agents/ /home/default/.claude/agents/
+COPY hooks/validate-reviewer-bash.sh /app/hooks/validate-reviewer-bash.sh
+RUN chmod +x /app/hooks/validate-reviewer-bash.sh
+
+# Native Claude Code permission files (engine-enforced permissions.deny), applied per-role
+# via --settings in cli-executor.js -- NOT baked into a shared ~/.claude/settings.json, since
+# this image runs every role (sysadmin/developer need to commit/push; only specific roles
+# get a restrictive file here).
+COPY claude-settings/ /app/claude-settings/
+
 # Create non-root user directories
 RUN mkdir -p /home/default /data/gitops && \
     chown -R 1001:0 /home/default /app /data && \
     chmod -R g=u /home/default /app /data
+
+# Re-tighten the three artifacts enforcing code_reviewer's read-only guarantee:
+# root:0-owned, mode 0550 (r-x for owner AND group, nothing for other). MUST run
+# AFTER the broader chown/chmod above, which grants 1001:0 group-write via `g=u` --
+# reversing that order would make these writable again for the runtime UID. The
+# runtime USER 1001 has no /etc/passwd entry, so its primary GID defaults to 0,
+# matching the GROUP permission bits (r-x) here, not owner -- it can read+execute
+# but never WRITE. This closes the "compromise once, disable forever" root cause: a
+# write primitive that slips past validate-reviewer-bash.sh (e.g. an undiscovered
+# future bypass) can no longer overwrite/truncate the hook, the permissions file, or
+# (the codereview-caught gap) the reviewer subagent definitions themselves -- the
+# agents/ directory carries each subagent's `tools:` allowlist and `hooks:` wiring;
+# leaving it group-writable would let a compromised session permanently disable
+# layers 1+3 for the rest of the pod's lifetime by editing those files directly.
+#
+# Target the ENCLOSING DIRECTORY for the hook (/app/hooks), not just the file inside
+# it -- codereview caught (and this was empirically reproduced) that hardening only
+# the leaf file leaves its parent directory writable, and directory-entry create/
+# delete is governed by the PARENT's write bit, independent of the child file's own
+# permissions: `rm /app/hooks/validate-reviewer-bash.sh` only needs write on
+# /app/hooks, not on the file itself. /app/claude-settings and
+# /home/default/.claude/agents don't have this gap because they were already
+# targeted as directories (their own entries become 0550 too, and removing a
+# non-empty directory whose entries can't be individually unlinked fails closed).
+# /app/hooks also contains check-inbox.sh/cluster-context.sh (unrelated, non-
+# security-critical CLI hooks) -- hardening the whole directory after they're
+# already copied in is safe since neither needs further writes at runtime.
+RUN chown -R root:0 /app/hooks /app/claude-settings /home/default/.claude/agents && \
+    chmod -R 0550 /app/hooks /app/claude-settings /home/default/.claude/agents
 
 # Switch to non-root user
 USER 1001

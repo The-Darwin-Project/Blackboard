@@ -15,7 +15,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
 };
 
 export const PHASES = ['triage', 'dispatch', 'verify', 'escalate', 'close'];
-export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst'];
+export const AGENTS = ['architect', 'sysadmin', 'developer', 'qe', 'security_analyst', 'code_reviewer'];
 export const DOMAINS = ['clear', 'complicated', 'complex', 'chaotic', 'casual', 'disorder'];
 
 const PHASE_TOOL_PRIORITY: Record<string, string[]> = {
@@ -112,6 +112,7 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'agent:developer': 'Pair programming: Dev implements, QE verifies',
   'agent:qe': 'Quality verification of developer output',
   'agent:security_analyst': 'Security analysis and vulnerability assessment',
+  'agent:code_reviewer': 'Multi-lens structured code review',
   // Cynefin domains
   'domain:clear': 'Known knowns — best practice, single correct solution',
   'domain:complicated': 'Known unknowns — expert analysis, multiple good practices',
