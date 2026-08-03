@@ -514,6 +514,7 @@ class Aligner:
                     actor="aligner",
                     action="confirm",
                     evidence=message,
+                    chat_role="user",
                 )
                 await self.blackboard.append_turn(eid, turn)
                 logger.info(f"Aligner notified active event {eid}: {message}")

@@ -142,6 +142,7 @@ _TOOL_TO_BEHAVIOR: dict[str, str] = {
     "transition_jira_issue": "transitioning a Jira issue",
     "post_sticky_note": "posting a sticky note",
     "read_sticky_notes": "reading sticky notes",
+    "web_search": "searching the web for current information",
 }
 
 _ALL_TOOL_NAMES: frozenset[str] = frozenset(_TOOL_TO_BEHAVIOR.keys())

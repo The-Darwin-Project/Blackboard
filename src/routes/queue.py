@@ -271,6 +271,7 @@ async def approve_event(
         actor="user",
         action="approve",
         thoughts="User approved the plan.",
+        chat_role="user",
     )
     await blackboard.append_turn(event_id, turn)
 
@@ -308,6 +309,7 @@ async def reject_event(
         action="reject",
         thoughts=body.reason,
         image=body.image,
+        chat_role="user",
     )
     await blackboard.append_turn(event_id, turn)
 

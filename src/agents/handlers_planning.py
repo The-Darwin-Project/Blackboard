@@ -87,7 +87,7 @@ async def handle_get_plan_progress(
             response_parts=response_parts,
         )
         await ctx.append_and_broadcast(event_id, turn)
-        return False
+        return True
     steps = {s["id"]: {**s, "status": "pending"} for s in plan_turn.taskForAgent["steps"]}
     for t in event_doc.conversation:
         if t.action == "plan_step" and t.taskForAgent and "step_id" in t.taskForAgent:

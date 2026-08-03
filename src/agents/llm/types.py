@@ -1215,6 +1215,26 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {},
         },
     },
+    # --- Web search (replaces SDK grounding for Chat bridge path) ---
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for current information. Returns relevant snippets and URLs. "
+            "Use when you need up-to-date information about technologies, services, CVEs, "
+            "documentation, or any topic where your training data may be stale."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query.",
+                    "maxLength": 500,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 

@@ -63,6 +63,7 @@ async def create_chat_event(
             actor="user",
             action="message",
             thoughts=request.message,
+            chat_role="user",
         )
         await blackboard.append_turn(event_id, user_turn)
         logger.info(f"Chat event created: {event_id} for service {request.service}")

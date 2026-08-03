@@ -1147,6 +1147,7 @@ class LiveAPIAdapter:
             actor="jarvis",
             action="message",
             thoughts=message,
+            chat_role="user",
         )
         await self._blackboard.append_turn(event_id, turn)
         # Wake FRIDAY: clear in-memory wait + hold_watch + transition deferred->active + thaw if frozen

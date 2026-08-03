@@ -227,6 +227,7 @@ class SlackChannel:
             turn=2, actor="user", action="message",
             thoughts=text, source="slack",
             user_name=display_name,
+            chat_role="user",
         )
         await self._blackboard.append_turn(new_event_id, user_turn)
         return new_event_id
@@ -327,6 +328,7 @@ class SlackChannel:
                         actor="user", action="message",
                         thoughts=text, source="slack",
                         user_name=display_name,
+                        chat_role="user",
                     )
                     await self._blackboard.append_turn(existing_event_id, turn)
                     self._brain.clear_waiting(existing_event_id)
@@ -489,6 +491,7 @@ class SlackChannel:
                 actor="user", action="message",
                 thoughts=text, source="slack",
                 user_name=display_name,
+                chat_role="user",
             )
             await self._blackboard.append_turn(event_id, turn)
 
@@ -532,6 +535,7 @@ class SlackChannel:
                 action="approve",
                 thoughts="User approved the plan.",
                 source="slack",
+                chat_role="user",
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
@@ -559,6 +563,7 @@ class SlackChannel:
                 action="reject",
                 thoughts="User rejected the plan.",
                 source="slack",
+                chat_role="user",
             )
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
@@ -1012,6 +1017,10 @@ class SlackChannel:
             return
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
+
+        # Two-tier: only post macro (chat_role="model") response turns to Slack
+        if turn.actor == "brain" and turn.action == "response" and turn.chat_role is None:
+            return
 
         # Dedup: if stream already delivered this response text, skip Block Kit
         if turn.actor == "brain" and turn.action == "response":
