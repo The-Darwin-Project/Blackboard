@@ -3,5 +3,6 @@
 
 from .event_markdown import event_to_markdown
 from .github_app import GitHubAppAuth, get_github_auth
+from .pii_redaction import redact_pii
 
-__all__ = ["GitHubAppAuth", "get_github_auth", "event_to_markdown"]
+__all__ = ["GitHubAppAuth", "get_github_auth", "event_to_markdown", "redact_pii"]
