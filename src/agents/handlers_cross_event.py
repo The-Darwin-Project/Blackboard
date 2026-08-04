@@ -189,6 +189,54 @@ async def handle_read_sticky_notes(
     return True
 
 
+async def handle_recall_pruned_turns(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    """Read turns from the current event that were pruned from context."""
+    bb = ctx.get_blackboard()
+    event = await bb.get_event(event_id)
+    if not event or not event.conversation:
+        turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain", action="tool_result",
+            thoughts="No conversation found.",
+            waitingFor="recall_pruned_turns",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    try:
+        from_turn = int(args.get("from_turn", 1))
+        to_turn = int(args.get("to_turn", 10))
+    except (ValueError, TypeError):
+        from_turn, to_turn = 1, 10
+
+    from_turn = max(1, from_turn)
+    to_turn = min(len(event.conversation), to_turn)
+    if to_turn - from_turn > 20:
+        to_turn = from_turn + 19
+
+    turns = [t for t in event.conversation if from_turn <= t.turn <= to_turn]
+    blocks = []
+    for t in turns:
+        content = t.thoughts or t.evidence or t.result or ""
+        if len(content) > 3000:
+            content = content[:3000] + "...(truncated)"
+        blocks.append(f"[T{t.turn} {t.actor}.{t.action}]: {content}")
+
+    result_text = "\n\n".join(blocks) if blocks else "(no turns in range)"
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain", action="tool_result",
+        thoughts=result_text,
+        waitingFor="recall_pruned_turns",
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
@@ -197,3 +245,4 @@ from .tool_router import HANDLER_REGISTRY
 HANDLER_REGISTRY["inspect_event"] = handle_inspect_event
 HANDLER_REGISTRY["post_sticky_note"] = handle_post_sticky_note
 HANDLER_REGISTRY["read_sticky_notes"] = handle_read_sticky_notes
+HANDLER_REGISTRY["recall_pruned_turns"] = handle_recall_pruned_turns

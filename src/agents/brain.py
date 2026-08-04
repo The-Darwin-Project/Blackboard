@@ -2685,7 +2685,11 @@ class Brain:
 
         if kept and kept[0] != conv_msgs[0]:
             pruned_count = len(conv_msgs) - len(kept)
-            marker = {"role": "user", "parts": [{"text": f"[{pruned_count} earlier turns pruned for context window]"}]}
+            first_kept_idx = len(conv_msgs) - len(kept) + 1
+            marker = {"role": "user", "parts": [{"text": (
+                f"[{pruned_count} earlier turns (1-{first_kept_idx - 1}) pruned for context window. "
+                f"Use recall_pruned_turns(from_turn, to_turn) to retrieve if needed.]"
+            )}]}
             return [context_msg, marker] + kept
 
         return [context_msg] + kept

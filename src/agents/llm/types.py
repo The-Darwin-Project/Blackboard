@@ -1018,6 +1018,29 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "required": ["event_id"],
         },
     },
+    # --- recall_pruned_turns (self-event turn retrieval when context was pruned) ---
+    {
+        "name": "recall_pruned_turns",
+        "description": (
+            "Retrieve earlier conversation turns from this event that were pruned from your "
+            "context window. Use when the prune marker tells you turns were dropped and you "
+            "need to recall what was discussed earlier. Returns full turn content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "from_turn": {
+                    "type": "integer",
+                    "description": "Start turn number (inclusive)",
+                },
+                "to_turn": {
+                    "type": "integer",
+                    "description": "End turn number (inclusive)",
+                },
+            },
+            "required": ["from_turn", "to_turn"],
+        },
+    },
     # --- post_sticky_note (gated: jarvis-sourced + close phase only) ---
     {
         "name": "post_sticky_note",
