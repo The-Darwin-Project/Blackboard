@@ -48,9 +48,12 @@
 # 19. [Pattern]: Fresh-wake priming: send_pulse() detects was_idle → _connect() → priming turn
 #     with Redis handoff notes. Fires from send_pulse() only (not _try_reconnect).
 # 20. [Pattern]: grounding_metadata extraction in _process_message() logs RAG retrieval chunks.
-# 21. [Constraint]: _redact_pii() is applied at EVERY self._session.send() site that carries
-#     human/LLM/event-derived free text when MemoryCorpus store_context=True may persist the
-#     session. Static prompt constants need no redaction. Shared via src/utils/pii_redaction.py.
+# 21. [Constraint]: _redact_pii() is applied at session.send() sites that carry
+#     human/LLM/event-derived free text when MemoryCorpus store_context=True may persist
+#     the session (receive_brain_response, send_pulse, wake priming, tool results,
+#     system-review context, handoff replay, rotate summary, session-report handoff).
+#     Static prompt constants and structured silent-event audit payloads (IDs/phases)
+#     are exempt. Shared via src/utils/pii_redaction.py.
 """
 LiveAPIAdapter: Gemini Live API session for the Cortex observer (System 2).
 
@@ -360,21 +363,25 @@ class LiveAPIAdapter:
 
         Fires from send_pulse() only — _try_reconnect has its own _replay_pending_context.
         Unconditional: exercises MemoryCorpus even when no events are active yet.
+        Bounded to 10s so a hung Redis/Live send cannot stall first-pulse delivery.
         """
         try:
-            handoff_text = _redact_pii(await self._tool_recall_handoff_notes(last_n=3))
-            has_handoff = bool(handoff_text) and "No handoff notes found" not in handoff_text
-            if has_handoff:
-                priming = (
-                    f"{_RESUME_REFS}Resuming session. Prior context:\n{handoff_text}\n\n"
-                    "What patterns from prior sessions are relevant to current monitoring?"
-                )
-            else:
-                priming = f"{_RESUME_REFS}Resuming fresh session. No prior handoff notes available."
-            await self._session.send(input=priming, end_of_turn=True)
+            async with asyncio.timeout(10):
+                handoff_text = _redact_pii(await self._tool_recall_handoff_notes(last_n=3))
+                has_handoff = bool(handoff_text) and "No handoff notes found" not in handoff_text
+                if has_handoff:
+                    priming = (
+                        f"{_RESUME_REFS}Resuming session. Prior context:\n{handoff_text}\n\n"
+                        "What patterns from prior sessions are relevant to current monitoring?"
+                    )
+                else:
+                    priming = f"{_RESUME_REFS}Resuming fresh session. No prior handoff notes available."
+                await self._session.send(input=priming, end_of_turn=True)
             logger.info("Cortex wake priming sent (handoff=%s)", has_handoff)
+        except TimeoutError:
+            logger.warning("Cortex wake priming timed out (10s) — continuing to pulse")
         except Exception as e:
-            logger.debug("Cortex wake priming failed (non-fatal): %s", e)
+            logger.warning("Cortex wake priming failed (non-fatal): %s", e)
 
     async def _load_neuron_labels(self) -> None:
         """Pre-load titles for knowledge neurons so first-mention pulses include context."""
@@ -544,25 +551,29 @@ class LiveAPIAdapter:
         eid = self._last_pulse_event_id
 
         if hasattr(msg, "server_content") and msg.server_content:
-            gm = getattr(msg.server_content, "grounding_metadata", None)
-            if gm:
-                chunks = getattr(gm, "grounding_chunks", None) or []
-                queries = list(getattr(gm, "retrieval_queries", None) or [])
-                web_queries = list(getattr(gm, "web_search_queries", None) or [])
-                if chunks or queries or web_queries:
-                    rag_count = sum(
-                        1 for c in chunks
-                        if hasattr(c, "retrieved_context") and c.retrieved_context
-                    )
-                    web_count = sum(
-                        1 for c in chunks
-                        if hasattr(c, "web") and c.web
-                    )
-                    logger.info(
-                        "Cortex grounding: web=%d rag=%d queries=%s",
-                        web_count, rag_count,
-                        queries or web_queries,
-                    )
+            try:
+                gm = getattr(msg.server_content, "grounding_metadata", None)
+                if gm:
+                    chunks = getattr(gm, "grounding_chunks", None) or []
+                    queries = list(getattr(gm, "retrieval_queries", None) or [])
+                    web_queries = list(getattr(gm, "web_search_queries", None) or [])
+                    if chunks or queries or web_queries:
+                        rag_count = sum(
+                            1 for c in chunks
+                            if hasattr(c, "retrieved_context") and c.retrieved_context
+                        )
+                        web_count = sum(
+                            1 for c in chunks
+                            if hasattr(c, "web") and c.web
+                        )
+                        # Counts only — query strings may echo session PII into logs.
+                        logger.info(
+                            "Cortex grounding: web=%d rag=%d query_count=%d",
+                            web_count, rag_count,
+                            len(queries) or len(web_queries),
+                        )
+            except Exception as e:
+                logger.debug("Cortex grounding_metadata parse failed (non-fatal): %s", e)
 
         if hasattr(msg, "text") and msg.text:
             if self._collecting_handoff:
@@ -1544,6 +1555,7 @@ class LiveAPIAdapter:
         report = ""
         prompt = f"{_REPORT_REFS}{SESSION_REPORT_PROMPT}"
         if handoff_history:
+            handoff_history = _redact_pii(handoff_history)
             segments = handoff_history.count("---") + 1
             prompt = (
                 f"{_REPORT_REFS}Before writing your report, here are your session notes from this shift "

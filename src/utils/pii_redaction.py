@@ -21,7 +21,8 @@
 Used by:
 - LiveAPIAdapter (JARVIS): text sent into a Live API session with store_context=True
   persists for the WHOLE session, not just one turn.
-- Archivist: text sent to the external Vertex Discovery Engine Ranking API.
+
+Archivist Ranking API redaction is a separate restore (not wired on this branch).
 """
 from __future__ import annotations
 

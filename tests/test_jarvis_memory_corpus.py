@@ -317,6 +317,27 @@ class TestRedactionCoverageAcrossSendSites:
         assert "dave@example.com" not in response_text
         assert "[redacted-email]" in response_text
 
+    async def test_session_report_redacts_handoff_history(self):
+        """_generate_session_report_on() must redact handoff_history before session.send —
+        shift-end writes into MemoryCorpus under store_context=True."""
+        session = AsyncMock()
+
+        async def _empty_receive():
+            if False:
+                yield None
+
+        session.receive = MagicMock(return_value=_empty_receive())
+        adapter = _make_jarvis_adapter(session=session)
+
+        await adapter._generate_session_report_on(
+            session,
+            handoff_history="Notes for eve@example.com about the outage.",
+        )
+
+        sent_kwargs = session.send.await_args.kwargs
+        assert "eve@example.com" not in sent_kwargs["input"]
+        assert "[redacted-email]" in sent_kwargs["input"]
+
 
 # ===========================================================================
 # T-9: Grounding_metadata extraction in real _process_message()
@@ -341,7 +362,7 @@ class TestGroundingMetadataExtraction:
             await adapter._process_message(msg)
 
         mock_logger.info.assert_any_call(
-            "Cortex grounding: web=%d rag=%d queries=%s", 0, 1, ["pipeline retry best practices"],
+            "Cortex grounding: web=%d rag=%d query_count=%d", 0, 1, 1,
         )
 
     async def test_mixed_web_and_rag_chunks_counted_separately(self):
@@ -366,7 +387,7 @@ class TestGroundingMetadataExtraction:
             await adapter._process_message(msg)
 
         mock_logger.info.assert_any_call(
-            "Cortex grounding: web=%d rag=%d queries=%s", 1, 1, ["kubernetes"],
+            "Cortex grounding: web=%d rag=%d query_count=%d", 1, 1, 1,
         )
 
     async def test_no_grounding_metadata_is_expected_no_error(self):
