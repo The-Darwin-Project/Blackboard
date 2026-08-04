@@ -552,11 +552,9 @@ class _BrainToolContext:
 
 _ACLOSE_TIMEOUT = 5.0
 
-# Conversation compression safety net (Goal 2, truncation-search-destroy):
-# raises the compression trigger budget and bounds any single "full" tier
-# turn so one oversized message can't blow the model context window.
+# Conversation compression safety net: when estimated prompt tokens exceed this budget,
+# _compress_contents prunes oldest turns from the front, keeping the last ~200K tokens.
 _CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
-_FULL_TIER_MAX_CHARS = int(os.getenv("BRAIN_FULL_TIER_MAX_CHARS", "100000"))
 
 # Ephemeral-only model/effort routing (scoped to Tekton-spawned pods -- local
 # sidecars keep their Deployment-configured model, never read these maps).
@@ -1150,7 +1148,17 @@ class Brain:
             # Iterative LLM loop -- re-invokes when a tool (e.g., lookup_service)
             # returns True, meaning the LLM needs to make a follow-up decision.
             # Bounded to prevent runaway loops.
-            is_intermediate = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+            task_running = event_id in self._active_tasks and not self._active_tasks[event_id].done()
+            if task_running:
+                routing_turn = self._routing_turn_for_event.get(event_id, 0)
+                has_agent_result = any(
+                    t.actor != "brain" and t.action not in ("message", "plan_step")
+                    and t.turn > routing_turn
+                    for t in event.conversation
+                )
+                is_intermediate = not has_agent_result
+            else:
+                is_intermediate = False
             max_llm_iterations = 2 if is_intermediate else (8 if event.source == "jarvis" else 5)
             response_emitted = False  # Track if brain.response was already flushed this cycle
             acknowledged_interrupts: set[int] = set()
@@ -2644,10 +2652,11 @@ class Brain:
 
     @classmethod
     def _compress_contents(cls, contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -> list[dict]:
-        """Progressive compression: skeleton/summary/full tiers. No LLM call.
+        """Tail-keep prune: drop oldest conversation turns when over budget.
 
-        First message (event context) always kept intact.
-        Atomic pair guard: model(functionCall) + user(response) never separated.
+        First message (event context header) always kept intact.
+        No truncation of individual turns — full fidelity until prune threshold.
+        When over budget: keep header + last ~200K tokens of conversation from the end.
         """
         if len(contents) <= 3:
             return contents
@@ -2657,66 +2666,29 @@ class Brain:
 
         context_msg = contents[0]
         conv_msgs = contents[1:]
-        n = len(conv_msgs)
 
-        skeleton_end = max(0, n - 20)
-        summary_end = max(skeleton_end, n - 10)
+        tail_budget = 200_000
+        kept: list[dict] = []
+        running_tokens = 0
 
-        # Build tier assignment per message, then enforce atomic pairs
-        tiers = []
-        for i in range(n):
-            if i < skeleton_end:
-                tiers.append("skeleton")
-            elif i < summary_end:
-                tiers.append("summary")
-            else:
-                tiers.append("full")
-
-        # Atomic pair guard: if a model msg has functionCall parts, promote
-        # it and the next user msg to the same tier (the less compressed one)
-        for i in range(n - 1):
-            msg = conv_msgs[i]
-            if msg["role"] == "model" and any(
-                isinstance(p, dict) and ("functionCall" in p or "function_call" in p)
+        for msg in reversed(conv_msgs):
+            msg_tokens = sum(
+                len(str(p.get("text", ""))) // 4
                 for p in msg.get("parts", [])
-            ):
-                better = min(tiers[i], tiers[i + 1], key=["full", "summary", "skeleton"].index)
-                tiers[i] = better
-                tiers[i + 1] = better
+            )
+            if running_tokens + msg_tokens > tail_budget and kept:
+                break
+            kept.append(msg)
+            running_tokens += msg_tokens
 
-        compressed = [context_msg]
-        for i, msg in enumerate(conv_msgs):
-            tier = tiers[i]
-            if tier == "skeleton":
-                role = msg["role"]
-                first_text = ""
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p:
-                        first_text = p["text"][:300]
-                        break
-                compressed.append({"role": role, "parts": [{"text": f"(earlier turn: {first_text}...)"}]})
-            elif tier == "summary":
-                role = msg["role"]
-                parts = []
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p:
-                        sentences = p["text"].split(". ")
-                        parts.append({"text": sentences[0] + ("." if len(sentences) > 1 else "")})
-                    else:
-                        parts.append(p)
-                compressed.append({"role": role, "parts": parts or msg["parts"]})
-            else:
-                role = msg["role"]
-                parts = []
-                for p in msg.get("parts", []):
-                    if isinstance(p, dict) and "text" in p and len(p["text"]) > _FULL_TIER_MAX_CHARS:
-                        truncated = p["text"][:_FULL_TIER_MAX_CHARS]
-                        parts.append({"text": f"{truncated}\n...(turn truncated at {_FULL_TIER_MAX_CHARS} chars)"})
-                    else:
-                        parts.append(p)
-                compressed.append({"role": role, "parts": parts})
+        kept.reverse()
 
-        return compressed
+        if kept and kept[0] != conv_msgs[0]:
+            pruned_count = len(conv_msgs) - len(kept)
+            marker = {"role": "user", "parts": [{"text": f"[{pruned_count} earlier turns pruned for context window]"}]}
+            return [context_msg, marker] + kept
+
+        return [context_msg] + kept
 
     # =========================================================================
     # Function Call Dispatcher
