@@ -29,6 +29,11 @@
 #     (see handlers_observations.py) as authoritative overrides of earlier triage/diagnosis. Both the Claude
 #     path (archive_event) and Gemini fallback (_archive_event_fallback) extract reference_facts (with
 #     service) and set corrected_by_field_notes.
+# 21. [Pattern]: _sanitize_lesson_text() is a module-level helper (Layer 3 defense-in-depth).
+#     Maps all known Brain tool names to behavioral descriptions via _TOOL_TO_BEHAVIOR
+#     (must stay in sync with BRAIN_TOOL_SCHEMAS — Test T-10 enforces). Applied in store_lesson()
+#     before embed AND in the dedup-merge path. Does NOT import from src/agents/llm/ (hexagonal
+#     boundary); mapping maintained manually.
 """
 Archivist: Summarizes closed events into vectorized deep memory.
 
@@ -42,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -67,6 +73,70 @@ EXTRACTOR_MODEL = os.getenv("LLM_MODEL_LESSON_EXTRACTOR", "claude-sonnet-5")
 # knob was the defect -- each provider call now has its own env var.
 _ARCHIVIST_CLAUDE_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST_CLAUDE", "16384"))
 _ARCHIVIST_DIGEST_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS_ARCHIVIST_DIGEST", "4096"))
+
+# ---------------------------------------------------------------------------
+# Lesson tool-name sanitization (Layer 3 defense-in-depth)
+# Manually maintained — hexagonal boundary forbids importing from src/agents/llm.
+# Test T-10 asserts completeness against BRAIN_TOOL_SCHEMAS.
+# ---------------------------------------------------------------------------
+_TOOL_TO_BEHAVIOR: dict[str, str] = {
+    "record_observation": "recording a metric",
+    "defer_event": "parking with a timer",
+    "classify_event": "classifying the domain",
+    "select_agent": "dispatching an agent",
+    "wait_for_user": "parking for human response",
+    "wait_for_agent": "parking for agent delivery",
+    "close_event": "closing the event",
+    "set_phase": "advancing the phase",
+    "refresh_gitlab_context": "refreshing external state",
+    "refresh_github_context": "refreshing external state",
+    "refresh_kargo_context": "refreshing external state",
+    "consult_deep_memory": "consulting memory",
+    "lookup_journal": "checking the ops journal",
+    "lookup_service": "looking up service metadata",
+    "search_open_incidents": "searching incidents",
+    "report_incident": "escalating an incident",
+    "notify_user_slack": "notifying the user",
+    "take_note": "recording a field note",
+    "review_notes": "reviewing field notes",
+    "list_observations": "listing observation history",
+    "hold_watch": "holding for observation",
+    "wait_for_jarvis": "awaiting meta-cognitive review",
+    "respond_to_jarvis": "replying to the observer",
+    "message_agent": "messaging the agent",
+    "inspect_event": "inspecting event state",
+    "notify_gitlab_result": "posting the result to GitLab",
+    "reply_to_agent": "replying to an agent",
+    "request_user_approval": "requesting human approval",
+    "re_trigger_aligner": "re-triggering alignment check",
+    "ask_agent_for_state": "querying agent state",
+    "wait_for_verification": "waiting for verification",
+    "create_plan": "creating a plan",
+    "get_plan_progress": "checking plan progress",
+    "fetch_jira_issue": "fetching a Jira issue",
+    "comment_jira_issue": "commenting on a Jira issue",
+    "transition_jira_issue": "transitioning a Jira issue",
+    "post_sticky_note": "posting a sticky note",
+    "read_sticky_notes": "reading sticky notes",
+    "recall_pruned_turns": "recalling pruned conversation turns",
+}
+
+_ALL_TOOL_NAMES: frozenset[str] = frozenset(_TOOL_TO_BEHAVIOR.keys())
+
+
+def _sanitize_lesson_text(text: str) -> str:
+    """Strip Brain tool/function names from lesson text fields.
+
+    All BRAIN_TOOL_SCHEMAS names are mapped to behavioral descriptions via
+    _TOOL_TO_BEHAVIOR. Word-bounded regex replace preserves semantic meaning.
+    Test T-10 asserts the mapping stays complete against BRAIN_TOOL_SCHEMAS.
+    """
+    if not text:
+        return text
+    for name, behavior in _TOOL_TO_BEHAVIOR.items():
+        text = re.sub(rf"\b{re.escape(name)}\b", behavior, text)
+    return text
+
 
 SUMMARIZE_PROMPT = """Summarize this operational event conversation into a structured JSON object for similarity search.
 Each turn is timestamped as [HH:MM:SS actor.action]. Use timestamps to derive durations.
@@ -703,6 +773,13 @@ class Archivist:
 
             kw = keywords or []
             refs = event_references or []
+
+            title = _sanitize_lesson_text(title)
+            pattern = _sanitize_lesson_text(pattern)
+            anti_pattern = _sanitize_lesson_text(anti_pattern)
+            fix_action = _sanitize_lesson_text(fix_action)
+            kw = [_sanitize_lesson_text(k) for k in kw]
+
             embed_text = f"{title} {pattern} {anti_pattern} {fix_action} {' '.join(kw)}"
             vector = await self._embed(embed_text)
 
@@ -727,8 +804,13 @@ class Archivist:
                     merged_refs = list(set(existing.get("event_references", []) + refs))
                     new_count = existing.get("verification_count", 0) + 1
 
+                    merged_kw = [_sanitize_lesson_text(k) for k in merged_kw]
                     merged_payload = {
                         **existing,
+                        "title": _sanitize_lesson_text(existing.get("title", "")),
+                        "pattern": _sanitize_lesson_text(existing.get("pattern", "")),
+                        "anti_pattern": _sanitize_lesson_text(existing.get("anti_pattern", "")),
+                        "fix_action": _sanitize_lesson_text(existing.get("fix_action", "")),
                         "keywords": merged_kw,
                         "event_references": merged_refs,
                         "verification_count": new_count,
@@ -736,8 +818,8 @@ class Archivist:
                     }
 
                     merged_embed_text = (
-                        f"{existing.get('title', '')} {existing.get('pattern', '')} "
-                        f"{existing.get('anti_pattern', '')} {' '.join(merged_kw)}"
+                        f"{merged_payload['title']} {merged_payload['pattern']} "
+                        f"{merged_payload['anti_pattern']} {' '.join(merged_kw)}"
                     )
                     merged_vector = await self._embed(merged_embed_text)
 
@@ -1310,6 +1392,13 @@ class Archivist:
         "Lessons must be environment-agnostic. Abstract away specific service names, URLs, "
         "cluster details, MR IDs. Keep concrete: timing heuristics, pattern signatures, "
         "trade-off reasoning, decision boundaries with thresholds.\n\n"
+        "Never use internal system tool identifiers or function-call names in pattern "
+        "or anti_pattern text. These are snake_case internal API names that the agent "
+        "discovers from its tool declarations — listing them in lessons primes the agent "
+        "to invoke those exact functions when the lesson is recalled into context. "
+        "Describe the BEHAVIOR instead: 'recording metrics repeatedly', 'parking with "
+        "a timer', 'classifying the domain', 'dispatching an agent'. If the lesson is "
+        "about a tool-calling pattern, describe what the tool DOES, not what it's CALLED.\n\n"
         "## Existing Corpus Awareness\n\n"
         "If an existing corpus section is provided, check each candidate lesson against it. "
         "Set action='reinforce' and target_title to the existing lesson's title if the new "
@@ -1332,11 +1421,11 @@ class Archivist:
                             "title": {"type": "string", "description": "Short abstract title."},
                             "pattern": {
                                 "type": "string",
-                                "description": "Correct reasoning. Include authorization boundary when a fix is involved.",
+                                "description": "Correct reasoning. Include authorization boundary when a fix is involved. NEVER include Brain tool/function names (snake_case identifiers) — describe behaviors only.",
                             },
                             "anti_pattern": {
                                 "type": "string",
-                                "description": "Drift detection signature — the thinking FRIDAY would produce just before making this mistake.",
+                                "description": "Drift detection signature — the thinking FRIDAY would produce just before making this mistake. NEVER include Brain tool/function names (snake_case identifiers) — describe behaviors only.",
                             },
                             "keywords": {
                                 "type": "array",
@@ -1345,7 +1434,7 @@ class Archivist:
                             },
                             "fix_action": {
                                 "type": "string",
-                                "description": "Autonomous remediation (defer, retest, classify, close). 'none' if no autonomous fix was possible. Distinguish from actions requiring human approval.",
+                                "description": "Autonomous remediation (defer, retest, classify, close). 'none' if no autonomous fix was possible. Distinguish from actions requiring human approval. NEVER include Brain tool/function names (snake_case identifiers) — describe behaviors only.",
                             },
                             "event_references": {"type": "array", "items": {"type": "string"}},
                             "action": {

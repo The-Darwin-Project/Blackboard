@@ -268,6 +268,33 @@ MAX_TURNS_PER_EVENT = 100
 NUDGE_INTERVAL_SECONDS = 1800  # 30 min idle before automated nudge
 MAX_NUDGES_BEFORE_ESCALATION = 3  # consecutive nudges before human escalation
 
+# ---------------------------------------------------------------------------
+# RECALL tool-name filter (Layer 4 defense-in-depth)
+# Lazy-loaded from BRAIN_TOOL_SCHEMAS to avoid import-order issues at module level.
+# ---------------------------------------------------------------------------
+_BRAIN_TOOL_NAMES: frozenset[str] = frozenset()
+
+
+def _init_tool_names() -> frozenset[str]:
+    """Lazy-load tool names from BRAIN_TOOL_SCHEMAS."""
+    from .llm.types import BRAIN_TOOL_SCHEMAS
+    return frozenset(t["name"] for t in BRAIN_TOOL_SCHEMAS)
+
+
+def _strip_tool_names(text: str) -> str:
+    """Defense-in-depth: strip any surviving tool identifiers from RECALL content."""
+    global _BRAIN_TOOL_NAMES
+    if not text:
+        return text
+    if not _BRAIN_TOOL_NAMES:
+        _BRAIN_TOOL_NAMES = _init_tool_names()
+    for name in _BRAIN_TOOL_NAMES:
+        text = text.replace(name, "")
+    # Collapse double-spaces left by stripped names
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip()
+
 
 def _safe_int_env(name: str, default: int) -> int:
     """Parse integer env var with safe fallback for empty/invalid values."""
@@ -2224,7 +2251,9 @@ class Brain:
         for lesson in lessons:
             p = lesson.get("payload", {})
             if "title" in p:
-                lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+                title = _strip_tool_names(p.get("title", "untitled"))
+                pattern = _strip_tool_names(p.get("pattern", ""))
+                lines.append(f"- {title}: {pattern}")
             elif "topic" in p:
                 scope = p.get("scope", "")
                 fact = p.get("fact", "")
@@ -2405,7 +2434,9 @@ class Brain:
         for hit in hits:
             p = hit.get("payload", {})
             if "title" in p:
-                lines.append(f"- {p.get('title', 'untitled')}: {p.get('pattern', '')}")
+                title = _strip_tool_names(p.get("title", "untitled"))
+                pattern = _strip_tool_names(p.get("pattern", ""))
+                lines.append(f"- {title}: {pattern}")
             elif "topic" in p:
                 scope = p.get("scope", "")
                 fact = p.get("fact", "")
