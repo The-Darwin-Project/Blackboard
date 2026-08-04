@@ -406,6 +406,15 @@ spec:
             - name: BRAIN_GOOGLE_SEARCH_ENABLED
               value: "{{ .Values.googleSearch.enabled }}"
             {{- end }}
+            {{- if .Values.ragEngine }}
+            # RAG Engine (JARVIS MemoryCorpus)
+            {{- if .Values.ragEngine.jarvis }}
+            - name: JARVIS_RAG_CORPUS_ID
+              value: {{ .Values.ragEngine.jarvis.corpusId | default "" | quote }}
+            - name: JARVIS_RAG_ENABLED
+              value: {{ .Values.ragEngine.jarvis.enabled | default false | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.memoryReflex }}
             # Memory Reflex (real-time lesson search during thinking stream)
             - name: BRAIN_MEMORY_REFLEX

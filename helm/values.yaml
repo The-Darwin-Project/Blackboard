@@ -524,6 +524,13 @@ idleTimeout:
 googleSearch:
   enabled: false # Set to true to enable Google Search grounding in triage/investigate phases
 # =============================================================================
+# RAG Engine (Vertex AI RAG grounding — JARVIS MemoryCorpus only in this restore)
+# =============================================================================
+ragEngine:
+  jarvis:
+    corpusId: "" # Full resource path: projects/{project}/locations/{location}/ragCorpora/{id}
+    enabled: false
+# =============================================================================
 # Memory Reflex (real-time lesson search during FRIDAY's thinking stream)
 # =============================================================================
 memoryReflex:
