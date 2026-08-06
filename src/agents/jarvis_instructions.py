@@ -955,4 +955,26 @@ TOOL_DECLARATIONS = [
             "required": ["reason"],
         },
     },
+    # --- Web search (grounded, isolated call) ---
+    {
+        "name": "google_web_search",
+        "description": (
+            "Search the public web for current information. Use when you need real-time "
+            "data to verify FRIDAY's claims, check recent CVEs, release dates, or confirm "
+            "external system status. Returns a grounded summary with source URLs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The search query. Be specific — include version numbers, dates, "
+                        "product names when known."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]

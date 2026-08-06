@@ -10,9 +10,9 @@
 # 8. [Pattern]: Structured contents pass through as-is (already Gemini format). Adapter converts image parts to SDK Part objects.
 # 9. [Pattern]: QuotaTracker integration: acquire(estimate) pre-request, record(actual) post-response using usage_metadata.total_token_count.
 # 10. [Gotcha]: Streaming candidates_token_count is None on final chunk. Always use total_token_count (probe-verified).
-# 11. [Pattern]: set_search_enabled() controls Google Search grounding. Adapter-level state, not LLMPort param.
-#     _build_config reads self._search_enabled to append GoogleSearch tool. Grounding metadata extracted
-#     from final candidate and yielded on the done=True chunk. Graceful fallback: None if not available.
+# 11. [Pattern]: Google Search grounding removed from adapter-level state. Web search is now a
+#     function call tool (google_web_search) with an isolated generateContent handler.
+#     Grounding metadata extraction from main session candidates is no longer needed.
 # 12. [Pattern]: generate_stream accumulates thought_parts (part.thought=True) separately from last_parts.
 #     raw_parts = thought_parts + output_parts (deduped). Provides full context for thought_signature
 #     chain preservation across turns. Required for Gemini 3.5+ thought preservation and forward-compatible
@@ -59,16 +59,7 @@ class GeminiAdapter:
         )
         self._model_name = model_name
         self._tracker = quota_tracker
-        self._search_enabled = False
         logger.info(f"GeminiAdapter initialized: {model_name} (quota_tracker={'yes' if quota_tracker else 'no'})")
-
-    def set_search_enabled(self, enabled: bool) -> None:
-        """Enable/disable Google Search grounding for subsequent calls.
-
-        Adapter-level state -- callers set before generate_stream() and reset after.
-        Only affects _build_config tool assembly. No impact on LLMPort interface.
-        """
-        self._search_enabled = enabled
 
     # -----------------------------------------------------------------
     # Quota tracking helpers
@@ -145,15 +136,11 @@ class GeminiAdapter:
             kwargs["system_instruction"] = system_prompt
         if tools is not None:
             tool_objects = [self._convert_tools(tools)]
-            if self._search_enabled:
-                tool_objects.append(types.Tool(google_search=types.GoogleSearch()))
             kwargs["tools"] = tool_objects
             kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
             kwargs["tool_config"] = types.ToolConfig(
                 function_calling_config=types.FunctionCallingConfig(mode="AUTO")
             )
-        elif self._search_enabled:
-            kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
         return types.GenerateContentConfig(**kwargs)
 

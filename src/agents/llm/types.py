@@ -731,6 +731,28 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "google_web_search",
+        "description": (
+            "Search the public web for current information. Use when you need real-time "
+            "data your knowledge may not cover: recent CVEs, release dates, service status, "
+            "documentation updates, or verifying claims about external systems. Returns a "
+            "grounded summary with source URLs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The search query. Be specific — include version numbers, dates, "
+                        "product names, CVE IDs when known."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "report_incident",
         "description": (
             "Report an incident to the tracking system. When Nightwatcher is enabled, "

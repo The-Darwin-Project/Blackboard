@@ -133,22 +133,20 @@ class TestJarvisMemoryCorpusConfig:
 @pytest.mark.asyncio
 class TestJarvisConnectWithoutCorpus:
     async def test_no_retrieval_tool_when_disabled(self):
-        """T-7: JARVIS_RAG_ENABLED=false -> real _build_live_tools() has no retrieval tool,
-        google_search present (pre-existing behavior unchanged)."""
+        """T-7: JARVIS_RAG_ENABLED=false -> _build_live_tools() has only function_declarations.
+        google_web_search is now a function call, not an ambient google_search tool."""
         from google.genai import types
 
         adapter = _make_jarvis_adapter(rag_enabled=False, rag_corpus_id="")
 
         tools = adapter._build_live_tools(types)
 
-        assert len(tools) == 2
+        assert len(tools) == 1
         assert all(getattr(t, "retrieval", None) is None for t in tools)
-        assert any(getattr(t, "google_search", None) is not None for t in tools), (
-            "google_search must be present when RAG is disabled"
-        )
+        assert tools[0].function_declarations is not None
 
     async def test_no_retrieval_tool_when_corpus_empty(self):
-        """T-7: JARVIS_RAG_CORPUS_ID='' -> real _build_live_tools() has no retrieval tool
+        """T-7: JARVIS_RAG_CORPUS_ID='' -> _build_live_tools() has only function_declarations
         even if JARVIS_RAG_ENABLED=true (corpus is required, not just the flag)."""
         from google.genai import types
 
@@ -157,7 +155,7 @@ class TestJarvisConnectWithoutCorpus:
         tools = adapter._build_live_tools(types)
 
         assert all(getattr(t, "retrieval", None) is None for t in tools)
-        assert any(getattr(t, "google_search", None) is not None for t in tools)
+        assert len(tools) == 1
 
 
 # ===========================================================================

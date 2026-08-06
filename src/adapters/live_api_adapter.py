@@ -202,11 +202,9 @@ class LiveAPIAdapter:
                 ),
             )))
             logger.info(
-                "JARVIS MemoryCorpus enabled (google_search suppressed -- untested 3-way combo): %s",
+                "JARVIS MemoryCorpus enabled: %s (google_web_search available as function call)",
                 self._rag_corpus_id,
             )
-        else:
-            tools.append(types.Tool(google_search=types.GoogleSearch()))
         return tools
 
     async def _connect(self) -> None:
@@ -718,6 +716,8 @@ class LiveAPIAdapter:
                 return await self._tool_create_system_review(args.get("reason", ""))
             elif name == "recall_handoff_notes":
                 return await self._tool_recall_handoff_notes(int(args.get("last_n", 3)))
+            elif name == "google_web_search":
+                return await self._tool_google_web_search(args.get("query", ""))
             else:
                 return f"Unknown tool: {name}"
         except Exception as e:
@@ -1231,6 +1231,54 @@ class LiveAPIAdapter:
                 dt = "unknown"
             lines.append(f"\n--- Session {i+1} ({dt}) ---\n{report_text}")
         return "\n".join(lines)
+
+    async def _tool_google_web_search(self, query: str) -> str:
+        """Isolated grounded search — same pattern as Brain handler."""
+        import asyncio
+        import os
+
+        if not query.strip():
+            return "Error: query required"
+        query = query.strip()[:500]
+        model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
+        project = os.getenv("GCP_PROJECT", "")
+        location = os.getenv("GCP_LOCATION", "global")
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(vertexai=True, project=project, location=location)
+            async with asyncio.timeout(60):
+                response = await client.aio.models.generate_content(
+                    model=model,
+                    contents=query,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        temperature=0.1,
+                        max_output_tokens=2048,
+                    ),
+                )
+            chunks = []
+            if response.candidates:
+                gm = getattr(response.candidates[0], "grounding_metadata", None)
+                if gm:
+                    for chunk in getattr(gm, "grounding_chunks", None) or []:
+                        web = getattr(chunk, "web", None)
+                        if web:
+                            chunks.append(f"- [{getattr(web, 'title', '')}]({getattr(web, 'uri', '')})")
+
+            summary = response.text or ""
+            if not summary and not chunks:
+                return "No relevant web results found."
+            result = "## Web Search Results (external, unverified)\n"
+            result += summary
+            if chunks:
+                result += "\n\nSources:\n" + "\n".join(chunks[:8])
+            result += "\n## End Web Search Results"
+            return result
+        except Exception as e:
+            logger.warning("JARVIS google_web_search failed: %s", e)
+            return f"Web search temporarily unavailable ({type(e).__name__})."
 
     # -------------------------------------------------------------------------
     # Session lifecycle

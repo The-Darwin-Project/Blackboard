@@ -28,6 +28,7 @@ EXPECTED_HANDLERS = {
     "re_trigger_aligner",
     "read_sticky_notes",
     "recall_pruned_turns",
+    "google_web_search",
     "record_observation",
     "refresh_github_context",
     "refresh_gitlab_context",
@@ -66,6 +67,6 @@ def test_handler_registry_count():
     import src.agents.brain  # noqa: F401
     from src.agents.tool_router import HANDLER_REGISTRY
 
-    assert len(HANDLER_REGISTRY) == 39, (
-        f"Expected 38 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
+    assert len(HANDLER_REGISTRY) == 40, (
+        f"Expected 40 handlers, got {len(HANDLER_REGISTRY)}: {sorted(HANDLER_REGISTRY.keys())}"
     )

@@ -119,6 +119,7 @@ _TOOL_TO_BEHAVIOR: dict[str, str] = {
     "post_sticky_note": "posting a sticky note",
     "read_sticky_notes": "reading sticky notes",
     "recall_pruned_turns": "recalling pruned conversation turns",
+    "google_web_search": "searching the web for current information",
 }
 
 _ALL_TOOL_NAMES: frozenset[str] = frozenset(_TOOL_TO_BEHAVIOR.keys())

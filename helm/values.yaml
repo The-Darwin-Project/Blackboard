@@ -519,10 +519,10 @@ idleTimeout:
   conversationSec: "900" # chat/slack post-response idle timeout (was 3600 before v0.9)
   casualSec: "600" # CASUAL domain idle timeout (shorter for social conversations)
 # =============================================================================
-# Google Search Grounding (Brain web search during triage/investigate)
+# Google Search Grounding (function call — isolated generateContent with grounding)
 # =============================================================================
 googleSearch:
-  enabled: false # Set to true to enable Google Search grounding in triage/investigate phases
+  model: "gemini-3.5-flash-lite" # Model for isolated grounded search calls
 # =============================================================================
 # RAG Engine (Vertex AI RAG grounding — JARVIS MemoryCorpus only in this restore)
 # =============================================================================

@@ -402,9 +402,9 @@ spec:
               value: "{{ .Values.idleTimeout.casualSec }}"
             {{- end }}
             {{- if .Values.googleSearch }}
-            # Google Search Grounding
-            - name: BRAIN_GOOGLE_SEARCH_ENABLED
-              value: "{{ .Values.googleSearch.enabled }}"
+            # Google Search Grounding (function call model)
+            - name: GOOGLE_SEARCH_GROUNDING_MODEL
+              value: "{{ .Values.googleSearch.model }}"
             {{- end }}
             {{- if .Values.ragEngine }}
             # RAG Engine (JARVIS MemoryCorpus)

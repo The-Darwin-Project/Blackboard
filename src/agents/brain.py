@@ -714,12 +714,9 @@ class Brain:
         max_dispatches = int(os.getenv("BRAIN_MAX_CONCURRENT_DISPATCHES", "0"))
         self._dispatch_semaphore = asyncio.Semaphore(max_dispatches) if max_dispatches > 0 else None
 
-        self._search_enabled = os.getenv("BRAIN_GOOGLE_SEARCH_ENABLED", "false").lower() == "true"
-
         skills_status = f"progressive ({len(self._skill_loader.available_phases())} phases)" if self._skill_loader else "monolith"
         wip_status = f"wip_cap={max_dispatches}" if max_dispatches > 0 else "wip_cap=off"
-        search_status = "search=on" if self._search_enabled else "search=off"
-        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, {search_status}, agents={list(self.agents.keys())})")
+        logger.info(f"Brain initialized (provider={self.provider}, model={self.model_name}, skills={skills_status}, {wip_status}, agents={list(self.agents.keys())})")
 
         # Initialize tool router context — singleton, methods take event_id
         self._tool_ctx = _BrainToolContext(self)
@@ -1389,7 +1386,7 @@ class Brain:
                 active_tools = self._inject_maintainer_enum(active_tools, maintainer_emails)
 
         # Reorder tools: always-available first, then phase-relevant, then rest.
-        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
+        _always_tools = {"lookup_service", "lookup_journal", "consult_deep_memory", "google_web_search", "classify_event", "set_phase", "wait_for_user", "read_sticky_notes"}
         _phase_tool_priority: dict[str, set[str]] = {
             "triage":    {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"},
             "dispatch":  {"select_agent", "create_plan", "message_agent", "reply_to_agent", "defer_event", "comment_jira_issue", "transition_jira_issue"},
@@ -1442,10 +1439,6 @@ class Brain:
         function_call = None
         raw_parts = None
         last_grounding = None
-
-        want_search = self._search_enabled and brain_phase in ("triage", "dispatch")
-        if want_search and hasattr(self._adapter, 'set_search_enabled'):
-            self._adapter.set_search_enabled(True)
 
         chunk_timeout = float(os.getenv("LLM_STREAM_CHUNK_TIMEOUT_SEC", "120"))
         timeout_retries = 0
@@ -1565,11 +1558,8 @@ class Brain:
                         logger.error(f"Brain LLM streaming failed for {event_id}: {e}", exc_info=True)
                     break
         finally:
-            if want_search and hasattr(self._adapter, 'set_search_enabled'):
-                self._adapter.set_search_enabled(False)
-
-        # Clear thinking indicator ONCE after the loop exits
-        await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
+            # Clear thinking indicator ONCE after the loop exits
+            await self._broadcast({"type": "brain_thinking_done", "event_id": event_id})
 
         # If all retries failed with no output, write error turn
         if last_error and not function_call and not accumulated_text and not accumulated_thoughts:
@@ -2806,7 +2796,7 @@ class Brain:
                 turn=(await self._next_turn_number(event_id)),
                 actor="brain",
                 action="tool_result",
-                waitingFor="google_search",
+                waitingFor="google_web_search",
                 evidence=grounding_evidence,
                 response_parts=response_parts,
             )

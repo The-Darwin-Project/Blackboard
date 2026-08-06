@@ -332,6 +332,87 @@ async def handle_lookup_journal(
     return True
 
 
+async def handle_google_web_search(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    """Execute an isolated grounded search and return structured results."""
+    import asyncio
+    import os
+
+    query = args.get("query", "").strip()[:500]
+    if not query:
+        turn = ConversationTurn(
+            turn=0, actor="brain", action="tool_result",
+            thoughts="google_web_search requires a non-empty query.",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
+
+    model = os.getenv("GOOGLE_SEARCH_GROUNDING_MODEL", "gemini-3.5-flash-lite")
+    project = os.getenv("GCP_PROJECT", "")
+    location = os.getenv("GCP_LOCATION", "global")
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(vertexai=True, project=project, location=location)
+        async with asyncio.timeout(60):
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=query,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.1,
+                    max_output_tokens=2048,
+                ),
+            )
+
+        chunks = []
+        search_queries = []
+        if response.candidates:
+            gm = getattr(response.candidates[0], "grounding_metadata", None)
+            if gm:
+                for chunk in getattr(gm, "grounding_chunks", None) or []:
+                    web = getattr(chunk, "web", None)
+                    if web:
+                        chunks.append({
+                            "title": getattr(web, "title", ""),
+                            "uri": getattr(web, "uri", ""),
+                        })
+                search_queries = list(getattr(gm, "web_search_queries", None) or [])
+
+        summary = response.text or ""
+        if not summary and not chunks:
+            result_text = "No relevant web results found for this query."
+        else:
+            result_text = "## Web Search Results (external, unverified)\n"
+            result_text += summary
+            if chunks:
+                result_text += "\n\nSources:\n" + "\n".join(
+                    f"- [{c['title']}]({c['uri']})" for c in chunks[:8]
+                )
+            result_text += "\n## End Web Search Results"
+
+        logger.info(
+            "google_web_search for %s: %d chunks, %d queries, %d chars",
+            event_id, len(chunks), len(search_queries), len(summary),
+        )
+
+    except Exception as e:
+        logger.warning("google_web_search failed for %s: %s", event_id, e)
+        result_text = f"Web search temporarily unavailable ({type(e).__name__})."
+
+    turn = ConversationTurn(
+        turn=0, actor="brain", action="tool_result",
+        evidence=result_text,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
@@ -340,3 +421,4 @@ from .tool_router import HANDLER_REGISTRY
 HANDLER_REGISTRY["lookup_service"] = handle_lookup_service
 HANDLER_REGISTRY["consult_deep_memory"] = handle_consult_deep_memory
 HANDLER_REGISTRY["lookup_journal"] = handle_lookup_journal
+HANDLER_REGISTRY["google_web_search"] = handle_google_web_search
