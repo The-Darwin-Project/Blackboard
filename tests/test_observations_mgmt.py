@@ -664,18 +664,26 @@ class TestReportEndpoint:
         """Request validation: series_names beyond OBS_MAX_REPORT_SERIES is rejected before
         any LLM/report work happens."""
         too_many = [f"series_{i}" for i in range(BlackboardState.OBS_MAX_REPORT_SERIES + 1)]
-        resp = manage_client.post(
-            "/api/observations/manage/report",
-            json={"series_names": too_many},
-        )
+        manage_client.app.dependency_overrides[get_report_client] = lambda: MagicMock()
+        try:
+            resp = manage_client.post(
+                "/api/observations/manage/report",
+                json={"series_names": too_many},
+            )
+        finally:
+            del manage_client.app.dependency_overrides[get_report_client]
         assert resp.status_code == 422
 
     def test_report_endpoint_series_names_empty_422(self, manage_client, mock_blackboard):
         """Request validation: empty series_names is rejected (min_length=1)."""
-        resp = manage_client.post(
-            "/api/observations/manage/report",
-            json={"series_names": []},
-        )
+        manage_client.app.dependency_overrides[get_report_client] = lambda: MagicMock()
+        try:
+            resp = manage_client.post(
+                "/api/observations/manage/report",
+                json={"series_names": []},
+            )
+        finally:
+            del manage_client.app.dependency_overrides[get_report_client]
         assert resp.status_code == 422
 
     def test_report_endpoint_timeout_returns_504(self, manage_client, mock_blackboard):
