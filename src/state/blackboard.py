@@ -9,7 +9,7 @@
 # 7. [Pattern]: Slack thread mapping (darwin:slack:thread:{channel_id}:{thread_ts}) is cleaned up by delete_slack_mapping() on event close.
 # 8. [Pattern]: create_event() accepts optional created_by_email for multi-tenant event ownership. Callers (chat WS) pass user.email; automated sources default to None.
 # 9. [Pattern]: update_event_sticky_notes() follows same WATCH/MULTI as all update_event_* methods.
-# 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag).
+# 10. [Pattern]: Lua scripts registered once at __init__ via register_script() — used for atomic compare-and-delete (escalation flag) and atomic observation rename-and-reindex.
 # 11. [Pattern]: Field Notes Notebook (darwin:notebook HASH). RENAMENX for atomic drain; ResponseError for missing-source guard. Quarantine via RENAME after MAX_DIGEST_RETRIES. Retry counter is Redis INCR with TTL (survives pod restart).
 # 12. [Pattern]: Aligner pending queue — darwin:aligner:pending ZSET (ZADD NX score=first_seen) + darwin:aligner:pending:meta HASH. Pipelined stage/commit/restage. remove_service() auto-cleans health pending.
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -170,10 +171,27 @@ end
 return 0
 """
 
+    _LUA_RENAME_OBS = """
+-- KEYS[1] = darwin:obs:{old_name}
+-- KEYS[2] = darwin:obs:{new_name}
+-- KEYS[3] = darwin:obs:_index
+-- ARGV[1] = old_name
+-- ARGV[2] = new_name
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('EXISTS', KEYS[2]) == 1 then return -1 end
+redis.call('RENAME', KEYS[1], KEYS[2])
+redis.call('SREM', KEYS[3], ARGV[1])
+redis.call('SADD', KEYS[3], ARGV[2])
+return 1
+"""
+
     def __init__(self, redis: Redis):
         self.redis = redis
         self._clear_escalation_script = self.redis.register_script(
             self._LUA_CLEAR_ESCALATION
+        )
+        self._rename_obs_script = self.redis.register_script(
+            self._LUA_RENAME_OBS
         )
     
     # =========================================================================
@@ -2832,6 +2850,17 @@ return 0
     OBS_INDEX_KEY = "darwin:obs:_index"
     OBS_RETENTION_SECONDS = 604800  # 7 days
 
+    # Single source of truth for observation series name validation. Served to the
+    # frontend via list_observations()["name_pattern"] so ObservationCard.tsx never
+    # hand-duplicates this rule out of sync with the backend.
+    OBS_NAME_PATTERN = r'^[a-z][a-z0-9_]{1,63}$'
+
+    # Single source of truth for the "series per report" cap. Consumed by
+    # ReportRequest.series_names (max_length), observations_reporter's selection slice,
+    # and served to the frontend via list_observations()["max_report_series"] so
+    # InsightsPage.tsx/ObservationCard.tsx never hand-duplicate this number.
+    OBS_MAX_REPORT_SERIES = 10
+
     async def record_observation(
         self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
     ) -> dict:
@@ -2974,6 +3003,8 @@ return 0
             "event_opened": event_opened,
             "event_age_minutes": event_age_minutes,
             "observations": series_list,
+            "name_pattern": self.OBS_NAME_PATTERN,
+            "max_report_series": self.OBS_MAX_REPORT_SERIES,
         }
 
     async def _obs_keys_for_event(self, event_id: str, name: str | None = None) -> dict[str, str]:
@@ -2999,6 +3030,53 @@ return 0
             n_str = n if isinstance(n, str) else n.decode()
             result[n_str] = f"{self.OBS_GLOBAL_PREFIX}{n_str}"
         return result
+
+    _OBS_RESERVED_NAMES = frozenset({"_index"})
+
+    _OBS_NAME_RE = re.compile(OBS_NAME_PATTERN)
+
+    @classmethod
+    def validate_obs_name(cls, name: str) -> str:
+        """Validate observation series name. Raises ValueError if invalid."""
+        if name in cls._OBS_RESERVED_NAMES:
+            raise ValueError(f"Reserved observation name: '{name}'")
+        if not cls._OBS_NAME_RE.match(name):
+            raise ValueError(
+                f"Invalid observation name: must match {cls.OBS_NAME_PATTERN}"
+            )
+        return name
+
+    async def delete_observation(self, name: str) -> bool:
+        """Delete a global observation series. Returns True if existed."""
+        if name in self._OBS_RESERVED_NAMES:
+            return False
+        key = f"{self.OBS_GLOBAL_PREFIX}{name}"
+        pipe = self.redis.pipeline()
+        pipe.delete(key)
+        pipe.srem(self.OBS_INDEX_KEY, name)
+        results = await pipe.execute()
+        return results[0] > 0
+
+    async def rename_observation(self, old_name: str, new_name: str) -> bool:
+        """Atomically rename a global observation series via Lua script.
+
+        Returns True on success. Raises ValueError on not-found or collision.
+        """
+        if old_name in self._OBS_RESERVED_NAMES or new_name in self._OBS_RESERVED_NAMES:
+            raise ValueError(f"Observation '{old_name}' not found")
+        result = await self._rename_obs_script(
+            keys=[
+                f"{self.OBS_GLOBAL_PREFIX}{old_name}",
+                f"{self.OBS_GLOBAL_PREFIX}{new_name}",
+                self.OBS_INDEX_KEY,
+            ],
+            args=[old_name, new_name],
+        )
+        if result == 0:
+            raise ValueError(f"Observation '{old_name}' not found")
+        if result == -1:
+            raise ValueError(f"Observation '{new_name}' already exists")
+        return True
 
     @staticmethod
     def _parse_obs_member(m: str, score: float) -> dict:

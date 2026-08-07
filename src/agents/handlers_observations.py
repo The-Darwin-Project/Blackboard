@@ -20,7 +20,19 @@ if TYPE_CHECKING:
 async def handle_record_observation(
     ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
 ) -> bool:
+    from ..state.blackboard import BlackboardState
     name = args.get("name", "")
+    try:
+        BlackboardState.validate_obs_name(name)
+    except ValueError as exc:
+        turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain", action="tool_result",
+            thoughts=f"Observation rejected: {exc}",
+            waitingFor="record_observation", response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, turn)
+        return True
     value = args.get("value", 0)
     unit = args.get("unit", "")
     result = await ctx.get_blackboard().record_observation(event_id, name, value, unit)

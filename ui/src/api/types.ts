@@ -573,6 +573,29 @@ export interface ObservationsResponse {
   event_opened: string;
   event_age_minutes: number;
   observations: ObservationSeries[];
+  /** Server-authoritative regex (as a string) for valid observation series names. */
+  name_pattern: string;
+  /** Server-authoritative cap on series selectable for a single report. */
+  max_report_series: number;
+}
+
+// =============================================================================
+// Observation Management
+// =============================================================================
+
+export interface ReportResponse {
+  markdown: string;
+  filename: string;
+  series_count: number;
+  generated_at: string;
+}
+
+export interface RenameRequest {
+  new_name: string;
+}
+
+export interface BulkDeleteRequest {
+  names: string[];
 }
 
 // =============================================================================

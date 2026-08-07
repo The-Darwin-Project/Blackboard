@@ -671,6 +671,39 @@ export async function getEventObservations(eventId: string): Promise<Observation
   return fetchApi<ObservationsResponse>(`/api/queue/${encodeURIComponent(eventId)}/observations`);
 }
 
+export async function deleteObservation(name: string) {
+  return fetchApi<{ deleted: string }>(`/api/observations/manage/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
+export async function renameObservation(name: string, newName: string) {
+  return fetchApi<{ renamed: string; new_name: string }>(`/api/observations/manage/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ new_name: newName }),
+  });
+}
+
+export async function bulkDeleteObservations(names: string[]) {
+  return fetchApi<{ deleted: number }>('/api/observations/manage/bulk-delete', {
+    method: 'POST',
+    body: JSON.stringify({ names }),
+  });
+}
+
+export async function generateObservationsReport(seriesNames: string[], context = '') {
+  return fetchApi<import('./types').ReportResponse>('/api/observations/manage/report', {
+    method: 'POST',
+    body: JSON.stringify({ series_names: seriesNames, context }),
+  });
+}
+
+export async function exportObservations(format: 'csv' | 'json', names?: string[]) {
+  const params = new URLSearchParams({ format });
+  if (names?.length) params.set('names', names.join(','));
+  return fetchApi<{ content: string | object; filename: string; format: string }>(
+    `/api/observations/manage/export?${params}`,
+  );
+}
+
 // =============================================================================
 // JARVIS Memory API (handoff reports + proposals)
 // =============================================================================

@@ -50,3 +50,6 @@ croniter>=6.0.0
 
 # Jira integration (markdown to Atlassian Document Format)
 marklassian>=0.1.0
+
+# Chart rendering for observation reports (SVG via asyncio.to_thread)
+matplotlib>=3.11.0
