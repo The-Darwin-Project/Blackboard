@@ -4,8 +4,13 @@
 # 2. [Constraint]: No live Redis/LLM. BlackboardState mocked via AsyncMock.
 # 3. [Pattern]: TestClient with dependency_overrides for route tests (shifts_api pattern).
 # 4. [Gotcha]: Tests may fail until executor implements the code. Expected.
+# 5. [Pattern]: TestRealAuthPath / TestRealObsAdminPath exercise require_auth/require_obs_admin
+#    *without* dependency_overrides -- every other test class overrides both, which would
+#    otherwise leave the real auth/authz dependencies completely unexercised.
 """Unit and route tests for observation management (delete, rename, report)."""
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 import fakeredis.aioredis
@@ -14,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.dependencies import get_blackboard
+from src.dependencies import get_blackboard, get_report_client
 from src.state.blackboard import BlackboardState
 
 
@@ -40,13 +45,19 @@ def mock_blackboard():
 
 @pytest.fixture
 def manage_client(mock_blackboard):
-    """TestClient for observation management routes."""
+    """TestClient for observation management routes.
+
+    Overrides require_auth *and* require_obs_admin -- most tests exercise route logic, not
+    the auth/authz dependencies themselves. See TestRealAuthPath / TestRealObsAdminPath below
+    for tests against the real dependencies.
+    """
     from src.routes.observations_mgmt import mgmt_router
-    from src.auth import require_auth
+    from src.auth import require_auth, require_obs_admin
     app = FastAPI()
     app.include_router(mgmt_router)
     app.dependency_overrides[get_blackboard] = lambda: mock_blackboard
     app.dependency_overrides[require_auth] = lambda: {"user": "test@test.com"}
+    app.dependency_overrides[require_obs_admin] = lambda: {"user": "test@test.com"}
     return TestClient(app)
 
 
@@ -354,6 +365,20 @@ class TestDeleteEndpoint:
         resp = manage_client.delete("/api/observations/manage/nonexistent")
         assert resp.status_code == 404
 
+    def test_delete_endpoint_skips_name_regex_validation(self, manage_client, mock_blackboard):
+        """Regression: DELETE must accept a legacy name that fails OBS_NAME_PATTERN
+        (uppercase, hyphens) -- this is a deliberate design decision ("allows cleanup of
+        legacy names", see file header) distinguishing DELETE from PATCH, which does
+        validate. A future change that "helpfully" adds regex validation to DELETE would
+        silently break legacy-name cleanup without this test failing loudly."""
+        mock_blackboard.delete_observation = AsyncMock(return_value=True)
+        legacy_name = "Legacy-Metric.Name"
+        assert not BlackboardState._OBS_NAME_RE.match(legacy_name)
+        resp = manage_client.delete(f"/api/observations/manage/{legacy_name}")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == legacy_name
+        mock_blackboard.delete_observation.assert_awaited_once_with(legacy_name)
+
 
 # =========================================================================
 # Routes: PATCH /api/observations/manage/{name}
@@ -593,16 +618,18 @@ class TestReportEndpoint:
 
         mock_llm_response = MagicMock()
         mock_llm_response.text = "## Error Count Analysis\nErrors are trending up."
+        mock_client = MagicMock()
+        mock_client.models.generate_content = MagicMock(return_value=mock_llm_response)
 
-        with patch("src.routes.observations_mgmt._get_report_client") as mock_factory, \
-             patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz4="):
-            mock_client = MagicMock()
-            mock_client.models.generate_content = MagicMock(return_value=mock_llm_response)
-            mock_factory.return_value = mock_client
-            resp = manage_client.post(
-                "/api/observations/manage/report",
-                json={"series_names": ["error_count"]},
-            )
+        manage_client.app.dependency_overrides[get_report_client] = lambda: mock_client
+        try:
+            with patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz4="):
+                resp = manage_client.post(
+                    "/api/observations/manage/report",
+                    json={"series_names": ["error_count"]},
+                )
+        finally:
+            del manage_client.app.dependency_overrides[get_report_client]
 
         assert resp.status_code == 200
         data = resp.json()
@@ -617,16 +644,56 @@ class TestReportEndpoint:
             "event_age_minutes": 0.0,
             "observations": [],
         })
+        mock_client = MagicMock()
+        mock_client.models.generate_content = MagicMock(return_value=MagicMock(text="No data"))
 
-        with patch("src.routes.observations_mgmt._get_report_client") as mock_factory, \
-             patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz4="):
-            mock_client = MagicMock()
-            mock_client.models.generate_content = MagicMock(return_value=MagicMock(text="No data"))
-            mock_factory.return_value = mock_client
-            resp = manage_client.post(
-                "/api/observations/manage/report",
-                json={"series_names": ["nonexistent"]},
-            )
+        manage_client.app.dependency_overrides[get_report_client] = lambda: mock_client
+        try:
+            with patch("src.reports.observations_reporter._render_chart_svg", return_value="PHN2Zz4="):
+                resp = manage_client.post(
+                    "/api/observations/manage/report",
+                    json={"series_names": ["nonexistent"]},
+                )
+        finally:
+            del manage_client.app.dependency_overrides[get_report_client]
         assert resp.status_code == 200
         data = resp.json()
         assert "markdown" in data
+
+    def test_report_endpoint_series_names_too_many_422(self, manage_client, mock_blackboard):
+        """Request validation: series_names beyond OBS_MAX_REPORT_SERIES is rejected before
+        any LLM/report work happens."""
+        too_many = [f"series_{i}" for i in range(BlackboardState.OBS_MAX_REPORT_SERIES + 1)]
+        resp = manage_client.post(
+            "/api/observations/manage/report",
+            json={"series_names": too_many},
+        )
+        assert resp.status_code == 422
+
+    def test_report_endpoint_series_names_empty_422(self, manage_client, mock_blackboard):
+        """Request validation: empty series_names is rejected (min_length=1)."""
+        resp = manage_client.post(
+            "/api/observations/manage/report",
+            json={"series_names": []},
+        )
+        assert resp.status_code == 422
+
+    def test_report_endpoint_timeout_returns_504(self, manage_client, mock_blackboard):
+        """T-8 (finding): a hang in generate_report must surface as a clean 504 with
+        timeout-specific detail, not an indefinite hang or an opaque 500."""
+        async def _hang(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        manage_client.app.dependency_overrides[get_report_client] = lambda: MagicMock()
+        try:
+            with patch("src.routes.observations_mgmt.REPORT_TIMEOUT_SECONDS", 0.05), \
+                 patch("src.reports.observations_reporter.generate_report", side_effect=_hang):
+                resp = manage_client.post(
+                    "/api/observations/manage/report",
+                    json={"series_names": ["error_count"]},
+                )
+        finally:
+            del manage_client.app.dependency_overrides[get_report_client]
+
+        assert resp.status_code == 504
+        assert "timed out" in resp.json()["detail"].lower()

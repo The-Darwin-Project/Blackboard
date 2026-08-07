@@ -16,7 +16,9 @@ import { useDeleteObservation, useRenameObservation, useBulkDeleteObservations }
 import { generateObservationsReport, exportObservations } from '../api/client';
 import ObservationCard from './ObservationCard';
 
-const MAX_REPORT_SERIES = 10;
+// Fallback only — the server (BlackboardState.OBS_MAX_REPORT_SERIES) is the source of
+// truth, delivered via ObservationsResponse.max_report_series. Used if that's unavailable.
+const FALLBACK_MAX_REPORT_SERIES = 10;
 
 export default function InsightsPage() {
   const { selectedEventId } = useOpsControl();
@@ -24,6 +26,7 @@ export default function InsightsPage() {
   const [serviceFilter, setServiceFilter] = useState<string>('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const deleteMutation = useDeleteObservation();
   const renameMutation = useRenameObservation();
@@ -67,6 +70,7 @@ export default function InsightsPage() {
   }, [deleteMutation]);
 
   const handleRename = useCallback((oldName: string, newName: string) => {
+    setActionError(null);
     renameMutation.mutate({ name: oldName, newName }, {
       onSuccess: () => {
         setSelected(prev => {
@@ -78,6 +82,7 @@ export default function InsightsPage() {
         });
         setServiceFilter('');
       },
+      onError: () => setActionError(`Rename of '${oldName}' failed. It may already exist or no longer exist.`),
     });
   }, [renameMutation]);
 
@@ -92,6 +97,7 @@ export default function InsightsPage() {
 
   const handleGenerateReport = useCallback(async () => {
     setGenerating(true);
+    setActionError(null);
     try {
       const { markdown, filename } = await generateObservationsReport([...selected]);
       const blob = new Blob([markdown], { type: 'text/markdown' });
@@ -101,34 +107,46 @@ export default function InsightsPage() {
       a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
+    } catch {
+      setActionError('Report generation failed. Please try again.');
     } finally {
       setGenerating(false);
     }
   }, [selected]);
 
   const handleExport = useCallback(async (format: 'csv' | 'json') => {
-    const names = selected.size > 0 ? [...selected] : undefined;
-    const result = await exportObservations(format, names);
-    const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content, null, 2);
-    const blob = new Blob([content], { type: format === 'csv' ? 'text/csv' : 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = result.filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    setActionError(null);
+    try {
+      const names = selected.size > 0 ? [...selected] : undefined;
+      const result = await exportObservations(format, names);
+      const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content, null, 2);
+      const blob = new Blob([content], { type: format === 'csv' ? 'text/csv' : 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setActionError('Export failed. Please try again.');
+    }
   }, [selected]);
 
   const handleExportSingle = useCallback(async (name: string) => {
-    const result = await exportObservations('csv', [name]);
-    const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content, null, 2);
-    const blob = new Blob([content], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = result.filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    setActionError(null);
+    try {
+      const result = await exportObservations('csv', [name]);
+      const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content, null, 2);
+      const blob = new Blob([content], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setActionError('Export failed. Please try again.');
+    }
   }, []);
 
   if (isLoading) {
@@ -167,10 +185,16 @@ export default function InsightsPage() {
     );
   }
 
-  const selectionDisabled = selected.size >= MAX_REPORT_SERIES;
+  const maxReportSeries = data?.max_report_series ?? FALLBACK_MAX_REPORT_SERIES;
+  const selectionDisabled = selected.size >= maxReportSeries;
 
   return (
     <div className="h-full overflow-y-auto p-4">
+      {actionError && (
+        <div className="mb-3 text-xs text-red-400 bg-red-600/10 border border-red-600/30 rounded px-2.5 py-1.5">
+          {actionError}
+        </div>
+      )}
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-sm font-medium text-text-primary flex items-center gap-1.5">
@@ -192,7 +216,7 @@ export default function InsightsPage() {
               <button
                 onClick={handleGenerateReport}
                 disabled={selected.size === 0 || generating}
-                title={selected.size > MAX_REPORT_SERIES ? `Maximum ${MAX_REPORT_SERIES} series` : selected.size === 0 ? 'Select series first' : 'Generate analysis report'}
+                title={selected.size > maxReportSeries ? `Maximum ${maxReportSeries} series` : selected.size === 0 ? 'Select series first' : 'Generate analysis report'}
                 className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 {generating ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />}
@@ -253,6 +277,7 @@ export default function InsightsPage() {
             key={series.name}
             series={series}
             namePattern={data?.name_pattern}
+            maxReportSeries={maxReportSeries}
             selected={selected.has(series.name)}
             selectionDisabled={selectionDisabled}
             onToggleSelect={!isEventMode ? toggleSelect : undefined}

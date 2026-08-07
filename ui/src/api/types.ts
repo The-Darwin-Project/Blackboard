@@ -575,6 +575,8 @@ export interface ObservationsResponse {
   observations: ObservationSeries[];
   /** Server-authoritative regex (as a string) for valid observation series names. */
   name_pattern: string;
+  /** Server-authoritative cap on series selectable for a single report. */
+  max_report_series: number;
 }
 
 // =============================================================================

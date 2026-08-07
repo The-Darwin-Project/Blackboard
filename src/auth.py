@@ -8,6 +8,8 @@
 # 6. [Pattern]: require_auth is a FastAPI Depends() that enforces named identity (raises 401 if anonymous).
 # 7. [Pattern]: Trusted-proxy path (TRUSTED_PROXY_ENABLED) is checked BEFORE JWT. Uses hmac.compare_digest for timing-safe secret comparison.
 # 8. [Gotcha]: TRUSTED_PROXY_ENABLED and TRUSTED_PROXY_SECRET are read at import time. Tests must patch module constants directly, not env vars.
+# 9. [Pattern]: require_obs_admin layers a group-membership check on top of require_auth for
+#    irreversible/global-scope mutation endpoints. Fails closed (403) if OBS_ADMIN_GROUPS is unset.
 """User identity domain -- pure JWT validation and UserContext abstraction.
 
 When dex.enabled=false (default): returns anonymous UserContext for Dashboard users.
@@ -38,6 +40,12 @@ DEX_CLIENT_ID = os.getenv("DEX_CLIENT_ID", "darwin-dashboard")
 
 TRUSTED_PROXY_ENABLED = os.getenv("TRUSTED_PROXY_ENABLED", "false").lower() == "true"
 TRUSTED_PROXY_SECRET = os.getenv("TRUSTED_PROXY_SECRET", "")
+
+# Dex groups (JWT "groups" claim, see _claims_to_user) allowed to perform irreversible,
+# global-scope observation-series mutations (delete/rename/bulk-delete). Comma-separated.
+OBS_ADMIN_GROUPS = frozenset(
+    g.strip() for g in os.getenv("OBS_ADMIN_GROUPS", "").split(",") if g.strip()
+)
 
 _oidc_adapter: OIDCKeyAdapter | None = None
 
@@ -176,4 +184,29 @@ async def require_auth(request: Request) -> UserContext:
     user = get_user_from_request(request)
     if not user.email:
         raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+async def require_obs_admin(request: Request) -> UserContext:
+    """FastAPI Depends() -- enforces named identity AND observation-admin group membership.
+
+    Layered on top of require_auth. Use on irreversible, global (cross-event) mutation
+    endpoints -- e.g. observation delete/rename/bulk-delete -- where proving the caller is
+    *someone* is not enough: these operations have no per-caller ownership to check, unlike
+    e.g. event-scoped overrides gated by created_by_email.
+
+    Fails closed: if OBS_ADMIN_GROUPS is unset, every request is denied (403) rather than
+    silently falling back to identity-only auth. Operators must explicitly configure the
+    allowed Dex groups via the OBS_ADMIN_GROUPS env var to enable these endpoints.
+    """
+    from fastapi import HTTPException
+
+    user = await require_auth(request)
+    if not OBS_ADMIN_GROUPS or OBS_ADMIN_GROUPS.isdisjoint(user.roles):
+        logger.warning(
+            "Denied observation-admin action for %s: roles=%s do not intersect configured "
+            "OBS_ADMIN_GROUPS=%s",
+            user.email, user.roles, sorted(OBS_ADMIN_GROUPS),
+        )
+        raise HTTPException(status_code=403, detail="Observation-admin group membership required")
     return user

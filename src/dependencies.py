@@ -4,9 +4,12 @@
 # 2. [Constraint]: get_kargo_observer/get_argocd_observer are the canonical accessors for REST routes.
 #    Also set on dashboard_adapter and brain.agents.
 # 3. [Constraint]: No UI imports. This module is a FastAPI dependency injection boundary.
+# 4. [Pattern]: get_report_client() is a plain (non-async) Depends() factory -- routes swap it
+#    via app.dependency_overrides in tests instead of patching genai.Client construction.
 """FastAPI dependency injection for Darwin Blackboard."""
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 from .state.blackboard import BlackboardState
@@ -178,3 +181,21 @@ def set_pulse_tracker(tracker) -> None:
 
 async def get_pulse_tracker():
     return _pulse_tracker
+
+
+# genai report client (observations management LLM report generation)
+
+def get_report_client():
+    """Create a genai Client for observation-report generation.
+
+    Plain Depends() factory (not async, no cached global instance -- client construction is
+    cheap/stateless) so routes can override it via app.dependency_overrides in tests instead
+    of patching module-level construction.
+    """
+    from google import genai
+
+    return genai.Client(
+        vertexai=True,
+        project=os.getenv("GCP_PROJECT", ""),
+        location=os.getenv("GCP_LOCATION", "global"),
+    )

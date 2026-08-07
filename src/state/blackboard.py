@@ -2855,6 +2855,12 @@ return 1
     # hand-duplicates this rule out of sync with the backend.
     OBS_NAME_PATTERN = r'^[a-z][a-z0-9_]{1,63}$'
 
+    # Single source of truth for the "series per report" cap. Consumed by
+    # ReportRequest.series_names (max_length), observations_reporter's selection slice,
+    # and served to the frontend via list_observations()["max_report_series"] so
+    # InsightsPage.tsx/ObservationCard.tsx never hand-duplicate this number.
+    OBS_MAX_REPORT_SERIES = 10
+
     async def record_observation(
         self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
     ) -> dict:
@@ -2998,6 +3004,7 @@ return 1
             "event_age_minutes": event_age_minutes,
             "observations": series_list,
             "name_pattern": self.OBS_NAME_PATTERN,
+            "max_report_series": self.OBS_MAX_REPORT_SERIES,
         }
 
     async def _obs_keys_for_event(self, event_id: str, name: str | None = None) -> dict[str, str]:

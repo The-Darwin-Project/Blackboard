@@ -3,7 +3,9 @@
 # 1. [Pattern]: LLM pipeline: N per-series (parallel, return_exceptions) + 1 cross-series summary.
 # 2. [Constraint]: matplotlib chart rendering via asyncio.to_thread — NEVER block the event loop.
 # 3. [Pattern]: _sample_points(max_n=50) for LLM input — uniform downsampling.
-# 4. [Constraint]: 30s asyncio.timeout per LLM call. Failed series get placeholder text.
+# 4. [Constraint]: 30s asyncio.timeout per LLM call, 15s per chart render. Failures get
+#    placeholder text/blank chart rather than propagating -- keeps the caller's outer 90s
+#    report timeout (observations_mgmt.py) from being consumed by any single slow step.
 # 5. [Pattern]: Charts use dark theme matching Darwin UI (bg=#0f172a).
 """LLM-powered observation analysis report with embedded SVG charts."""
 from __future__ import annotations
@@ -18,7 +20,11 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib.figure import Figure
 
+from ..state.blackboard import BlackboardState
+
 logger = logging.getLogger(__name__)
+
+_CHART_RENDER_TIMEOUT = 15
 
 _SERIES_PROMPT = (
     "Analyze this operational time series from a Kubernetes/CI platform. "
@@ -111,6 +117,18 @@ def _render_chart_svg(series: dict) -> str:
     return base64.b64encode(buf.read()).decode()
 
 
+async def _render_chart_with_timeout(series: dict) -> str:
+    """Bound chart rendering to _CHART_RENDER_TIMEOUT so one slow render can't silently
+    consume the caller's whole outer report timeout. Returns "" (chart omitted) on timeout,
+    matching the existing missing-chart handling in _assemble_report."""
+    try:
+        async with asyncio.timeout(_CHART_RENDER_TIMEOUT):
+            return await asyncio.to_thread(_render_chart_svg, series)
+    except TimeoutError:
+        logger.warning("Chart render timed out after %ss for series %s", _CHART_RENDER_TIMEOUT, series.get("name"))
+        return ""
+
+
 def _assemble_report(
     summary: str,
     analyses: list[str],
@@ -162,7 +180,9 @@ async def generate_report(
     """Generate an LLM-powered analysis report for selected observation series."""
     obs_data = await blackboard.list_observations()
     name_set = set(series_names)
-    selected = [s for s in obs_data.get("observations", []) if s["name"] in name_set][:10]
+    selected = [s for s in obs_data.get("observations", []) if s["name"] in name_set][
+        :BlackboardState.OBS_MAX_REPORT_SERIES
+    ]
 
     if not selected:
         return _assemble_report(
@@ -193,7 +213,7 @@ async def generate_report(
         summary = "Cross-series summary unavailable."
 
     charts_raw = await asyncio.gather(
-        *[asyncio.to_thread(_render_chart_svg, s) for s in selected],
+        *[_render_chart_with_timeout(s) for s in selected],
         return_exceptions=True,
     )
     charts: list[str] = []

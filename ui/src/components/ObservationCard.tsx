@@ -22,9 +22,14 @@ const TREND_CONFIG = {
 // truth, delivered via ObservationsResponse.name_pattern. Used if that's unavailable.
 const FALLBACK_OBS_NAME_PATTERN = '^[a-z][a-z0-9_]{1,63}$';
 
+// Fallback only — the server (BlackboardState.OBS_MAX_REPORT_SERIES) is the source of
+// truth, delivered via ObservationsResponse.max_report_series. Used if that's unavailable.
+const FALLBACK_MAX_REPORT_SERIES = 10;
+
 interface Props {
   series: ObservationSeries;
   namePattern?: string;
+  maxReportSeries?: number;
   selected?: boolean;
   selectionDisabled?: boolean;
   onToggleSelect?: (name: string) => void;
@@ -34,12 +39,17 @@ interface Props {
 }
 
 export default function ObservationCard({
-  series, namePattern, selected, selectionDisabled, onToggleSelect, onDelete, onRename, onExport,
+  series, namePattern, maxReportSeries, selected, selectionDisabled, onToggleSelect, onDelete, onRename, onExport,
 }: Props) {
-  const nameRe = useMemo(
-    () => new RegExp(namePattern || FALLBACK_OBS_NAME_PATTERN),
-    [namePattern],
-  );
+  const nameRe = useMemo(() => {
+    // Guard against a future backend regex change that's Python-valid but JS-invalid --
+    // fall back rather than throwing inside this render-path useMemo.
+    try {
+      return new RegExp(namePattern || FALLBACK_OBS_NAME_PATTERN);
+    } catch {
+      return new RegExp(FALLBACK_OBS_NAME_PATTERN);
+    }
+  }, [namePattern]);
   const { icon: TrendIcon, color: trendColor, label: trendLabel } = TREND_CONFIG[series.trend];
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -87,7 +97,7 @@ export default function ObservationCard({
               type="checkbox"
               checked={selected ?? false}
               disabled={selectionDisabled && !selected}
-              title={selectionDisabled && !selected ? 'Maximum 10 series per report' : undefined}
+              title={selectionDisabled && !selected ? `Maximum ${maxReportSeries ?? FALLBACK_MAX_REPORT_SERIES} series per report` : undefined}
               onChange={() => onToggleSelect(series.name)}
               className="accent-amber-500 flex-shrink-0"
             />
