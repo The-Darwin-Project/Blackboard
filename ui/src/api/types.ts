@@ -576,6 +576,25 @@ export interface ObservationsResponse {
 }
 
 // =============================================================================
+// Observation Management
+// =============================================================================
+
+export interface ReportResponse {
+  markdown: string;
+  filename: string;
+  series_count: number;
+  generated_at: string;
+}
+
+export interface RenameRequest {
+  new_name: string;
+}
+
+export interface BulkDeleteRequest {
+  names: string[];
+}
+
+// =============================================================================
 // Agent Registry (connected sidecars)
 // =============================================================================
 

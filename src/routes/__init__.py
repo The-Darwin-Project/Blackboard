@@ -18,6 +18,7 @@ from .jira import router as jira_router
 from .notebook import router as notebook_router
 from .observations import router as observations_router
 from .observations import global_router as observations_global_router
+from .observations_mgmt import mgmt_router as observations_mgmt_router
 
 __all__ = [
     "chat_router",
@@ -30,6 +31,7 @@ __all__ = [
     "notebook_router",
     "observations_router",
     "observations_global_router",
+    "observations_mgmt_router",
     "queue_router",
     "reports_router",
     "shifts_router",

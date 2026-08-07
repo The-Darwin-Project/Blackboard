@@ -43,6 +43,7 @@ from .routes import (
     notebook_router,
     observations_router,
     observations_global_router,
+    observations_mgmt_router,
     queue_router,
     reports_router,
     shifts_router,
@@ -790,6 +791,7 @@ app.include_router(queue_router)
 app.include_router(notebook_router)
 app.include_router(observations_router)
 app.include_router(observations_global_router)
+app.include_router(observations_mgmt_router)
 app.include_router(cognitive_graph_router)
 app.include_router(journal_router)
 app.include_router(chat_router)
