@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,8 @@ def _render_chart_svg(series: dict) -> str:
     epochs = [p["epoch"] for p in points]
     values = [p["value"] for p in points]
 
-    fig, ax = plt.subplots(figsize=(6, 2))
+    fig = Figure(figsize=(6, 2))
+    ax = fig.add_subplot(111)
     fig.patch.set_facecolor("#0f172a")
     ax.set_facecolor("#0f172a")
     ax.plot(epochs, values, color=color, linewidth=1.2)
@@ -106,7 +107,6 @@ def _render_chart_svg(series: dict) -> str:
 
     buf = io.BytesIO()
     fig.savefig(buf, format="svg", bbox_inches="tight", facecolor="#0f172a", edgecolor="none")
-    plt.close(fig)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode()
 

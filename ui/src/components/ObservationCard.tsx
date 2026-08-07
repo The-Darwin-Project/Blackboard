@@ -7,7 +7,7 @@
 /**
  * Single observation series card with sparkline, kebab menu, and selection checkbox.
  */
-import { useState, useRef, useEffect } from 'react';
+import { useMemo, useState, useRef, useEffect } from 'react';
 import { LineChart, Line, ResponsiveContainer, Tooltip, YAxis } from 'recharts';
 import { TrendingUp, TrendingDown, Minus, MoreVertical, Pencil, Trash2, Download } from 'lucide-react';
 import type { ObservationSeries } from '../api/types';
@@ -18,10 +18,13 @@ const TREND_CONFIG = {
   stable: { icon: Minus, color: '#64748b', label: 'Stable' },
 } as const;
 
-const OBS_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
+// Fallback only — the server (BlackboardState.OBS_NAME_PATTERN) is the source of
+// truth, delivered via ObservationsResponse.name_pattern. Used if that's unavailable.
+const FALLBACK_OBS_NAME_PATTERN = '^[a-z][a-z0-9_]{1,63}$';
 
 interface Props {
   series: ObservationSeries;
+  namePattern?: string;
   selected?: boolean;
   selectionDisabled?: boolean;
   onToggleSelect?: (name: string) => void;
@@ -31,8 +34,12 @@ interface Props {
 }
 
 export default function ObservationCard({
-  series, selected, selectionDisabled, onToggleSelect, onDelete, onRename, onExport,
+  series, namePattern, selected, selectionDisabled, onToggleSelect, onDelete, onRename, onExport,
 }: Props) {
+  const nameRe = useMemo(
+    () => new RegExp(namePattern || FALLBACK_OBS_NAME_PATTERN),
+    [namePattern],
+  );
   const { icon: TrendIcon, color: trendColor, label: trendLabel } = TREND_CONFIG[series.trend];
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -57,8 +64,8 @@ export default function ObservationCard({
   const commitRename = () => {
     const trimmed = renameValue.trim();
     if (trimmed === series.name) { setRenaming(false); return; }
-    if (!OBS_NAME_RE.test(trimmed)) {
-      setRenameError('Must match ^[a-z][a-z0-9_]{1,63}$');
+    if (!nameRe.test(trimmed)) {
+      setRenameError(`Must match ${namePattern || FALLBACK_OBS_NAME_PATTERN}`);
       return;
     }
     setRenameError('');

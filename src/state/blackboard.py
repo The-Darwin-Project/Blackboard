@@ -2850,6 +2850,11 @@ return 1
     OBS_INDEX_KEY = "darwin:obs:_index"
     OBS_RETENTION_SECONDS = 604800  # 7 days
 
+    # Single source of truth for observation series name validation. Served to the
+    # frontend via list_observations()["name_pattern"] so ObservationCard.tsx never
+    # hand-duplicates this rule out of sync with the backend.
+    OBS_NAME_PATTERN = r'^[a-z][a-z0-9_]{1,63}$'
+
     async def record_observation(
         self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
     ) -> dict:
@@ -2992,6 +2997,7 @@ return 1
             "event_opened": event_opened,
             "event_age_minutes": event_age_minutes,
             "observations": series_list,
+            "name_pattern": self.OBS_NAME_PATTERN,
         }
 
     async def _obs_keys_for_event(self, event_id: str, name: str | None = None) -> dict[str, str]:
@@ -3020,7 +3026,7 @@ return 1
 
     _OBS_RESERVED_NAMES = frozenset({"_index"})
 
-    _OBS_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{1,63}$')
+    _OBS_NAME_RE = re.compile(OBS_NAME_PATTERN)
 
     @classmethod
     def validate_obs_name(cls, name: str) -> str:
@@ -3029,7 +3035,7 @@ return 1
             raise ValueError(f"Reserved observation name: '{name}'")
         if not cls._OBS_NAME_RE.match(name):
             raise ValueError(
-                f"Invalid observation name: must match ^[a-z][a-z0-9_]{{1,63}}$"
+                f"Invalid observation name: must match {cls.OBS_NAME_PATTERN}"
             )
         return name
 
@@ -3049,6 +3055,8 @@ return 1
 
         Returns True on success. Raises ValueError on not-found or collision.
         """
+        if old_name in self._OBS_RESERVED_NAMES or new_name in self._OBS_RESERVED_NAMES:
+            raise ValueError(f"Observation '{old_name}' not found")
         result = await self._rename_obs_script(
             keys=[
                 f"{self.OBS_GLOBAL_PREFIX}{old_name}",

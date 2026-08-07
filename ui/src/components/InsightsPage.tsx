@@ -252,6 +252,7 @@ export default function InsightsPage() {
           <ObservationCard
             key={series.name}
             series={series}
+            namePattern={data?.name_pattern}
             selected={selected.has(series.name)}
             selectionDisabled={selectionDisabled}
             onToggleSelect={!isEventMode ? toggleSelect : undefined}

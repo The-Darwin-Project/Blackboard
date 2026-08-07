@@ -573,6 +573,8 @@ export interface ObservationsResponse {
   event_opened: string;
   event_age_minutes: number;
   observations: ObservationSeries[];
+  /** Server-authoritative regex (as a string) for valid observation series names. */
+  name_pattern: string;
 }
 
 // =============================================================================

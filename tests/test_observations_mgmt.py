@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import pytest
+import fakeredis.aioredis
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
@@ -109,6 +110,45 @@ class TestRenameObservation:
         )
         with pytest.raises(ValueError, match="already exists"):
             await bb.rename_observation("old_name", "existing")
+
+
+class TestRenameObservationIndexGuard:
+    """Real BlackboardState + fakeredis (no mocking of rename_observation itself) —
+    exercises the actual Lua script to regression-test the reserved-index-key
+    data-corruption bug: renaming `_index` used to alias the global index SET
+    itself, so the RENAME/SREM/SADD calls in the script destroyed it."""
+
+    @pytest.fixture
+    async def bb(self):
+        redis = fakeredis.aioredis.FakeRedis()
+        state = BlackboardState(redis)
+        await redis.zadd("darwin:obs:series_a", {"m1": 1})
+        await redis.sadd(state.OBS_INDEX_KEY, "series_a")
+        await redis.zadd("darwin:obs:series_b", {"m2": 2})
+        await redis.sadd(state.OBS_INDEX_KEY, "series_b")
+        return state
+
+    @pytest.mark.asyncio
+    async def test_rename_from_reserved_index_name_is_rejected(self, bb):
+        """Renaming the reserved `_index` source name must be rejected, not corrupt
+        the global index."""
+        with pytest.raises(ValueError, match="not found"):
+            await bb.rename_observation("_index", "pwned")
+
+        # The global index set must still contain both real series untouched.
+        members = {m.decode() if isinstance(m, bytes) else m
+                   for m in await bb.redis.smembers(bb.OBS_INDEX_KEY)}
+        assert members == {"series_a", "series_b"}
+        assert await bb.redis.exists(bb.OBS_INDEX_KEY)
+
+    @pytest.mark.asyncio
+    async def test_rename_to_reserved_index_name_is_rejected(self, bb):
+        """Renaming a real series *to* the reserved `_index` name must also be
+        rejected (defense in depth against a caller bypassing route-level validation)."""
+        with pytest.raises(ValueError, match="not found"):
+            await bb.rename_observation("series_a", "_index")
+
+        assert await bb.redis.exists("darwin:obs:series_a")
 
 
 # =========================================================================
@@ -400,6 +440,125 @@ class TestBulkDeleteEndpoint:
         )
         assert resp.status_code == 200
         assert resp.json()["deleted"] == 0
+
+
+# =========================================================================
+# Routes: GET /api/observations/manage/export
+# =========================================================================
+
+class TestExportEndpoint:
+    @staticmethod
+    def _seed_two_series(mock_blackboard):
+        mock_blackboard.list_observations = AsyncMock(return_value={
+            "event_id": "",
+            "event_opened": "",
+            "event_age_minutes": 0.0,
+            "name_pattern": "^[a-z][a-z0-9_]{1,63}$",
+            "observations": [
+                {
+                    "name": "error_count",
+                    "count": 2,
+                    "min": 1.0,
+                    "max": 3.0,
+                    "latest_value": 3.0,
+                    "unit": "count",
+                    "first_at": "2026-08-05T00:00:00Z",
+                    "last_at": "2026-08-07T00:00:00Z",
+                    "span_minutes": 2880.0,
+                    "trend": "rising",
+                    "points": [
+                        {"timestamp": "2026-08-05T00:00:00Z", "value": 1.0, "unit": "count",
+                         "service": "svc-a", "event_id": "evt-1"},
+                        {"timestamp": "2026-08-07T00:00:00Z", "value": 3.0, "unit": "count",
+                         "service": "svc-a", "event_id": "evt-1"},
+                    ],
+                },
+                {
+                    "name": "latency_ms",
+                    "count": 1,
+                    "min": 42.0,
+                    "max": 42.0,
+                    "latest_value": 42.0,
+                    "unit": "ms",
+                    "first_at": "2026-08-06T00:00:00Z",
+                    "last_at": "2026-08-06T00:00:00Z",
+                    "span_minutes": 0.0,
+                    "trend": "stable",
+                    "points": [
+                        {"timestamp": "2026-08-06T00:00:00Z", "value": 42.0, "unit": "ms",
+                         "service": "svc-b", "event_id": "evt-2"},
+                    ],
+                },
+            ],
+        })
+
+    def test_export_csv_default_all_series(self, manage_client, mock_blackboard):
+        """CSV export with no `names` filter includes every series's points as rows."""
+        self._seed_two_series(mock_blackboard)
+        resp = manage_client.get("/api/observations/manage/export", params={"format": "csv"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["format"] == "csv"
+        assert data["filename"].endswith(".csv")
+        lines = data["content"].strip().splitlines()
+        assert lines[0] == "name,timestamp,value,unit,trend,service,event_id"
+        # 2 points for error_count + 1 point for latency_ms = 3 data rows.
+        assert len(lines) == 4
+        assert any(row.startswith("error_count,") for row in lines[1:])
+        assert any(row.startswith("latency_ms,") for row in lines[1:])
+
+    def test_export_csv_names_filter(self, manage_client, mock_blackboard):
+        """CSV export with `names` narrows to the requested series only."""
+        self._seed_two_series(mock_blackboard)
+        resp = manage_client.get(
+            "/api/observations/manage/export",
+            params={"format": "csv", "names": "latency_ms"},
+        )
+        assert resp.status_code == 200
+        lines = resp.json()["content"].strip().splitlines()
+        assert len(lines) == 2  # header + 1 point
+        assert "latency_ms" in lines[1]
+        assert "error_count" not in lines[1]
+
+    def test_export_json_default(self, manage_client, mock_blackboard):
+        """JSON export (default format) returns series summaries with points."""
+        self._seed_two_series(mock_blackboard)
+        resp = manage_client.get("/api/observations/manage/export")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["format"] == "json"
+        assert data["filename"].endswith(".json")
+        content = data["content"]
+        assert content["series_count"] == 2
+        names = {s["name"] for s in content["series"]}
+        assert names == {"error_count", "latency_ms"}
+        error_series = next(s for s in content["series"] if s["name"] == "error_count")
+        assert error_series["min"] == 1.0
+        assert error_series["max"] == 3.0
+        assert len(error_series["points"]) == 2
+
+    def test_export_json_names_filter(self, manage_client, mock_blackboard):
+        """JSON export honors the `names` filter, excluding non-matching series."""
+        self._seed_two_series(mock_blackboard)
+        resp = manage_client.get(
+            "/api/observations/manage/export",
+            params={"format": "json", "names": "error_count"},
+        )
+        assert resp.status_code == 200
+        content = resp.json()["content"]
+        assert content["series_count"] == 1
+        assert content["series"][0]["name"] == "error_count"
+
+    def test_export_no_series(self, manage_client, mock_blackboard):
+        """Export with zero matching series returns an empty, well-formed payload."""
+        mock_blackboard.list_observations = AsyncMock(return_value={
+            "event_id": "", "event_opened": "", "event_age_minutes": 0.0,
+            "observations": [],
+        })
+        resp = manage_client.get("/api/observations/manage/export", params={"format": "csv"})
+        assert resp.status_code == 200
+        lines = resp.json()["content"].strip().splitlines()
+        assert lines == ["name,timestamp,value,unit,trend,service,event_id"]
 
 
 # =========================================================================
