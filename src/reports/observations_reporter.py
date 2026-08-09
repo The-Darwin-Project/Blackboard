@@ -48,9 +48,13 @@ def _sample_points(points: list[dict], max_n: int = 50) -> list[dict]:
 
 async def _analyze_series(client, model: str, series: dict) -> str:
     sampled = _sample_points(series["points"])
-    data_block = "\n".join(
-        f"  {p['timestamp']}  {p['value']} {series.get('unit', '')}" for p in sampled
-    )
+    data_lines = []
+    for p in sampled:
+        line = f"  {p['timestamp']}  {p['value']} {series.get('unit', '')}"
+        if p.get("reason"):
+            line += f"  -- {p['reason']}"
+        data_lines.append(line)
+    data_block = "\n".join(data_lines)
     prompt = (
         f"Series: {series['name']}\n"
         f"Trend: {series['trend']} | Range: {series['min']}-{series['max']} "

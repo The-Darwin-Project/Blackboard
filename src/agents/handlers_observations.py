@@ -35,7 +35,8 @@ async def handle_record_observation(
         return True
     value = args.get("value", 0)
     unit = args.get("unit", "")
-    result = await ctx.get_blackboard().record_observation(event_id, name, value, unit)
+    reason = args.get("reason", "")
+    result = await ctx.get_blackboard().record_observation(event_id, name, value, unit, reason=reason)
     turn = ConversationTurn(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain",
