@@ -1130,14 +1130,13 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "record_observation",
         "description": (
-            "Record a numeric observation to an EXISTING time series or a canonical "
-            "series name. Trajectories emerge across sampling intervals — record once "
-            "per measurement cycle, then evaluate (defer, close, or dispatch). "
-            "Before recording, mentally check: will this same metric name "
-            "be recorded again in future events for this service? If not, use take_note "
-            "instead. Reuse existing series names from list_observations. "
-            "Canonical names: pipeline_duration_m, kueue_wait_m, s390x_build_duration_m, "
-            "error_count, pod_restart_count, promotion_duration_m."
+            "Record a numeric measurement with operational context. Each point captures "
+            "both the value AND your reasoning at the moment of observation — why this "
+            "number matters right now, what caused it, or what you're tracking. This context "
+            "persists in the time series and surfaces in analysis reports, eliminating the "
+            "need to re-investigate historical data points. "
+            "Use EXISTING series names (check list_observations first) or canonical names. "
+            "Record once per measurement cycle, then evaluate (defer, close, or dispatch)."
         ),
         "input_schema": {
             "type": "object",
@@ -1156,6 +1155,17 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                 "unit": {
                     "type": "string",
                     "description": "Optional unit label (e.g. 'ms', '%', 'count', 'replicas')",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Brief operational context for THIS specific data point — what caused "
+                        "this value, what you observed, or why it's significant. Examples: "
+                        "'arm64 remote host provisioning timeout after 3 retries', "
+                        "'post-fix baseline after helm rollback', "
+                        "'s390x quota saturated, 4 pipelines queued'. "
+                        "Omit for routine readings where context is obvious from the event."
+                    ),
                 },
             },
             "required": ["name", "value"],

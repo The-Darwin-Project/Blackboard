@@ -2863,11 +2863,15 @@ return 1
 
     async def record_observation(
         self, event_id: str, name: str, value: float, unit: str, brain_phase: str = "",
+        reason: str = "",
     ) -> dict:
         """Record a numeric observation to both event-scoped and global timelines.
 
         If brain_phase is empty, derives it from the event document (single GET).
+        Reason is URL-encoded to avoid colon conflicts in the member format.
         """
+        from urllib.parse import quote as url_quote
+
         now = time.time()
         event = await self.get_event(event_id)
         if not brain_phase and event:
@@ -2877,8 +2881,9 @@ return 1
         if event:
             service = getattr(event, "service", "") or ""
 
+        reason_encoded = url_quote(reason, safe="") if reason else ""
         iso = datetime.utcfromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%SZ")
-        member = f"{iso}:{value}:{unit}:{brain_phase}:{event_id}:{service}"
+        member = f"{iso}:{value}:{unit}:{brain_phase}:{event_id}:{service}:{reason_encoded}"
 
         event_key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
         global_key = f"{self.OBS_GLOBAL_PREFIX}{name}"
@@ -3080,28 +3085,38 @@ return 1
 
     @staticmethod
     def _parse_obs_member(m: str, score: float) -> dict:
-        """Parse 6-segment member format: {iso}:{value}:{unit}:{phase}:{event_id}:{service}.
+        """Parse 7-segment member format: {iso}:{value}:{unit}:{phase}:{event_id}:{service}:{reason_encoded}.
 
-        Falls back to 4-segment legacy format for pre-migration data.
+        Falls back to 6-segment (no reason) and 4-segment legacy format for pre-migration data.
         """
-        segs = m.rsplit(":", 5)
-        if len(segs) == 6:
-            ts_str, val_str, u, ph, eid, svc = segs
+        from urllib.parse import unquote as url_unquote
+
+        segs = m.rsplit(":", 6)
+        if len(segs) == 7:
+            ts_str, val_str, u, ph, eid, svc, reason_enc = segs
+            reason = url_unquote(reason_enc) if reason_enc else ""
+        elif len(segs) >= 6:
+            segs6 = m.rsplit(":", 5)
+            ts_str, val_str, u, ph, eid, svc = segs6
+            reason = ""
         else:
             segs4 = m.rsplit(":", 3)
             if len(segs4) == 4:
                 ts_str, val_str, u, ph = segs4
             else:
                 ts_str, val_str, u, ph = m, "0", "", ""
-            eid, svc = "", ""
+            eid, svc, reason = "", "", ""
         try:
             v = float(val_str)
         except ValueError:
             v = 0.0
-        return {
+        result = {
             "timestamp": ts_str, "epoch": score, "value": v,
             "unit": u, "phase": ph, "event_id": eid, "service": svc,
         }
+        if reason:
+            result["reason"] = reason
+        return result
 
     async def get_observation_summary(self, event_id: str) -> Optional[dict]:
         """Compact observation summary for Archivist archival. Returns None if no observations."""
