@@ -418,6 +418,12 @@ obsAdmin:
   groups: "" # CSV of OCP group names (Dex "groups" claim) -- set in GitOps overlay.
   # require_obs_admin fails closed (403) while this is empty.
 # =============================================================================
+# Trusted Proxy (Release Console BFF → Darwin Brain WS auth)
+# =============================================================================
+trustedProxy:
+  existingSecret: "" # K8s Secret with keys "enabled" and "secret". Set in GitOps overlay.
+                     # When empty: trusted-proxy auth path is disabled (Dex-only).
+# =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
 ephemeralAgents:
