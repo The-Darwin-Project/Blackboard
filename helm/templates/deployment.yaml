@@ -527,6 +527,16 @@ spec:
             - name: OBS_ADMIN_GROUPS
               value: {{ .Values.obsAdmin.groups | quote }}
             {{- end }}
+            {{- if .Values.trustedProxy.existingSecret }}
+            # Trusted Proxy (Release Console BFF auth)
+            - name: TRUSTED_PROXY_ENABLED
+              value: "true"
+            - name: TRUSTED_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.trustedProxy.existingSecret }}
+                  key: secret
+            {{- end }}
             {{- if and .Values.jira.enabled .Values.jira.existingSecret }}
             # Jira Integration (Headhunter Jira Head)
             - name: JIRA_URL
