@@ -3103,15 +3103,22 @@ return 1
             reason_enc = segs[6] if len(segs) > 6 else ""
             reason = url_unquote(reason_enc) if reason_enc else ""
         else:
-            segs = m.rsplit(":", 5)
-            if len(segs) == 6:
+            # Legacy colon format. Count colons to determine field count:
+            # 4-field (legacy): {iso}:{val}:{unit}:{phase} — 5 colons (2 in timestamp + 3 separators)
+            # 6-field: {iso}:{val}:{unit}:{phase}:{eid}:{svc} — 7 colons (2 in timestamp + 5 separators)
+            # 7-field (broken, briefly deployed): adds :reason — 8+ colons
+            colon_count = m.count(":")
+            if colon_count >= 7:
+                # 6-field format: rsplit by 5 to preserve timestamp colons
+                segs = m.rsplit(":", 5)
                 ts_str, val_str, u, ph, eid, svc = segs
+            elif colon_count >= 5:
+                # 4-field with timestamp: rsplit by 3
+                segs = m.rsplit(":", 3)
+                ts_str, val_str, u, ph = segs
+                eid, svc = "", ""
             else:
-                segs4 = m.rsplit(":", 3)
-                if len(segs4) == 4:
-                    ts_str, val_str, u, ph = segs4
-                else:
-                    ts_str, val_str, u, ph = m, "0", "", ""
+                ts_str, val_str, u, ph = m, "0", "", ""
                 eid, svc = "", ""
             reason = ""
 
