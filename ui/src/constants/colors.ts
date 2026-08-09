@@ -89,10 +89,10 @@ export const AGENT_NEURON_COLORS: Record<string, string> = {
   architect: '#3b82f6', // blue
   sysadmin:  '#22c55e', // green
   developer: '#f59e0b', // amber
-  qe:        '#a855f7', // purple
+  qe:        '#fb7185', // rose (matches ACTOR_COLORS.qe -- distinct from explorer purple)
   security_analyst: '#ef4444', // red
   code_reviewer: '#f97316', // orange
-  explorer:  '#d946ef', // fuchsia (distinct from architect blue AND qe purple)
+  explorer:  '#a855f7', // purple (distinct from architect blue; matches ACTOR_COLORS.explorer)
 };
 
 /** Brain skill tag_type colors for the Cortex skill ring (ring 2, r=320) */
