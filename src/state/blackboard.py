@@ -2867,8 +2867,8 @@ return 1
     ) -> dict:
         """Record a numeric observation to both event-scoped and global timelines.
 
-        If brain_phase is empty, derives it from the event document (single GET).
-        Reason is URL-encoded to avoid colon conflicts in the member format.
+        Uses pipe '|' separator in member format to avoid collision with ISO timestamp colons.
+        Reason is URL-encoded to avoid pipe conflicts.
         """
         from urllib.parse import quote as url_quote
 
@@ -2883,7 +2883,7 @@ return 1
 
         reason_encoded = url_quote(reason, safe="") if reason else ""
         iso = datetime.utcfromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%SZ")
-        member = f"{iso}:{value}:{unit}:{brain_phase}:{event_id}:{service}:{reason_encoded}"
+        member = f"{iso}|{value}|{unit}|{brain_phase}|{event_id}|{service}|{reason_encoded}"
 
         event_key = f"{self.OBS_KEY_PREFIX}{event_id}{self.OBS_KEY_INFIX}{name}"
         global_key = f"{self.OBS_GLOBAL_PREFIX}{name}"
@@ -3085,27 +3085,43 @@ return 1
 
     @staticmethod
     def _parse_obs_member(m: str, score: float) -> dict:
-        """Parse 7-segment member format: {iso}:{value}:{unit}:{phase}:{event_id}:{service}:{reason_encoded}.
+        """Parse observation member. Pipe-separated (new) or colon-separated (legacy).
 
-        Falls back to 6-segment (no reason) and 4-segment legacy format for pre-migration data.
+        New format (pipe): {iso}|{value}|{unit}|{phase}|{event_id}|{service}|{reason_encoded}
+        Legacy format (colon): {iso}:{value}:{unit}:{phase}:{event_id}:{service}
         """
         from urllib.parse import unquote as url_unquote
 
-        segs = m.rsplit(":", 6)
-        if len(segs) == 7:
-            ts_str, val_str, u, ph, eid, svc, reason_enc = segs
+        if "|" in m:
+            segs = m.split("|")
+            ts_str = segs[0] if len(segs) > 0 else ""
+            val_str = segs[1] if len(segs) > 1 else "0"
+            u = segs[2] if len(segs) > 2 else ""
+            ph = segs[3] if len(segs) > 3 else ""
+            eid = segs[4] if len(segs) > 4 else ""
+            svc = segs[5] if len(segs) > 5 else ""
+            reason_enc = segs[6] if len(segs) > 6 else ""
             reason = url_unquote(reason_enc) if reason_enc else ""
-        elif len(segs) >= 6:
-            segs6 = m.rsplit(":", 5)
-            ts_str, val_str, u, ph, eid, svc = segs6
-            reason = ""
         else:
-            segs4 = m.rsplit(":", 3)
-            if len(segs4) == 4:
-                ts_str, val_str, u, ph = segs4
+            # Legacy colon format. Count colons to determine field count:
+            # 4-field (legacy): {iso}:{val}:{unit}:{phase} — 5 colons (2 in timestamp + 3 separators)
+            # 6-field: {iso}:{val}:{unit}:{phase}:{eid}:{svc} — 7 colons (2 in timestamp + 5 separators)
+            # 7-field (broken, briefly deployed): adds :reason — 8+ colons
+            colon_count = m.count(":")
+            if colon_count >= 7:
+                # 6-field format: rsplit by 5 to preserve timestamp colons
+                segs = m.rsplit(":", 5)
+                ts_str, val_str, u, ph, eid, svc = segs
+            elif colon_count >= 5:
+                # 4-field with timestamp: rsplit by 3
+                segs = m.rsplit(":", 3)
+                ts_str, val_str, u, ph = segs
+                eid, svc = "", ""
             else:
                 ts_str, val_str, u, ph = m, "0", "", ""
-            eid, svc, reason = "", "", ""
+                eid, svc = "", ""
+            reason = ""
+
         try:
             v = float(val_str)
         except ValueError:
