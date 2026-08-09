@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "ed1237b" # Updated by CI to commit SHA
+  tag: "ff44147" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -422,7 +422,7 @@ obsAdmin:
 # =============================================================================
 trustedProxy:
   existingSecret: "" # K8s Secret with keys "enabled" and "secret". Set in GitOps overlay.
-                     # When empty: trusted-proxy auth path is disabled (Dex-only).
+  # When empty: trusted-proxy auth path is disabled (Dex-only).
 # =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
