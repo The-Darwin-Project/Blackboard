@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "35b09ae" # Updated by CI to commit SHA
+  tag: "ed1237b" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -416,7 +416,7 @@ slackAccess:
 # =============================================================================
 obsAdmin:
   groups: "" # CSV of OCP group names (Dex "groups" claim) -- set in GitOps overlay.
-             # require_obs_admin fails closed (403) while this is empty.
+  # require_obs_admin fails closed (403) while this is empty.
 # =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
