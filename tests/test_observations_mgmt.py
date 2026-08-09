@@ -632,9 +632,9 @@ class TestReportEndpoint:
             del manage_client.app.dependency_overrides[get_report_client]
 
         assert resp.status_code == 200
-        data = resp.json()
-        assert "markdown" in data
-        assert len(data["markdown"]) > 0
+        assert resp.headers["content-type"] == "application/pdf"
+        assert len(resp.content) > 100
+        assert resp.content[:4] == b"%PDF"
 
     def test_report_endpoint_no_observations(self, manage_client, mock_blackboard):
         """Report with no matching observations → 200 with minimal markdown."""
@@ -657,8 +657,8 @@ class TestReportEndpoint:
         finally:
             del manage_client.app.dependency_overrides[get_report_client]
         assert resp.status_code == 200
-        data = resp.json()
-        assert "markdown" in data
+        assert resp.headers["content-type"] == "application/pdf"
+        assert resp.content[:4] == b"%PDF"
 
     def test_report_endpoint_series_names_too_many_422(self, manage_client, mock_blackboard):
         """Request validation: series_names beyond OBS_MAX_REPORT_SERIES is rejected before

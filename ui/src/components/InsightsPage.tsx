@@ -99,12 +99,11 @@ export default function InsightsPage() {
     setGenerating(true);
     setActionError(null);
     try {
-      const { markdown, filename } = await generateObservationsReport([...selected]);
-      const blob = new Blob([markdown], { type: 'text/markdown' });
+      const blob = await generateObservationsReport([...selected]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename;
+      a.download = `observations-report-${new Date().toISOString().slice(0, 10)}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {

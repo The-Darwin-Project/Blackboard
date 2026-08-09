@@ -174,12 +174,13 @@ async def generate_observations_report(
     _user=Depends(require_auth),
 ):
     import asyncio
-    from ..reports.observations_reporter import generate_report
+    from ..reports.observations_reporter import generate_report, render_pdf
+    from fastapi.responses import Response
 
     model = os.getenv("LLM_MODEL_OBSERVATIONS_REPORT", "gemini-3.5-flash-lite")
     try:
         async with asyncio.timeout(REPORT_TIMEOUT_SECONDS):
-            return await generate_report(blackboard, client, model, body.series_names, body.context)
+            result = await generate_report(blackboard, client, model, body.series_names, body.context)
     except TimeoutError:
         logger.warning(
             "Observations report generation exceeded %ss timeout (series=%s)",
@@ -192,3 +193,11 @@ async def generate_observations_report(
                 "Try selecting fewer series or retry."
             ),
         )
+
+    pdf_bytes = await asyncio.to_thread(render_pdf, result["markdown"])
+    filename = result["filename"].replace(".md", ".pdf")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -689,11 +689,14 @@ export async function bulkDeleteObservations(names: string[]) {
   });
 }
 
-export async function generateObservationsReport(seriesNames: string[], context = '') {
-  return fetchApi<import('./types').ReportResponse>('/api/observations/manage/report', {
+export async function generateObservationsReport(seriesNames: string[], context = ''): Promise<Blob> {
+  const resp = await fetch('/api/observations/manage/report', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ series_names: seriesNames, context }),
   });
+  if (!resp.ok) throw new Error(`Report generation failed: ${resp.status}`);
+  return resp.blob();
 }
 
 export async function exportObservations(format: 'csv' | 'json', names?: string[]) {
