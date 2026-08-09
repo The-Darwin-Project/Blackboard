@@ -523,6 +523,10 @@ spec:
                   key: maintainer-emails
             {{- end }}
             {{- end }}
+            {{- if .Values.obsAdmin.groups }}
+            - name: OBS_ADMIN_GROUPS
+              value: {{ .Values.obsAdmin.groups | quote }}
+            {{- end }}
             {{- if and .Values.jira.enabled .Values.jira.existingSecret }}
             # Jira Integration (Headhunter Jira Head)
             - name: JIRA_URL

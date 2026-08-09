@@ -412,6 +412,12 @@ slackAccess:
   syncIntervalSeconds: 300
   existingSecret: "" # K8s Secret with key "maintainer-emails" -- set in GitOps overlay
 # =============================================================================
+# Observation Admin Gate (OCP Group-based -- gates delete/rename/bulk-delete)
+# =============================================================================
+obsAdmin:
+  groups: "" # CSV of OCP group names (Dex "groups" claim) -- set in GitOps overlay.
+             # require_obs_admin fails closed (403) while this is empty.
+# =============================================================================
 # Ephemeral Agents (On-Call via Tekton TaskRun)
 # =============================================================================
 ephemeralAgents:
