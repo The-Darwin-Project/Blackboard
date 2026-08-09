@@ -282,6 +282,41 @@ class TestCodeReviewerRouting:
         assert "code_reviewer" in create_plan_agent_schema["enum"]
 
 
+class TestExplorerRoleMaps:
+    """Explorer additions to EPHEMERAL_ONLY_ROLES, _ROLE_MODEL_MAP, _ROLE_EFFORT_MAP, _ROLE_CLI_MAP."""
+
+    def test_explorer_in_ephemeral_only_roles(self):
+        """Explorer is marked ephemeral-only (no persistent sidecar)."""
+        from src.agents.brain import Brain
+
+        assert "explorer" in Brain.EPHEMERAL_ONLY_ROLES
+
+    def test_explorer_model_map(self):
+        """Explorer resolves to gemini-3.5-flash-lite."""
+        from src.agents.brain import _ROLE_MODEL_MAP
+
+        assert _ROLE_MODEL_MAP.get("explorer") == "gemini-3.5-flash-lite"
+
+    def test_explorer_effort_map(self):
+        """Explorer effort resolves to 'low'."""
+        from src.agents.brain import _ROLE_EFFORT_MAP
+
+        assert _ROLE_EFFORT_MAP.get("explorer") == "low"
+
+    def test_explorer_cli_map(self):
+        """Explorer CLI resolves to 'gemini'."""
+        from src.agents.brain import _ROLE_CLI_MAP
+
+        assert _ROLE_CLI_MAP.get("explorer") == "gemini"
+
+    def test_other_roles_default_to_claude_cli(self):
+        """Non-explorer roles default to 'claude' via .get() fallback."""
+        from src.agents.brain import _ROLE_CLI_MAP
+
+        assert _ROLE_CLI_MAP.get("architect", "claude") == "claude"
+        assert _ROLE_CLI_MAP.get("developer", "claude") == "claude"
+
+
 class TestDeferEventSafely:
     """_defer_event_safely (C4-F5 fix): a defer_event failure must not fall through to
     _run_agent_task's outer handler's zero-backoff immediate re-enqueue."""

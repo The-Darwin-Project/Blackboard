@@ -291,7 +291,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"],
+                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer", "explorer"],
                     "description": (
                         "Which agent to route to. "
                         "security_analyst: vulnerability scanning, CVE remediation assessment, "
@@ -299,7 +299,11 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                         "Ephemeral only -- always spawns an on-call pod. "
                         "code_reviewer: structured multi-lens code review via parallel subagents "
                         "(architecture, correctness, maintainability, security, reliability, testing), "
-                        "pre-merge quality gates, severity-graded findings. Ephemeral only."
+                        "pre-merge quality gates, severity-graded findings. Ephemeral only. "
+                        "explorer: lightweight read-only probe agent. Finds information that native "
+                        "refresh tools cannot provide -- pipeline IDs by branch and commit, cluster "
+                        "state, external API status. Reports findings concisely, never implements "
+                        "fixes or takes action. Ephemeral only."
                     ),
                 },
                 "task_instruction": {
@@ -403,7 +407,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_name": {
                     "type": "string",
-                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"],
+                    "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer", "explorer"],
                     "description": "Which agent to ask",
                 },
                 "question": {
@@ -529,7 +533,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Role name of the agent to reply to: 'developer', 'qe', 'sysadmin', 'architect', 'security_analyst', or 'code_reviewer'. The system resolves this to the active agent working on the current event.",
+                    "description": "Role name of the agent to reply to: 'developer', 'qe', 'sysadmin', 'architect', 'security_analyst', 'code_reviewer', or 'explorer'. The system resolves this to the active agent working on the current event.",
                 },
                 "message": {
                     "type": "string",
@@ -547,14 +551,14 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "the message and the response appears in the conversation. Use for quick "
             "questions, status checks, and coordination -- NOT for work plans (use "
             "select_agent for those). Pass the role name: 'developer', 'qe', 'sysadmin', "
-            "'architect', 'security_analyst', or 'code_reviewer'."
+            "'architect', 'security_analyst', 'code_reviewer', or 'explorer'."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Role name of the agent to message: 'developer', 'qe', 'sysadmin', 'architect', 'security_analyst', or 'code_reviewer'. The system resolves this to the correct agent connection.",
+                    "description": "Role name of the agent to message: 'developer', 'qe', 'sysadmin', 'architect', 'security_analyst', 'code_reviewer', or 'explorer'. The system resolves this to the correct agent connection.",
                 },
                 "message": {
                     "type": "string",
@@ -687,7 +691,7 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
                             "id": {"type": "string", "description": "Step number (e.g., '1', '2')"},
                             "agent": {
                                 "type": "string",
-                                "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer"],
+                                "enum": ["architect", "sysadmin", "developer", "qe", "security_analyst", "code_reviewer", "explorer"],
                                 "description": "Which agent handles this step",
                             },
                             "summary": {"type": "string", "description": "What this step accomplishes"},

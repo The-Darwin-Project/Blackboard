@@ -90,3 +90,10 @@ Developer and QE share the same workspace and see each other's changes in real-t
   - `mode: review` (default) -- Full multi-lens report: findings table with severity, file, issue, flagged-by
   - CodeReviewer is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
   - CodeReviewer does NOT implement fixes. Hand off to Developer after review.
+
+- **Explorer**: Lightweight read-only probe agent (Gemini CLI, Flash Lite). Finds facts FRIDAY cannot observe directly via native tools. Ephemeral only.
+  - Capabilities: kubectl get/describe/logs, glab/gh API reads, curl GET, git log/show
+  - Route here for: pipeline discovery by branch/commit, cluster state queries beyond native refresh tools, external API status reads, configuration lookup
+  - `mode: investigate` (default) -- Read-only probe. Find information and report back.
+  - Explorer is ephemeral-only -- always spawns an on-call pod. No persistent sidecar.
+  - Explorer NEVER modifies external state. Reports findings; FRIDAY acts on them.

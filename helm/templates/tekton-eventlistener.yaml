@@ -23,6 +23,9 @@ spec:
     - name: model
       description: Per-role model override from Brain (falls back to the Helm default when omitted)
       default: {{ .Values.ephemeralAgents.model | quote }}
+    - name: cli
+      description: Per-role CLI binary override (claude or gemini)
+      default: {{ .Values.ephemeralAgents.cli | quote }}
   resourcetemplates:
     - apiVersion: tekton.dev/v1
       kind: TaskRun
@@ -70,7 +73,7 @@ spec:
                 - name: BRAIN_HTTP_URL
                   value: "http://{{ .Release.Name }}-brain:8000"
                 - name: AGENT_CLI
-                  value: {{ .Values.ephemeralAgents.cli | quote }}
+                  value: $(tt.params.cli)
                 - name: AGENT_MODEL
                   value: $(tt.params.model)
                 - name: AGENT_PERMISSION_MODE
@@ -298,6 +301,8 @@ spec:
       value: $(body.installation_id)
     - name: model
       value: $(body.model)
+    - name: cli
+      value: $(body.cli)
 ---
 apiVersion: triggers.tekton.dev/v1beta1
 kind: EventListener

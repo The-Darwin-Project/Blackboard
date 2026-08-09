@@ -173,10 +173,10 @@
 # 46. [Pattern]: _close_and_broadcast unevaluated-message re-check runs only for LLM-driven closes
 #     (close_reason="resolved"). System-driven closes (duplicate, timeout, error, force_closed,
 #     stream_close) bypass intentionally — safety-valve closes must always win regardless of pending messages.
-# 45. [Pattern]: _ROLE_MODEL_MAP/_ROLE_EFFORT_MAP (module-level, env-backed) resolve per-role model/effort
-#     for EPHEMERAL dispatch only -- local sidecars keep their Deployment-configured model. Gate at the
-#     dispatch_to_agent() call site is `agent_id_override is not None`, NOT is_ephemeral_dispatch (the
-#     latter is set early and diverges from reality on circuit-breaker fallback / MMC overflow). Always
+# 45. [Pattern]: _ROLE_MODEL_MAP/_ROLE_EFFORT_MAP/_ROLE_CLI_MAP (module-level, env-backed) resolve
+#     per-role model/effort/CLI for EPHEMERAL dispatch only -- local sidecars keep their Deployment-
+#     configured model. Gate at dispatch_to_agent() call site is `agent_id_override is not None`, NOT
+#     is_ephemeral_dispatch (the latter diverges on circuit-breaker fallback / MMC overflow). Always
 #     use .get(agent_name, default) -- never bracket access -- so an out-of-vocabulary role fails safe.
 #     `effort` (FRIDAY's optional select_agent param) passes through for BOTH local + ephemeral dispatch
 #     and never invalidates --resume (unlike mode, which does on change).
@@ -314,6 +314,7 @@ VOLUME_PATHS = {
     "developer": "/data/gitops-developer",
     "qe": "/data/gitops-qe",
     "security_analyst": "/data/workspace",
+    "explorer": "/data/workspace",
     "code_reviewer": "/data/workspace",
 }
 
@@ -594,6 +595,7 @@ _ROLE_MODEL_MAP = {
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
     "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
+    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.5-flash-lite"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
@@ -602,6 +604,10 @@ _ROLE_EFFORT_MAP = {
     "qe": os.getenv("EPHEMERAL_EFFORT_QE", "high"),
     "security_analyst": os.getenv("EPHEMERAL_EFFORT_SECURITY", "high"),
     "code_reviewer": os.getenv("EPHEMERAL_EFFORT_CODE_REVIEWER", "high"),
+    "explorer": os.getenv("EPHEMERAL_EFFORT_EXPLORER", "low"),
+}
+_ROLE_CLI_MAP = {
+    "explorer": os.getenv("EPHEMERAL_CLI_EXPLORER", "gemini"),
 }
 
 
@@ -744,7 +750,7 @@ class Brain:
     _BYPASS_SOURCES = frozenset({"chat", "slack", "jarvis"})
 
     # Roles with no persistent sidecar -- always dispatch via EphemeralProvisioner.
-    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst", "code_reviewer"})
+    EPHEMERAL_ONLY_ROLES = frozenset({"security_analyst", "code_reviewer", "explorer"})
 
     async def _count_global_wip(self) -> int:
         """Count all events in WIP (active + deferred), minus _waiting_for_user.
@@ -3368,9 +3374,10 @@ class Brain:
                     # Tier 2: MMC overflow -- scale C when local sidecars are full
                     # Local sidecars are role-locked (1 per role = MM1). Ephemeral agents
                     # shape-shift via WS msg.role, breaking the per-role bottleneck.
+                    # Open to ALL sources (aligner/jarvis included) -- Tier 1 already
+                    # handles HH/TK/Kargo; Tier 0 handles ephemeral-only roles.
                     if (not use_ephemeral and self._ephemeral_provisioner
-                            and event_doc and event_doc.source in ("chat", "slack")
-                            and registry):
+                            and event_doc and registry):
                         local_available = await registry.get_available(agent_name)
                         if local_available is None:
                             logger.info(
@@ -3410,7 +3417,9 @@ class Brain:
                                 or getattr(evidence, "github_issue_context", None) or {})
                         _install_id = _ctx.get("installation_id", "") if isinstance(_ctx, dict) else ""
                         provision_result = await self._ephemeral_provisioner.ensure_agent(
-                            event_id, _install_id, model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5"),
+                            event_id, _install_id,
+                            model=_ROLE_MODEL_MAP.get(agent_name, "claude-sonnet-5"),
+                            cli=_ROLE_CLI_MAP.get(agent_name, "claude"),
                         )
                         if provision_result is None:
                             if agent_name in self.EPHEMERAL_ONLY_ROLES:

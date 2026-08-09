@@ -311,7 +311,7 @@ class MessageStatus(str, Enum):
 class ConversationTurn(BaseModel):
     """A single turn in an event conversation."""
     turn: int = Field(..., description="Turn number in conversation")
-    actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, security_analyst, code_reviewer, aligner, headhunter, cortex, dispatcher, user")
+    actor: str = Field(..., description="brain, architect, sysadmin, developer, qe, security_analyst, code_reviewer, explorer, aligner, headhunter, cortex, dispatcher, user")
     action: str = Field(
         ...,
         description="triage, investigate, review, execute, plan, plan_step, question, clarify, approve, confirm, close, request_approval, route, decide, verify, defer, wait, message, huddle, reply, tool_result, evidence, phase, error",

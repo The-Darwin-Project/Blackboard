@@ -620,7 +620,7 @@ export interface AgentRegistryEntry {
 // Agent Mapping Helper
 // =============================================================================
 
-export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'qe' | 'security_analyst' | 'code_reviewer' | 'brain';
+export type Agent = 'aligner' | 'architect' | 'sysadmin' | 'developer' | 'qe' | 'security_analyst' | 'code_reviewer' | 'explorer' | 'brain';
 
 // =============================================================================
 // Field Notes Notebook
