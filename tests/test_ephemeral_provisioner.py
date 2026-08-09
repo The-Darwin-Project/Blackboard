@@ -848,7 +848,7 @@ class TestModelPropagation:
         call_count = 0
         captured_calls = []
 
-        async def flaky_trigger(event_id, installation_id="", model=""):
+        async def flaky_trigger(event_id, installation_id="", model="", cli=""):
             nonlocal call_count
             call_count += 1
             captured_calls.append(model)
