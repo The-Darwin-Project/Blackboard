@@ -1,7 +1,8 @@
 # BlackBoard/src/agents/agent_registry.py
 # @ai-rules:
 # 1. [Pattern]: All mutations guarded by asyncio.Lock.
-# 2. [Pattern]: Evict-on-reconnect by role + agent_id prefix match.
+# 2. [Pattern]: Evict-on-reconnect by role + agent_id prefix match (non-ephemeral)
+#    or by bound_event_id match (ephemeral) -- see register().
 # 3. [Pattern]: _on_task_orphaned callback wired by TaskBridge for error sentinel injection on disconnect.
 # 4. [Constraint]: Pure infrastructure. No LLM logic, no routing decisions.
 """Agent Registry -- manages a dynamic pool of connected agent sidecars."""
@@ -73,13 +74,29 @@ class AgentRegistry:
                     and aid.rsplit("-", 1)[0] == prefix
                     and aid != agent_id
                 ]
-                for aid in stale:
-                    old = self._agents.pop(aid)
-                    try:
-                        await old.ws.close()
-                    except Exception:
-                        pass
-                    logger.info("Evicted stale agent %s (replaced by %s)", aid, agent_id)
+            elif event_id is not None:
+                # Ephemeral dedup-by-event_id: at most one ephemeral agent may be
+                # bound to a given event_id. Without this, a cross-CLI terminate
+                # (ephemeral_provisioner.terminate_agent) racing a fresh respawn
+                # for the same event could otherwise leave two connections briefly
+                # coexisting, and get_ephemeral()'s first-match scan could return
+                # the stale, terminating one instead of the new one.
+                stale = [
+                    aid for aid, conn in self._agents.items()
+                    if conn.ephemeral
+                    and conn.bound_event_id == event_id
+                    and aid != agent_id
+                ]
+            else:
+                stale = []
+
+            for aid in stale:
+                old = self._agents.pop(aid)
+                try:
+                    await old.ws.close()
+                except Exception:
+                    pass
+                logger.info("Evicted stale agent %s (replaced by %s)", aid, agent_id)
 
             self._agents[agent_id] = AgentConnection(
                 agent_id=agent_id,

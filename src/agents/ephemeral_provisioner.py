@@ -139,10 +139,24 @@ class EphemeralProvisioner:
         Returns ``AgentConnection`` on success, or:
         - ``INFRA_SENTINEL``: Tekton unreachable, caller should defer
         - ``None``: circuit breaker tripped, caller should fall back to sidecar
+
+        Side effect: if a cross-CLI mismatch is detected against an *idle*
+        existing ephemeral agent for this event, that agent is terminated
+        (synchronously deregistered -- see ``terminate_agent``) before a
+        replacement is spawned. A *busy* mismatched agent is never killed
+        outright; its current task is left to finish and the existing
+        (wrong-CLI) connection is returned instead.
         """
         existing = await self._registry.get_ephemeral(event_id)
         if existing:
             if cli and (not existing.cli or existing.cli != cli):
+                if existing.busy:
+                    logger.warning(
+                        "Cross-CLI mismatch for %s: existing=%s, requested=%s -- "
+                        "agent is busy (task=%s), deferring termination until idle",
+                        event_id, existing.cli, cli, existing.current_task_id,
+                    )
+                    return existing
                 logger.info(
                     "Cross-CLI mismatch for %s: existing=%s, requested=%s -- terminating for re-spawn",
                     event_id, existing.cli, cli,
@@ -206,7 +220,15 @@ class EphemeralProvisioner:
             evt.set()
 
     async def terminate_agent(self, event_id: str) -> None:
-        """Send terminate signal to ephemeral agent on event close."""
+        """Send terminate signal to ephemeral agent on event close.
+
+        Deregisters the connection from the registry synchronously (not just
+        on eventual WS disconnect) so that a caller which immediately
+        respawns for the same event_id (see the cross-CLI-mismatch branch in
+        ``ensure_agent``) can never observe the stale, terminating agent via
+        ``registry.get_ephemeral()`` during the window before the old pod
+        actually tears down.
+        """
         agent = await self._registry.get_ephemeral(event_id)
         if agent and agent.ephemeral:
             try:
@@ -214,6 +236,11 @@ class EphemeralProvisioner:
                 logger.info("Sent terminate to ephemeral agent for %s", event_id)
             except Exception:
                 logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
+            await self._registry.unregister(agent.agent_id)
+            try:
+                await agent.ws.close()
+            except Exception:
+                pass
         self._infra_failures.pop(event_id, None)
         if self._health_port:
             self._health_port.clear_event(event_id)
