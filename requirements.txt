@@ -53,3 +53,5 @@ marklassian>=0.1.0
 
 # Chart rendering for observation reports (SVG via asyncio.to_thread)
 matplotlib>=3.11.0
+weasyprint>=69.0
+markdown>=3.6

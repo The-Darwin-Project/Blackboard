@@ -7,7 +7,7 @@
 #    placeholder text/blank chart rather than propagating -- keeps the caller's outer 90s
 #    report timeout (observations_mgmt.py) from being consumed by any single slow step.
 # 5. [Pattern]: Charts use dark theme matching Darwin UI (bg=#0f172a).
-"""LLM-powered observation analysis report with embedded SVG charts."""
+"""LLM-powered observation analysis report with embedded PNG charts, output as PDF."""
 from __future__ import annotations
 
 import asyncio
@@ -112,7 +112,7 @@ def _render_chart_svg(series: dict) -> str:
     ax.set_title(series["name"], color="#e2e8f0", fontsize=9, pad=4)
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="svg", bbox_inches="tight", facecolor="#0f172a", edgecolor="none")
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="#0f172a", edgecolor="none", dpi=150)
     buf.seek(0)
     return base64.b64encode(buf.read()).decode()
 
@@ -149,7 +149,7 @@ def _assemble_report(
     for i, series in enumerate(selected):
         lines.append(f"\n## {i + 1}. {series['name']}")
         if i < len(charts) and charts[i]:
-            lines.append(f"![{series['name']} trend](data:image/svg+xml;base64,{charts[i]})")
+            lines.append(f"![{series['name']} trend](data:image/png;base64,{charts[i]})")
         lines.append("")
         lines.append(
             f"**Trend:** {series['trend'].capitalize()} | "
@@ -221,3 +221,31 @@ async def generate_report(
         charts.append(c if isinstance(c, str) else "")
 
     return _assemble_report(summary, analyses, charts, selected)
+
+
+_PDF_CSS = """
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: #0f172a; color: #e2e8f0; padding: 40px; line-height: 1.6; }
+h1 { color: #f8fafc; border-bottom: 1px solid #334155; padding-bottom: 8px; }
+h2 { color: #f1f5f9; margin-top: 32px; }
+h3 { color: #cbd5e1; }
+hr { border: none; border-top: 1px solid #334155; margin: 24px 0; }
+img { max-width: 100%; border-radius: 8px; margin: 12px 0; }
+strong { color: #f8fafc; }
+code { background: #1e293b; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+p, li { color: #cbd5e1; }
+@page { size: A4 landscape; margin: 20mm; }
+"""
+
+
+def render_pdf(markdown_text: str) -> bytes:
+    """Convert markdown report (with base64 PNG images) to PDF bytes."""
+    import markdown as md
+    from weasyprint import HTML
+
+    html_body = md.markdown(markdown_text, extensions=["tables", "fenced_code"])
+    full_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>{_PDF_CSS}</style></head>
+<body>{html_body}</body></html>"""
+
+    return HTML(string=full_html).write_pdf()
