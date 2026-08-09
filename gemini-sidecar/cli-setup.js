@@ -112,6 +112,15 @@ function registerMCPsAndHooks(settings, cli) {
                            description: 'Check for pending team messages and blackboard turns after each tool call' }],
             });
         }
+        settings.hooks.AfterAgent = settings.hooks.AfterAgent || [];
+        if (!settings.hooks.AfterAgent.some(h => h.hooks?.some(hh => hh.name === 'require-results'))) {
+            settings.hooks.AfterAgent.push({
+                matcher: '*',
+                hooks: [{ name: 'require-results', type: 'command',
+                           command: '/app/hooks/require-results.sh', timeout: 3000,
+                           description: 'Block exit if team_send_results not called (parity with Claude Stop hook)' }],
+            });
+        }
         settings.hooks.SessionStart = settings.hooks.SessionStart || [];
         if (!settings.hooks.SessionStart.some(h => h.hooks?.some(hh => hh.name === 'team-inbox-reinject'))) {
             settings.hooks.SessionStart.push({

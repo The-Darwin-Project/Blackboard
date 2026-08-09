@@ -236,6 +236,28 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // Hook status for Gemini AfterAgent hook (require-results.sh)
+  if (url.pathname === '/hook-status' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      hasResults: !!state.getCallbackResult(),
+      taskMode: task?.mode || '',
+    }));
+    return;
+  }
+
+  // Hook status for Gemini AfterAgent hook (require-results.sh)
+  if (url.pathname === '/hook-status' && req.method === 'GET') {
+    const task = state.getCurrentTask();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      hasResults: !!state.getCallbackResult(),
+      taskMode: task?.mode || '',
+    }));
+    return;
+  }
+
   // Inbound message inbox (Manager proactive messages, drained on read)
   if (url.pathname === '/messages' && req.method === 'GET') {
     const msgs = state.drainInboundMessages();
