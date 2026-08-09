@@ -24,6 +24,7 @@ from src.agents.ephemeral_provisioner import (
     SpawnFailed,
     INFRA_SENTINEL,
 )
+from src.agents.agent_registry import AgentRegistry
 
 
 @dataclass
@@ -35,6 +36,37 @@ class FakeAgent:
     def __post_init__(self):
         if self.ws is None:
             self.ws = MagicMock()
+
+
+class _FakeWS:
+    """Minimal WebSocket stand-in for AgentRegistry/EphemeralProvisioner tests
+    that exercise real registration/termination flows instead of mocking the
+    registry wholesale."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.closed = False
+
+    async def send_json(self, msg: dict) -> None:
+        self.sent.append(msg)
+
+    async def close(self, *args, **kwargs) -> None:
+        self.closed = True
+
+    @property
+    def terminated(self) -> bool:
+        return any(m.get("type") == "terminate" for m in self.sent)
+
+
+async def _register_ephemeral(
+    registry: AgentRegistry, agent_id: str, event_id: str, cli: str,
+) -> _FakeWS:
+    ws = _FakeWS()
+    await registry.register(
+        agent_id, "explorer", ws, [], cli, "gemini-flash",
+        ephemeral=True, event_id=event_id,
+    )
+    return ws
 
 
 def _make_provisioner(
@@ -848,7 +880,7 @@ class TestModelPropagation:
         call_count = 0
         captured_calls = []
 
-        async def flaky_trigger(event_id, installation_id="", model=""):
+        async def flaky_trigger(event_id, installation_id="", model="", cli=""):
             nonlocal call_count
             call_count += 1
             captured_calls.append(model)
@@ -863,3 +895,105 @@ class TestModelPropagation:
                         await prov.ensure_agent("evt-model003", model="claude-sonnet-5")
 
         assert captured_calls == ["claude-sonnet-5", "claude-sonnet-5"]
+
+
+class TestCrossCLIMismatchRealPath:
+    """Exercises the ACTUAL ensure_agent() cross-CLI-mismatch branch against a
+    real AgentRegistry (not a wholesale AsyncMock) -- covers the busy-check
+    guard and the synchronous deregistration that closes the cross-CLI race
+    window (AgentRegistry.register()'s ephemeral dedup-by-event_id eviction
+    and EphemeralProvisioner.terminate_agent()'s synchronous unregister()).
+
+    Only `_trigger_taskrun` (the real Tekton HTTP boundary) is faked; the
+    registry, `terminate_agent`, and `_wait_for_registration` all run for
+    real, exactly as they would in production.
+    """
+
+    @pytest.mark.asyncio
+    async def test_idle_mismatch_terminates_and_deregisters_before_respawn(self):
+        registry = AgentRegistry()
+        prov = EphemeralProvisioner(
+            registry=registry, event_listener_url="http://fake:8080",
+            deadline_sec=2, poll_interval_sec=0.05, stall_timeout_sec=1,
+        )
+        registry.set_ephemeral_registered_callback(prov.on_ephemeral_registered)
+
+        old_ws = await _register_ephemeral(registry, "old-agent", "evt-x", cli="claude")
+
+        async def fake_trigger(event_id, installation_id="", model="", cli=""):
+            # Models reality: the Tekton POST returns immediately (202), and
+            # the new pod registers over its own WS connection some time
+            # later -- after _wait_for_registration has already started
+            # waiting, not synchronously within _trigger_taskrun itself.
+            async def _delayed_register():
+                await asyncio.sleep(0.02)
+                await _register_ephemeral(registry, "new-agent", event_id, cli=cli)
+            asyncio.create_task(_delayed_register())
+
+        with patch.object(prov, "_trigger_taskrun", side_effect=fake_trigger):
+            result = await prov.ensure_agent("evt-x", cli="gemini")
+
+        # The stale agent was actually removed from the registry -- not just
+        # sent a fire-and-forget WS message -- closing the race window where
+        # get_ephemeral() could return it instead of the freshly spawned one.
+        assert await registry.get_by_id("old-agent") is None
+        assert old_ws.terminated
+        assert old_ws.closed
+
+        assert result is not None
+        assert result.agent_id == "new-agent"
+        assert result.cli == "gemini"
+
+    @pytest.mark.asyncio
+    async def test_busy_mismatch_is_not_terminated(self):
+        registry = AgentRegistry()
+        prov = EphemeralProvisioner(registry=registry, event_listener_url="http://fake:8080")
+
+        await _register_ephemeral(registry, "busy-agent", "evt-y", cli="claude")
+        await registry.mark_busy("busy-agent", "evt-y", "task-9", role="explorer")
+
+        with patch.object(prov, "_trigger_taskrun", new_callable=AsyncMock) as mock_trigger:
+            result = await prov.ensure_agent("evt-y", cli="gemini")
+
+        mock_trigger.assert_not_called()
+        assert result is not None
+        assert result.agent_id == "busy-agent"
+        assert result.cli == "claude"
+
+        # Still registered and still busy -- a mid-task agent must not be
+        # killed outright just because a different CLI was requested.
+        still = await registry.get_by_id("busy-agent")
+        assert still is not None
+        assert still.busy is True
+
+    @pytest.mark.asyncio
+    async def test_matching_cli_returns_existing_without_touching_registry(self):
+        registry = AgentRegistry()
+        prov = EphemeralProvisioner(registry=registry, event_listener_url="http://fake:8080")
+        await _register_ephemeral(registry, "same-agent", "evt-w", cli="gemini")
+
+        with patch.object(prov, "_trigger_taskrun", new_callable=AsyncMock) as mock_trigger:
+            result = await prov.ensure_agent("evt-w", cli="gemini")
+
+        mock_trigger.assert_not_called()
+        assert result is not None
+        assert result.agent_id == "same-agent"
+        assert await registry.get_by_id("same-agent") is not None
+
+    @pytest.mark.asyncio
+    async def test_registry_dedup_by_event_id_evicts_stale_ephemeral(self):
+        """Defense-in-depth at the registry layer: even if a stale ephemeral
+        connection for an event_id somehow outlives terminate_agent's own
+        deregistration, AgentRegistry.register() itself evicts any other
+        ephemeral connection already bound to that event_id."""
+        registry = AgentRegistry()
+        old_ws = await _register_ephemeral(registry, "old-agent", "evt-z", cli="claude")
+
+        new_ws = await _register_ephemeral(registry, "new-agent", "evt-z", cli="gemini")
+
+        assert await registry.get_by_id("old-agent") is None
+        assert old_ws.closed
+        assert not new_ws.closed
+        found = await registry.get_ephemeral("evt-z")
+        assert found is not None
+        assert found.agent_id == "new-agent"

@@ -97,6 +97,9 @@ function buildCLICommand(prompt, options = {}) {
     const args = [];
     if (options.autoApprove) args.push('--yolo');
     args.push('-o', 'stream-json');
+    if (options.model) {
+        args.push('--model', options.model);
+    }
     if (options.sessionId) {
         args.push('--resume', options.sessionId);
     }

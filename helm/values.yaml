@@ -433,6 +433,7 @@ ephemeralAgents:
     qe: "claude-sonnet-5"
     security_analyst: "claude-sonnet-5"
     code_reviewer: "claude-sonnet-5"
+    explorer: "gemini-3.5-flash-lite"
   roleEffort:
     architect: "high"
     sysadmin: "medium"
@@ -440,6 +441,9 @@ ephemeralAgents:
     qe: "high"
     security_analyst: "high"
     code_reviewer: "high"
+    explorer: "low"
+  roleCli:
+    explorer: "gemini"
   # Node exclusion list -- skip broken nodes for ephemeral agent scheduling.
   # Managed via ArgoCD app params. SysAdmin can add nodes here when investigating issues.
   pruneImage: "alpine/k8s:latest" # Lightweight kubectl image for TaskRun cleanup

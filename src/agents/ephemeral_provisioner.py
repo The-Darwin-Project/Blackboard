@@ -121,6 +121,7 @@ class EphemeralProvisioner:
 
     async def ensure_agent(
         self, event_id: str, installation_id: str = "", model: str = "",
+        cli: str = "",
     ) -> "AgentConnection | str | None":
         """Ensure an ephemeral agent exists for this event. Spawn if needed.
 
@@ -131,13 +132,38 @@ class EphemeralProvisioner:
         only included in the POST body when non-empty, so an empty value never overrides
         the TriggerTemplate's Helm-configured default.
 
+        `cli` (per-role CLI override) selects the CLI binary (claude/gemini) on the
+        TaskRun pod. Only included in the POST body when non-empty, falling back to the
+        TriggerTemplate's Helm default ("claude").
+
         Returns ``AgentConnection`` on success, or:
         - ``INFRA_SENTINEL``: Tekton unreachable, caller should defer
         - ``None``: circuit breaker tripped, caller should fall back to sidecar
+
+        Side effect: if a cross-CLI mismatch is detected against an *idle*
+        existing ephemeral agent for this event, that agent is terminated
+        (synchronously deregistered -- see ``terminate_agent``) before a
+        replacement is spawned. A *busy* mismatched agent is never killed
+        outright; its current task is left to finish and the existing
+        (wrong-CLI) connection is returned instead.
         """
         existing = await self._registry.get_ephemeral(event_id)
         if existing:
-            return existing
+            if cli and (not existing.cli or existing.cli != cli):
+                if existing.busy:
+                    logger.warning(
+                        "Cross-CLI mismatch for %s: existing=%s, requested=%s -- "
+                        "agent is busy (task=%s), deferring termination until idle",
+                        event_id, existing.cli, cli, existing.current_task_id,
+                    )
+                    return existing
+                logger.info(
+                    "Cross-CLI mismatch for %s: existing=%s, requested=%s -- terminating for re-spawn",
+                    event_id, existing.cli, cli,
+                )
+                await self.terminate_agent(event_id)
+            else:
+                return existing
 
         failures = self._infra_failures.get(event_id, 0)
         if failures >= MAX_INFRA_FAILURES:
@@ -149,7 +175,7 @@ class EphemeralProvisioner:
             return None
 
         try:
-            await self._trigger_taskrun(event_id, installation_id, model)
+            await self._trigger_taskrun(event_id, installation_id, model, cli)
             agent = await self._wait_for_registration(
                 event_id, self._deadline_sec,
                 self._poll_interval_sec, self._stall_timeout_sec,
@@ -167,7 +193,7 @@ class EphemeralProvisioner:
             await asyncio.sleep(5)
 
             try:
-                await self._trigger_taskrun(event_id, installation_id, model)
+                await self._trigger_taskrun(event_id, installation_id, model, cli)
                 retry_deadline = max(60.0, self._deadline_sec / 2)
                 agent = await self._wait_for_registration(
                     event_id, retry_deadline,
@@ -194,7 +220,15 @@ class EphemeralProvisioner:
             evt.set()
 
     async def terminate_agent(self, event_id: str) -> None:
-        """Send terminate signal to ephemeral agent on event close."""
+        """Send terminate signal to ephemeral agent on event close.
+
+        Deregisters the connection from the registry synchronously (not just
+        on eventual WS disconnect) so that a caller which immediately
+        respawns for the same event_id (see the cross-CLI-mismatch branch in
+        ``ensure_agent``) can never observe the stale, terminating agent via
+        ``registry.get_ephemeral()`` during the window before the old pod
+        actually tears down.
+        """
         agent = await self._registry.get_ephemeral(event_id)
         if agent and agent.ephemeral:
             try:
@@ -202,18 +236,26 @@ class EphemeralProvisioner:
                 logger.info("Sent terminate to ephemeral agent for %s", event_id)
             except Exception:
                 logger.debug("Failed to send terminate for %s (already disconnected?)", event_id)
+            await self._registry.unregister(agent.agent_id)
+            try:
+                await agent.ws.close()
+            except Exception:
+                pass
         self._infra_failures.pop(event_id, None)
         if self._health_port:
             self._health_port.clear_event(event_id)
 
     async def _trigger_taskrun(
         self, event_id: str, installation_id: str = "", model: str = "",
+        cli: str = "",
     ) -> None:
         payload = {
             "event_id": event_id, "action": "spawn", "installation_id": installation_id,
         }
         if model:
             payload["model"] = model
+        if cli:
+            payload["cli"] = cli
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(self._url, json=payload)
             resp.raise_for_status()

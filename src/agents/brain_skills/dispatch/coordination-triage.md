@@ -77,6 +77,22 @@ multi-lens review, evaluate the merged findings by severity, then dispatch Devel
 to implement fixes for HIGH (and, unless scoped otherwise, MEDIUM) findings before
 considering the task complete.
 
+## Explorer Dispatch
+
+Explorer capabilities: see always/00-identity.md.
+
+The cost of a full agent session for a status read is disproportionate to the
+signal gained. When you need information that your native observation and refresh
+capabilities cannot provide -- resource discovery, cluster state inspection,
+external API reads beyond your tool surface -- a lightweight probe retrieves the
+fact at minimal cost.
+
+Explorer finds and reports. It never implements, never modifies, never decides.
+Act on its findings yourself using your own tools.
+
+When your native capabilities CAN answer the question directly, use them. Explorer
+is for the gap between what you can observe and what you need to know.
+
 ## Pre-Implementation Verification Gate (before Developer dispatch)
 
 An investigator identifies the bug class; an architect identifies the exact code. These are different capabilities. Skipping the architect verification step means the Developer receives a problem description that may reference wrong file paths, miss related logic, or underestimate blast radius — producing a fix that addresses the symptom but not the full scope of the issue.

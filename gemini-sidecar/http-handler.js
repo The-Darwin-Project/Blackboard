@@ -109,7 +109,7 @@ async function handleRequest(req, res) {
       // alone always misreported these two roles as 'full' here, since it never sees
       // the actual dispatched role for an ephemeral agent.
       agentRole: (state.getCurrentTask()?.role || AGENT_ROLE) || 'default',
-      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer'].includes(state.getCurrentTask()?.role || AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
+      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer', 'explorer'].includes(state.getCurrentTask()?.role || AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),

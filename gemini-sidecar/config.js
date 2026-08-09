@@ -21,6 +21,7 @@ const ROLE_TIMEOUTS = {
     qe: 1800000,              // 30 min
     security_analyst: 1800000, // 30 min
     code_reviewer: 2700000,   // 45 min -- fans out to 6 sequential/concurrent subagent delegations before merging, unlike single-pass roles
+    explorer: 600000,         // 10 min -- probes should be fast; exceeding 10 min means the question was wrong
     default: 1800000,         // 30 min
 };
 // explicit TIMEOUT_MS env var always wins (operator override), then the role-specific ceiling,
@@ -37,7 +38,7 @@ const CLI_429_INITIAL_DELAY_MS = 60000;     // 60s -- quota typically recovers i
 const CLI_429_BACKOFF_MULTIPLIER = 2;       // 60s, then 120s
 
 // CLI routing -- AGENT_CLI selects which binary to spawn (gemini or claude)
-const AGENT_CLI = process.env.AGENT_CLI || 'gemini';
+const AGENT_CLI = process.env.AGENT_CLI || 'claude';
 const AGENT_MODEL = process.env.AGENT_MODEL || process.env.GEMINI_MODEL || '';
 // Agent role -- used to restrict tools (e.g., architect can't write code files)
 const AGENT_ROLE = process.env.AGENT_ROLE || '';

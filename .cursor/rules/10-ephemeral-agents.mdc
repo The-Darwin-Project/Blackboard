@@ -19,7 +19,8 @@ alwaysApply: true
 * Bypass sources (chat, slack, jarvis) always admitted immediately — no cap check.
 * If cap reached, automated events stay NEW in queue until a slot opens (event closes or defers with `_waiting_for_user`).
 * Cap is SOFT (non-atomic count+admit, bounded by worker concurrency).
-* MMC overflow (ephemeral scaling for chat/slack) triggers when `_ephemeral_provisioner` exists and local sidecar unavailable.
+* **Tier 1** (primary ephemeral sources, never fall back to local): headhunter, timekeeper, and `kargo_stage` events always use an ephemeral agent when `_ephemeral_provisioner` exists.
+* **Tier 2** (MMC overflow): open to ALL sources, not just chat/slack -- when the target role has no available local sidecar (`registry.get_available()` returns `None`) and `_ephemeral_provisioner` exists, the event overflows to an ephemeral agent regardless of source (aligner/jarvis included; Tier 1 sources are already handled above, and Tier 0 ephemeral-only roles are handled separately). No new concurrency/rate control accompanies this: `BRAIN_MAX_CONCURRENT_DISPATCHES` defaults to `0` (semaphore disabled), so a burst of busy-sidecar events across previously-excluded sources can each independently spawn an ephemeral pod.
 
 ## Dynamic Role Switching
 

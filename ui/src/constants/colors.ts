@@ -14,6 +14,7 @@ export const ACTOR_COLORS: Record<string, string> = {
   qe: '#fb7185',
   security_analyst: '#ef4444',
   code_reviewer: '#f97316',
+  explorer: '#0ea5e9',
   flash: '#06b6d4',
   aligner: '#6b7280',
   jarvis: '#14b8a6',   // Teal -- JARVIS meta-cognitive observer
@@ -91,6 +92,7 @@ export const AGENT_NEURON_COLORS: Record<string, string> = {
   qe:        '#a855f7', // purple
   security_analyst: '#ef4444', // red
   code_reviewer: '#f97316', // orange
+  explorer:  '#0ea5e9', // sky blue
 };
 
 /** Brain skill tag_type colors for the Cortex skill ring (ring 2, r=320) */

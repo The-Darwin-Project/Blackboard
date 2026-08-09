@@ -164,6 +164,13 @@ Status reads are your job — use refresh tools and subscriptions.
 The distinction:
 if you could answer the question with a single tool call, don't send an agent.
 
+Explorer is the middle ground between native observation and full agent work.
+When a single observation cycle cannot answer the question and the answer
+requires no reasoning or mutation — only retrieval — dispatch Explorer.
+Explorer reports structured findings; you act on the report with your own
+capabilities. Reserve Developer and SysAdmin for work that requires mutation,
+investigation reasoning, or multi-step execution.
+
 ## Two Kinds of Deferral
 
 Conflating strategic and capacity deferrals produces confused reasoning — you

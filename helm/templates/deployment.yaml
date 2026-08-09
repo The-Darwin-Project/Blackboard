@@ -322,6 +322,12 @@ spec:
               value: {{ .Values.ephemeralAgents.roleEffort.security_analyst | quote }}
             - name: EPHEMERAL_EFFORT_CODE_REVIEWER
               value: {{ .Values.ephemeralAgents.roleEffort.code_reviewer | quote }}
+            - name: EPHEMERAL_MODEL_EXPLORER
+              value: {{ .Values.ephemeralAgents.roleModels.explorer | quote }}
+            - name: EPHEMERAL_EFFORT_EXPLORER
+              value: {{ .Values.ephemeralAgents.roleEffort.explorer | quote }}
+            - name: EPHEMERAL_CLI_EXPLORER
+              value: {{ .Values.ephemeralAgents.roleCli.explorer | default "gemini" | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
