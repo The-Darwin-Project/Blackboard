@@ -198,7 +198,7 @@ spec:
             {{- end }}
             {{- if .Values.memgraph.enabled }}
             - name: MEMGRAPH_URL
-              value: "bolt://{{ .Release.Name }}-memgraph:7687"
+              value: "bolt://{{ .Release.Name }}-memgraph-data-0:7687"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration

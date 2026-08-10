@@ -57,42 +57,71 @@ qdrant:
   port: 6333 # HTTP API
   grpcPort: 6334 # gRPC API
 # =============================================================================
-# Memgraph Knowledge Graph (subchart: memgraph/memgraph)
+# Memgraph Knowledge Graph (subchart: memgraph-high-availability v1.3.3, aliased as memgraph)
+# Minimal setup: 1 data + 1 coordinator. Using HA chart for fixOwnershipInitContainer.
 # =============================================================================
 memgraph:
   enabled: true
-  memgraphConfig:
-    - "--also-log-to-stderr=true"
-    - "--telemetry-enabled=false"
-  persistentVolumeClaim:
-    createStorageClaim: false # emptyDir -- PVC ownership incompatible with Memgraph UID check. Graph rebuilt from backfill on restart.
-    storageClassName: ""
-    storageSize: 8Gi
-    createLogStorage: false # Use stderr (K8s captures stdout/stderr natively)
+  storage:
+    data:
+      libPVCSize: "8Gi"
+      libStorageAccessMode: "ReadWriteOnce"
+      libStorageClassName: ""  # Override via ArgoCD (block storage, NOT CephFS)
+      createLogStorageClaim: false
+    coordinators:
+      libPVCSize: "1Gi"
+      libStorageAccessMode: "ReadWriteOnce"
+      libStorageClassName: ""
+      createLogStorageClaim: false
+  fixOwnershipInitContainer:
+    enabled: true
   sysctlInitContainer:
-    enabled: false # Requires privileged SCC on OpenShift -- disable for now
-  container:
-    startupProbe:
-      tcpSocket:
-        port: 7687
-      failureThreshold: 60
-      periodSeconds: 5
+    enabled: false
+  commonArgs:
+    data:
+      logging:
+        log_level: "WARNING"
+        also_log_to_stderr: true
+        log_file: ""
+        log_retention_days: 7
+    coordinators:
+      logging:
+        log_level: "WARNING"
+        also_log_to_stderr: true
+        log_file: ""
+        log_retention_days: 7
+  data:
+    - id: "0"
+      args:
+        - "--telemetry-enabled=false"
+      tls:
+        bolt:
+          enabled: false
+        intraCluster:
+          enabled: false
+  coordinators:
+    - id: "1"
+      args: []
+      tls:
+        bolt:
+          enabled: false
+        intraCluster:
+          enabled: false
   resources:
-    requests:
-      memory: 256Mi
-      cpu: 100m
-    limits:
-      memory: 2Gi
-      cpu: "1"
-  service:
-    type: ClusterIP
-    enableBolt: true
-    boltPort: 7687
-    enableWebsocketMonitoring: false
-    enableHttpMonitoring: false
-  auth:
-    username: "darwin"
-    password: "" # Override via secret or ArgoCD app parameters -- required, no anonymous bolt access
+    data:
+      requests:
+        memory: 256Mi
+        cpu: 100m
+      limits:
+        memory: 2Gi
+        cpu: "1"
+    coordinators:
+      requests:
+        memory: 128Mi
+        cpu: 50m
+      limits:
+        memory: 512Mi
+        cpu: 500m
 # =============================================================================
 # Agent Sidecars Configuration (same base image, per-agent CLI type and rules)
 # =============================================================================

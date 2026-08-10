@@ -23,7 +23,8 @@ keywords:
 maintainers:
   - name: Tal Hason
 dependencies:
-  - name: memgraph
-    version: "~1.0"
+  - name: memgraph-high-availability
+    version: "1.3.3"
     repository: "https://memgraph.github.io/helm-charts"
+    alias: memgraph
     condition: memgraph.enabled
