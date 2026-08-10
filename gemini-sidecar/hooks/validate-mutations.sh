@@ -4,6 +4,9 @@
 # 1. [Pattern]: Gemini CLI BeforeTool hook — blocks shell mutations for read-only roles.
 # 2. [Contract]: Defense-in-depth flange. Primary enforcement is behavioral (agent rules).
 #    No normalization pipeline — trusted Darwin prompts, not untrusted external code.
+#    Known accepted gap: a naive regex denylist over the raw command string cannot catch
+#    indirection (eval, process substitution, variable-split commands). Closing that
+#    requires a tool-allowlist / engine permissions.deny layer, out of scope here.
 # 3. [Constraint]: Fail-OPEN always. Exit 0 with JSON. Never exit non-zero (blocks agent).
 # 4. [Constraint]: Single-responsibility — validation ONLY. Context injection stays in AfterTool.
 # 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
@@ -14,12 +17,14 @@ READONLY_ROLES="explorer security_analyst"
 
 # Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
 # stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
-ROLE_DATA=$(curl -sf "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
+ROLE_DATA=$(curl -sf --max-time 1 "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
 ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
 [ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
 
-# Fast exit: if role is not read-only, allow everything
-if ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
+# Fast exit: if role is not read-only, allow everything.
+# Explicit empty check first -- don't rely on grep -w's empty-pattern behavior,
+# which is not consistently specified across grep implementations.
+if [ -z "$ROLE" ] || ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
     echo '{"decision":"allow"}'
     exit 0
 fi
@@ -96,10 +101,11 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
     exit 0
 fi
 
-# Curl mutations — case-SENSITIVE (uppercase -F is form upload, lowercase -f is fail-silently)
-# Covers: -X METHOD, --request METHOD, --data/--data-*, -d/-dVALUE/-d VALUE, -F/-FVALUE,
-# --form, -T/--upload-file (PUT-style upload)
-if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d(\s|\S)|-F\S?|--form\b|-T\b|--upload-file\b)'; then
+# Curl mutations. Method/data/upload flags are checked case-INSENSITIVELY (curl accepts
+# lowercase HTTP verbs, e.g. `-X post`). -F is checked separately, case-SENSITIVE, since
+# uppercase -F is form upload but lowercase -f is unrelated (fail-silently).
+if printf '%s\n' "$CHECK_CMD" | grep -qiE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d(\s|\S)|--form\b|-T\b|--upload-file\b)' \
+    || printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*-F\S?'; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "process.stdout.write(JSON.stringify({
       decision: 'block',
