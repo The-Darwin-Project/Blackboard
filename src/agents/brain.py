@@ -790,6 +790,24 @@ class Brain:
     # =========================================================================
 
     @staticmethod
+    def _github_pr_differs(a: EventDocument, b: EventDocument) -> bool:
+        """Return True if both events have github_context (or github_issue_context) with different identifiers."""
+        if not (a.event and a.event.evidence and b.event and b.event.evidence):
+            return False
+        a_ev, b_ev = a.event.evidence, b.event.evidence
+        a_gh = getattr(a_ev, "github_context", None) or {}
+        b_gh = getattr(b_ev, "github_context", None) or {}
+        if a_gh.get("pr_number") and b_gh.get("pr_number"):
+            return a_gh["pr_number"] != b_gh["pr_number"]
+        a_issue = getattr(a_ev, "github_issue_context", None) or {}
+        b_issue = getattr(b_ev, "github_issue_context", None) or {}
+        if a_issue.get("issue_number") and b_issue.get("issue_number"):
+            return a_issue["issue_number"] != b_issue["issue_number"]
+        if (a_gh or a_issue) and (b_gh or b_issue):
+            return (a_gh.get("pr_number") or a_issue.get("issue_number")) != (b_gh.get("pr_number") or b_issue.get("issue_number"))
+        return False
+
+    @staticmethod
     def _extract_mr_url(event: EventDocument) -> str | None:
         """Extract normalized MR/PR URL from gitlab_context, kargo_context, or github_context.
 
@@ -965,15 +983,19 @@ class Brain:
                         and existing.status.value in ("active", "new", "deferred")):
                     continue
 
-                # Pass 1: service-name match (existing behavior)
+                # Pass 1: service-name match — same service, check if same work item
                 if existing.service == event.service:
                     ex_ctx = (getattr(existing.event.evidence, "gitlab_context", None) or {}) if (existing.event and existing.event.evidence) else {}
                     ex_mr = ex_ctx.get("mr_iid")
                     ex_project = ex_ctx.get("project_id")
                     if new_project and ex_project and new_project != ex_project:
-                        pass  # fall through to URL check
+                        pass  # different GitLab project
                     elif new_mr and ex_mr and new_mr != ex_mr:
-                        pass  # fall through to URL check
+                        pass  # different GitLab MR
+                    elif self._github_pr_differs(event, existing):
+                        pass  # different GitHub PR or issue
+                    elif new_mr_url and self._extract_mr_url(existing) and new_mr_url != self._extract_mr_url(existing):
+                        pass  # different PR/MR URL (catch-all)
                     else:
                         logger.info(
                             f"Closing duplicate event {event_id} -- "
