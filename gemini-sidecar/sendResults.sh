@@ -48,7 +48,9 @@ if [ -z "$CONTENT" ]; then
 fi
 
 if [ "$TYPE" = "result" ]; then
-  echo "[sendResults] WARN: shell fallback used (MCP frontmatter validation bypassed)" >&2
+  echo "[sendResults] ERROR: shell sendResults is disabled — use team_send_results MCP tool instead (frontmatter validation required)" >&2
+  echo "Usage: call team_send_results via MCP with YAML frontmatter (---\\nreasoning: ...\\nassessment: ...\\n---)" >&2
+  exit 1
 fi
 
 # POST to sidecar callback endpoint
