@@ -1,0 +1,32 @@
+{{- if .Values.memgraph.enabled }}
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ .Release.Name }}-memgraph-init
+  labels:
+    {{- include "darwin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: memgraph
+allowPrivilegedContainer: false
+allowPrivilegeEscalation: false
+allowedCapabilities:
+  - CHOWN
+defaultAddCapabilities: []
+requiredDropCapabilities:
+  - ALL
+runAsUser:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+volumes:
+  - persistentVolumeClaim
+  - emptyDir
+  - projected
+  - secret
+  - configMap
+users:
+  - system:serviceaccount:{{ .Release.Namespace }}:{{ .Release.Name }}-memgraph
+{{- end }}
