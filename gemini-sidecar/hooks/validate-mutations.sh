@@ -45,7 +45,8 @@ TOOL_NAME="${PARSED%%|||*}"
 COMMAND="${PARSED#*|||}"
 
 # Early exit: non-shell tools don't need mutation checking
-SHELL_TOOLS="Bash shell run_in_terminal execute_command"
+# run_shell_command is Gemini CLI's actual built-in shell tool name.
+SHELL_TOOLS="Bash shell run_in_terminal execute_command run_shell_command"
 if ! echo "$SHELL_TOOLS" | grep -qw "$TOOL_NAME"; then
     echo '{"decision":"allow"}'
     exit 0
@@ -84,9 +85,9 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "process.stdout.write(JSON.stringify({
       decision: 'block',
-      reason: 'Read-only role ($ROLE): mutation blocked. Command matched denylist: ' +
-              process.argv[1].slice(0, 120)
-    }))" "$LOG_CMD"
+      reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
+              process.argv[2].slice(0, 120)
+    }))" "$ROLE" "$LOG_CMD"
     exit 0
 fi
 
@@ -96,9 +97,9 @@ if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*((-X|--request)\s*(POST|PUT|
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "process.stdout.write(JSON.stringify({
       decision: 'block',
-      reason: 'Read-only role ($ROLE): mutation blocked. Command matched denylist: ' +
-              process.argv[1].slice(0, 120)
-    }))" "$LOG_CMD"
+      reason: 'Read-only role (' + process.argv[1] + '): mutation blocked. Command matched denylist: ' +
+              process.argv[2].slice(0, 120)
+    }))" "$ROLE" "$LOG_CMD"
     exit 0
 fi
 
