@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "93f1022" # Updated by CI to commit SHA
+  tag: "9624b1b" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -66,7 +66,7 @@ memgraph:
     data:
       libPVCSize: "8Gi"
       libStorageAccessMode: "ReadWriteOnce"
-      libStorageClassName: ""  # Override via ArgoCD (block storage, NOT CephFS)
+      libStorageClassName: "" # Override via ArgoCD (block storage, NOT CephFS)
       createLogStorageClaim: false
     coordinators:
       libPVCSize: "1Gi"
