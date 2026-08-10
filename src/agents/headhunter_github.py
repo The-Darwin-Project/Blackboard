@@ -899,7 +899,17 @@ class GitHubPlatform:
         await self._remove_label(installation_id, owner, repo, pr_number, self._active_label)
         await self._add_labels(installation_id, owner, repo, pr_number, [self._done_label])
 
-        head_sha = gh_ctx.get("head_sha", "")
+        # Fetch live HEAD SHA — evidence value is stale if FRIDAY pushed commits during review
+        head_sha = ""
+        try:
+            client = await self._resolve_client(installation_id, owner, repo)
+            if client:
+                pr_resp = await client.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+                head_sha = (pr_resp.json().get("head") or {}).get("sha", "")
+        except Exception as e:
+            logger.debug(f"Live SHA fetch failed for {owner}/{repo}#{pr_number}: {e}")
+        if not head_sha:
+            head_sha = gh_ctx.get("head_sha", "")
         if head_sha:
             try:
                 await self.blackboard.set_github_pr_sha(owner, repo, pr_number, head_sha)
