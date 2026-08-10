@@ -58,7 +58,7 @@ qdrant:
   grpcPort: 6334 # gRPC API
 # =============================================================================
 # Memgraph Knowledge Graph (subchart: memgraph-high-availability v1.3.3, aliased as memgraph)
-# Minimal setup: 1 data + 1 coordinator. Using HA chart for fixOwnershipInitContainer.
+# Minimal setup: 1 data + 1 coordinator. OpenShift-compatible (no privileged initContainers).
 # =============================================================================
 memgraph:
   enabled: true
@@ -73,10 +73,22 @@ memgraph:
       libStorageAccessMode: "ReadWriteOnce"
       libStorageClassName: ""
       createLogStorageClaim: false
-  fixOwnershipInitContainer:
-    enabled: true
+  # OpenShift-compatible: no privileged initContainers
   sysctlInitContainer:
     enabled: false
+  fixOwnershipInitContainer:
+    enabled: false
+  # Let OpenShift assign arbitrary UID (inherit from SCC)
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
   commonArgs:
     data:
       logging:
