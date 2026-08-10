@@ -1,0 +1,6 @@
+dependencies:
+- name: memgraph
+  repository: https://memgraph.github.io/helm-charts
+  version: 1.0.5
+digest: sha256:e8a9cdafbe91485197212c0ff6d33a79aefe9b297b44f14ae467a3d1bdeaa5bf
+generated: "2026-08-10T14:34:06.474993575+03:00"

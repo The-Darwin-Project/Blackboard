@@ -22,3 +22,8 @@ keywords:
   - multi-agent
 maintainers:
   - name: Tal Hason
+dependencies:
+  - name: memgraph
+    version: "~1.0"
+    repository: "https://memgraph.github.io/helm-charts"
+    condition: memgraph.enabled

@@ -48,15 +48,6 @@ app.kubernetes.io/component: qdrant
 {{- end }}
 
 {{/*
-Memgraph component labels.
-*/}}
-{{- define "darwin.memgraphLabels" -}}
-app.kubernetes.io/name: darwin-memgraph
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/component: memgraph
-{{- end }}
-
-{{/*
 Dex component labels.
 */}}
 {{- define "darwin.dexLabels" -}}

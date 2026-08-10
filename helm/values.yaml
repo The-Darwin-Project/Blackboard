@@ -57,18 +57,26 @@ qdrant:
   port: 6333 # HTTP API
   grpcPort: 6334 # gRPC API
 # =============================================================================
-# Memgraph Knowledge Graph (bolt:// graph database) -- standalone Deployment + Service
+# Memgraph Knowledge Graph (subchart: memgraph/memgraph)
 # =============================================================================
 memgraph:
   enabled: true
-  image:
-    repository: memgraph/memgraph
-    tag: "latest"
-  persistence:
-    enabled: true
-    storageClassName: "" # Override via ArgoCD app parameters (use block storage, NOT CephFS -- WAL needs flock)
-    accessMode: ReadWriteOnce
-    size: 8Gi
+  memgraphConfig:
+    - "--also-log-to-stderr=true"
+    - "--telemetry-enabled=false"
+  persistentVolumeClaim:
+    createStorageClaim: true
+    storageClassName: ""  # Override via ArgoCD (block storage, NOT CephFS -- WAL needs flock)
+    storageSize: 8Gi
+    createLogStorage: false  # Use stderr (K8s captures stdout/stderr natively)
+  sysctlInitContainer:
+    enabled: false  # Requires privileged SCC on OpenShift -- disable for now
+  container:
+    startupProbe:
+      tcpSocket:
+        port: 7687
+      failureThreshold: 60
+      periodSeconds: 5
   resources:
     requests:
       memory: 256Mi
@@ -76,7 +84,12 @@ memgraph:
     limits:
       memory: 2Gi
       cpu: "1"
-  url: "bolt://darwin-blackboard-memgraph:7687"
+  service:
+    type: ClusterIP
+    enableBolt: true
+    boltPort: 7687
+    enableWebsocketMonitoring: false
+    enableHttpMonitoring: false
   auth:
     username: "darwin"
     password: "" # Override via secret or ArgoCD app parameters -- required, no anonymous bolt access

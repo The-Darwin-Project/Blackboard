@@ -198,17 +198,7 @@ spec:
             {{- end }}
             {{- if .Values.memgraph.enabled }}
             - name: MEMGRAPH_URL
-              value: {{ .Values.memgraph.url | default (printf "bolt://%s-memgraph:7687" .Release.Name) | quote }}
-            - name: MEMGRAPH_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-memgraph
-                  key: username
-            - name: MEMGRAPH_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-memgraph
-                  key: password
+              value: "bolt://{{ .Release.Name }}-memgraph:7687"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
