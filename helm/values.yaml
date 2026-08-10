@@ -77,6 +77,9 @@ memgraph:
       memory: 2Gi
       cpu: "1"
   url: "bolt://darwin-blackboard-memgraph:7687"
+  auth:
+    username: "darwin"
+    password: "" # Override via secret or ArgoCD app parameters -- required, no anonymous bolt access
 # =============================================================================
 # Agent Sidecars Configuration (same base image, per-agent CLI type and rules)
 # =============================================================================
