@@ -37,6 +37,9 @@ spec:
             - "--log-file="
             - "--also-log-to-stderr"
             - "--data-directory=/var/lib/memgraph"
+            - "--metrics-address=0.0.0.0"
+            - "--metrics-port=9091"
+            - "--telemetry-enabled=false"
           ports:
             - name: bolt
               containerPort: 7687
