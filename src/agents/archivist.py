@@ -274,13 +274,14 @@ ARCHIVE_TOOL_SCHEMA = {
 class Archivist:
     """Processes closed events into deep memory vectors."""
 
-    def __init__(self):
+    def __init__(self, kg_store=None):
         self._client = None
         self._adapter = None
         self._claude_adapter = None
         self._vector_store = None
         self._initialized = False
         self._knowledge_ready = False
+        self._kg_store = kg_store  # KnowledgeGraphStore | None -- set by main.py
         self.project = os.getenv("GCP_PROJECT", "")
         self.location = os.getenv("GCP_LOCATION", "global")
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
@@ -487,6 +488,8 @@ class Archivist:
                 f"facts={len(summary.get('reference_facts', []))})"
             )
 
+            await self._extract_and_store_graph(summary, event.service, event.id)
+
         except Exception as e:
             logger.warning(f"Archivist failed for event {event.id} (non-fatal): {e}")
 
@@ -576,6 +579,66 @@ class Archivist:
                 logger.warning(f"Reference fact storage failed (non-fatal): {e}")
 
         logger.info(f"Archived event {event.id} (Gemini fallback) -> Qdrant")
+
+        await self._extract_and_store_graph(summary, event.service, event.id)
+
+    async def _extract_and_store_graph(
+        self, summary: dict, service: str | None, event_id: str,
+    ) -> None:
+        """Extract entities from summary and write to knowledge graph. Fire-and-forget."""
+        if not self._kg_store:
+            return
+        try:
+            from .entity_extractor import extract_entities
+
+            entities = await extract_entities(summary, service)
+            if entities.entities:
+                await self._kg_store.upsert_entities(
+                    entities.entities, entities.relationships,
+                )
+        except Exception as e:
+            logger.warning("Knowledge graph write failed for %s (non-fatal): %s", event_id, e)
+
+    async def backfill_knowledge_graph(self, blackboard) -> int:
+        """Backfill knowledge graph for closed events missing from Memgraph.
+
+        Scans Redis for closed events, checks Memgraph for existing Event nodes,
+        and re-runs entity extraction for missing ones. Rate-limited to 5 per startup.
+        Returns count backfilled.
+        """
+        if not self._kg_store:
+            return 0
+        try:
+            if not await self._ensure_initialized():
+                return 0
+
+            event_ids = await blackboard.get_closed_event_ids(limit=200)
+            if not event_ids:
+                return 0
+
+            backfilled = 0
+            for eid in event_ids:
+                if backfilled >= 5:
+                    break
+                has = await self._kg_store.has_entity("Event", f"event:{eid}")
+                if has:
+                    continue
+
+                memory = await self.get_memory(eid)
+                if not memory:
+                    continue
+
+                payload = memory.get("payload", {})
+                service = payload.get("service")
+                await self._extract_and_store_graph(payload, service, eid)
+                backfilled += 1
+
+            if backfilled:
+                logger.info("Knowledge graph backfill: %d events processed", backfilled)
+            return backfilled
+        except Exception as e:
+            logger.warning("Knowledge graph backfill failed (non-fatal): %s", e)
+            return 0
 
     async def backfill_archives(self, blackboard) -> int:
         """Scan Redis for closed events missing from Qdrant. Returns count backfilled."""

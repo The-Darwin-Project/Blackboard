@@ -57,6 +57,27 @@ qdrant:
   port: 6333 # HTTP API
   grpcPort: 6334 # gRPC API
 # =============================================================================
+# Memgraph Knowledge Graph (bolt:// graph database) -- standalone Deployment + Service
+# =============================================================================
+memgraph:
+  enabled: true
+  image:
+    repository: memgraph/memgraph
+    tag: "latest"
+  persistence:
+    enabled: true
+    storageClassName: "" # Override via ArgoCD app parameters (use block storage, NOT CephFS -- WAL needs flock)
+    accessMode: ReadWriteOnce
+    size: 8Gi
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 2Gi
+      cpu: "1"
+  url: "bolt://darwin-blackboard-memgraph:7687"
+# =============================================================================
 # Agent Sidecars Configuration (same base image, per-agent CLI type and rules)
 # =============================================================================
 sidecars:

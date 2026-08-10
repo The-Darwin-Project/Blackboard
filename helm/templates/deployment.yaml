@@ -196,6 +196,10 @@ spec:
             - name: QDRANT_URL
               value: "http://{{ .Release.Name }}-qdrant:{{ .Values.qdrant.port }}"
             {{- end }}
+            {{- if .Values.memgraph.enabled }}
+            - name: MEMGRAPH_URL
+              value: {{ .Values.memgraph.url | default (printf "bolt://%s-memgraph:7687" .Release.Name) | quote }}
+            {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
             - name: GITHUB_APP_ID

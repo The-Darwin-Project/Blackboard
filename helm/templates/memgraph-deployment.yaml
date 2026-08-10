@@ -1,0 +1,75 @@
+{{- if .Values.memgraph.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-memgraph
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.memgraphLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: darwin-memgraph
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: darwin-memgraph
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: memgraph
+    spec:
+      serviceAccountName: {{ .Release.Name }}-brain
+      containers:
+        - name: memgraph
+          image: "{{ .Values.memgraph.image.repository }}:{{ .Values.memgraph.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: bolt
+              containerPort: 7687
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.memgraph.resources | nindent 12 }}
+          volumeMounts:
+          {{- if .Values.memgraph.persistence.enabled }}
+            - name: memgraph-data
+              mountPath: /var/lib/memgraph
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      volumes:
+        {{- if .Values.memgraph.persistence.enabled }}
+        - name: memgraph-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-memgraph-data
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-memgraph
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.memgraphLabels" . | nindent 4 }}
+spec:
+  selector:
+    app: darwin-memgraph
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: bolt
+      port: 7687
+      targetPort: 7687
+{{- end }}
