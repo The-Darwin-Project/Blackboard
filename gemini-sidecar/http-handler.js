@@ -236,24 +236,14 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // Hook status for Gemini AfterAgent hook (require-results.sh)
+  // Hook status for Gemini hooks (require-results.sh, validate-mutations.sh)
   if (url.pathname === '/hook-status' && req.method === 'GET') {
     const task = state.getCurrentTask();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       hasResults: !!state.getCallbackResult(),
       taskMode: task?.mode || '',
-    }));
-    return;
-  }
-
-  // Hook status for Gemini AfterAgent hook (require-results.sh)
-  if (url.pathname === '/hook-status' && req.method === 'GET') {
-    const task = state.getCurrentTask();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      hasResults: !!state.getCallbackResult(),
-      taskMode: task?.mode || '',
+      role: task?.role || AGENT_ROLE || '',
     }));
     return;
   }

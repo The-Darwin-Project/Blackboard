@@ -187,10 +187,13 @@ RUN chmod +x /usr/local/bin/sendResults && \
 COPY huddleSendMessage.sh /usr/local/bin/huddleSendMessage
 RUN chmod +x /usr/local/bin/huddleSendMessage
 
-# Install CLI hooks (team inbox + remote cluster context)
+# Install CLI hooks (team inbox + cluster context + exit gate + mutation validation)
 COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
 COPY hooks/cluster-context.sh /app/hooks/cluster-context.sh
-RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh
+COPY hooks/require-results.sh /app/hooks/require-results.sh
+COPY hooks/validate-mutations.sh /app/hooks/validate-mutations.sh
+RUN chmod +x /app/hooks/check-inbox.sh /app/hooks/cluster-context.sh \
+    /app/hooks/require-results.sh /app/hooks/validate-mutations.sh
 
 # Create CLI config directories (rules come from ConfigMap mount)
 RUN mkdir -p /home/default/.gemini && \
