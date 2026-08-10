@@ -1,0 +1,112 @@
+{{- if .Values.knowledgeGraph.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-kg-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kg-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: darwin-kg-postgres
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: darwin-kg-postgres
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: kg-postgres
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.knowledgeGraph.image.repository }}:{{ .Values.knowledgeGraph.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_DATABASE
+              value: {{ .Values.knowledgeGraph.database }}
+            - name: POSTGRESQL_USER
+              value: darwin
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-kg-postgres
+                  key: password
+          resources:
+            {{- toYaml .Values.knowledgeGraph.resources | nindent 12 }}
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/pgsql/data
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command:
+                - /usr/libexec/check-container
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: pg-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-kg-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-kg-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kg-postgres
+spec:
+  selector:
+    app: darwin-kg-postgres
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-kg-postgres-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kg-postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.knowledgeGraph.persistence.storageClassName }}
+  storageClassName: {{ .Values.knowledgeGraph.persistence.storageClassName }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.knowledgeGraph.persistence.size }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-kg-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kg-postgres
+type: Opaque
+stringData:
+  password: "{{ randAlphaNum 24 }}"
+{{- end }}

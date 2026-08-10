@@ -1,21 +1,15 @@
 # BlackBoard/src/memory/knowledge_graph.py
 # @ai-rules:
-# 1. [Constraint]: Uses neo4j async driver (bolt://). Justified waiver of HTTP-only precedent.
-# 2. [Pattern]: Lazy init via _ensure_initialized(). Never block import or construction.
+# 1. [Constraint]: Uses asyncpg for Postgres. Adjacency table model (kg_entities + kg_relationships).
+# 2. [Pattern]: Lazy init via _ensure_initialized(). Creates tables on first use (idempotent DDL).
 # 3. [Pattern]: All public methods fail-open (try/except, log warning, return empty). Never raises.
-# 4. [Gotcha]: Memgraph is bolt-compatible but has no APOC/GDS. Use pure Cypher only.
-# 5. [Constraint]: Node identity via MERGE on natural keys (name for Service, event_id for Event).
-# 6. [Pattern]: Labels/relationship types/depth can't be parameterized by the bolt driver, so every
-#    f-string-built label, type, or depth MUST be validated against `_VALID_LABEL_RE` (or the depth
-#    bound) before it reaches session.run() -- this applies to ALL public methods, not just upsert.
-# 7. [Gotcha]: Entity/Relationship inputs may be pydantic BaseModel instances or plain dicts. Use
-#    `_field()` for attribute access -- BaseModel has no `.get()`, so `getattr(x, n, None) or
-#    x.get(n, d)` raises AttributeError the moment a real attribute is present but falsy.
+# 4. [Constraint]: Node identity via INSERT ON CONFLICT UPDATE on natural keys.
+# 5. [Pattern]: Parameterized queries only. Never string-interpolate user data into SQL.
 """
-Async Knowledge Graph adapter for Memgraph (bolt://).
+Async Knowledge Graph adapter for Postgres (adjacency tables).
 
 Stores entity relationships extracted from archived events. Fail-open:
-all errors logged, never raised. Memgraph unavailability does not block
+all errors logged, never raised. Postgres unavailability does not block
 event closure or archival.
 """
 from __future__ import annotations
@@ -27,48 +21,69 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-MEMGRAPH_URL = os.getenv("MEMGRAPH_URL", "bolt://memgraph:7687")
-MEMGRAPH_USER = os.getenv("MEMGRAPH_USER", "")
-MEMGRAPH_PASSWORD = os.getenv("MEMGRAPH_PASSWORD", "")
+KG_POSTGRES_URL = os.getenv("KG_POSTGRES_URL", "")
 
-_VALID_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_MAX_TRAVERSAL_DEPTH = 10
+_VALID_ENTITY_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS kg_entities (
+    id SERIAL PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    properties JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(entity_type, entity_id)
+);
 
-def _field(obj: Any, name: str, default: Any = None) -> Any:
-    """Duck-type field access for either a pydantic model or a plain dict."""
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
+CREATE TABLE IF NOT EXISTS kg_relationships (
+    id SERIAL PRIMARY KEY,
+    from_entity_type TEXT NOT NULL,
+    from_entity_id TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    to_entity_type TEXT NOT NULL,
+    to_entity_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(from_entity_type, from_entity_id, rel_type, to_entity_type, to_entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kg_entities_lookup ON kg_entities(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_kg_rel_from ON kg_relationships(from_entity_type, from_entity_id);
+CREATE INDEX IF NOT EXISTS idx_kg_rel_to ON kg_relationships(to_entity_type, to_entity_id);
+"""
 
 
 class KnowledgeGraphStore:
-    """Async Memgraph client using neo4j bolt driver."""
+    """Async Postgres knowledge graph using adjacency tables."""
 
-    def __init__(self, url: str = MEMGRAPH_URL):
-        self._url = url
-        self._driver = None
+    def __init__(self, url: str = ""):
+        self._url = url or KG_POSTGRES_URL
+        self._pool = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> bool:
         if self._initialized:
             return True
+        if not self._url:
+            return False
         try:
-            from neo4j import AsyncGraphDatabase
+            import asyncpg
 
-            auth = (MEMGRAPH_USER, MEMGRAPH_PASSWORD) if MEMGRAPH_USER else None
-            self._driver = AsyncGraphDatabase.driver(self._url, auth=auth)
+            self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
+            async with self._pool.acquire() as conn:
+                await conn.execute(_SCHEMA_DDL)
             self._initialized = True
-            logger.info("KnowledgeGraphStore initialized (url=%s, auth=%s)", self._url, bool(auth))
+            logger.info("KnowledgeGraphStore initialized (postgres)")
             return True
         except Exception as e:
             logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
             return False
 
     async def close(self) -> None:
-        if self._driver:
-            await self._driver.close()
-            self._driver = None
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
             self._initialized = False
 
     async def upsert_entities(
@@ -76,48 +91,51 @@ class KnowledgeGraphStore:
         entities: list[Any],
         relationships: list[Any],
     ) -> None:
-        """MERGE entities and relationships into the graph. Idempotent."""
+        """Upsert entities and relationships. Idempotent."""
         try:
             if not await self._ensure_initialized():
                 return
 
-            async with self._driver.session() as session:
+            async with self._pool.acquire() as conn:
                 for entity in entities:
-                    etype = _field(entity, "type", "Node")
-                    eid = _field(entity, "id", "")
-                    props = _field(entity, "properties", {}) or {}
+                    etype = getattr(entity, "type", None) or entity.get("type", "Node")
+                    eid = getattr(entity, "id", None) or entity.get("id", "")
+                    props = getattr(entity, "properties", None) or entity.get("properties", {})
 
-                    if not _VALID_LABEL_RE.match(etype):
-                        logger.warning("Skipping entity with invalid label: %s", etype)
+                    if not _VALID_ENTITY_TYPE_RE.match(etype):
+                        logger.warning("Skipping entity with invalid type: %s", etype)
                         continue
 
-                    cypher = (
-                        f"MERGE (n:{etype} {{id: $id}}) "
-                        "ON CREATE SET n += $props, n.created_at = timestamp() "
-                        "ON MATCH SET n += $props, n.last_seen = timestamp()"
+                    import json
+                    await conn.execute(
+                        """
+                        INSERT INTO kg_entities (entity_type, entity_id, properties)
+                        VALUES ($1, $2, $3::jsonb)
+                        ON CONFLICT (entity_type, entity_id)
+                        DO UPDATE SET properties = $3::jsonb, last_seen = NOW()
+                        """,
+                        etype, eid, json.dumps(props),
                     )
-                    await session.run(cypher, id=eid, props=props)
 
                 for rel in relationships:
-                    from_type = _field(rel, "from_type", "Node")
-                    from_id = _field(rel, "from_id", "")
-                    rel_type = _field(rel, "rel_type", "RELATED_TO")
-                    to_type = _field(rel, "to_type", "Node")
-                    to_id = _field(rel, "to_id", "")
+                    from_type = getattr(rel, "from_type", None) or rel.get("from_type", "Node")
+                    from_id = getattr(rel, "from_id", None) or rel.get("from_id", "")
+                    rel_type = getattr(rel, "rel_type", None) or rel.get("rel_type", "RELATED_TO")
+                    to_type = getattr(rel, "to_type", None) or rel.get("to_type", "Node")
+                    to_id = getattr(rel, "to_id", None) or rel.get("to_id", "")
 
-                    if not all(_VALID_LABEL_RE.match(label) for label in (from_type, to_type, rel_type)):
-                        logger.warning("Skipping relationship with invalid labels: %s->%s->%s", from_type, rel_type, to_type)
+                    if not all(_VALID_ENTITY_TYPE_RE.match(t) for t in (from_type, to_type, rel_type)):
+                        logger.warning("Skipping relationship with invalid types: %s->%s->%s", from_type, rel_type, to_type)
                         continue
 
-                    cypher = (
-                        f"MATCH (a:{from_type} {{id: $from_id}}) "
-                        f"MATCH (b:{to_type} {{id: $to_id}}) "
-                        f"MERGE (a)-[r:{rel_type}]->(b) "
-                        "ON CREATE SET r.created_at = timestamp() "
-                        "ON MATCH SET r.last_seen = timestamp()"
-                    )
-                    await session.run(
-                        cypher, from_id=from_id, to_id=to_id,
+                    await conn.execute(
+                        """
+                        INSERT INTO kg_relationships (from_entity_type, from_entity_id, rel_type, to_entity_type, to_entity_id)
+                        VALUES ($1, $2, $3, $4, $5)
+                        ON CONFLICT (from_entity_type, from_entity_id, rel_type, to_entity_type, to_entity_id)
+                        DO UPDATE SET last_seen = NOW()
+                        """,
+                        from_type, from_id, rel_type, to_type, to_id,
                     )
 
             logger.info(
@@ -133,60 +151,56 @@ class KnowledgeGraphStore:
         entity_id: str,
         depth: int = 1,
     ) -> list[dict[str, Any]]:
-        """Find entities related to a given node up to `depth` hops."""
+        """Find entities related to a given node (1-hop by default)."""
         try:
-            if not isinstance(entity_type, str) or not _VALID_LABEL_RE.match(entity_type):
-                logger.warning("Rejecting query_related with invalid label: %s", entity_type)
-                return []
-            if not isinstance(depth, int) or isinstance(depth, bool) or not 1 <= depth <= _MAX_TRAVERSAL_DEPTH:
-                logger.warning("Rejecting query_related with invalid depth: %s", depth)
-                return []
-
             if not await self._ensure_initialized():
                 return []
 
-            cypher = (
-                f"MATCH (n:{entity_type} {{id: $id}})-[r*1..{depth}]-(m) "
-                "RETURN DISTINCT labels(m) AS labels, m.id AS id, properties(m) AS props"
-            )
-            async with self._driver.session() as session:
-                result = await session.run(cypher, id=entity_id)
-                records = [record.data() async for record in result]
-
-            return records
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON (e.entity_type = r.to_entity_type AND e.entity_id = r.to_entity_id)
+                    WHERE r.from_entity_type = $1 AND r.from_entity_id = $2
+                    UNION
+                    SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON (e.entity_type = r.from_entity_type AND e.entity_id = r.from_entity_id)
+                    WHERE r.to_entity_type = $1 AND r.to_entity_id = $2
+                    """,
+                    entity_type, entity_id,
+                )
+                return [dict(row) for row in rows]
         except Exception as e:
             logger.warning("Knowledge graph query failed (non-fatal): %s", e)
             return []
 
     async def has_entity(self, entity_type: str, entity_id: str) -> bool:
-        """Check if an entity exists in the graph."""
+        """Check if an entity exists."""
         try:
-            if not isinstance(entity_type, str) or not _VALID_LABEL_RE.match(entity_type):
-                logger.warning("Rejecting has_entity with invalid label: %s", entity_type)
-                return False
-
             if not await self._ensure_initialized():
                 return False
 
-            cypher = f"MATCH (n:{entity_type} {{id: $id}}) RETURN count(n) AS cnt"
-            async with self._driver.session() as session:
-                result = await session.run(cypher, id=entity_id)
-                record = await result.single()
-                return record and record["cnt"] > 0
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
+                    entity_type, entity_id,
+                )
+                return row is not None
         except Exception as e:
             logger.warning("Knowledge graph has_entity failed (non-fatal): %s", e)
             return False
 
     async def health_check(self) -> bool:
-        """Verify Memgraph is reachable."""
+        """Verify Postgres is reachable."""
         try:
             if not await self._ensure_initialized():
                 return False
 
-            async with self._driver.session() as session:
-                result = await session.run("RETURN 1 AS ok")
-                record = await result.single()
-                return record is not None and record["ok"] == 1
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT 1 AS ok")
+                return row is not None and row["ok"] == 1
         except Exception as e:
             logger.warning("Knowledge graph health check failed: %s", e)
             return False

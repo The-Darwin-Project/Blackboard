@@ -196,9 +196,14 @@ spec:
             - name: QDRANT_URL
               value: "http://{{ .Release.Name }}-qdrant:{{ .Values.qdrant.port }}"
             {{- end }}
-            {{- if .Values.memgraph.enabled }}
-            - name: MEMGRAPH_URL
-              value: "bolt://{{ .Release.Name }}-memgraph-data-0:7687"
+            {{- if .Values.knowledgeGraph.enabled }}
+            - name: KG_POSTGRES_URL
+              value: "postgresql://darwin:$(KG_POSTGRES_PASSWORD)@{{ .Release.Name }}-kg-postgres:5432/{{ .Values.knowledgeGraph.database }}"
+            - name: KG_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-kg-postgres
+                  key: password
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration

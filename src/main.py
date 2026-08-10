@@ -120,11 +120,11 @@ async def lifespan(app: FastAPI):
         aligner = Aligner(blackboard)
 
         kg_store = None
-        memgraph_url = os.getenv("MEMGRAPH_URL", "")
-        if memgraph_url:
+        kg_postgres_url = os.getenv("KG_POSTGRES_URL", "")
+        if kg_postgres_url:
             from .memory.knowledge_graph import KnowledgeGraphStore
-            kg_store = KnowledgeGraphStore(url=memgraph_url)
-            logger.info("KnowledgeGraphStore initialized (url=%s)", memgraph_url)
+            kg_store = KnowledgeGraphStore(url=kg_postgres_url)
+            logger.info("KnowledgeGraphStore initialized (postgres)")
 
         archivist = Archivist(kg_store=kg_store)
         set_archivist(archivist)
