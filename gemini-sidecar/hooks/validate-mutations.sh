@@ -77,6 +77,11 @@ BLOCK_PATTERN+='|\bkargo\s+(promote|verify)\b'
 BLOCK_PATTERN+='|\b(rm|mv|chmod|chown|dd|cp|ln|install|mkdir|touch)\b'
 # File write redirects (exclude /dev/null and fd duplication)
 BLOCK_PATTERN+='|\btee\b'
+# Shell redirection to a real file (CHECK_CMD already stripped >/dev/null above;
+# any >/>> remaining is a write). Excludes fd duplication (e.g. 2>&1).
+BLOCK_PATTERN+='|>>?[[:space:]]*[^&[:space:]]'
+# Piping output into an interpreter (curl ... | bash, etc.) -- trivial RCE otherwise
+BLOCK_PATTERN+='|\|\s*(sudo\s+)?(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\b'
 # Package publish
 BLOCK_PATTERN+='|\bnpm\s+publish\b'
 
@@ -92,8 +97,9 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
 fi
 
 # Curl mutations — case-SENSITIVE (uppercase -F is form upload, lowercase -f is fail-silently)
-# Covers: -X METHOD, --request METHOD, --data/--data-*, -d/-dVALUE, -F/-FVALUE, --form
-if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d\S|-F\S?|--form\b)'; then
+# Covers: -X METHOD, --request METHOD, --data/--data-*, -d/-dVALUE/-d VALUE, -F/-FVALUE,
+# --form, -T/--upload-file (PUT-style upload)
+if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d(\s|\S)|-F\S?|--form\b|-T\b|--upload-file\b)'; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "process.stdout.write(JSON.stringify({
       decision: 'block',
