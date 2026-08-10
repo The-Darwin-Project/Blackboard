@@ -5,7 +5,12 @@
 # 3. [Pattern]: All public methods fail-open (try/except, log warning, return empty). Never raises.
 # 4. [Gotcha]: Memgraph is bolt-compatible but has no APOC/GDS. Use pure Cypher only.
 # 5. [Constraint]: Node identity via MERGE on natural keys (name for Service, event_id for Event).
-# 6. [Pattern]: Parameterized Cypher queries only. Never string-interpolate user data into Cypher.
+# 6. [Pattern]: Labels/relationship types/depth can't be parameterized by the bolt driver, so every
+#    f-string-built label, type, or depth MUST be validated against `_VALID_LABEL_RE` (or the depth
+#    bound) before it reaches session.run() -- this applies to ALL public methods, not just upsert.
+# 7. [Gotcha]: Entity/Relationship inputs may be pydantic BaseModel instances or plain dicts. Use
+#    `_field()` for attribute access -- BaseModel has no `.get()`, so `getattr(x, n, None) or
+#    x.get(n, d)` raises AttributeError the moment a real attribute is present but falsy.
 """
 Async Knowledge Graph adapter for Memgraph (bolt://).
 
@@ -23,8 +28,18 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MEMGRAPH_URL = os.getenv("MEMGRAPH_URL", "bolt://memgraph:7687")
+MEMGRAPH_USER = os.getenv("MEMGRAPH_USER", "")
+MEMGRAPH_PASSWORD = os.getenv("MEMGRAPH_PASSWORD", "")
 
 _VALID_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_TRAVERSAL_DEPTH = 10
+
+
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    """Duck-type field access for either a pydantic model or a plain dict."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
 
 class KnowledgeGraphStore:
@@ -41,9 +56,10 @@ class KnowledgeGraphStore:
         try:
             from neo4j import AsyncGraphDatabase
 
-            self._driver = AsyncGraphDatabase.driver(self._url, auth=None)
+            auth = (MEMGRAPH_USER, MEMGRAPH_PASSWORD) if MEMGRAPH_USER else None
+            self._driver = AsyncGraphDatabase.driver(self._url, auth=auth)
             self._initialized = True
-            logger.info("KnowledgeGraphStore initialized (url=%s)", self._url)
+            logger.info("KnowledgeGraphStore initialized (url=%s, auth=%s)", self._url, bool(auth))
             return True
         except Exception as e:
             logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
@@ -67,9 +83,9 @@ class KnowledgeGraphStore:
 
             async with self._driver.session() as session:
                 for entity in entities:
-                    etype = getattr(entity, "type", None) or entity.get("type", "Node")
-                    eid = getattr(entity, "id", None) or entity.get("id", "")
-                    props = getattr(entity, "properties", None) or entity.get("properties", {})
+                    etype = _field(entity, "type", "Node")
+                    eid = _field(entity, "id", "")
+                    props = _field(entity, "properties", {}) or {}
 
                     if not _VALID_LABEL_RE.match(etype):
                         logger.warning("Skipping entity with invalid label: %s", etype)
@@ -80,16 +96,16 @@ class KnowledgeGraphStore:
                         "ON CREATE SET n += $props, n.created_at = timestamp() "
                         "ON MATCH SET n += $props, n.last_seen = timestamp()"
                     )
-                    await session.run(cypher, id=eid, props=props or {})
+                    await session.run(cypher, id=eid, props=props)
 
                 for rel in relationships:
-                    from_type = getattr(rel, "from_type", None) or rel.get("from_type", "Node")
-                    from_id = getattr(rel, "from_id", None) or rel.get("from_id", "")
-                    rel_type = getattr(rel, "rel_type", None) or rel.get("rel_type", "RELATED_TO")
-                    to_type = getattr(rel, "to_type", None) or rel.get("to_type", "Node")
-                    to_id = getattr(rel, "to_id", None) or rel.get("to_id", "")
+                    from_type = _field(rel, "from_type", "Node")
+                    from_id = _field(rel, "from_id", "")
+                    rel_type = _field(rel, "rel_type", "RELATED_TO")
+                    to_type = _field(rel, "to_type", "Node")
+                    to_id = _field(rel, "to_id", "")
 
-                    if not all(_VALID_LABEL_RE.match(l) for l in (from_type, to_type, rel_type)):
+                    if not all(_VALID_LABEL_RE.match(label) for label in (from_type, to_type, rel_type)):
                         logger.warning("Skipping relationship with invalid labels: %s->%s->%s", from_type, rel_type, to_type)
                         continue
 
@@ -119,6 +135,13 @@ class KnowledgeGraphStore:
     ) -> list[dict[str, Any]]:
         """Find entities related to a given node up to `depth` hops."""
         try:
+            if not isinstance(entity_type, str) or not _VALID_LABEL_RE.match(entity_type):
+                logger.warning("Rejecting query_related with invalid label: %s", entity_type)
+                return []
+            if not isinstance(depth, int) or isinstance(depth, bool) or not 1 <= depth <= _MAX_TRAVERSAL_DEPTH:
+                logger.warning("Rejecting query_related with invalid depth: %s", depth)
+                return []
+
             if not await self._ensure_initialized():
                 return []
 
@@ -138,6 +161,10 @@ class KnowledgeGraphStore:
     async def has_entity(self, entity_type: str, entity_id: str) -> bool:
         """Check if an entity exists in the graph."""
         try:
+            if not isinstance(entity_type, str) or not _VALID_LABEL_RE.match(entity_type):
+                logger.warning("Rejecting has_entity with invalid label: %s", entity_type)
+                return False
+
             if not await self._ensure_initialized():
                 return False
 
