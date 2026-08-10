@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "642012d" # Updated by CI to commit SHA
+  tag: "93f1022" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -65,7 +65,7 @@ memgraph:
     - "--also-log-to-stderr=true"
     - "--telemetry-enabled=false"
   persistentVolumeClaim:
-    createStorageClaim: false  # emptyDir -- PVC ownership incompatible with Memgraph UID check. Graph rebuilt from backfill on restart.
+    createStorageClaim: false # emptyDir -- PVC ownership incompatible with Memgraph UID check. Graph rebuilt from backfill on restart.
     storageClassName: ""
     storageSize: 8Gi
     createLogStorage: false # Use stderr (K8s captures stdout/stderr natively)
