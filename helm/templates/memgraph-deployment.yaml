@@ -33,6 +33,10 @@ spec:
         - name: memgraph
           image: "{{ .Values.memgraph.image.repository }}:{{ .Values.memgraph.image.tag }}"
           imagePullPolicy: IfNotPresent
+          args:
+            - "--log-file="
+            - "--also-log-to-stderr"
+            - "--data-directory=/var/lib/memgraph"
           ports:
             - name: bolt
               containerPort: 7687
