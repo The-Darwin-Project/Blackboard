@@ -103,6 +103,15 @@ function registerMCPsAndHooks(settings, cli) {
 
     settings.hooks = settings.hooks || {};
     if (cli === 'gemini') {
+        settings.hooks.BeforeTool = settings.hooks.BeforeTool || [];
+        if (!settings.hooks.BeforeTool.some(h => h.hooks?.some(hh => hh.name === 'validate-mutations'))) {
+            settings.hooks.BeforeTool.push({
+                matcher: '*',
+                hooks: [{ name: 'validate-mutations', type: 'command',
+                           command: '/app/hooks/validate-mutations.sh', timeout: 3000,
+                           description: 'Block shell mutations for read-only roles (defense-in-depth)' }],
+            });
+        }
         settings.hooks.AfterTool = settings.hooks.AfterTool || [];
         if (!settings.hooks.AfterTool.some(h => h.hooks?.some(hh => hh.name === 'team-inbox'))) {
             settings.hooks.AfterTool.push({
