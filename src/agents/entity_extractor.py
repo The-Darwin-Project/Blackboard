@@ -124,15 +124,24 @@ def _get_client():
 async def extract_entities(
     event_summary: dict[str, Any],
     service: str | None = None,
+    event_id: str | None = None,
 ) -> KnowledgeGraphEntities:
     """Extract entities from an event summary using Flash Lite.
+
+    `event_id` is the caller's authoritative event id (falls back to
+    `event_summary['event_id']` when omitted). It is used both in the prompt
+    and to deterministically overwrite the extracted Event entity's natural
+    key -- the LLM's echoed id is a hint, not the source of truth, so a
+    malformed/omitted echo can never produce an `event:unknown` node for a
+    real event.
 
     Returns empty KnowledgeGraphEntities on any failure (fail-open).
     """
     empty = KnowledgeGraphEntities()
+    eid = event_id or event_summary.get("event_id", "unknown")
     try:
         summary_text = (
-            f"Event: {event_summary.get('event_id', 'unknown')}\n"
+            f"Event: {eid}\n"
             f"Service: {service or event_summary.get('service', 'unknown')}\n"
             f"Symptom: {event_summary.get('symptom', 'unknown')}\n"
             f"Root Cause: {event_summary.get('root_cause', 'unknown')}\n"
@@ -163,18 +172,23 @@ async def extract_entities(
         entities = [Entity(**e) for e in result.get("entities", [])]
         relationships = [Relationship(**r) for r in result.get("relationships", [])]
 
+        canonical_event_id = f"event:{eid}"
+        for entity in entities:
+            if entity.type.lower() == "event":
+                entity.id = canonical_event_id
+
         return KnowledgeGraphEntities(entities=entities, relationships=relationships)
 
     except asyncio.TimeoutError:
         logger.warning(
             "Entity extraction timed out after %ss for %s",
             KG_EXTRACTOR_TIMEOUT,
-            event_summary.get("event_id", "unknown"),
+            eid,
         )
         return empty
     except Exception as e:
         logger.warning(
             "Entity extraction failed for %s (non-fatal): %s",
-            event_summary.get("event_id", "unknown"), e,
+            eid, e,
         )
         return empty

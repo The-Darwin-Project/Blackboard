@@ -591,7 +591,7 @@ class Archivist:
         try:
             from .entity_extractor import extract_entities
 
-            entities = await extract_entities(summary, service)
+            entities = await extract_entities(summary, service, event_id=event_id)
             if entities.entities:
                 await self._kg_store.upsert_entities(
                     entities.entities, entities.relationships,
