@@ -11,7 +11,7 @@ global:
 # =============================================================================
 image:
   repository: ghcr.io/the-darwin-project/blackboard
-  tag: "035f9e0" # Updated by CI to commit SHA
+  tag: "642012d" # Updated by CI to commit SHA
   pullPolicy: IfNotPresent
 replicaCount: 1
 # =============================================================================
@@ -66,11 +66,11 @@ memgraph:
     - "--telemetry-enabled=false"
   persistentVolumeClaim:
     createStorageClaim: true
-    storageClassName: ""  # Override via ArgoCD (block storage, NOT CephFS -- WAL needs flock)
+    storageClassName: "" # Override via ArgoCD (block storage, NOT CephFS -- WAL needs flock)
     storageSize: 8Gi
-    createLogStorage: false  # Use stderr (K8s captures stdout/stderr natively)
+    createLogStorage: false # Use stderr (K8s captures stdout/stderr natively)
   sysctlInitContainer:
-    enabled: false  # Requires privileged SCC on OpenShift -- disable for now
+    enabled: false # Requires privileged SCC on OpenShift -- disable for now
   container:
     startupProbe:
       tcpSocket:
