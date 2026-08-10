@@ -1,0 +1,30 @@
+# helm/templates/networkpolicy-memgraph.yaml
+# @ai-rules:
+# 1. [Constraint]: Only the Brain pod may reach Memgraph's bolt:// port. All other ingress denied.
+# 2. [Pattern]: podSelector mirrors memgraph-deployment.yaml's own pod template labels -- keep
+#    both in sync if those labels change.
+{{- if .Values.memgraph.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-memgraph-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.memgraphLabels" . | nindent 4 }}
+    app.kubernetes.io/component: network-security
+spec:
+  podSelector:
+    matchLabels:
+      app: darwin-memgraph
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "darwin.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 7687
+{{- end }}

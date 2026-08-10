@@ -118,7 +118,15 @@ async def lifespan(app: FastAPI):
         import asyncio
         
         aligner = Aligner(blackboard)
-        archivist = Archivist()
+
+        kg_store = None
+        memgraph_url = os.getenv("MEMGRAPH_URL", "")
+        if memgraph_url:
+            from .memory.knowledge_graph import KnowledgeGraphStore
+            kg_store = KnowledgeGraphStore(url=memgraph_url)
+            logger.info("KnowledgeGraphStore initialized (url=%s)", memgraph_url)
+
+        archivist = Archivist(kg_store=kg_store)
         set_archivist(archivist)
         architect = Architect()
         sysadmin = SysAdmin()
@@ -450,6 +458,7 @@ async def lifespan(app: FastAPI):
         async def _backfill_on_startup():
             await asyncio.sleep(10)
             await archivist.backfill_archives(blackboard)
+            await archivist.backfill_knowledge_graph(blackboard)
 
         asyncio.create_task(_backfill_on_startup())
 

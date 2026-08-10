@@ -1,0 +1,109 @@
+# @ai-rules:
+# 1. [Constraint]: Memgraph has no auth until a user is created -- bootstrap via a postStart
+#    `mgconsole` hook, not an image env var (the official image has none for this).
+# 2. [Gotcha]: postStart hook failures kill the container, so the bootstrap script must always
+#    `exit 0` -- treat auth bootstrap as best-effort/retried, never as a container-fatal step.
+# 3. [Pattern]: Ingress to bolt:// (7687) is restricted by NetworkPolicy (networkpolicy-memgraph.yaml)
+#    to pods matching darwin.selectorLabels (the Brain pod) -- keep both in sync if labels change.
+{{- if .Values.memgraph.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-memgraph
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.memgraphLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: darwin-memgraph
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: darwin-memgraph
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: memgraph
+    spec:
+      serviceAccountName: {{ .Release.Name }}-brain
+      containers:
+        - name: memgraph
+          image: "{{ .Values.memgraph.image.repository }}:{{ .Values.memgraph.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: bolt
+              containerPort: 7687
+              protocol: TCP
+          env:
+            - name: MEMGRAPH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-memgraph
+                  key: username
+            - name: MEMGRAPH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-memgraph
+                  key: password
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    for i in $(seq 1 30); do
+                      if printf '%s' "CREATE USER IF NOT EXISTS $MEMGRAPH_USER IDENTIFIED BY '$MEMGRAPH_PASSWORD'; GRANT ALL PRIVILEGES TO $MEMGRAPH_USER;" \
+                        | mgconsole --host 127.0.0.1 --port 7687 >/tmp/mgconsole-bootstrap.log 2>&1; then
+                        exit 0
+                      fi
+                      sleep 2
+                    done
+                    cat /tmp/mgconsole-bootstrap.log
+                    exit 0
+          resources:
+            {{- toYaml .Values.memgraph.resources | nindent 12 }}
+          volumeMounts:
+          {{- if .Values.memgraph.persistence.enabled }}
+            - name: memgraph-data
+              mountPath: /var/lib/memgraph
+          {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      volumes:
+        {{- if .Values.memgraph.persistence.enabled }}
+        - name: memgraph-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-memgraph-data
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-memgraph
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "darwin.memgraphLabels" . | nindent 4 }}
+spec:
+  selector:
+    app: darwin-memgraph
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: bolt
+      port: 7687
+      targetPort: 7687
+{{- end }}
