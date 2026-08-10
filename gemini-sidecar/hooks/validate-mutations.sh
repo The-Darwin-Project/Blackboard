@@ -6,13 +6,19 @@
 #    No normalization pipeline — trusted Darwin prompts, not untrusted external code.
 # 3. [Constraint]: Fail-OPEN always. Exit 0 with JSON. Never exit non-zero (blocks agent).
 # 4. [Constraint]: Single-responsibility — validation ONLY. Context injection stays in AfterTool.
-# 5. [Gotcha]: Role from $AGENT_ROLE env var (not HTTP). Available in all hook shells.
+# 5. [Gotcha]: Role from /hook-status (ephemeral) || $AGENT_ROLE (local). Ephemeral pods
+#    have AGENT_ROLE="" — real role arrives via WS, exposed by /hook-status endpoint.
 
 # Read-only roles (Gemini-CLI roles only — Claude roles have their own enforcement)
 READONLY_ROLES="explorer security_analyst"
 
+# Resolve role: ephemeral agents have AGENT_ROLE="" at process start (role arrives via WS,
+# stored in task.role, exposed at /hook-status). Local sidecars have AGENT_ROLE set in env.
+ROLE_DATA=$(curl -sf "http://localhost:${SIDECAR_PORT:-9090}/hook-status" 2>/dev/null)
+ROLE=$(echo "$ROLE_DATA" | node -e "const d=require('fs').readFileSync(0,'utf8');try{const j=JSON.parse(d);process.stdout.write(j.role||'')}catch{process.stdout.write('')}" 2>/dev/null)
+[ -z "$ROLE" ] && ROLE="${AGENT_ROLE:-}"
+
 # Fast exit: if role is not read-only, allow everything
-ROLE="${AGENT_ROLE:-}"
 if ! echo "$READONLY_ROLES" | grep -qw "$ROLE"; then
     echo '{"decision":"allow"}'
     exit 0
@@ -85,7 +91,8 @@ if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
 fi
 
 # Curl mutations — case-SENSITIVE (uppercase -F is form upload, lowercase -f is fail-silently)
-if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*(-X\s*(POST|PUT|DELETE|PATCH)|--data\b|-d\s|-F\s|--form\b)'; then
+# Covers: -X METHOD, --request METHOD, --data/--data-*, -d/-dVALUE, -F/-FVALUE, --form
+if printf '%s\n' "$CHECK_CMD" | grep -qE '\bcurl\b.*((-X|--request)\s*(POST|PUT|DELETE|PATCH)|--data\b|-d\S|-F\S?|--form\b)'; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)
     node -e "process.stdout.write(JSON.stringify({
       decision: 'block',
