@@ -61,6 +61,8 @@ qdrant:
 # =============================================================================
 memgraph:
   enabled: true
+  statefulSetAnnotations:
+    argocd.argoproj.io/sync-options: Replace=true
   memgraphConfig:
     - "--also-log-to-stderr=true"
     - "--telemetry-enabled=false"
