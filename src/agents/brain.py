@@ -74,6 +74,11 @@
 #     Overwrite semantics. Persists across defer-wake (warm SI context). Cleared only in
 #     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
 #     intentionally broken on RECALL re-invoke.
+# 36. [Pattern]: Knowledge graph recall (graph_recall.py). _get_graph_recall queries Postgres KG
+#     via archivist._kg_store for service-related entities. Returns <prior_knowledge> XML fence
+#     or None. Fail-open (3s timeout). Injected in _build_system_prompt BEFORE post-agent recall.
+#     _check_graph_edges activates has_graph_edges flag for context skill phase.
+#     _enrich_graph_from_agent is fire-and-forget post-agent entity extraction (15s timeout).
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate processing: scan enqueues active-task events with unseen non-brain turns.
 #     _process_with_llm uses is_intermediate flag to gate tools: {reply_to_agent, message_agent,
@@ -2004,7 +2009,7 @@ class Brain:
             flags["has_recent_closed"] = bool(recent_closed)
 
             flags["_cached_mermaid"] = ""
-            flags["has_graph_edges"] = False
+            flags["has_graph_edges"] = await self._check_graph_edges(event.service)
 
         flags["has_aligner_turns"] = any(
             t.actor == "aligner" for t in event.conversation
@@ -2199,10 +2204,15 @@ class Brain:
                         _wrap_section(path, body, self._skill_loader.get_tag_type(path))
                     )
 
+        graph_context = await self._get_graph_recall(event)
+        if graph_context:
+            resolved_contents.append(graph_context)
+
         if "post-agent" in active_phases:
             recall_block = await self._post_agent_recall(event)
             if recall_block:
                 resolved_contents.append(recall_block)
+            asyncio.ensure_future(self._enrich_graph_from_agent(event))
 
         if "defer-wake" in active_phases and context_flags:
             consecutive = context_flags.get("consecutive_defers", 0)
@@ -2355,6 +2365,115 @@ class Brain:
                 line2 += " Any new evidence to reclassify?"
 
         return f"{line1}\n{line2}"
+
+    async def _check_graph_edges(self, service: str) -> bool:
+        """Check if the service has knowledge graph data. Fail-open: returns False."""
+        if not service or service.lower() in ("general", "system"):
+            return False
+        archivist = self.agents.get("_archivist_memory")
+        kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+        if not kg_store:
+            return False
+        try:
+            return await asyncio.wait_for(
+                kg_store.has_entity("Service", f"service:{service}"),
+                timeout=2.0,
+            )
+        except Exception:
+            logger.debug("_check_graph_edges failed for service=%s (fail-open)", service)
+            return False
+
+    async def _enrich_graph_from_agent(self, event: EventDocument) -> None:
+        """Extract entities from latest agent result and write to KG. Fire-and-forget."""
+        try:
+            archivist = self.agents.get("_archivist_memory")
+            kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+            if not kg_store:
+                return
+
+            last_agent = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")),
+                None,
+            )
+            if not last_agent:
+                return
+
+            # Idempotency guard: don't re-extract for the same turn
+            turn_idx = event.conversation.index(last_agent)
+            enrichment_key = (event.id, turn_idx)
+            if not hasattr(self, "_enriched_turns"):
+                self._enriched_turns: set[tuple[str, int]] = set()
+            if enrichment_key in self._enriched_turns:
+                return
+            self._enriched_turns.add(enrichment_key)
+
+            agent_text = last_agent.result or last_agent.thoughts or ""
+            if len(agent_text) < 50:
+                return
+
+            service = event.service if event.service not in ("general", "system") else None
+            if not service:
+                return
+
+            from ..models import EventEvidence
+            evidence = event.event.evidence if event.event else None
+            domain = (evidence.brain_domain or evidence.domain) if isinstance(evidence, EventEvidence) else "unknown"
+
+            summary = {
+                "event_id": event.id,
+                "service": service,
+                "symptom": agent_text[:500],
+                "root_cause": "",
+                "fix_action": "",
+                "domain": domain,
+                "outcome": "in_progress",
+            }
+
+            from .entity_extractor import extract_entities
+            entities = await asyncio.wait_for(
+                extract_entities(summary, service, event_id=event.id),
+                timeout=15.0,
+            )
+            if entities.entities:
+                await kg_store.upsert_entities(entities.entities, entities.relationships)
+                logger.info(
+                    "Graph enrichment: wrote %d entities from agent result for %s",
+                    len(entities.entities), event.id,
+                )
+        except Exception as e:
+            logger.warning("Graph enrichment failed for %s (non-fatal): %s", event.id, e)
+
+    async def _get_graph_recall(self, event: EventDocument) -> str | None:
+        """Query the knowledge graph for service context and return SI fence block.
+
+        Fail-open: returns None on any error, empty graph, or missing kg_store.
+        Caller falls back to Qdrant vector search when this returns None.
+        """
+        service = event.service
+        if not service or service.lower() in ("general", "system"):
+            return None
+
+        archivist = self.agents.get("_archivist_memory")
+        kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+        if not kg_store:
+            return None
+
+        try:
+            from ..models import EventEvidence
+            evidence = event.event.evidence if event.event else None
+            domain = (evidence.brain_domain or evidence.domain) if isinstance(evidence, EventEvidence) else ""
+
+            from .graph_recall import get_graph_context
+            return await get_graph_context(
+                kg_store,
+                service=service,
+                event_source=event.source,
+                domain=domain,
+            )
+        except Exception as e:
+            logger.warning("Graph recall failed for %s (non-fatal): %s", event.id, e)
+            return None
 
     async def _post_agent_recall(self, event: EventDocument) -> str | None:
         """Search deep memory using agent findings and inject matching patterns into SI.

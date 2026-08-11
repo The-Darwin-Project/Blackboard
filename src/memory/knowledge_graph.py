@@ -61,24 +61,31 @@ class KnowledgeGraphStore:
         self._url = url or KG_POSTGRES_URL
         self._pool = None
         self._initialized = False
+        self._init_lock: Any = None
 
     async def _ensure_initialized(self) -> bool:
         if self._initialized:
             return True
         if not self._url:
             return False
-        try:
-            import asyncpg
+        import asyncio
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self._initialized:
+                return True
+            try:
+                import asyncpg
 
-            self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
-            async with self._pool.acquire() as conn:
-                await conn.execute(_SCHEMA_DDL)
-            self._initialized = True
-            logger.info("KnowledgeGraphStore initialized (postgres)")
-            return True
-        except Exception as e:
-            logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
-            return False
+                self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
+                async with self._pool.acquire() as conn:
+                    await conn.execute(_SCHEMA_DDL)
+                self._initialized = True
+                logger.info("KnowledgeGraphStore initialized (postgres)")
+                return True
+            except Exception as e:
+                logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
+                return False
 
     async def close(self) -> None:
         if self._pool:
