@@ -81,6 +81,7 @@ def _make_brain_stub(kg_store=None):
         agents={"_archivist_memory": archivist_mock},
         _recall_lessons={},
         _graph_enrich_tasks=set(),
+        _enriched_turns=set(),
     )
 
     # Bind actual Brain methods to the stub so self.method() works
