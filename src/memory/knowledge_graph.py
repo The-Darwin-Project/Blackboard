@@ -170,11 +170,13 @@ class KnowledgeGraphStore:
                     FROM kg_relationships r
                     JOIN kg_entities e ON (e.entity_type = r.to_entity_type AND e.entity_id = r.to_entity_id)
                     WHERE r.from_entity_type = $1 AND r.from_entity_id = $2
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
                     UNION
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
                     FROM kg_relationships r
                     JOIN kg_entities e ON (e.entity_type = r.from_entity_type AND e.entity_id = r.from_entity_id)
                     WHERE r.to_entity_type = $1 AND r.to_entity_id = $2
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
                     """,
                     entity_type, entity_id,
                 )
