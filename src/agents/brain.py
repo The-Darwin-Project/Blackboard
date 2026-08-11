@@ -75,7 +75,7 @@
 #     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
 #     intentionally broken on RECALL re-invoke.
 # 36. [Pattern]: Knowledge graph recall (graph_recall.py). _get_graph_recall queries Postgres KG
-#     via archivist._kg_store for service-related entities. Returns <prior_knowledge> XML fence
+#     via archivist.kg_store (public accessor) for service-related entities. Returns <prior_knowledge> XML fence
 #     or None. Fail-open (3s timeout). Injected in _build_system_prompt BEFORE post-agent recall.
 #     _check_graph_edges activates has_graph_edges flag for context skill phase.
 #     _enrich_graph_from_agent is fire-and-forget post-agent entity extraction (15s timeout).
@@ -638,6 +638,7 @@ class Brain:
         self._running = False
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
+        self._graph_enrich_tasks: set[asyncio.Task] = set()  # strong refs -- event loop only holds weak refs
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
         self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
@@ -2212,7 +2213,7 @@ class Brain:
             recall_block = await self._post_agent_recall(event)
             if recall_block:
                 resolved_contents.append(recall_block)
-            asyncio.ensure_future(self._enrich_graph_from_agent(event))
+            self._schedule_graph_enrichment(event)
 
         if "defer-wake" in active_phases and context_flags:
             consecutive = context_flags.get("consecutive_defers", 0)
@@ -2371,7 +2372,7 @@ class Brain:
         if not service or service.lower() in ("general", "system"):
             return False
         archivist = self.agents.get("_archivist_memory")
-        kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+        kg_store = archivist.kg_store if archivist is not None else None
         if not kg_store:
             return False
         try:
@@ -2383,11 +2384,23 @@ class Brain:
             logger.debug("_check_graph_edges failed for service=%s (fail-open)", service)
             return False
 
+    def _schedule_graph_enrichment(self, event: EventDocument) -> None:
+        """Fire-and-forget self._enrich_graph_from_agent, keeping a strong task
+        reference (self._graph_enrich_tasks) so the event loop's weak reference
+        can't let it get garbage-collected mid-execution -- matches the
+        asyncio.create_task convention used at every other fire-and-forget site
+        in this file (archivist.py, headhunter.py, routes/queue.py)."""
+        t = asyncio.create_task(self._enrich_graph_from_agent(event))
+        self._graph_enrich_tasks.add(t)
+        t.add_done_callback(self._graph_enrich_tasks.discard)
+
     async def _enrich_graph_from_agent(self, event: EventDocument) -> None:
         """Extract entities from latest agent result and write to KG. Fire-and-forget."""
+        if not hasattr(self, "_enriched_turns"):
+            self._enriched_turns: set[tuple[str, int]] = set()
         try:
             archivist = self.agents.get("_archivist_memory")
-            kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+            kg_store = archivist.kg_store if archivist is not None else None
             if not kg_store:
                 return
 
@@ -2399,14 +2412,14 @@ class Brain:
             if not last_agent:
                 return
 
-            # Idempotency guard: don't re-extract for the same turn
+            # Idempotency guard: don't re-extract for the same turn. Only committed
+            # once extraction+upsert below succeed -- a transient failure (timeout,
+            # Postgres blip) must NOT permanently mark the turn as done, or it would
+            # be silently and irrecoverably skipped with no retry.
             turn_idx = event.conversation.index(last_agent)
             enrichment_key = (event.id, turn_idx)
-            if not hasattr(self, "_enriched_turns"):
-                self._enriched_turns: set[tuple[str, int]] = set()
             if enrichment_key in self._enriched_turns:
                 return
-            self._enriched_turns.add(enrichment_key)
 
             agent_text = last_agent.result or last_agent.thoughts or ""
             if len(agent_text) < 50:
@@ -2441,6 +2454,7 @@ class Brain:
                     "Graph enrichment: wrote %d entities from agent result for %s",
                     len(entities.entities), event.id,
                 )
+            self._enriched_turns.add(enrichment_key)
         except Exception as e:
             logger.warning("Graph enrichment failed for %s (non-fatal): %s", event.id, e)
 
@@ -2455,7 +2469,7 @@ class Brain:
             return None
 
         archivist = self.agents.get("_archivist_memory")
-        kg_store = getattr(archivist, "_kg_store", None) if archivist else None
+        kg_store = archivist.kg_store if archivist is not None else None
         if not kg_store:
             return None
 

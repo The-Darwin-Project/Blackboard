@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -55,6 +55,7 @@ def _make_brain_stub(resolved_pairs, kargo_paths=None, kargo_bodies=None):
         _build_event_state_header=lambda event, ctx: "## EVENT STATE HEADER",
         _post_agent_recall=lambda event: None,
         _format_recall_block=lambda event: None,
+        _get_graph_recall=AsyncMock(return_value=None),
     )
     return brain
 

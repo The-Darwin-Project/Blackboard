@@ -35,6 +35,20 @@ _SKIP_SERVICES = frozenset({"general", "system", ""})
 
 _FENCE_CLOSE_RE = re.compile(r"</prior_knowledge>", re.IGNORECASE)
 
+# Entity properties originate from free-text agent output run through an LLM
+# extractor that only constrains JSON *shape*, not content, then persist in
+# Postgres with no TTL -- stripping only "</prior_knowledge>" is not enough to
+# stop tag/fence-based prompt injection (same class of bug as brain.py's
+# _sanitize_override_reason). Blanket-strip all tag-like sequences instead.
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _sanitize(text: Any) -> str:
+    """Strip tag-like sequences from KG-derived text before it enters the SI fence."""
+    if not isinstance(text, str):
+        return "" if text is None else str(text)
+    return _TAG_RE.sub("", text)
+
 
 async def get_graph_context(
     kg_store: KnowledgeGraphStore | None,
@@ -108,11 +122,11 @@ def _format_graph_context(
         lines.append(f"### Past Events ({len(events)})")
         for ev in events:
             props = _parse_props(ev.get("properties"))
-            eid = ev.get("entity_id", "")
-            summary = props.get("summary", "")
-            domain_val = props.get("domain", "")
-            outcome = props.get("outcome", "")
-            rel = ev.get("rel_type", "")
+            eid = _sanitize(ev.get("entity_id", ""))
+            summary = _sanitize(props.get("summary", ""))
+            domain_val = _sanitize(props.get("domain", ""))
+            outcome = _sanitize(props.get("outcome", ""))
+            rel = _sanitize(ev.get("rel_type", ""))
             parts = [f"- **{eid}**"]
             if rel:
                 parts[0] += f" ({rel})"
@@ -129,11 +143,11 @@ def _format_graph_context(
         lines.append(f"### Applied Fixes ({len(fixes)})")
         for fix in fixes:
             props = _parse_props(fix.get("properties"))
-            fid = fix.get("entity_id", "")
-            desc = props.get("description", "")
-            fix_type = props.get("fix_type", "")
+            fid = _sanitize(fix.get("entity_id", ""))
+            desc = _sanitize(props.get("description", ""))
+            fix_type = _sanitize(props.get("fix_type", ""))
             effective = props.get("effective")
-            rel = fix.get("rel_type", "")
+            rel = _sanitize(fix.get("rel_type", ""))
             parts = [f"- **{fid}**"]
             if rel:
                 parts[0] += f" ({rel})"
@@ -150,10 +164,10 @@ def _format_graph_context(
         lines.append(f"### Related Services ({len(services)})")
         for svc in services:
             props = _parse_props(svc.get("properties"))
-            sid = svc.get("entity_id", "")
-            name = props.get("name", sid)
-            ns = props.get("namespace", "")
-            rel = svc.get("rel_type", "")
+            sid = _sanitize(svc.get("entity_id", ""))
+            name = _sanitize(props.get("name", sid))
+            ns = _sanitize(props.get("namespace", ""))
+            rel = _sanitize(svc.get("rel_type", ""))
             parts = [f"- **{name}**"]
             if rel:
                 parts[0] += f" ({rel})"

@@ -70,7 +70,7 @@ def _make_brain_stub(kg_store=None):
     blackboard.get_recent_closed_for_service = AsyncMock(return_value=[])
 
     archivist_mock = MagicMock()
-    archivist_mock._kg_store = kg_store
+    archivist_mock.kg_store = kg_store
 
     brain = SimpleNamespace(
         _skill_loader=loader,
@@ -80,12 +80,14 @@ def _make_brain_stub(kg_store=None):
         _waiting_for_user={},
         agents={"_archivist_memory": archivist_mock},
         _recall_lessons={},
+        _graph_enrich_tasks=set(),
     )
 
     # Bind actual Brain methods to the stub so self.method() works
     brain._get_graph_recall = Brain._get_graph_recall.__get__(brain, type(brain))
     brain._check_graph_edges = Brain._check_graph_edges.__get__(brain, type(brain))
     brain._enrich_graph_from_agent = Brain._enrich_graph_from_agent.__get__(brain, type(brain))
+    brain._schedule_graph_enrichment = Brain._schedule_graph_enrichment.__get__(brain, type(brain))
     brain._format_recall_block = Brain._format_recall_block.__get__(brain, type(brain))
 
     return brain
