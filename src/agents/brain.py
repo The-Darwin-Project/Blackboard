@@ -639,6 +639,7 @@ class Brain:
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
         self._graph_enrich_tasks: set[asyncio.Task] = set()  # strong refs -- event loop only holds weak refs
+        self._enriched_turns: set[tuple[str, int]] = set()  # (event_id, turn_idx) -- pruned on event close
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
         self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
@@ -2396,8 +2397,6 @@ class Brain:
 
     async def _enrich_graph_from_agent(self, event: EventDocument) -> None:
         """Extract entities from latest agent result and write to KG. Fire-and-forget."""
-        if not hasattr(self, "_enriched_turns"):
-            self._enriched_turns: set[tuple[str, int]] = set()
         try:
             archivist = self.agents.get("_archivist_memory")
             kg_store = archivist.kg_store if archivist is not None else None
@@ -4327,6 +4326,7 @@ class Brain:
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
         self._agent_session_modes.pop(event_id, None)
+        self._enriched_turns = {k for k in self._enriched_turns if k[0] != event_id}
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)
