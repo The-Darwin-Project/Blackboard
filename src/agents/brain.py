@@ -74,6 +74,11 @@
 #     Overwrite semantics. Persists across defer-wake (warm SI context). Cleared only in
 #     _close_and_broadcast. Per-event asyncio lock protects writes. thought_signature chain
 #     intentionally broken on RECALL re-invoke.
+# 36. [Pattern]: Knowledge graph recall (graph_recall.py). _get_graph_recall queries Postgres KG
+#     via archivist.kg_store (public accessor) for service-related entities. Returns <prior_knowledge> XML fence
+#     or None. Fail-open (3s timeout). Injected in _build_system_prompt BEFORE post-agent recall.
+#     _check_graph_edges activates has_graph_edges flag for context skill phase.
+#     _enrich_graph_from_agent is fire-and-forget post-agent entity extraction (15s timeout).
 # 23. [Pattern]: _ws_mode ("legacy"/"reverse") gates dispatch path. Reverse uses dispatch_to_agent + registry. Legacy uses agent.process() + per-task WS.
 # 24. [Pattern]: Intermediate processing: scan enqueues active-task events with unseen non-brain turns.
 #     _process_with_llm uses is_intermediate flag to gate tools: {reply_to_agent, message_agent,
@@ -244,6 +249,10 @@ if TYPE_CHECKING:
     from .brain_skill_loader import BrainSkillLoader
 
 logger = logging.getLogger(__name__)
+
+# Sentinel distinguishing "no graph_recall passed" from an explicit None result
+# (a legitimate fail-open/empty-graph outcome) in _build_system_prompt.
+_UNSET = object()
 
 # Populate tool handler registry (side-effect imports)
 import src.agents.handlers_observations  # noqa: F401
@@ -595,7 +604,7 @@ _ROLE_MODEL_MAP = {
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
     "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
-    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.5-flash-lite"),
+    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.6-flash"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
@@ -633,6 +642,8 @@ class Brain:
         self._running = False
         self._llm_available = False
         self._active_tasks: dict[str, asyncio.Task] = {}  # event_id -> running task
+        self._graph_enrich_tasks: set[asyncio.Task] = set()  # strong refs -- event loop only holds weak refs
+        self._enriched_turns: set[tuple[str, int]] = set()  # (event_id, turn_idx) -- pruned on event close
         self._active_agent_for_event: dict[str, str] = {}  # event_id -> agent_name
         self._routing_turn_for_event: dict[str, int] = {}  # event_id -> turn number when agent was dispatched
         self._agent_sessions: dict[str, dict[str, str]] = {}  # event_id -> {agent_name -> session_id}
@@ -1359,12 +1370,40 @@ class Brain:
                         else:
                             logger.info("Skill reload fell back to filesystem -- version not updated")
 
-            context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
+            # Fire the two KG lookups as tasks up front so they run concurrently
+            # with each other and with _extract_context_flags's own Redis reads,
+            # instead of the previous sequential await-then-await (worst case
+            # 2s + 3s = 5s on every prompt-build turn).
+            kg_edges_task = (
+                asyncio.create_task(self._check_graph_edges(event.service))
+                if not is_intermediate else None
+            )
+            graph_recall_task = asyncio.create_task(self._get_graph_recall(event))
+
+            context_flags = await self._extract_context_flags(
+                event, is_intermediate=is_intermediate, skip_kg=True,
+            )
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
+
+            if kg_edges_task is not None:
+                has_edges, graph_recall = await asyncio.gather(
+                    kg_edges_task, graph_recall_task, return_exceptions=True,
+                )
+                context_flags["has_graph_edges"] = False if isinstance(has_edges, BaseException) else has_edges
+            else:
+                try:
+                    graph_recall = await graph_recall_task
+                except Exception:
+                    logger.warning("Graph recall task failed for %s (fail-open)", event.id)
+                    graph_recall = None
+            if isinstance(graph_recall, BaseException):
+                graph_recall = None
+
             active_phases = self._match_phases(event, context_flags)
-            system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+
+            system_prompt = await self._build_system_prompt(event, active_phases, context_flags, graph_recall=graph_recall)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
             if event.source == "jarvis":
                 call_temp = max(call_temp, 1.7)
@@ -1953,7 +1992,7 @@ class Brain:
     # =========================================================================
 
     async def _extract_context_flags(
-        self, event: EventDocument, *, is_intermediate: bool = False,
+        self, event: EventDocument, *, is_intermediate: bool = False, skip_kg: bool = False,
     ) -> ContextFlags:
         """Extract boolean context flags for phase matching. Lightweight Redis reads.
 
@@ -1961,6 +2000,8 @@ class Brain:
         avoiding double Redis calls for active_events, mermaid, and recent_closed.
         is_intermediate is passed from the caller (single evaluation at L1016)
         to avoid TOCTOU with _active_tasks between await boundaries.
+        skip_kg: when True, skip the has_graph_edges KG call -- caller has
+        already fired it concurrently and will set the flag after gathering.
         """
         flags: ContextFlags = {
             "turn_count": len(event.conversation),
@@ -2004,7 +2045,9 @@ class Brain:
             flags["has_recent_closed"] = bool(recent_closed)
 
             flags["_cached_mermaid"] = ""
-            flags["has_graph_edges"] = False
+            flags["has_graph_edges"] = (
+                False if skip_kg else await self._check_graph_edges(event.service)
+            )
 
         flags["has_aligner_turns"] = any(
             t.actor == "aligner" for t in event.conversation
@@ -2115,8 +2158,15 @@ class Brain:
     async def _build_system_prompt(
         self, event: EventDocument, active_phases: list[str],
         context_flags: dict | None = None,
+        graph_recall: str | None | object = _UNSET,
     ) -> str:
-        """Assemble system prompt from matching skill phases + dependency resolution."""
+        """Assemble system prompt from matching skill phases + dependency resolution.
+
+        graph_recall: pre-fetched result of self._get_graph_recall(event), passed by
+        the caller so it can be gathered concurrently with _check_graph_edges instead
+        of being awaited here sequentially. Falls back to fetching it internally when
+        not provided (_UNSET sentinel), e.g. for direct/test callers.
+        """
         if not self._skill_loader or not self._skill_loader.available_phases():
             raise RuntimeError(
                 "BrainSkillLoader has no available phases. Ensure brain_skills/ directory exists "
@@ -2199,10 +2249,16 @@ class Brain:
                         _wrap_section(path, body, self._skill_loader.get_tag_type(path))
                     )
 
+        if graph_recall is _UNSET:
+            graph_recall = await self._get_graph_recall(event)
+        if graph_recall:
+            resolved_contents.append(graph_recall)
+
         if "post-agent" in active_phases:
             recall_block = await self._post_agent_recall(event)
             if recall_block:
                 resolved_contents.append(recall_block)
+            self._schedule_graph_enrichment(event)
 
         if "defer-wake" in active_phases and context_flags:
             consecutive = context_flags.get("consecutive_defers", 0)
@@ -2355,6 +2411,132 @@ class Brain:
                 line2 += " Any new evidence to reclassify?"
 
         return f"{line1}\n{line2}"
+
+    async def _check_graph_edges(self, service: str) -> bool:
+        """Check if the service has knowledge graph data. Fail-open: returns False."""
+        if not service or service.lower() in ("general", "system"):
+            return False
+        archivist = self.agents.get("_archivist_memory")
+        kg_store = archivist.kg_store if archivist is not None else None
+        if not kg_store:
+            return False
+        try:
+            return await asyncio.wait_for(
+                kg_store.has_entity("Service", f"service:{service}"),
+                timeout=2.0,
+            )
+        except Exception:
+            logger.debug("_check_graph_edges failed for service=%s (fail-open)", service)
+            return False
+
+    def _schedule_graph_enrichment(self, event: EventDocument) -> None:
+        """Fire-and-forget self._enrich_graph_from_agent, keeping a strong task
+        reference (self._graph_enrich_tasks) so the event loop's weak reference
+        can't let it get garbage-collected mid-execution -- matches the
+        asyncio.create_task convention used at every other fire-and-forget site
+        in this file (archivist.py, headhunter.py, routes/queue.py)."""
+        t = asyncio.create_task(self._enrich_graph_from_agent(event))
+        self._graph_enrich_tasks.add(t)
+        t.add_done_callback(self._graph_enrich_tasks.discard)
+
+    async def _enrich_graph_from_agent(self, event: EventDocument) -> None:
+        """Extract entities from latest agent result and write to KG. Fire-and-forget."""
+        try:
+            archivist = self.agents.get("_archivist_memory")
+            kg_store = archivist.kg_store if archivist is not None else None
+            if not kg_store:
+                return
+
+            last_agent = next(
+                (t for t in reversed(event.conversation)
+                 if t.actor not in ("brain", "user", "aligner", "headhunter", "dispatcher")),
+                None,
+            )
+            if not last_agent:
+                return
+
+            # Idempotency guard: don't re-extract for the same turn. Only committed
+            # once extraction+upsert below succeed -- a transient failure (timeout,
+            # Postgres blip) must NOT permanently mark the turn as done, or it would
+            # be silently and irrecoverably skipped with no retry.
+            turn_idx = next(
+                i for i in range(len(event.conversation) - 1, -1, -1)
+                if event.conversation[i] is last_agent
+            )
+            enrichment_key = (event.id, turn_idx)
+            if enrichment_key in self._enriched_turns:
+                return
+
+            agent_text = last_agent.result or last_agent.thoughts or ""
+            if len(agent_text) < 50:
+                return
+
+            service = event.service if event.service not in ("general", "system") else None
+            if not service:
+                return
+
+            from ..models import EventEvidence
+            evidence = event.event.evidence if event.event else None
+            domain = (evidence.brain_domain or evidence.domain) if isinstance(evidence, EventEvidence) else "unknown"
+
+            summary = {
+                "event_id": event.id,
+                "service": service,
+                "symptom": agent_text[:500],
+                "root_cause": "",
+                "fix_action": "",
+                "domain": domain,
+                "outcome": "in_progress",
+            }
+
+            from .entity_extractor import extract_entities
+            entities = await asyncio.wait_for(
+                extract_entities(summary, service, event_id=event.id),
+                timeout=15.0,
+            )
+            if entities.entities:
+                await asyncio.wait_for(
+                    kg_store.upsert_entities(entities.entities, entities.relationships),
+                    timeout=10.0,
+                )
+                logger.info(
+                    "Graph enrichment: wrote %d entities from agent result for %s",
+                    len(entities.entities), event.id,
+                )
+            self._enriched_turns.add(enrichment_key)
+        except Exception as e:
+            logger.warning("Graph enrichment failed for %s (non-fatal): %s", event.id, e)
+
+    async def _get_graph_recall(self, event: EventDocument) -> str | None:
+        """Query the knowledge graph for service context and return SI fence block.
+
+        Fail-open: returns None on any error, empty graph, or missing kg_store.
+        Caller falls back to Qdrant vector search when this returns None.
+        """
+        service = event.service
+        if not service or service.lower() in ("general", "system"):
+            return None
+
+        archivist = self.agents.get("_archivist_memory")
+        kg_store = archivist.kg_store if archivist is not None else None
+        if not kg_store:
+            return None
+
+        try:
+            from ..models import EventEvidence
+            evidence = event.event.evidence if event.event else None
+            domain = (evidence.brain_domain or evidence.domain) if isinstance(evidence, EventEvidence) else ""
+
+            from .graph_recall import get_graph_context
+            return await get_graph_context(
+                kg_store,
+                service=service,
+                event_source=event.source,
+                domain=domain,
+            )
+        except Exception as e:
+            logger.warning("Graph recall failed for %s (non-fatal): %s", event.id, e)
+            return None
 
     async def _post_agent_recall(self, event: EventDocument) -> str | None:
         """Search deep memory using agent findings and inject matching patterns into SI.
@@ -4194,6 +4376,7 @@ class Brain:
         self._active_agent_for_event.pop(event_id, None)
         self._agent_sessions.pop(event_id, None)
         self._agent_session_modes.pop(event_id, None)
+        self._enriched_turns = {k for k in self._enriched_turns if k[0] != event_id}
         for agent in self.agents.values():
             if hasattr(agent, 'cleanup_event'):
                 agent.cleanup_event(event_id)

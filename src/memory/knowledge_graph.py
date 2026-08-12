@@ -14,6 +14,7 @@ event closure or archival.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -24,6 +25,27 @@ logger = logging.getLogger(__name__)
 KG_POSTGRES_URL = os.getenv("KG_POSTGRES_URL", "")
 
 _VALID_ENTITY_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Pool max_size is 4, but up to MAX_ACTIVE_EVENTS (default 20) workers may
+# call KG methods concurrently. Bound concurrent pool.acquire() waiters to
+# 2x pool size so excess callers fail fast via the existing timeout wrappers
+# instead of queuing unboundedly on pool contention.
+_KG_SEMAPHORE = asyncio.Semaphore(8)
+
+# Free-text entity/relationship fields originate from LLM extraction over
+# agent output and are persisted with no TTL. graph_recall.py sanitizes on
+# read, but that is the only current consumer of query_related -- any future
+# reader would inherit unsanitized data. Strip tag-like sequences at write
+# time too, as defense-in-depth (same _TAG_RE pattern as graph_recall.py).
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _sanitize(text: Any) -> str:
+    """Strip tag-like sequences from a string before it is persisted."""
+    if not isinstance(text, str):
+        return "" if text is None else _TAG_RE.sub("", str(text))
+    return _TAG_RE.sub("", text)
+
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS kg_entities (
@@ -61,24 +83,30 @@ class KnowledgeGraphStore:
         self._url = url or KG_POSTGRES_URL
         self._pool = None
         self._initialized = False
+        self._init_lock: Any = None
 
     async def _ensure_initialized(self) -> bool:
         if self._initialized:
             return True
         if not self._url:
             return False
-        try:
-            import asyncpg
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self._initialized:
+                return True
+            try:
+                import asyncpg
 
-            self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
-            async with self._pool.acquire() as conn:
-                await conn.execute(_SCHEMA_DDL)
-            self._initialized = True
-            logger.info("KnowledgeGraphStore initialized (postgres)")
-            return True
-        except Exception as e:
-            logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
-            return False
+                self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
+                async with self._pool.acquire() as conn:
+                    await conn.execute(_SCHEMA_DDL)
+                self._initialized = True
+                logger.info("KnowledgeGraphStore initialized (postgres)")
+                return True
+            except Exception as e:
+                logger.warning("KnowledgeGraphStore init failed (non-fatal): %s", e)
+                return False
 
     async def close(self) -> None:
         if self._pool:
@@ -96,11 +124,12 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return
 
-            async with self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
                 for entity in entities:
                     etype = getattr(entity, "type", None) or entity.get("type", "Node")
-                    eid = getattr(entity, "id", None) or entity.get("id", "")
+                    eid = _sanitize(getattr(entity, "id", None) or entity.get("id", ""))
                     props = getattr(entity, "properties", None) or entity.get("properties", {})
+                    props = {k: _sanitize(v) for k, v in props.items()}
 
                     if not _VALID_ENTITY_TYPE_RE.match(etype):
                         logger.warning("Skipping entity with invalid type: %s", etype)
@@ -119,10 +148,10 @@ class KnowledgeGraphStore:
 
                 for rel in relationships:
                     from_type = getattr(rel, "from_type", None) or rel.get("from_type", "Node")
-                    from_id = getattr(rel, "from_id", None) or rel.get("from_id", "")
+                    from_id = _sanitize(getattr(rel, "from_id", None) or rel.get("from_id", ""))
                     rel_type = getattr(rel, "rel_type", None) or rel.get("rel_type", "RELATED_TO")
                     to_type = getattr(rel, "to_type", None) or rel.get("to_type", "Node")
-                    to_id = getattr(rel, "to_id", None) or rel.get("to_id", "")
+                    to_id = _sanitize(getattr(rel, "to_id", None) or rel.get("to_id", ""))
 
                     if not all(_VALID_ENTITY_TYPE_RE.match(t) for t in (from_type, to_type, rel_type)):
                         logger.warning("Skipping relationship with invalid types: %s->%s->%s", from_type, rel_type, to_type)
@@ -156,18 +185,20 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return []
 
-            async with self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
                     FROM kg_relationships r
                     JOIN kg_entities e ON (e.entity_type = r.to_entity_type AND e.entity_id = r.to_entity_id)
                     WHERE r.from_entity_type = $1 AND r.from_entity_id = $2
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
                     UNION
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
                     FROM kg_relationships r
                     JOIN kg_entities e ON (e.entity_type = r.from_entity_type AND e.entity_id = r.from_entity_id)
                     WHERE r.to_entity_type = $1 AND r.to_entity_id = $2
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
                     """,
                     entity_type, entity_id,
                 )
@@ -182,7 +213,7 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return False
 
-            async with self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
                 row = await conn.fetchrow(
                     "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
                     entity_type, entity_id,
@@ -198,7 +229,7 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return False
 
-            async with self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
                 row = await conn.fetchrow("SELECT 1 AS ok")
                 return row is not None and row["ok"] == 1
         except Exception as e:

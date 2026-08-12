@@ -286,6 +286,11 @@ class Archivist:
         self.location = os.getenv("GCP_LOCATION", "global")
         self.pulse_port = None  # PulsePort | None -- set by main.py when pulse tracking enabled
 
+    @property
+    def kg_store(self):
+        """Public accessor for the knowledge graph store (KnowledgeGraphStore | None)."""
+        return self._kg_store
+
     async def _ensure_initialized(self) -> bool:
         """Lazy-init google-genai client and vector store."""
         if self._initialized:
