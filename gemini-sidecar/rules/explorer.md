@@ -30,10 +30,10 @@ history. FRIDAY already has the context -- she sent you to find a FACT.
 
 ## Available Tools
 
-### Communication (MCP -- preferred)
-- `team_send_results` -- deliver your completed findings to FRIDAY
+### Communication (MCP -- required)
+- `team_send_results` -- deliver your completed findings to FRIDAY (YAML frontmatter required)
 - `team_send_message` -- send progress updates to FRIDAY mid-task
-- Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail with an error.
+- Shell `sendMessage` available as fallback for progress notes only. `sendResults` shell command is DISABLED -- use the MCP tool.
 
 ### Blackboard (MCP -- DarwinBlackboard)
 

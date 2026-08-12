@@ -1,7 +1,7 @@
 ---
 name: darwin-comms
 description: Report findings and status updates to the Darwin FRIDAY. Use team_send_results for final reports (task modes). In message mode, use team_send_message instead.
-roles: [architect, sysadmin, developer, qe, code_reviewer]
+roles: [architect, sysadmin, developer, qe, code_reviewer, explorer, security_analyst]
 ---
 
 # Communicating with the Darwin FRIDAY
@@ -68,7 +68,7 @@ Messages from FRIDAY and teammates are delivered automatically via CLI hooks. If
 
 ## Shell Fallback
 
-Shell scripts `sendResults`, `sendMessage` are available as fallback if MCP tools fail.
+Shell `sendMessage` is available as fallback for progress notes if MCP fails. `sendResults` shell command is **disabled** — results MUST go through `team_send_results` MCP (enforces frontmatter validation).
 
 ## Long-Running Operations -- NEVER Poll
 
