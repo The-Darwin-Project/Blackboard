@@ -281,6 +281,51 @@ class TestPostAgentEnrichment:
         # Must NOT raise
         await Brain._enrich_graph_from_agent(brain, event)
 
+    @patch("src.agents.entity_extractor.extract_entities", new_callable=AsyncMock)
+    async def test_enrichment_key_uses_identity_not_value_equality(self, mock_extract):
+        """Regression: `.index(last_agent)` used value equality, so a field-for-field
+        identical earlier turn would make it resolve to the wrong (earlier) turn_idx,
+        corrupting the idempotency key. The fix scans by identity (`is`) from the end.
+        """
+        from src.agents.entity_extractor import KnowledgeGraphEntities
+
+        mock_extract.return_value = KnowledgeGraphEntities(entities=[], relationships=[])
+
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
+        kg_store.upsert_entities = AsyncMock()
+
+        brain = _make_brain_stub(kg_store=kg_store)
+
+        duplicate_text = (
+            "Fixed the pod crash loop by updating resource limits. "
+            "The deployment was using 128Mi but needed 512Mi."
+        )
+        earlier_turn = SimpleNamespace(
+            actor="developer", result=duplicate_text, thoughts=None,
+            action="result", taskForAgent=None,
+        )
+        later_turn = SimpleNamespace(
+            actor="developer", result=duplicate_text, thoughts=None,
+            action="result", taskForAgent=None,
+        )
+        # Sanity: value-equal but distinct objects -- this is what breaks .index().
+        assert earlier_turn == later_turn
+        assert earlier_turn is not later_turn
+
+        event = _make_event_stub(
+            service="kubevirt-plugin",
+            conversation=[earlier_turn, later_turn],
+        )
+        event.domain = "complicated"
+
+        from src.agents.brain import Brain
+        await Brain._enrich_graph_from_agent(brain, event)
+
+        # last_agent resolves to `later_turn` at index 1. The idempotency key must
+        # reflect its true position, not index 0 where the value-equal duplicate sits.
+        assert (event.id, 1) in brain._enriched_turns
+        assert (event.id, 0) not in brain._enriched_turns
+
 
 @pytest.mark.asyncio
 class TestQdrantFallback:

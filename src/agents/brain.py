@@ -2454,7 +2454,10 @@ class Brain:
             # once extraction+upsert below succeed -- a transient failure (timeout,
             # Postgres blip) must NOT permanently mark the turn as done, or it would
             # be silently and irrecoverably skipped with no retry.
-            turn_idx = event.conversation.index(last_agent)
+            turn_idx = next(
+                i for i in range(len(event.conversation) - 1, -1, -1)
+                if event.conversation[i] is last_agent
+            )
             enrichment_key = (event.id, turn_idx)
             if enrichment_key in self._enriched_turns:
                 return
