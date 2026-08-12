@@ -197,13 +197,13 @@ spec:
               value: "http://{{ .Release.Name }}-qdrant:{{ .Values.qdrant.port }}"
             {{- end }}
             {{- if .Values.knowledgeGraph.enabled }}
-            - name: KG_POSTGRES_URL
-              value: "postgresql://darwin:$(KG_POSTGRES_PASSWORD)@{{ .Release.Name }}-kg-postgres:5432/{{ .Values.knowledgeGraph.database }}"
             - name: KG_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.knowledgeGraph.secretName | default (printf "%s-kg-postgres" .Release.Name) }}
                   key: password
+            - name: KG_POSTGRES_URL
+              value: "postgresql://darwin:$(KG_POSTGRES_PASSWORD)@{{ .Release.Name }}-kg-postgres:5432/{{ .Values.knowledgeGraph.database }}"
             {{- end }}
             {{- if .Values.github.existingSecret }}
             # GitHub App configuration
