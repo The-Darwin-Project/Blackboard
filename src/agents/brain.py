@@ -1395,7 +1395,7 @@ class Brain:
             else:
                 try:
                     graph_recall = await graph_recall_task
-                except BaseException:
+                except Exception:
                     logger.warning("Graph recall task failed for %s (fail-open)", event.id)
                     graph_recall = None
             if isinstance(graph_recall, BaseException):
