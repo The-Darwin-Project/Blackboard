@@ -146,7 +146,7 @@ def _format_graph_context(
             fid = _sanitize(fix.get("entity_id", ""))
             desc = _sanitize(props.get("description", ""))
             fix_type = _sanitize(props.get("fix_type", ""))
-            effective = props.get("effective")
+            effective = _sanitize(props.get("effective"))
             rel = _sanitize(fix.get("rel_type", ""))
             parts = [f"- **{fid}**"]
             if rel:
@@ -155,7 +155,7 @@ def _format_graph_context(
                 parts.append(f"  Type: {fix_type}")
             if desc:
                 parts.append(f"  Description: {desc}")
-            if effective is not None:
+            if effective:
                 parts.append(f"  Effective: {effective}")
             lines.extend(parts)
         lines.append("")

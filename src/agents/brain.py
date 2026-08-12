@@ -2448,7 +2448,10 @@ class Brain:
                 timeout=15.0,
             )
             if entities.entities:
-                await kg_store.upsert_entities(entities.entities, entities.relationships)
+                await asyncio.wait_for(
+                    kg_store.upsert_entities(entities.entities, entities.relationships),
+                    timeout=10.0,
+                )
                 logger.info(
                     "Graph enrichment: wrote %d entities from agent result for %s",
                     len(entities.entities), event.id,
