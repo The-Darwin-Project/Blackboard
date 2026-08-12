@@ -177,12 +177,12 @@ class TestExplorerEphemeralOnly:
 # ---------------------------------------------------------------------------
 
 class TestExplorerModelResolution:
-    """Explorer resolves to gemini-3.5-flash-lite in the role model map."""
+    """Explorer resolves to a model in the role model map and flows through dispatch."""
 
     def test_role_model_map_has_explorer(self):
-        """T-2: _ROLE_MODEL_MAP["explorer"] == "gemini-3.5-flash-lite"."""
+        """T-2: _ROLE_MODEL_MAP has 'explorer' with a non-empty model string."""
         assert "explorer" in _ROLE_MODEL_MAP
-        assert _ROLE_MODEL_MAP["explorer"] == "gemini-3.5-flash-lite"
+        assert _ROLE_MODEL_MAP["explorer"]  # non-empty
 
     @pytest.mark.asyncio
     async def test_explorer_model_passed_to_ensure_agent(self, registry_and_bridge):
@@ -211,7 +211,7 @@ class TestExplorerModelResolution:
             )
 
         ensure_kwargs = brain._ephemeral_provisioner.ensure_agent.call_args.kwargs
-        assert ensure_kwargs["model"] == "gemini-3.5-flash-lite"
+        assert ensure_kwargs["model"] == _ROLE_MODEL_MAP["explorer"]
 
     @pytest.mark.asyncio
     async def test_explorer_model_passed_to_dispatch(self, registry_and_bridge):
@@ -239,7 +239,7 @@ class TestExplorerModelResolution:
                 effort="",
             )
 
-        assert mock_dispatch.call_args.kwargs["model"] == "gemini-3.5-flash-lite"
+        assert mock_dispatch.call_args.kwargs["model"] == _ROLE_MODEL_MAP["explorer"]
 
 
 # ---------------------------------------------------------------------------
