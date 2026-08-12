@@ -1386,7 +1386,6 @@ class Brain:
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
-            active_phases = self._match_phases(event, context_flags)
 
             if kg_edges_task is not None:
                 has_edges, graph_recall = await asyncio.gather(
@@ -1394,9 +1393,15 @@ class Brain:
                 )
                 context_flags["has_graph_edges"] = False if isinstance(has_edges, Exception) else has_edges
             else:
-                graph_recall = await graph_recall_task
+                try:
+                    graph_recall = await graph_recall_task
+                except Exception:
+                    logger.warning("Graph recall task failed for %s (fail-open)", event.id)
+                    graph_recall = None
             if isinstance(graph_recall, Exception):
                 graph_recall = None
+
+            active_phases = self._match_phases(event, context_flags)
 
             system_prompt = await self._build_system_prompt(event, active_phases, context_flags, graph_recall=graph_recall)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
