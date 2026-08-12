@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.memory.knowledge_graph import KnowledgeGraphStore
+
 
 def _make_event_stub(
     source: str = "chat",
@@ -108,7 +110,7 @@ class TestPreGenerationRecall:
             "</prior_knowledge>"
         )
 
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         brain = _make_brain_stub(kg_store=kg_store)
 
         from src.agents.brain import Brain
@@ -140,7 +142,7 @@ class TestHasGraphEdgesFlag:
 
     async def test_flag_true_when_entity_exists(self):
         """T-B3: has_graph_edges=True when kg_store.has_entity() returns True."""
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         kg_store.has_entity = AsyncMock(return_value=True)
 
         brain = _make_brain_stub(kg_store=kg_store)
@@ -156,7 +158,7 @@ class TestHasGraphEdgesFlag:
 
     async def test_flag_false_when_entity_missing(self):
         """T-B4: has_graph_edges=False when kg_store.has_entity() returns False."""
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         kg_store.has_entity = AsyncMock(return_value=False)
 
         brain = _make_brain_stub(kg_store=kg_store)
@@ -201,7 +203,7 @@ class TestPostAgentEnrichment:
             ],
         )
 
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         kg_store.upsert_entities = AsyncMock()
 
         brain = _make_brain_stub(kg_store=kg_store)
@@ -230,7 +232,7 @@ class TestPostAgentEnrichment:
         """T-B7: Exception in enrichment is logged, not raised (fire-and-forget)."""
         mock_extract.side_effect = RuntimeError("extraction service unavailable")
 
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         brain = _make_brain_stub(kg_store=kg_store)
 
         agent_turn = SimpleNamespace(
@@ -257,7 +259,7 @@ class TestPostAgentEnrichment:
 
         mock_extract.return_value = KnowledgeGraphEntities(entities=[], relationships=[])
 
-        kg_store = MagicMock()
+        kg_store = MagicMock(spec=KnowledgeGraphStore)
         kg_store.upsert_entities = AsyncMock(side_effect=ConnectionError("PG down"))
 
         brain = _make_brain_stub(kg_store=kg_store)
