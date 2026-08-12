@@ -250,6 +250,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sentinel distinguishing "no graph_recall passed" from an explicit None result
+# (a legitimate fail-open/empty-graph outcome) in _build_system_prompt.
+_UNSET = object()
+
 # Populate tool handler registry (side-effect imports)
 import src.agents.handlers_observations  # noqa: F401
 import src.agents.handlers_lookup  # noqa: F401
@@ -1366,12 +1370,35 @@ class Brain:
                         else:
                             logger.info("Skill reload fell back to filesystem -- version not updated")
 
-            context_flags = await self._extract_context_flags(event, is_intermediate=is_intermediate)
+            # Fire the two KG lookups as tasks up front so they run concurrently
+            # with each other and with _extract_context_flags's own Redis reads,
+            # instead of the previous sequential await-then-await (worst case
+            # 2s + 3s = 5s on every prompt-build turn).
+            kg_edges_task = (
+                asyncio.create_task(self._check_graph_edges(event.service))
+                if not is_intermediate else None
+            )
+            graph_recall_task = asyncio.create_task(self._get_graph_recall(event))
+
+            context_flags = await self._extract_context_flags(
+                event, is_intermediate=is_intermediate, skip_kg=True,
+            )
             if is_defer_wake:
                 context_flags["is_defer_wakeup"] = True
                 context_flags["consecutive_defers"] = max(context_flags.get("consecutive_defers", 0), 1)
             active_phases = self._match_phases(event, context_flags)
-            system_prompt = await self._build_system_prompt(event, active_phases, context_flags)
+
+            if kg_edges_task is not None:
+                has_edges, graph_recall = await asyncio.gather(
+                    kg_edges_task, graph_recall_task, return_exceptions=True,
+                )
+                context_flags["has_graph_edges"] = False if isinstance(has_edges, Exception) else has_edges
+            else:
+                graph_recall = await graph_recall_task
+            if isinstance(graph_recall, Exception):
+                graph_recall = None
+
+            system_prompt = await self._build_system_prompt(event, active_phases, context_flags, graph_recall=graph_recall)
             thinking_level, call_temp, phase_max_tokens = self._resolve_llm_params(active_phases)
             if event.source == "jarvis":
                 call_temp = max(call_temp, 1.7)
@@ -1960,7 +1987,7 @@ class Brain:
     # =========================================================================
 
     async def _extract_context_flags(
-        self, event: EventDocument, *, is_intermediate: bool = False,
+        self, event: EventDocument, *, is_intermediate: bool = False, skip_kg: bool = False,
     ) -> ContextFlags:
         """Extract boolean context flags for phase matching. Lightweight Redis reads.
 
@@ -1968,6 +1995,8 @@ class Brain:
         avoiding double Redis calls for active_events, mermaid, and recent_closed.
         is_intermediate is passed from the caller (single evaluation at L1016)
         to avoid TOCTOU with _active_tasks between await boundaries.
+        skip_kg: when True, skip the has_graph_edges KG call -- caller has
+        already fired it concurrently and will set the flag after gathering.
         """
         flags: ContextFlags = {
             "turn_count": len(event.conversation),
@@ -2011,7 +2040,9 @@ class Brain:
             flags["has_recent_closed"] = bool(recent_closed)
 
             flags["_cached_mermaid"] = ""
-            flags["has_graph_edges"] = await self._check_graph_edges(event.service)
+            flags["has_graph_edges"] = (
+                False if skip_kg else await self._check_graph_edges(event.service)
+            )
 
         flags["has_aligner_turns"] = any(
             t.actor == "aligner" for t in event.conversation
@@ -2122,8 +2153,15 @@ class Brain:
     async def _build_system_prompt(
         self, event: EventDocument, active_phases: list[str],
         context_flags: dict | None = None,
+        graph_recall: str | None | object = _UNSET,
     ) -> str:
-        """Assemble system prompt from matching skill phases + dependency resolution."""
+        """Assemble system prompt from matching skill phases + dependency resolution.
+
+        graph_recall: pre-fetched result of self._get_graph_recall(event), passed by
+        the caller so it can be gathered concurrently with _check_graph_edges instead
+        of being awaited here sequentially. Falls back to fetching it internally when
+        not provided (_UNSET sentinel), e.g. for direct/test callers.
+        """
         if not self._skill_loader or not self._skill_loader.available_phases():
             raise RuntimeError(
                 "BrainSkillLoader has no available phases. Ensure brain_skills/ directory exists "
@@ -2206,9 +2244,10 @@ class Brain:
                         _wrap_section(path, body, self._skill_loader.get_tag_type(path))
                     )
 
-        graph_context = await self._get_graph_recall(event)
-        if graph_context:
-            resolved_contents.append(graph_context)
+        if graph_recall is _UNSET:
+            graph_recall = await self._get_graph_recall(event)
+        if graph_recall:
+            resolved_contents.append(graph_recall)
 
         if "post-agent" in active_phases:
             recall_block = await self._post_agent_recall(event)
