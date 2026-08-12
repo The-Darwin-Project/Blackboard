@@ -43,7 +43,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 def _sanitize(text: Any) -> str:
     """Strip tag-like sequences from a string before it is persisted."""
     if not isinstance(text, str):
-        return "" if text is None else str(text)
+        return "" if text is None else _TAG_RE.sub("", str(text))
     return _TAG_RE.sub("", text)
 
 
@@ -129,7 +129,7 @@ class KnowledgeGraphStore:
                     etype = getattr(entity, "type", None) or entity.get("type", "Node")
                     eid = _sanitize(getattr(entity, "id", None) or entity.get("id", ""))
                     props = getattr(entity, "properties", None) or entity.get("properties", {})
-                    props = {k: _sanitize(v) if isinstance(v, str) else v for k, v in props.items()}
+                    props = {k: _sanitize(v) for k, v in props.items()}
 
                     if not _VALID_ENTITY_TYPE_RE.match(etype):
                         logger.warning("Skipping entity with invalid type: %s", etype)

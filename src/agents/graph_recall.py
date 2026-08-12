@@ -46,7 +46,7 @@ _TAG_RE = re.compile(r"<[^>]+>")
 def _sanitize(text: Any) -> str:
     """Strip tag-like sequences from KG-derived text before it enters the SI fence."""
     if not isinstance(text, str):
-        return "" if text is None else str(text)
+        return "" if text is None else _TAG_RE.sub("", str(text))
     return _TAG_RE.sub("", text)
 
 
@@ -101,7 +101,7 @@ def _format_graph_context(
 ) -> str | None:
     """Format graph query results as a prior_knowledge fence block."""
     lines: list[str] = [
-        f"## Knowledge Graph: {service}",
+        f"## Knowledge Graph: {_sanitize(service)}",
         "",
     ]
 

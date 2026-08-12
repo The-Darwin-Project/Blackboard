@@ -1391,14 +1391,14 @@ class Brain:
                 has_edges, graph_recall = await asyncio.gather(
                     kg_edges_task, graph_recall_task, return_exceptions=True,
                 )
-                context_flags["has_graph_edges"] = False if isinstance(has_edges, Exception) else has_edges
+                context_flags["has_graph_edges"] = False if isinstance(has_edges, BaseException) else has_edges
             else:
                 try:
                     graph_recall = await graph_recall_task
-                except Exception:
+                except BaseException:
                     logger.warning("Graph recall task failed for %s (fail-open)", event.id)
                     graph_recall = None
-            if isinstance(graph_recall, Exception):
+            if isinstance(graph_recall, BaseException):
                 graph_recall = None
 
             active_phases = self._match_phases(event, context_flags)
