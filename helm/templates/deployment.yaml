@@ -202,7 +202,7 @@ spec:
             - name: KG_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-kg-postgres
+                  name: {{ .Values.knowledgeGraph.secretName | default (printf "%s-kg-postgres" .Release.Name) }}
                   key: password
             {{- end }}
             {{- if .Values.github.existingSecret }}

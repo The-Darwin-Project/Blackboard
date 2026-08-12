@@ -75,6 +75,7 @@ knowledgeGraph:
       memory: 1Gi
       cpu: 500m
   database: knowledge_graph
+  secretName: "" # External Secret name containing 'password' key. If empty, defaults to {release}-kg-postgres.
   # Connection URL built from these (or override with knowledgeGraph.url)
   url: "" # If empty, constructed from service name + database
 # =============================================================================

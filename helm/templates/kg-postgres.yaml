@@ -38,7 +38,7 @@ spec:
             - name: POSTGRESQL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Release.Name }}-kg-postgres
+                  name: {{ .Values.knowledgeGraph.secretName | default (printf "%s-kg-postgres" .Release.Name) }}
                   key: password
           resources:
             {{- toYaml .Values.knowledgeGraph.resources | nindent 12 }}
@@ -97,16 +97,4 @@ spec:
   resources:
     requests:
       storage: {{ .Values.knowledgeGraph.persistence.size }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ .Release.Name }}-kg-postgres
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "darwin.labels" . | nindent 4 }}
-    app.kubernetes.io/component: kg-postgres
-type: Opaque
-stringData:
-  password: "{{ randAlphaNum 24 }}"
 {{- end }}
