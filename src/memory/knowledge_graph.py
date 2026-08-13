@@ -5,6 +5,9 @@
 # 3. [Pattern]: All public methods fail-open (try/except, log warning, return empty). Never raises.
 # 4. [Constraint]: Node identity via INSERT ON CONFLICT UPDATE on natural keys.
 # 5. [Pattern]: Parameterized queries only. Never string-interpolate user data into SQL.
+# 6. [Pattern]: Service entity resolution (_resolve_service_id) — fuzzy ILIKE match on bare name,
+#    ranked by relationship count. Belt: read path resolves before query. Suspenders: write path
+#    resolves before upsert, rewrites relationship IDs via resolved_ids map.
 """
 Async Knowledge Graph adapter for Postgres (adjacency tables).
 
@@ -125,6 +128,7 @@ class KnowledgeGraphStore:
                 return
 
             async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+                resolved_ids: dict[str, str] = {}
                 for entity in entities:
                     etype = getattr(entity, "type", None) or entity.get("type", "Node")
                     eid = _sanitize(getattr(entity, "id", None) or entity.get("id", ""))
@@ -134,6 +138,13 @@ class KnowledgeGraphStore:
                     if not _VALID_ENTITY_TYPE_RE.match(etype):
                         logger.warning("Skipping entity with invalid type: %s", etype)
                         continue
+
+                    if etype == "Service":
+                        canonical = await self._resolve_service_id(conn, eid)
+                        if canonical != eid:
+                            logger.debug("Write-time alias: %s -> %s", eid, canonical)
+                            resolved_ids[eid] = canonical
+                            eid = canonical
 
                     import json
                     await conn.execute(
@@ -152,6 +163,10 @@ class KnowledgeGraphStore:
                     rel_type = getattr(rel, "rel_type", None) or rel.get("rel_type", "RELATED_TO")
                     to_type = getattr(rel, "to_type", None) or rel.get("to_type", "Node")
                     to_id = _sanitize(getattr(rel, "to_id", None) or rel.get("to_id", ""))
+                    if from_type == "Service":
+                        from_id = resolved_ids.get(from_id, from_id)
+                    if to_type == "Service":
+                        to_id = resolved_ids.get(to_id, to_id)
 
                     if not all(_VALID_ENTITY_TYPE_RE.match(t) for t in (from_type, to_type, rel_type)):
                         logger.warning("Skipping relationship with invalid types: %s->%s->%s", from_type, rel_type, to_type)
@@ -180,12 +195,21 @@ class KnowledgeGraphStore:
         entity_id: str,
         depth: int = 1,
     ) -> list[dict[str, Any]]:
-        """Find entities related to a given node (1-hop by default)."""
+        """Find entities related to a given node (1-hop by default).
+
+        Uses exact match first; falls back to fuzzy resolution for Service
+        entities when exact match yields no results (handles name variants
+        like "Blackboard" vs "darwin-blackboard").
+        """
         try:
             if not await self._ensure_initialized():
                 return []
 
             async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+                resolved_id = entity_id
+                if entity_type == "Service":
+                    resolved_id = await self._resolve_service_id(conn, entity_id)
+
                 rows = await conn.fetch(
                     """
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
@@ -200,24 +224,89 @@ class KnowledgeGraphStore:
                     WHERE r.to_entity_type = $1 AND r.to_entity_id = $2
                         AND e.last_seen > NOW() - INTERVAL '7 days'
                     """,
-                    entity_type, entity_id,
+                    entity_type, resolved_id,
                 )
                 return [dict(row) for row in rows]
         except Exception as e:
             logger.warning("Knowledge graph query failed (non-fatal): %s", e)
             return []
 
+    async def _resolve_service_id(
+        self, conn: Any, entity_id: str,
+    ) -> str:
+        """Resolve a service entity_id to the canonical ID with the most relationships.
+
+        Handles name variants: "service:Blackboard" may need to resolve to
+        "service:darwin-blackboard" (seeded from Qdrant archives). Extracts the
+        bare name from "service:<name>" and searches ILIKE for variants.
+        Returns the variant with the most relationships, or the original ID
+        if no better match exists.
+        """
+        bare = entity_id.removeprefix("service:").lower()
+        if not bare:
+            return entity_id
+
+        row = await conn.fetchrow(
+            "SELECT 1 FROM kg_entities WHERE entity_type = 'Service' AND entity_id = $1",
+            entity_id,
+        )
+        if row:
+            rel_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM kg_relationships
+                WHERE (from_entity_type = 'Service' AND from_entity_id = $1)
+                   OR (to_entity_type = 'Service' AND to_entity_id = $1)
+                """,
+                entity_id,
+            )
+            if rel_count and rel_count >= 2:
+                return entity_id
+
+        candidates = await conn.fetch(
+            """
+            SELECT e.entity_id, count(r.id) as rel_count
+            FROM kg_entities e
+            LEFT JOIN kg_relationships r ON (
+                (r.from_entity_type = 'Service' AND r.from_entity_id = e.entity_id)
+                OR (r.to_entity_type = 'Service' AND r.to_entity_id = e.entity_id)
+            )
+            WHERE e.entity_type = 'Service'
+              AND LOWER(e.entity_id) LIKE $1
+            GROUP BY e.entity_id
+            ORDER BY rel_count DESC
+            LIMIT 1
+            """,
+            f"%{bare}%",
+        )
+        if candidates and candidates[0]["rel_count"] > 0:
+            resolved = candidates[0]["entity_id"]
+            if resolved != entity_id:
+                logger.debug(
+                    "Service resolution: %s -> %s (%d rels)",
+                    entity_id, resolved, candidates[0]["rel_count"],
+                )
+            return resolved
+
+        return entity_id
+
     async def has_entity(self, entity_type: str, entity_id: str) -> bool:
-        """Check if an entity exists."""
+        """Check if an entity exists (with fuzzy resolution for Services)."""
         try:
             if not await self._ensure_initialized():
                 return False
 
             async with _KG_SEMAPHORE, self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
-                    entity_type, entity_id,
-                )
+                if entity_type == "Service":
+                    resolved = await self._resolve_service_id(conn, entity_id)
+                    row = await conn.fetchrow(
+                        "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
+                        entity_type, resolved,
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
+                        entity_type, entity_id,
+                    )
                 return row is not None
         except Exception as e:
             logger.warning("Knowledge graph has_entity failed (non-fatal): %s", e)

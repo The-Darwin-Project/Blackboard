@@ -27,6 +27,8 @@ class TestUpsertEntities:
         store._initialized = True
 
         mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = None
+        mock_conn.fetch.return_value = []
         mock_cm = AsyncMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
@@ -60,6 +62,8 @@ class TestUpsertEntities:
         store._initialized = True
 
         mock_conn = AsyncMock()
+        mock_conn.fetchrow.return_value = None
+        mock_conn.fetch.return_value = []
         mock_cm = AsyncMock()
         mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_cm.__aexit__ = AsyncMock(return_value=False)
