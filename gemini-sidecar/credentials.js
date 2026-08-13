@@ -178,14 +178,11 @@ async function generateAllTokens(installations) {
     }
   }
 
-  // Persist token map for git-credential-darwin and gh-wrapper.sh
-  if (Object.keys(tokenMap).length > 0) {
-    fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(tokenMap, null, 2), { mode: 0o600 });
-    console.log(`[${new Date().toISOString()}] Token map written (${Object.keys(tokenMap).length} orgs) -> ${TOKEN_MAP_PATH}`);
-  }
-
   return tokenMap;
 }
+
+// Dedup lock: prevents concurrent discovery from 3 call sites (http-handler, ws-server, ws-client)
+let _discoveryInFlight = null;
 
 /**
  * Full multi-org discovery and token generation with fallback chain:
@@ -195,10 +192,18 @@ async function generateAllTokens(installations) {
  * 4. No auth (returns empty map, cleans stale map file)
  *
  * Always cleans pre-existing token map at entry to prevent stale inheritance.
+ * Dedup: concurrent callers share a single in-flight discovery (no race on file).
  *
  * @returns {Promise<Object<string, {token: string, installation_id: string, expires_at: string}>>}
  */
 async function discoverAndGenerateTokens() {
+  if (_discoveryInFlight) return _discoveryInFlight;
+  _discoveryInFlight = _discoverAndGenerateTokensInner();
+  try { return await _discoveryInFlight; }
+  finally { _discoveryInFlight = null; }
+}
+
+async function _discoverAndGenerateTokensInner() {
   // Clean stale map from prior sessions before any fallback path runs.
   // Prevents HIGH-1: a no-auth task inheriting tokens from a previous session.
   try { fs.unlinkSync(TOKEN_MAP_PATH); } catch { /* not present — expected on first run */ }
@@ -239,6 +244,9 @@ async function discoverAndGenerateTokens() {
           }
           return scopedMap;
         }
+        // No org scoping — write full map to disk (single write-site, post-scoping)
+        fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(fullTokenMap, null, 2), { mode: 0o600 });
+        console.log(`[${new Date().toISOString()}] Token map written (${Object.keys(fullTokenMap).length} orgs, unscoped) -> ${TOKEN_MAP_PATH}`);
         return fullTokenMap;
       }
     }
