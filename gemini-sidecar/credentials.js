@@ -275,17 +275,13 @@ function setupGitCredentials(tokenMap, workDir) {
     // Remove legacy flat credential helper (old single-token path)
     try { execSync('git config --global --unset credential.https://github.com.helper', { encoding: 'utf8', stdio: 'pipe' }); } catch { /* not set */ }
 
-    // Register per-org credential helpers via git-credential-darwin
-    const orgs = Object.keys(tokenMap).filter(k => k !== '_default');
-    if (orgs.length > 0) {
-      for (const org of orgs) {
-        execSync(`git config --global credential."https://github.com/${org}".helper "!/app/git-credential-darwin"`, { encoding: 'utf8' });
-      }
-      console.log(`[${new Date().toISOString()}] Per-org credential helpers registered: ${orgs.join(', ')}`);
-    } else if (tokenMap._default) {
-      // Single-install fallback: register one helper for all of github.com
+    // Register a single host-level credential helper. git-credential-darwin
+    // already lowercases the org from the credential path itself, so a
+    // per-org registration here is redundant and breaks for mixed-case org
+    // names since git's credential URL matching is case-sensitive.
+    if (Object.keys(tokenMap).length > 0) {
       execSync('git config --global credential.https://github.com.helper "!/app/git-credential-darwin"', { encoding: 'utf8' });
-      console.log(`[${new Date().toISOString()}] Default credential helper registered (single-install mode)`);
+      console.log(`[${new Date().toISOString()}] Host-level credential helper registered (github.com)`);
     }
 
     console.log(`[${new Date().toISOString()}] Git credentials configured`);
