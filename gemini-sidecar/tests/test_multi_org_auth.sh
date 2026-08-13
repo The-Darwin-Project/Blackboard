@@ -283,6 +283,72 @@ else
   echo "SKIP [T-14]: $CRED_HELPER not found"
 fi
 
+# ============================================================
+# T-15: GITHUB_ALLOWED_ORGS scoping — credential helper only
+# serves tokens for allowed orgs (verifies map-content scoping)
+# ============================================================
+
+if [[ -x "$CRED_HELPER" ]] || [[ -f "$CRED_HELPER" ]]; then
+  scoped_map="${TMPDIR_TEST}/scoped-map.json"
+  # Simulate a map that was scoped to only org-a (org-b excluded)
+  cat > "$scoped_map" <<'FIXTURE'
+{ "org-a": { "token": "ghs_scoped_org_a_token", "installation_id": "100", "expires_at": "" } }
+FIXTURE
+  chmod 600 "$scoped_map"
+
+  # Allowed org resolves
+  output_a="$(printf 'protocol=https\nhost=github.com\npath=org-a/repo.git\n\n' \
+    | GH_TOKEN_MAP_PATH="$scoped_map" bash "$CRED_HELPER" get 2>/dev/null)" || true
+  password_a="$(echo "$output_a" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_eq "T-15a: scoped map serves allowed org token" \
+    "ghs_scoped_org_a_token" "$password_a"
+
+  # Excluded org gets nothing (not in map → empty output → exit 0)
+  output_b="$(printf 'protocol=https\nhost=github.com\npath=org-b/repo.git\n\n' \
+    | GH_TOKEN_MAP_PATH="$scoped_map" bash "$CRED_HELPER" get 2>/dev/null)" || true
+  password_b="$(echo "$output_b" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_empty "T-15b: scoped map denies excluded org (not in map)" "$password_b"
+else
+  echo "SKIP [T-15]: $CRED_HELPER not found"
+fi
+
+# ============================================================
+# T-16: Stale token map cleanup — absent map file causes
+# credential helper to exit silently (no inherited tokens)
+# ============================================================
+
+if [[ -x "$CRED_HELPER" ]] || [[ -f "$CRED_HELPER" ]]; then
+  nonexistent_map="${TMPDIR_TEST}/does-not-exist.json"
+  output="$(printf 'protocol=https\nhost=github.com\npath=org-a/repo.git\n\n' \
+    | GH_TOKEN_MAP_PATH="$nonexistent_map" bash "$CRED_HELPER" get 2>/dev/null)" || true
+  password="$(echo "$output" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_empty "T-16: no map file → no token served (stale cleanup path)" "$password"
+else
+  echo "SKIP [T-16]: $CRED_HELPER not found"
+fi
+
+# ============================================================
+# T-17: Mixed-case org with scoped map — credential helper
+# lowercases org from URL path and matches lowercase map key
+# (end-to-end: case-insensitive routing + scoped map)
+# ============================================================
+
+if [[ -x "$CRED_HELPER" ]] || [[ -f "$CRED_HELPER" ]]; then
+  casetest_map="${TMPDIR_TEST}/casetest-map.json"
+  cat > "$casetest_map" <<'FIXTURE'
+{ "the-darwin-project": { "token": "ghs_darwin_scoped_token", "installation_id": "200", "expires_at": "" } }
+FIXTURE
+  chmod 600 "$casetest_map"
+
+  output="$(printf 'protocol=https\nhost=github.com\npath=The-Darwin-Project/Blackboard.git\n\n' \
+    | GH_TOKEN_MAP_PATH="$casetest_map" bash "$CRED_HELPER" get 2>/dev/null)" || true
+  password="$(echo "$output" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_eq "T-17: mixed-case URL path resolves via lowercased map key in scoped map" \
+    "ghs_darwin_scoped_token" "$password"
+else
+  echo "SKIP [T-17]: $CRED_HELPER not found"
+fi
+
 # --- Results ---
 
 echo ""

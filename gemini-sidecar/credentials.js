@@ -190,13 +190,23 @@ async function generateAllTokens(installations) {
 /**
  * Full multi-org discovery and token generation with fallback chain:
  * 1. GITHUB_INSTALLATION_ID env → single-token legacy path
- * 2. Discovery API → multi-org tokens
+ * 2. Discovery API → multi-org tokens (scoped by GITHUB_ALLOWED_ORGS if set)
  * 3. File-mount (INSTALL_ID_PATH) → single-token legacy path
- * 4. No auth (returns empty map)
+ * 4. No auth (returns empty map, cleans stale map file)
+ *
+ * Always cleans pre-existing token map at entry to prevent stale inheritance.
  *
  * @returns {Promise<Object<string, {token: string, installation_id: string, expires_at: string}>>}
  */
 async function discoverAndGenerateTokens() {
+  // Clean stale map from prior sessions before any fallback path runs.
+  // Prevents HIGH-1: a no-auth task inheriting tokens from a previous session.
+  try { fs.unlinkSync(TOKEN_MAP_PATH); } catch { /* not present — expected on first run */ }
+
+  // Parse allowed-org scoping (empty = all orgs, backward compat)
+  const allowedOrgs = (process.env.GITHUB_ALLOWED_ORGS || '')
+    .split(',').map(o => o.toLowerCase().trim()).filter(Boolean);
+
   // Fallback 1: explicit single-installation env var → old behavior
   if (process.env.GITHUB_INSTALLATION_ID) {
     console.log(`[${new Date().toISOString()}] GITHUB_INSTALLATION_ID set — using single-install path`);
@@ -211,8 +221,26 @@ async function discoverAndGenerateTokens() {
   try {
     const installations = await discoverInstallations();
     if (installations.length > 0) {
-      const tokenMap = await generateAllTokens(installations);
-      if (Object.keys(tokenMap).length > 0) return tokenMap;
+      const fullTokenMap = await generateAllTokens(installations);
+      if (Object.keys(fullTokenMap).length > 0) {
+        // Scope token map to allowed orgs if configured (fixes CRITICAL cross-org confused-deputy)
+        if (allowedOrgs.length > 0) {
+          const scopedMap = {};
+          for (const [org, entry] of Object.entries(fullTokenMap)) {
+            if (allowedOrgs.includes(org)) {
+              scopedMap[org] = entry;
+            }
+          }
+          if (Object.keys(scopedMap).length === 0) {
+            console.warn(`[${new Date().toISOString()}] No tokens match GITHUB_ALLOWED_ORGS=[${allowedOrgs.join(',')}]`);
+          } else {
+            fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(scopedMap, null, 2), { mode: 0o600 });
+            console.log(`[${new Date().toISOString()}] Token map scoped to ${Object.keys(scopedMap).length}/${Object.keys(fullTokenMap).length} orgs`);
+          }
+          return scopedMap;
+        }
+        return fullTokenMap;
+      }
     }
   } catch (err) {
     console.warn(`[${new Date().toISOString()}] Installation discovery failed: ${err.message}`);
@@ -232,7 +260,7 @@ async function discoverAndGenerateTokens() {
     }
   }
 
-  // Fallback 4: no auth
+  // Fallback 4: no auth — stale map already cleaned at function entry
   console.log(`[${new Date().toISOString()}] No GitHub installation tokens available`);
   return {};
 }
@@ -293,26 +321,42 @@ function setupGitCredentials(tokenMap, workDir) {
 
 /**
  * Configure GitHub MCP server + gh CLI auth with multi-org token map.
- * Selects primary token: GITHUB_INSTALLATION_ID match → first by ID (oldest) → _default.
+ * Selects primary token: GITHUB_TARGET_ORG → GITHUB_INSTALLATION_ID → _default → first available.
  * Both Gemini CLI and Claude Code use the MCP server for structured GitHub interaction.
  * The gh CLI uses GH_TOKEN env var; per-repo switching handled by gh-wrapper.sh.
  *
  * @param {Object} tokenMap - Multi-org token map from discoverAndGenerateTokens()
  */
 function setupGitHubTooling(tokenMap) {
-  // Select primary token for MCP + GH_TOKEN
   let token = '';
-  const explicitId = (process.env.GITHUB_INSTALLATION_ID || '').trim();
-  if (explicitId) {
-    const entry = Object.values(tokenMap).find(e => e.installation_id === explicitId);
-    if (entry) token = entry.token;
+
+  // Priority 1: task's target org (fixes HIGH-2 — org-agnostic primary token)
+  const targetOrg = (process.env.GITHUB_TARGET_ORG || '').toLowerCase().trim();
+  if (targetOrg && tokenMap[targetOrg]) {
+    token = tokenMap[targetOrg].token;
+    console.log(`[${new Date().toISOString()}] Primary token selected for target org: ${targetOrg}`);
   }
+
+  // Priority 2: explicit GITHUB_INSTALLATION_ID (existing behavior, unchanged)
   if (!token) {
-    // First by installation_id (oldest = lowest numeric id)
+    const explicitId = (process.env.GITHUB_INSTALLATION_ID || '').trim();
+    if (explicitId) {
+      const entry = Object.values(tokenMap).find(e => e.installation_id === explicitId);
+      if (entry) token = entry.token;
+    }
+  }
+
+  // Priority 3: _default key (single-install backward compat)
+  if (!token && tokenMap._default) {
+    token = tokenMap._default.token;
+  }
+
+  // Priority 4: first available (last resort — preserves existing fallback)
+  if (!token) {
     const entries = Object.values(tokenMap).filter(e => e.token);
-    entries.sort((a, b) => Number(a.installation_id) - Number(b.installation_id));
     if (entries.length > 0) token = entries[0].token;
   }
+
   if (!token) {
     console.warn(`[${new Date().toISOString()}] No GitHub token available for MCP/gh CLI`);
     return;
