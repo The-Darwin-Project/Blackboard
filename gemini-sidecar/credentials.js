@@ -1,11 +1,18 @@
 // gemini-sidecar/credentials.js
 // @ai-rules:
 // 1. [Constraint]: Consolidates ALL authentication, credential setup, and CLI login logic.
-// 2. [Pattern]: GitHub App JWT exchange for installation tokens; GitLab uses static PAT; ArgoCD session API for MCP JWT; Registry copies dockerconfigjson to ~/.docker/config.json. Claude MCP -> ~/.claude.json (via writeClaudeMcpServer); Gemini MCP -> ~/.gemini/settings.json.
-// 3. [Gotcha]: findPrivateKeyPath is internal — not exported; only public API exposed.
-// 4. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 30 min.
-// 5. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true. Acceptable for internal clusters.
-// 6. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig and registers kubernetes-mcp-server (--read-only --toolsets core,config,tekton). Tekton toolset adds TaskRun log retrieval; start/restart tools are permanently blocked by --read-only. If meta.kubearchiveUrl is set, also registers KubeArchive_<name> MCP (kubearchive-mcp.js with SA token from kubeconfig). getRemoteClustersMeta reads /config/remote-clusters/<name>.json for SessionStart hooks.
+// 2. [Pattern]: GitHub App multi-org: discoverAndGenerateTokens() discovers all installations,
+//    generates per-org tokens, writes /tmp/gh-token-map.json (0o600). Fallback chain:
+//    GITHUB_INSTALLATION_ID env → discovery API → file-mount → no auth.
+// 3. [Pattern]: git-credential-darwin shell helper resolves per-org tokens from the map file.
+//    gh-wrapper.sh does the same for `gh` CLI invocations.
+// 4. [Pattern]: GitLab uses static PAT; ArgoCD session API for MCP JWT; Registry copies
+//    dockerconfigjson to ~/.docker/config.json. Claude MCP -> ~/.claude.json; Gemini MCP -> ~/.gemini/settings.json.
+// 5. [Gotcha]: findPrivateKeyPath/createAppJWT are internal — not exported; only public API exposed.
+// 6. [Gotcha]: _lastCLILoginTime is module-scoped dedup — setupCLILogins skips ArgoCD/Kargo login if already done within 5 min.
+// 7. [Gotcha]: setupArgoCDMCP sets NODE_TLS_REJECT_UNAUTHORIZED=0 globally when ARGOCD_INSECURE=true.
+// 8. [Pattern]: Remote K8s clusters: setupRemoteK8sMCPs scans /secrets/remote-clusters/<name>/kubeconfig
+//    and registers kubernetes-mcp-server (--read-only --toolsets core,config,tekton).
 
 const fs = require('fs');
 const { spawn, execSync, execFileSync } = require('child_process');
@@ -48,35 +55,38 @@ function findPrivateKeyPath() {
  * Check if GitHub App credentials are available
  */
 function hasGitHubCredentials() {
-  return fs.existsSync(APP_ID_PATH) &&
-         (process.env.GITHUB_INSTALLATION_ID || fs.existsSync(INSTALL_ID_PATH)) &&
-         findPrivateKeyPath() !== null;
+  return fs.existsSync(APP_ID_PATH) && findPrivateKeyPath() !== null;
 }
 
 /**
- * Generate GitHub App installation token
- * Mirrors logic from BlackBoard/src/utils/github_app.py
- * @returns {Promise<string>} Installation access token (valid 1 hour)
+ * Create a short-lived App JWT for GitHub API authentication.
+ * Reusable helper — both single-install and multi-org paths need this.
+ * @returns {{jwtToken: string, appId: string}}
  */
-async function generateInstallationToken() {
+function createAppJWT() {
   const privateKeyPath = findPrivateKeyPath();
   if (!privateKeyPath) {
     throw new Error('GitHub App private key not found in /secrets/github/');
   }
-
-  // Read credentials from mounted secrets
   const appId = fs.readFileSync(APP_ID_PATH, 'utf8').trim();
-  const installId = (process.env.GITHUB_INSTALLATION_ID || fs.readFileSync(INSTALL_ID_PATH, 'utf8')).trim();
   const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
-
-  console.log(`[${new Date().toISOString()}] Generating GitHub App token (app=${appId}, install=${installId})`);
-
-  // Create JWT (same payload as Python: iat-60, exp+540, iss=appId)
   const now = Math.floor(Date.now() / 1000);
   const payload = { iat: now - 60, exp: now + 540, iss: appId };
   const jwtToken = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+  return { jwtToken, appId };
+}
 
-  // Exchange JWT for installation token
+/**
+ * Generate GitHub App installation token (single installation — legacy path).
+ * Mirrors logic from BlackBoard/src/utils/github_app.py
+ * @returns {Promise<string>} Installation access token (valid 1 hour)
+ */
+async function generateInstallationToken() {
+  const { jwtToken, appId } = createAppJWT();
+  const installId = (process.env.GITHUB_INSTALLATION_ID || fs.readFileSync(INSTALL_ID_PATH, 'utf8')).trim();
+
+  console.log(`[${new Date().toISOString()}] Generating GitHub App token (app=${appId}, install=${installId})`);
+
   const url = `https://api.github.com/app/installations/${installId}/access_tokens`;
   const response = await fetch(url, {
     method: 'POST',
@@ -97,36 +107,220 @@ async function generateInstallationToken() {
   return data.token;
 }
 
+// --- Multi-Org GitHub Auth ---
+const TOKEN_MAP_PATH = '/tmp/gh-token-map.json';
+
 /**
- * Configure git credentials for GitHub operations
- * Agent CLI will handle clone/pull/push itself
- * @param {string} token - Installation access token
+ * Discover all installations for this GitHub App.
+ * @returns {Promise<Array<{id: number, account: {login: string}}>>}
+ */
+async function discoverInstallations() {
+  const { jwtToken, appId } = createAppJWT();
+  console.log(`[${new Date().toISOString()}] Discovering GitHub App installations (app=${appId})`);
+
+  const response = await fetch('https://api.github.com/app/installations', {
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': `Bearer ${jwtToken}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`GitHub installations discovery failed: ${response.status} - ${error}`);
+  }
+
+  const installations = await response.json();
+  console.log(`[${new Date().toISOString()}] Discovered ${installations.length} installation(s): ${installations.map(i => i.account?.login || i.id).join(', ')}`);
+  return installations;
+}
+
+/**
+ * Generate access tokens for each installation. Accumulates partial successes.
+ * @param {Array<{id: number, account: {login: string}}>} installations
+ * @returns {Promise<Object<string, {token: string, installation_id: string, expires_at: string}>>}
+ */
+async function generateAllTokens(installations) {
+  const { jwtToken } = createAppJWT();
+  const tokenMap = {};
+
+  for (const inst of installations) {
+    const org = (inst.account?.login || '').toLowerCase();
+    if (!org) continue;
+
+    try {
+      const url = `https://api.github.com/app/installations/${inst.id}/access_tokens`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${jwtToken}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        console.warn(`[${new Date().toISOString()}] Token generation failed for ${org} (install=${inst.id}): ${response.status} - ${error}`);
+        continue;
+      }
+
+      const data = await response.json();
+      tokenMap[org] = {
+        token: data.token,
+        installation_id: String(inst.id),
+        expires_at: data.expires_at,
+      };
+      console.log(`[${new Date().toISOString()}] Got token for ${org} (install=${inst.id}, expires: ${data.expires_at})`);
+    } catch (err) {
+      console.warn(`[${new Date().toISOString()}] Token generation error for ${org}: ${err.message}`);
+    }
+  }
+
+  return tokenMap;
+}
+
+// Dedup lock: prevents concurrent discovery from 3 call sites (http-handler, ws-server, ws-client)
+let _discoveryInFlight = null;
+
+/**
+ * Full multi-org discovery and token generation with fallback chain:
+ * 1. GITHUB_INSTALLATION_ID env → single-token legacy path
+ * 2. Discovery API → multi-org tokens (scoped by GITHUB_ALLOWED_ORGS if set)
+ * 3. File-mount (INSTALL_ID_PATH) → single-token legacy path
+ * 4. No auth (returns empty map, cleans stale map file)
+ *
+ * Always cleans pre-existing token map at entry to prevent stale inheritance.
+ * Dedup: concurrent callers share a single in-flight discovery (no race on file).
+ *
+ * @returns {Promise<Object<string, {token: string, installation_id: string, expires_at: string}>>}
+ */
+async function discoverAndGenerateTokens() {
+  if (_discoveryInFlight) return _discoveryInFlight;
+  _discoveryInFlight = _discoverAndGenerateTokensInner();
+  try { return await _discoveryInFlight; }
+  finally { _discoveryInFlight = null; }
+}
+
+async function _discoverAndGenerateTokensInner() {
+  // Clean stale map from prior sessions before any fallback path runs.
+  // Prevents HIGH-1: a no-auth task inheriting tokens from a previous session.
+  try { fs.unlinkSync(TOKEN_MAP_PATH); } catch { /* not present — expected on first run */ }
+
+  // Parse allowed-org scoping (empty = all orgs, backward compat)
+  const allowedOrgs = (process.env.GITHUB_ALLOWED_ORGS || '')
+    .split(',').map(o => o.toLowerCase().trim()).filter(Boolean);
+
+  // Fallback 1: explicit single-installation env var → old behavior
+  if (process.env.GITHUB_INSTALLATION_ID) {
+    console.log(`[${new Date().toISOString()}] GITHUB_INSTALLATION_ID set — using single-install path`);
+    const token = await generateInstallationToken();
+    const installId = process.env.GITHUB_INSTALLATION_ID.trim();
+    const map = { _default: { token, installation_id: installId, expires_at: '' } };
+    fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(map, null, 2), { mode: 0o600 });
+    return map;
+  }
+
+  // Fallback 2: discovery API
+  try {
+    const installations = await discoverInstallations();
+    if (installations.length > 0) {
+      const fullTokenMap = await generateAllTokens(installations);
+      if (Object.keys(fullTokenMap).length > 0) {
+        // Scope token map to allowed orgs if configured (fixes CRITICAL cross-org confused-deputy)
+        if (allowedOrgs.length > 0) {
+          const scopedMap = {};
+          for (const [org, entry] of Object.entries(fullTokenMap)) {
+            if (allowedOrgs.includes(org)) {
+              scopedMap[org] = entry;
+            }
+          }
+          if (Object.keys(scopedMap).length === 0) {
+            console.warn(`[${new Date().toISOString()}] No tokens match GITHUB_ALLOWED_ORGS=[${allowedOrgs.join(',')}]`);
+          } else {
+            fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(scopedMap, null, 2), { mode: 0o600 });
+            console.log(`[${new Date().toISOString()}] Token map scoped to ${Object.keys(scopedMap).length}/${Object.keys(fullTokenMap).length} orgs`);
+          }
+          return scopedMap;
+        }
+        // No org scoping — write full map to disk (single write-site, post-scoping)
+        fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(fullTokenMap, null, 2), { mode: 0o600 });
+        console.log(`[${new Date().toISOString()}] Token map written (${Object.keys(fullTokenMap).length} orgs, unscoped) -> ${TOKEN_MAP_PATH}`);
+        return fullTokenMap;
+      }
+    }
+  } catch (err) {
+    console.warn(`[${new Date().toISOString()}] Installation discovery failed: ${err.message}`);
+  }
+
+  // Fallback 3: file-mounted installation-id (backward compat)
+  if (fs.existsSync(INSTALL_ID_PATH)) {
+    console.log(`[${new Date().toISOString()}] Falling back to file-mounted installation-id`);
+    try {
+      const token = await generateInstallationToken();
+      const installId = fs.readFileSync(INSTALL_ID_PATH, 'utf8').trim();
+      const map = { _default: { token, installation_id: installId, expires_at: '' } };
+      fs.writeFileSync(TOKEN_MAP_PATH, JSON.stringify(map, null, 2), { mode: 0o600 });
+      return map;
+    } catch (err) {
+      console.warn(`[${new Date().toISOString()}] File-mount token generation failed: ${err.message}`);
+    }
+  }
+
+  // Fallback 4: no auth — stale map already cleaned at function entry
+  console.log(`[${new Date().toISOString()}] No GitHub installation tokens available`);
+  return {};
+}
+
+/**
+ * Configure git credentials for GitHub operations (multi-org aware).
+ * Uses git-credential-darwin helper for per-org token resolution.
+ * @param {Object} tokenMap - Multi-org token map from discoverAndGenerateTokens()
  * @param {string} workDir - Working directory for git operations
  */
-function setupGitCredentials(token, workDir) {
-  console.log(`[${new Date().toISOString()}] Configuring git credentials`);
+function setupGitCredentials(tokenMap, workDir) {
+  console.log(`[${new Date().toISOString()}] Configuring git credentials (multi-org)`);
 
   try {
-    // Ensure work directory exists
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true });
     }
 
-    // Configure git user globally (for any repo the agent clones)
+    // Core git identity
     execSync(`git config --global user.name "${process.env.GIT_USER_NAME || 'Darwin Agent'}"`, { encoding: 'utf8' });
     execSync(`git config --global user.email "${process.env.GIT_USER_EMAIL || 'darwin-agent@darwin-project.io'}"`, { encoding: 'utf8' });
 
-    // Mark work directory as safe (PVC mounted volumes need this)
+    // Safe directories
     execSync(`git config --global --add safe.directory ${workDir}`, { encoding: 'utf8' });
-    execSync(`git config --global --add safe.directory '*'`, { encoding: 'utf8' });  // Allow any subdir
+    execSync(`git config --global --add safe.directory '*'`, { encoding: 'utf8' });
 
-    // Store credentials using host-specific helper (coexists with GitLab credentials)
-    const credFile = `/tmp/git-creds-${Date.now()}`;
-    execSync(`git config --global credential.https://github.com.helper 'store --file=${credFile}'`, { encoding: 'utf8' });
-    fs.writeFileSync(credFile, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+    // Enable per-path credential matching
+    execSync('git config --global credential.https://github.com.useHttpPath true', { encoding: 'utf8' });
+
+    // Clean stale per-org credential helpers from prior runs
+    try {
+      const existing = execSync('git config --global --get-regexp "^credential\\.https://github\\.com/.+\\.helper$"', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+      for (const line of existing.trim().split('\n')) {
+        if (!line) continue;
+        const key = line.split(/\s+/)[0];
+        try { execSync(`git config --global --unset "${key}"`, { encoding: 'utf8', stdio: 'pipe' }); } catch { /* already gone */ }
+      }
+    } catch { /* no existing entries -- expected on first run */ }
+
+    // Remove legacy flat credential helper (old single-token path)
+    try { execSync('git config --global --unset credential.https://github.com.helper', { encoding: 'utf8', stdio: 'pipe' }); } catch { /* not set */ }
+
+    // Register a single host-level credential helper. git-credential-darwin
+    // already lowercases the org from the credential path itself, so a
+    // per-org registration here is redundant and breaks for mixed-case org
+    // names since git's credential URL matching is case-sensitive.
+    if (Object.keys(tokenMap).length > 0) {
+      execSync('git config --global credential.https://github.com.helper "!/app/git-credential-darwin"', { encoding: 'utf8' });
+      console.log(`[${new Date().toISOString()}] Host-level credential helper registered (github.com)`);
+    }
 
     console.log(`[${new Date().toISOString()}] Git credentials configured`);
-
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Git config error:`, err.message);
     throw new Error(`Failed to configure git: ${err.message}`);
@@ -134,13 +328,48 @@ function setupGitCredentials(token, workDir) {
 }
 
 /**
- * Configure GitHub MCP server + gh CLI auth with a fresh installation token.
+ * Configure GitHub MCP server + gh CLI auth with multi-org token map.
+ * Selects primary token: GITHUB_TARGET_ORG → GITHUB_INSTALLATION_ID → _default → first available.
  * Both Gemini CLI and Claude Code use the MCP server for structured GitHub interaction.
- * The gh CLI uses GH_TOKEN env var for direct commands.
+ * The gh CLI uses GH_TOKEN env var; per-repo switching handled by gh-wrapper.sh.
  *
- * @param {string} token - GitHub App installation token
+ * @param {Object} tokenMap - Multi-org token map from discoverAndGenerateTokens()
  */
-function setupGitHubTooling(token) {
+function setupGitHubTooling(tokenMap) {
+  let token = '';
+
+  // Priority 1: task's target org (fixes HIGH-2 — org-agnostic primary token)
+  const targetOrg = (process.env.GITHUB_TARGET_ORG || '').toLowerCase().trim();
+  if (targetOrg && tokenMap[targetOrg]) {
+    token = tokenMap[targetOrg].token;
+    console.log(`[${new Date().toISOString()}] Primary token selected for target org: ${targetOrg}`);
+  }
+
+  // Priority 2: explicit GITHUB_INSTALLATION_ID (existing behavior, unchanged)
+  if (!token) {
+    const explicitId = (process.env.GITHUB_INSTALLATION_ID || '').trim();
+    if (explicitId) {
+      const entry = Object.values(tokenMap).find(e => e.installation_id === explicitId);
+      if (entry) token = entry.token;
+    }
+  }
+
+  // Priority 3: _default key (single-install backward compat)
+  if (!token && tokenMap._default) {
+    token = tokenMap._default.token;
+  }
+
+  // Priority 4: first available (last resort — preserves existing fallback)
+  if (!token) {
+    const entries = Object.values(tokenMap).filter(e => e.token);
+    if (entries.length > 0) token = entries[0].token;
+  }
+
+  if (!token) {
+    console.warn(`[${new Date().toISOString()}] No GitHub token available for MCP/gh CLI`);
+    return;
+  }
+
   // 1. Set GH_TOKEN for gh CLI (persists in process env for child processes)
   process.env.GH_TOKEN = token;
 
@@ -576,6 +805,7 @@ function setupRegistryCredentials() {
 module.exports = {
   hasGitHubCredentials,
   generateInstallationToken,
+  discoverAndGenerateTokens,
   setupGitCredentials,
   setupGitHubTooling,
   hasGitLabCredentials,

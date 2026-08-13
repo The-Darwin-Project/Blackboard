@@ -129,6 +129,20 @@ class TestCodeReviewerPermissionsFile:
             "Bash(curl *)", "Bash(wget *)",
             "Bash(scp *)", "Bash(ssh *)", "Bash(rsync *)", "Bash(sftp *)",
             "Bash(npm install *)", "Bash(pip install *)", "Bash(make *)",
-            "Read(//tmp/git-creds-*)", "Read(~/.ssh/**)",
+            "Read(//tmp/git-creds-*)", "Read(//tmp/gh-token-map*)", "Read(~/.ssh/**)",
         ):
             assert required in deny, f"Expected deny rule {required!r} missing"
+
+    def test_denies_token_map_read(self):
+        """T-13: Multi-org token map must be blocked from CodeReviewer read access.
+        The gh-token-map file contains installation tokens for all discovered GitHub
+        orgs — a reviewer subagent reading it could exfiltrate cross-org credentials."""
+        import json
+
+        data = json.loads(self.SETTINGS_PATH.read_text(encoding="utf-8"))
+        deny = data["permissions"]["deny"]
+        assert "Read(//tmp/gh-token-map*)" in deny, (
+            "Expected deny rule 'Read(//tmp/gh-token-map*)' missing from "
+            "code-reviewer-permissions.json — multi-org token map must not be "
+            "readable by reviewer subagents"
+        )

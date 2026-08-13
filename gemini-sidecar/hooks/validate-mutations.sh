@@ -90,6 +90,10 @@ BLOCK_PATTERN+='|\|\s*(sudo\s+)?(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\
 # Package publish
 BLOCK_PATTERN+='|\bnpm\s+publish\b'
 
+# Credential file paths — block read access to sensitive token stores
+CRED_READ_PATTERN='(/tmp/gh-token-map|/tmp/git-creds-|~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.netrc)'
+BLOCK_PATTERN+="|${CRED_READ_PATTERN}"
+
 # Case-insensitive check for the main denylist
 if printf '%s\n' "$CHECK_CMD" | grep -qiE "$BLOCK_PATTERN"; then
     LOG_CMD=$(printf '%s' "$COMMAND" | cut -c1-120)

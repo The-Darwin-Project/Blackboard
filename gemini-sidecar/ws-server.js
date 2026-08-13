@@ -10,7 +10,7 @@
 const { executeCLIStreaming } = require('./cli-executor');
 const {
   hasGitHubCredentials,
-  generateInstallationToken,
+  discoverAndGenerateTokens,
   setupGitCredentials,
   setupGitHubTooling,
   hasGitLabCredentials,
@@ -69,12 +69,12 @@ function setupWSServer(wss) {
         state.resetCallbackResult();
         console.log(`[${new Date().toISOString()}] WS task received: ${eventId} (prompt: ${prompt.length} chars, session: ${sessionId})`);
 
-        // Setup git credentials + GitHub tooling
+        // Setup git credentials + GitHub tooling (multi-org)
         if (hasGitHubCredentials()) {
           try {
-            const token = await generateInstallationToken();
-            setupGitCredentials(token, workDir);
-            setupGitHubTooling(token);
+            const tokenMap = await discoverAndGenerateTokens();
+            setupGitCredentials(tokenMap, workDir);
+            setupGitHubTooling(tokenMap);
             wsSend(ws, { type: 'progress', event_id: eventId, message: 'GitHub credentials configured' });
           } catch (err) {
             wsSend(ws, { type: 'progress', event_id: eventId, message: `GitHub credentials failed: ${err.message}, continuing...` });

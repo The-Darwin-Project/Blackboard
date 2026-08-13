@@ -17,7 +17,7 @@ const WebSocket = require('ws');
 const os = require('os');
 const { executeCLIStreaming, prepareResultsDir, is429Error } = require('./cli-executor');
 const {
-  hasGitHubCredentials, generateInstallationToken, setupGitCredentials, setupGitHubTooling,
+  hasGitHubCredentials, discoverAndGenerateTokens, setupGitCredentials, setupGitHubTooling,
   hasGitLabCredentials, readGitLabToken, setupGitLabCredentials, setupGitLabTooling,
   setupArgoCDMCP, setupCLILogins, setupRemoteK8sMCPs, setupRegistryCredentials, GITLAB_HOST,
 } = require('./credentials');
@@ -183,9 +183,9 @@ async function handleTask(ws, msg) {
 
   if (hasGitHubCredentials()) {
     try {
-      const token = await generateInstallationToken();
-      setupGitCredentials(token, workDir);
-      setupGitHubTooling(token);
+      const tokenMap = await discoverAndGenerateTokens();
+      setupGitCredentials(tokenMap, workDir);
+      setupGitHubTooling(tokenMap);
       sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: 'GitHub credentials configured' });
     } catch (err) {
       sendMsg(ws, taskId, { type: 'progress', event_id: eventId, message: `GitHub creds failed: ${err.message}, continuing...` });

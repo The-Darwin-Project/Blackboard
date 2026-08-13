@@ -13,7 +13,7 @@ const { executeCLI } = require('./cli-executor');
 const { tryWake } = require('./ws-client');
 const {
   hasGitHubCredentials,
-  generateInstallationToken,
+  discoverAndGenerateTokens,
   setupGitCredentials,
   setupGitHubTooling,
   hasGitLabCredentials,
@@ -382,12 +382,12 @@ async function handleRequest(req, res) {
       const workDir = body.cwd || DEFAULT_WORK_DIR;
       state.resetCallbackResult(); // Reset stale callback from previous WS task
 
-      // Setup git credentials + GitHub tooling if GitHub App is configured
+      // Setup git credentials + GitHub tooling if GitHub App is configured (multi-org)
       if (hasGitHubCredentials()) {
         try {
-          const token = await generateInstallationToken();
-          setupGitCredentials(token, workDir);
-          setupGitHubTooling(token);
+          const tokenMap = await discoverAndGenerateTokens();
+          setupGitCredentials(tokenMap, workDir);
+          setupGitHubTooling(tokenMap);
         } catch (err) {
           console.error(`[${new Date().toISOString()}] Git credential setup failed:`, err.message);
           console.log(`[${new Date().toISOString()}] Continuing without git credentials`);
