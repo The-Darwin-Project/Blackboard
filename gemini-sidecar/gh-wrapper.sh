@@ -20,11 +20,11 @@ if [ -n "$ORG" ] && [ -f "$TOKEN_MAP" ]; then
   RESOLVED_TOKEN=$(node -e "
     const fs = require('fs');
     try {
-      const map = JSON.parse(fs.readFileSync('${TOKEN_MAP}', 'utf8'));
-      const entry = map[process.argv[1]] || map._default;
+      const map = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+      const entry = map[process.argv[2]] || map._default;
       if (entry && entry.token) process.stdout.write(entry.token);
     } catch {}
-  " "$ORG" 2>/dev/null)
+  " "$TOKEN_MAP" "$ORG" 2>/dev/null)
   if [ -n "$RESOLVED_TOKEN" ]; then
     export GH_TOKEN="$RESOLVED_TOKEN"
   fi
