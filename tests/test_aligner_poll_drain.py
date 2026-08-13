@@ -25,6 +25,7 @@ def _mock_blackboard():
     from src.state.blackboard import BlackboardState
     bb = AsyncMock(spec=BlackboardState)
     bb.get_active_events.return_value = []
+    bb.get_active_events_with_status.return_value = {}
     bb.get_event.return_value = None
     bb.get_service.return_value = None
     bb.get_escalation_flag.return_value = None
@@ -405,3 +406,247 @@ async def test_progressing_commits_without_notify():
     bb.commit_aligner_signal.assert_called_once_with("svc-a|health")
     mock_notify.assert_not_called()
     bb.create_event.assert_not_called()
+
+
+# =========================================================================
+# T-F1: Flood consolidation — >threshold from same app → 1 event
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_flood_consolidation_creates_single_event():
+    """4 signals from same ArgoCD app (>threshold=3) → 1 consolidated event, all committed."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(4)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {}
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="argocd/flood-app")
+        meta["display_text"] = f"Degraded: {key}"
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._flood_threshold = 3
+
+    await aligner._drain_once()
+
+    assert bb.create_event.call_count == 1
+    call_kwargs = bb.create_event.call_args
+    assert "sync flood" in call_kwargs.kwargs.get("reason", call_kwargs[1].get("reason", ""))
+    assert bb.commit_aligner_signal.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_below_flood_threshold_creates_individual_events():
+    """3 signals from same app (==threshold=3) → 3 individual events (not consolidated)."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(3)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {}
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="argocd/small-app")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._flood_threshold = 3
+
+    await aligner._drain_once()
+
+    assert bb.create_event.call_count == 3
+
+
+# =========================================================================
+# T-F2: WIP batch cap — stops creating when headroom exhausted
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_wip_cap_restages_excess_signals():
+    """WIP at 18/20 (headroom=2) with 5 signals → 2 created, 3 restaged."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(5)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {
+        **{f"evt-{i}": "active" for i in range(15)},
+        **{f"evt-new-{i}": "new" for i in range(3)},
+    }
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._wip_cap = 20
+
+    await aligner._drain_once()
+
+    assert bb.create_event.call_count == 2
+    assert bb.restage_aligner_signal.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_wip_full_restages_all():
+    """WIP at 20/20 (headroom=0) → 0 events created, all restaged."""
+    bb = _mock_blackboard()
+    keys = ["svc-a|health", "svc-b|health"]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {
+        **{f"evt-{i}": "active" for i in range(15)},
+        **{f"evt-d-{i}": "deferred" for i in range(3)},
+        **{f"evt-n-{i}": "new" for i in range(2)},
+    }
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._wip_cap = 20
+
+    await aligner._drain_once()
+
+    bb.create_event.assert_not_called()
+    assert bb.restage_aligner_signal.call_count == 2
+
+
+# =========================================================================
+# T-F3: Flood + WIP cap interaction
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_flood_consolidation_respects_wip_cap():
+    """Flood consolidated event counts toward headroom; excess floods are restaged."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(8)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {
+        f"evt-{i}": "active" for i in range(19)
+    }
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="argocd/flood-app")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._wip_cap = 20
+    aligner._flood_threshold = 3
+
+    await aligner._drain_once()
+
+    assert bb.create_event.call_count == 1
+    assert bb.commit_aligner_signal.call_count == 8
+
+
+# =========================================================================
+# T-F4: Missing coverage from review (C1 findings)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_wip_headroom_exception_falls_back():
+    """_get_wip_headroom raises → fallback to 5, drain still creates up to 5 events."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(7)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.side_effect = Exception("Redis timeout")
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+
+    await aligner._drain_once()
+
+    assert bb.create_event.call_count == 5
+    assert bb.restage_aligner_signal.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mixed_consolidated_and_individual():
+    """2 apps (one floods, one doesn't) + bare signals → correct split."""
+    bb = _mock_blackboard()
+    keys = [
+        "svc-a|health", "svc-b|health", "svc-c|health", "svc-d|health",  # flood-app (4)
+        "svc-e|health", "svc-f|health",  # small-app (2, below threshold)
+        "bare-svc|health",  # no argocd_app
+    ]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {}
+
+    def hget_side_effect(hash_key, key):
+        if key == "bare-svc|health":
+            meta = _meta(argocd_app="")
+        elif key.startswith("svc-e") or key.startswith("svc-f"):
+            meta = _meta(argocd_app="argocd/small-app")
+        else:
+            meta = _meta(argocd_app="argocd/flood-app")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    aligner = _make_aligner(bb)
+    aligner._flood_threshold = 3
+
+    await aligner._drain_once()
+
+    # 1 consolidated (flood-app) + 2 individual (small-app) + 1 individual (bare) = 4
+    assert bb.create_event.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_consolidated_suppressed_active_commits_all():
+    """Consolidated event suppressed (active exists) → all signals committed, not restaged."""
+    bb = _mock_blackboard()
+    keys = [f"svc-{i}|health" for i in range(5)]
+    bb.drain_aligner_pending.return_value = keys
+    bb.get_active_events_with_status.return_value = {}
+
+    def hget_side_effect(hash_key, key):
+        meta = _meta(argocd_app="argocd/flood-app")
+        return json.dumps(meta)
+
+    bb.redis.hget.side_effect = hget_side_effect
+    bb.get_service.return_value = Service(name="svc-x", health_status="Degraded")
+    bb.count_aligner_pending.return_value = 0
+
+    from src.models import EventDocument, EventStatus
+    existing_event = AsyncMock(spec=EventDocument)
+    existing_event.service = "argocd/flood-app"
+    existing_event.status = EventStatus.ACTIVE
+    bb.get_active_events.return_value = ["evt-existing"]
+    bb.get_event.return_value = existing_event
+
+    aligner = _make_aligner(bb)
+    aligner._flood_threshold = 3
+
+    await aligner._drain_once()
+
+    bb.create_event.assert_not_called()
+    assert bb.commit_aligner_signal.call_count == 5
+    bb.restage_aligner_signal.assert_not_called()

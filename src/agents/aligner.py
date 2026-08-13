@@ -10,6 +10,10 @@
 # 6. [Pattern]: pending_count is an in-memory property updated at drain cycle start/end.
 # 7. [Gotcha]: Post-restart gap: _initial_sync(suppress_callbacks=True) won't re-populate
 #    pending for already-unhealthy apps. Same as prior edge-triggered behavior.
+# 8. [Pattern]: Flood consolidation — when >ALIGNER_FLOOD_THRESHOLD signals from the same
+#    ArgoCD app arrive in one drain, create ONE consolidated "sync flood" event instead of N.
+# 9. [Pattern]: WIP back-pressure — _get_wip_headroom() queries active+deferred count before
+#    creating events. Excess signals are restaged (not lost). Prevents unbounded input buffer.
 """
 Agent 1: The Aligner (The Listener)
 
@@ -107,6 +111,8 @@ class Aligner:
         self._task: Optional[asyncio.Task] = None
         self._poll_interval = int(os.getenv("ALIGNER_POLL_INTERVAL", "30"))
         self._dwell_seconds = float(os.getenv("ALIGNER_DWELL_SECONDS", "30"))
+        self._wip_cap = int(os.getenv("MAX_ACTIVE_EVENTS", "20"))
+        self._flood_threshold = int(os.getenv("ALIGNER_FLOOD_THRESHOLD", "3"))
         self._pending_count: int = 0
     
     async def _get_adapter(self):
@@ -170,12 +176,21 @@ class Aligner:
             await asyncio.sleep(self._poll_interval)
 
     async def _drain_once(self) -> None:
-        """Drain dwell-expired signals: re-check health, create events or discard."""
+        """Drain dwell-expired signals with flood consolidation and WIP back-pressure.
+
+        Three phases:
+        1. Read metadata + re-check health (discard self-resolved)
+        2. Group by ArgoCD app — consolidate floods (>threshold from same app → 1 event)
+        3. Apply WIP headroom cap — restage excess instead of creating unbounded events
+        """
         keys = await self.blackboard.drain_aligner_pending(self._dwell_seconds)
         if not keys:
             return
         self._pending_count = await self.blackboard.count_aligner_pending()
-        created = resolved = restaged = 0
+
+        # Phase 1: Re-check health, collect still-sick signals
+        sick_signals: list[tuple[str, dict]] = []
+        resolved = 0
         for key in keys:
             try:
                 meta_json = await self.blackboard.redis.hget(
@@ -193,7 +208,6 @@ class Aligner:
                 target, _ = key.split("|", 1)
                 subject_type = meta.get("subject_type", "service")
 
-                # Re-check current state before event creation
                 if subject_type == "service":
                     svc = await self.blackboard.get_service(target)
                     if svc is None or svc.health_status in ("Healthy", "Progressing"):
@@ -215,14 +229,84 @@ class Aligner:
                         resolved += 1
                         continue
 
-                # Still sick — attempt event creation
+                sick_signals.append((key, meta))
+            except Exception:
+                logger.exception("Drain phase-1 error for key %s, committing to prevent retry loop", key)
+                try:
+                    await self.blackboard.commit_aligner_signal(key)
+                except Exception:
+                    pass
+
+        if not sick_signals:
+            self._pending_count = await self.blackboard.count_aligner_pending()
+            if keys:
+                logger.info(
+                    "Aligner drain: %d expired, 0 events, %d self-resolved, 0 re-dwelled",
+                    len(keys), resolved,
+                )
+            return
+
+        # Phase 2: Flood consolidation — group by ArgoCD app
+        app_groups: dict[str, list[tuple[str, dict]]] = {}
+        individual: list[tuple[str, dict]] = []
+        for key, meta in sick_signals:
+            app = meta.get("argocd_app", "")
+            if app:
+                app_groups.setdefault(app, []).append((key, meta))
+            else:
+                individual.append((key, meta))
+
+        to_create: list[tuple[str, list[tuple[str, dict]]]] = []
+        for app, signals in app_groups.items():
+            if len(signals) > self._flood_threshold:
+                to_create.append((app, signals))
+            else:
+                individual.extend(signals)
+
+        # Phase 3: WIP-aware batch cap
+        available = await self._get_wip_headroom()
+        created = restaged = 0
+
+        for app, signals in to_create:
+            if created >= available:
+                for k, m in signals:
+                    await self.blackboard.restage_aligner_signal(k, m)
+                restaged += len(signals)
+                continue
+            try:
+                outcome = await self._create_consolidated_event(app, signals)
+            except Exception:
+                logger.exception("Consolidated event creation failed for %s, restaging", app)
+                for k, m in signals:
+                    await self.blackboard.restage_aligner_signal(k, m)
+                restaged += len(signals)
+                continue
+            if outcome == "created":
+                created += 1
+                for k, _ in signals:
+                    await self.blackboard.commit_aligner_signal(k)
+            elif outcome == "suppressed_active":
+                for k, _ in signals:
+                    await self.blackboard.commit_aligner_signal(k)
+            else:
+                for k, m in signals:
+                    await self.blackboard.restage_aligner_signal(k, m)
+                restaged += len(signals)
+
+        for key, meta in individual:
+            if created >= available:
+                await self.blackboard.restage_aligner_signal(key, meta)
+                restaged += 1
+                continue
+            try:
+                target, _ = key.split("|", 1)
                 anomaly_type = meta.get("anomaly_type", "health")
                 outcome = await self._trigger_architect(
                     target, anomaly_type.replace("_", " "),
                     meta["display_text"],
                     domain=meta.get("domain", "complicated"),
                     severity_level=meta.get("severity", "warning"),
-                    subject_type=subject_type,
+                    subject_type=meta.get("subject_type", "service"),
                     argocd_app=meta.get("argocd_app", ""),
                 )
                 if outcome in ("created", "suppressed_active"):
@@ -233,17 +317,71 @@ class Aligner:
                     await self.blackboard.restage_aligner_signal(key, meta)
                     restaged += 1
             except Exception:
-                logger.exception("Drain error for key %s, committing to prevent retry loop", key)
-                try:
-                    await self.blackboard.commit_aligner_signal(key)
-                except Exception:
-                    pass
+                logger.exception("Individual event creation failed for %s, restaging", key)
+                await self.blackboard.restage_aligner_signal(key, meta)
+                restaged += 1
+
         self._pending_count = await self.blackboard.count_aligner_pending()
         if keys:
+            consolidated_count = sum(1 for _, sigs in to_create if len(sigs) > 0)
             logger.info(
-                "Aligner drain: %d expired, %d events, %d self-resolved, %d re-dwelled",
-                len(keys), created, resolved, restaged,
+                "Aligner drain: %d expired, %d events (%d consolidated from %d signals), "
+                "%d self-resolved, %d re-dwelled (headroom: %d/%d)",
+                len(keys), created, consolidated_count,
+                sum(len(sigs) for _, sigs in to_create),
+                resolved, restaged, available, self._wip_cap,
             )
+
+    async def _get_wip_headroom(self) -> int:
+        """Query current WIP usage and return available headroom for new events.
+
+        Mirrors Headhunter.check_flow_gate() — counts NEW + ACTIVE + DEFERRED
+        to prevent input buffer growth, not just in-process work.
+        """
+        try:
+            status_map = await self.blackboard.get_active_events_with_status()
+            wip_used = sum(1 for s in status_map.values() if s in ("new", "active", "deferred"))
+            return max(0, self._wip_cap - wip_used)
+        except Exception as e:
+            logger.warning("Failed to query WIP headroom: %s (defaulting to 5)", e)
+            return 5
+
+    async def _create_consolidated_event(
+        self, app: str, signals: list[tuple[str, dict]],
+    ) -> str:
+        """Create a single consolidated event for a flood from one ArgoCD app.
+
+        Computes max severity across all signals in the group.
+        Returns same outcome strings as _trigger_architect.
+        """
+        affected_targets = []
+        for key, _ in signals:
+            if "|" in key:
+                target, _ = key.split("|", 1)
+                affected_targets.append(target)
+
+        _SEVERITY_RANK = {"info": 0, "warning": 1, "critical": 2}
+        max_severity = max(
+            (m.get("severity", "warning") for _, m in signals),
+            key=lambda s: _SEVERITY_RANK.get(s, 1),
+        )
+
+        display_text = (
+            f"ArgoCD sync flood: {len(signals)} services affected in {app}. "
+            f"Affected: {', '.join(affected_targets[:10])}"
+            f"{'...' if len(affected_targets) > 10 else ''}"
+        )
+
+        first_meta = signals[0][1]
+        return await self._trigger_architect(
+            app,
+            "argocd sync flood",
+            display_text,
+            domain=first_meta.get("domain", "complicated"),
+            severity_level=max_severity,
+            subject_type="system",
+            argocd_app=app,
+        )
 
     async def configure_filter(self, instruction: str) -> Optional[FilterRule]:
         """
