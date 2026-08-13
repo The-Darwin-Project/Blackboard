@@ -243,6 +243,8 @@ class KnowledgeGraphStore:
         if no better match exists.
         """
         bare = entity_id.removeprefix("service:").lower()
+        if "/" in bare:
+            bare = bare.rsplit("/", 1)[-1]
         if not bare:
             return entity_id
 
