@@ -237,7 +237,7 @@ BLOCK_PATTERN+='|(^|[;&|]\s*)\.\.?/'
 # code-reviewer-permissions.json) extend to a given Bash command -- the hook does
 # not need to know or trust that answer since it inspects the argument text
 # directly. Mirrors the same path set as the layer-2 Read deny rules.
-BLOCK_PATTERN+='|(~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.kube/config|~/\.netrc|/tmp/git-creds-)'
+BLOCK_PATTERN+='|(~/\.ssh|~/\.git-credentials|~/\.aws/credentials|~/\.kube/config|~/\.netrc|/tmp/git-creds-|/tmp/gh-token-map)'
 
 if printf '%s\n' "$CHECK_COMMAND" | grep -qiE "$BLOCK_PATTERN"; then
   # Bound + redact the logged command: blocked commands can legitimately contain

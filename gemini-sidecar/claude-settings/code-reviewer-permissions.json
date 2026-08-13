@@ -5,6 +5,7 @@
       "Write",
       "NotebookEdit",
       "Read(//tmp/git-creds-*)",
+      "Read(//tmp/gh-token-map*)",
       "Read(~/.git-credentials)",
       "Read(~/.netrc)",
       "Read(~/.ssh/**)",

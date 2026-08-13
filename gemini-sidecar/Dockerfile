@@ -67,6 +67,7 @@ RUN \
     curl -sL "https://github.com/cli/cli/releases/download/${GH_VERSION}/gh_${GH_VERSION#v}_linux_amd64.tar.gz" \
       -o /tmp/gh.tar.gz && tar -xzf /tmp/gh.tar.gz -C /tmp/ && \
     cp /tmp/gh_${GH_VERSION#v}_linux_amd64/bin/gh /usr/local/bin/gh && chmod +x /usr/local/bin/gh && \
+    mv /usr/local/bin/gh /usr/local/bin/.gh-real && \
     rm -rf /tmp/gh* && \
     # github-mcp-server -- GitHub MCP server (native PR/issue/action tools for Gemini + Claude CLIs)
     curl -sL https://github.com/github/github-mcp-server/releases/latest/download/github-mcp-server_Linux_x86_64.tar.gz \
@@ -90,7 +91,7 @@ RUN \
     # Verify all CLIs installed
     oc version --client && argocd version --client && kargo version && tkn version && \
     helm version --short && jq --version && yq --version && \
-    gh --version && github-mcp-server --help | head -1 && \
+    .gh-real --version && github-mcp-server --help | head -1 && \
     glab --version && flux --version
 
 # Install Gemini CLI globally and symlink to /usr/local/bin for non-root PATH
@@ -186,6 +187,11 @@ RUN chmod +x /usr/local/bin/sendResults && \
 # Install agent-to-manager callback script (huddleSendMessage -- team communication)
 COPY huddleSendMessage.sh /usr/local/bin/huddleSendMessage
 RUN chmod +x /usr/local/bin/huddleSendMessage
+
+# Install multi-org GitHub credential helpers (gh-wrapper.sh wraps gh CLI, git-credential-darwin for git)
+COPY gh-wrapper.sh /usr/local/bin/gh
+COPY git-credential-darwin /app/git-credential-darwin
+RUN chmod +x /usr/local/bin/gh /app/git-credential-darwin
 
 # Install CLI hooks (team inbox + cluster context + exit gate + mutation validation)
 COPY hooks/check-inbox.sh /app/hooks/check-inbox.sh
