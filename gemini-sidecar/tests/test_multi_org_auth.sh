@@ -123,6 +123,54 @@ else
 fi
 
 # ============================================================
+# T-3b: setupGitCredentials()'s host-level helper resolves a
+# mixed-case org URL via git's own credential matching (not just
+# a direct script invocation). This reproduces the case-sensitivity
+# regression: git's credential URL matching is case-sensitive, so a
+# per-org helper registered under a lowercased key (e.g.
+# "credential.https://github.com/the-darwin-project.helper") never
+# matches a real remote like "https://github.com/The-Darwin-Project/repo.git".
+# The fix registers a single host-level helper instead; this test
+# drives that registration through real `git config` + `git credential fill`.
+# ============================================================
+
+if [[ -x "$CRED_HELPER" ]] && command -v git &>/dev/null; then
+  mixedcase_map="${TMPDIR_TEST}/mixedcase-map.json"
+  # Lowercase key, matching generateAllTokens()'s actual output (org.toLowerCase()).
+  cat > "$mixedcase_map" <<'FIXTURE'
+{ "the-darwin-project": { "token": "ghs_mixedcase_test_token_ddd", "installation_id": "444", "expires_at": "" } }
+FIXTURE
+  chmod 600 "$mixedcase_map"
+
+  isolated_gitconfig="${TMPDIR_TEST}/t3b-gitconfig"
+  : > "$isolated_gitconfig"
+  GIT_CONFIG_GLOBAL="$isolated_gitconfig" git config --global credential.https://github.com.useHttpPath true
+  # This is the registration setupGitCredentials() now performs (host-level,
+  # not per-org) -- the fix under test.
+  GIT_CONFIG_GLOBAL="$isolated_gitconfig" git config --global credential.https://github.com.helper "!$CRED_HELPER"
+
+  fill_output="$(printf 'protocol=https\nhost=github.com\npath=The-Darwin-Project/repo.git\n\n' \
+    | GIT_CONFIG_GLOBAL="$isolated_gitconfig" GH_TOKEN_MAP_PATH="$mixedcase_map" git credential fill 2>/dev/null)" || true
+  password="$(echo "$fill_output" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_eq "T-3b: host-level helper resolves mixed-case org URL via git credential fill" \
+    "ghs_mixedcase_test_token_ddd" "$password"
+
+  # Regression guard: the OLD per-org lowercased registration must NOT resolve
+  # the same mixed-case URL (proves this test actually exercises the bug).
+  old_gitconfig="${TMPDIR_TEST}/t3b-gitconfig-old"
+  : > "$old_gitconfig"
+  GIT_CONFIG_GLOBAL="$old_gitconfig" git config --global credential.https://github.com.useHttpPath true
+  GIT_CONFIG_GLOBAL="$old_gitconfig" git config --global credential."https://github.com/the-darwin-project".helper "!$CRED_HELPER"
+  old_fill_output="$(printf 'protocol=https\nhost=github.com\npath=The-Darwin-Project/repo.git\n\n' \
+    | GIT_CONFIG_GLOBAL="$old_gitconfig" GH_TOKEN_MAP_PATH="$mixedcase_map" git credential fill 2>/dev/null)" || true
+  old_password="$(echo "$old_fill_output" | grep '^password=' | head -1 | cut -d= -f2-)"
+  assert_empty "T-3b: per-org lowercased helper (pre-fix pattern) does not resolve mixed-case URL" \
+    "$old_password"
+else
+  echo "SKIP [T-3b]: $CRED_HELPER or git not found"
+fi
+
+# ============================================================
 # T-4: Credential helper exits silently for unknown org
 # ============================================================
 
