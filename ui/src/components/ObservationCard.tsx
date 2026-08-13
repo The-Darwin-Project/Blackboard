@@ -171,8 +171,8 @@ export default function ObservationCard({
         </div>
       </div>
 
-      <div className="h-16 mb-3">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-16 mb-3" style={{ minWidth: 0, minHeight: 0 }}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
           <LineChart data={chartData}>
             <YAxis domain={['auto', 'auto']} hide />
             <Tooltip

@@ -690,9 +690,12 @@ export async function bulkDeleteObservations(names: string[]) {
 }
 
 export async function generateObservationsReport(seriesNames: string[], context = ''): Promise<Blob> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = _getToken?.();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   const resp = await fetch('/api/observations/manage/report', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ series_names: seriesNames, context }),
   });
   if (!resp.ok) throw new Error(`Report generation failed: ${resp.status}`);
