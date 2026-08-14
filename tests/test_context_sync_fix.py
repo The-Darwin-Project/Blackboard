@@ -269,6 +269,34 @@ class TestDashboardWsIngestionEnqueues:
 
         brain.enqueue_for_processing.assert_called_once_with("evt-sync-1")
 
+    @pytest.mark.asyncio
+    async def test_user_message_no_enqueue_when_event_missing(self):
+        """Guard: unknown event_id must short-circuit before any brain call."""
+        adapter, blackboard, brain = self._make_adapter()
+        blackboard.get_event.return_value = None
+        ws = AsyncMock()
+        user = MagicMock(label="Tal")
+
+        await adapter._handle_user_message(
+            ws, {"event_id": "evt-missing", "message": "hello"}, user
+        )
+
+        brain.enqueue_for_processing.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_user_message_no_enqueue_when_message_empty(self):
+        """Guard: missing message text short-circuits before the blackboard lookup."""
+        adapter, blackboard, brain = self._make_adapter()
+        ws = AsyncMock()
+        user = MagicMock(label="Tal")
+
+        await adapter._handle_user_message(
+            ws, {"event_id": "evt-sync-1", "message": ""}, user
+        )
+
+        blackboard.get_event.assert_not_called()
+        brain.enqueue_for_processing.assert_not_called()
+
 
 class TestSlackIngestionEnqueues:
     @pytest.mark.asyncio

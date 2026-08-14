@@ -123,3 +123,85 @@ async def test_queue_active_includes_created_by_email():
     by_id = {e["id"]: e for e in data}
     assert by_id["evt-test0001"]["created_by_email"] == "dev@redhat.com"
     assert by_id["evt-test0002"]["created_by_email"] is None
+
+
+async def _post_with_mocked_deps(path: str, mock_bb, mock_brain, json_body=None):
+    """POST to `path` with dependencies.get_blackboard/get_brain overridden."""
+    with patch("src.main.lifespan") as mock_lifespan:
+        mock_lifespan.return_value.__aenter__ = AsyncMock()
+        mock_lifespan.return_value.__aexit__ = AsyncMock()
+        from src import dependencies
+        from src.main import app
+
+        original_bb = dependencies._blackboard
+        original_brain = dependencies._brain
+        dependencies._blackboard = mock_bb
+        dependencies._brain = mock_brain
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.post(path, json=json_body or {})
+        finally:
+            dependencies._blackboard = original_bb
+            dependencies._brain = original_brain
+
+
+@pytest.mark.asyncio
+async def test_approve_event_enqueues_for_processing():
+    """POST /queue/{id}/approve calls brain.enqueue_for_processing (evt-4eeff00c Fix 1)."""
+    event = _make_event_document("evt-appr0001")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=True)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_with_mocked_deps("/queue/evt-appr0001/approve", mock_bb, mock_brain)
+
+    assert resp.status_code == 200
+    mock_bb.append_turn.assert_awaited_once()
+    mock_brain.clear_waiting.assert_called_once_with("evt-appr0001")
+    mock_brain.resume_if_parked.assert_awaited_once_with("evt-appr0001")
+    mock_brain.enqueue_for_processing.assert_called_once_with("evt-appr0001")
+
+
+@pytest.mark.asyncio
+async def test_reject_event_enqueues_for_processing():
+    """POST /queue/{id}/reject calls brain.enqueue_for_processing (evt-4eeff00c Fix 1)."""
+    event = _make_event_document("evt-rej00001")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=True)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_with_mocked_deps(
+        "/queue/evt-rej00001/reject", mock_bb, mock_brain, json_body={"reason": "not now"},
+    )
+
+    assert resp.status_code == 200
+    mock_bb.append_turn.assert_awaited_once()
+    mock_brain.clear_waiting.assert_called_once_with("evt-rej00001")
+    mock_brain.resume_if_parked.assert_awaited_once_with("evt-rej00001")
+    mock_brain.enqueue_for_processing.assert_called_once_with("evt-rej00001")
+
+
+@pytest.mark.asyncio
+async def test_approve_event_404_skips_enqueue():
+    """Unknown event_id returns 404 and never reaches brain.enqueue_for_processing."""
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=None)
+
+    mock_brain = MagicMock()
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_with_mocked_deps("/queue/evt-missing/approve", mock_bb, mock_brain)
+
+    assert resp.status_code == 404
+    mock_brain.enqueue_for_processing.assert_not_called()
