@@ -373,9 +373,9 @@ _ACTION_PATTERN = re.compile(
 # immediately before one of these is the Brain's final user-facing answer --
 # it must bypass the response_emitted guard (which otherwise suppresses it as
 # a duplicate of an earlier narration flush). Exclusions:
-#   report_incident/message_agent: handlers can return True (continuation).
-#   reply_to_agent: always returns False, but excluded for UX -- preceding text
-#   is agent-directed reasoning, not a user-facing answer.
+#   report_incident/message_agent/reply_to_agent: handlers can return True
+#   (continuation). reply_to_agent transparently redirects to message_agent
+#   when no active task exists, inheriting its return semantics.
 _CYCLE_ENDING_TOOLS = frozenset({
     "wait_for_user", "close_event", "defer_event",
     "select_agent", "wait_for_agent",
@@ -604,7 +604,7 @@ _ROLE_MODEL_MAP = {
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),
     "security_analyst": os.getenv("EPHEMERAL_MODEL_SECURITY", "claude-sonnet-5"),
     "code_reviewer": os.getenv("EPHEMERAL_MODEL_CODE_REVIEWER", "claude-sonnet-5"),
-    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.6-flash"),
+    "explorer": os.getenv("EPHEMERAL_MODEL_EXPLORER", "gemini-3.7-flash"),
 }
 _ROLE_EFFORT_MAP = {
     "architect": os.getenv("EPHEMERAL_EFFORT_ARCHITECT", "high"),
@@ -2811,7 +2811,7 @@ class Brain:
     def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
         """Convert a single ConversationTurn to semantically-labelled parts.
 
-        Labels: [USER], [SYSTEM x], [AGENT y]. Brain's own response_parts are unlabelled.
+        Labels: [USER], [SYSTEM tool], [AGENT y], [FRIDAY action]. Brain's own response_parts are unlabelled.
         """
         if turn.actor == "brain" and turn.action in ("thoughts", "intermediate"):
             return []
@@ -2838,8 +2838,8 @@ class Brain:
             text = turn.thoughts or ""
             if turn.evidence:
                 text = f"{text}\n{turn.evidence}" if text else turn.evidence
-            if turn.action != "response":
-                text = f"[SYSTEM {turn.action}]: {text}" if text else f"[SYSTEM {turn.action}]"
+            if turn.action not in ("response",):
+                text = f"[FRIDAY {turn.action}]: {text}" if text else f"[FRIDAY {turn.action}]"
         elif turn.actor == "user":
             raw = turn.thoughts or turn.result or ""
             if turn.user_name:

@@ -123,7 +123,7 @@ class Aligner:
                 
                 project = os.getenv("GCP_PROJECT")
                 location = os.getenv("GCP_LOCATION", "us-central1")
-                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.6-flash")
+                model_name = os.getenv("LLM_MODEL_ALIGNER", "gemini-3.7-flash")
                 
                 self._adapter = create_adapter("gemini", project, location, model_name)
                 logger.info(f"Aligner LLM adapter initialized: gemini/{model_name}")

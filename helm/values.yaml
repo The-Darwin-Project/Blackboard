@@ -154,12 +154,12 @@ gcp:
       temperature: "0.8"
       maxOutputTokens: "65000"
     aligner:
-      model: "gemini-3.6-flash"
+      model: "gemini-3.7-flash"
       temperature: "0.3"
       thinkingLevel: "high"
       maxOutputTokens: "10000"
     archivist:
-      model: "gemini-3.6-flash" # Event summarization for deep memory
+      model: "gemini-3.7-flash" # Event summarization for deep memory
       temperature: "0.4"
       thinkingLevel: "high"
       maxOutputTokens: "32000" # Gemini fallback only (_archive_event_fallback)
@@ -168,7 +168,7 @@ gcp:
     lessonExtractor:
       model: "claude-sonnet-5" # Claude via Vertex AI for lesson extraction from documents
     headhunter:
-      model: "gemini-3.6-flash" # MR triage and plan generation
+      model: "gemini-3.7-flash" # MR triage and plan generation
       temperature: "0.3"
       thinkingLevel: "low"
       maxOutputTokens: "10000"
@@ -177,7 +177,7 @@ gcp:
       temperature: "0.3"
       maxOutputTokens: "2048"
     nightwatcher:
-      model: "gemini-3.6-flash" # Shift consolidation (high thinking for clustering)
+      model: "gemini-3.7-flash" # Shift consolidation (high thinking for clustering)
       temperature: "0.5"
       thinkingLevel: "high"
       maxOutputTokens: "8192"
@@ -467,7 +467,7 @@ ephemeralAgents:
     qe: "claude-sonnet-5"
     security_analyst: "claude-sonnet-5"
     code_reviewer: "claude-sonnet-5"
-    explorer: "gemini-3.6-flash"
+    explorer: "gemini-3.7-flash"
   roleEffort:
     architect: "high"
     sysadmin: "medium"
