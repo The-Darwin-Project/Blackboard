@@ -4536,6 +4536,7 @@ class Brain:
                 raise
             self.clear_waiting(event_id)
             await self.resume_if_parked(event_id)
+            self.enqueue_for_processing(event_id)
             logger.info(f"enforce_domain_override: {user_label} enforced {domain} on {event_id}")
             return True
         finally:

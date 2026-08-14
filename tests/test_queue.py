@@ -205,3 +205,45 @@ async def test_approve_event_404_skips_enqueue():
 
     assert resp.status_code == 404
     mock_brain.enqueue_for_processing.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_approve_enqueues_when_not_parked():
+    """enqueue_for_processing fires even when resume_if_parked returns False (active, not waiting_approval)."""
+    event = _make_event_document("evt-notparked")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=False)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_with_mocked_deps("/queue/evt-notparked/approve", mock_bb, mock_brain)
+
+    assert resp.status_code == 200
+    mock_brain.resume_if_parked.assert_awaited_once_with("evt-notparked")
+    mock_brain.enqueue_for_processing.assert_called_once_with("evt-notparked")
+
+
+@pytest.mark.asyncio
+async def test_reject_enqueues_when_not_parked():
+    """enqueue_for_processing fires even when resume_if_parked returns False (active, not waiting_approval)."""
+    event = _make_event_document("evt-notparked2")
+
+    mock_bb = AsyncMock()
+    mock_bb.get_event = AsyncMock(return_value=event)
+
+    mock_brain = MagicMock()
+    mock_brain.clear_waiting = MagicMock()
+    mock_brain.resume_if_parked = AsyncMock(return_value=False)
+    mock_brain.enqueue_for_processing = MagicMock(return_value=True)
+
+    resp = await _post_with_mocked_deps(
+        "/queue/evt-notparked2/reject", mock_bb, mock_brain, json_body={"reason": "nope"},
+    )
+
+    assert resp.status_code == 200
+    mock_brain.resume_if_parked.assert_awaited_once_with("evt-notparked2")
+    mock_brain.enqueue_for_processing.assert_called_once_with("evt-notparked2")
