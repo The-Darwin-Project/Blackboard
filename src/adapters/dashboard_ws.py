@@ -165,6 +165,7 @@ class DashboardWSAdapter:
         await self._blackboard.append_turn(event_id, turn)
         self._brain.clear_waiting(event_id)
         await self._brain.resume_if_parked(event_id)
+        self._brain.enqueue_for_processing(event_id)
         await ws.send_json({
             "type": "turn",
             "event_id": event_id,
@@ -189,6 +190,7 @@ class DashboardWSAdapter:
         await self._blackboard.append_turn(event_id, turn)
         self._brain.clear_waiting(event_id)
         await self._brain.resume_if_parked(event_id)
+        self._brain.enqueue_for_processing(event_id)
         await ws.send_json({
             "type": "turn",
             "event_id": event_id,
