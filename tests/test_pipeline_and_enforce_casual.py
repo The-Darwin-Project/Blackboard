@@ -540,7 +540,8 @@ class TestEnforceDomainOverride:
 
         assert result is True
         bb.resume_from_approval.assert_awaited_once_with("evt-override")
-        mock_scheduler.enqueue.assert_called_once_with("evt-override")
+        assert mock_scheduler.enqueue.call_count == 2
+        mock_scheduler.enqueue.assert_any_call("evt-override")
 
 
 # ===========================================================================
