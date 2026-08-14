@@ -331,6 +331,7 @@ class SlackChannel:
                     await self._blackboard.append_turn(existing_event_id, turn)
                     self._brain.clear_waiting(existing_event_id)
                     await self._brain.resume_if_parked(existing_event_id)
+                    self._brain.enqueue_for_processing(existing_event_id)
                     await self._safe_react(client, channel, event["ts"], "eyes")
                     logger.info(f"Slack @mention: reply on {existing_event_id} from {display_name}")
                     return
@@ -498,6 +499,7 @@ class SlackChannel:
             else:
                 self._brain.clear_waiting(event_id)
                 await self._brain.resume_if_parked(event_id)
+                self._brain.enqueue_for_processing(event_id)
                 await self._safe_react(client, channel, event["ts"], "eyes")
                 if event_doc.slack_channel_id and event_doc.slack_thread_ts and event_doc.slack_channel_id != channel:
                     try:
@@ -536,6 +538,7 @@ class SlackChannel:
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
             await self._brain.resume_if_parked(event_id)
+            self._brain.enqueue_for_processing(event_id)
             await self._safe_react(client, channel, thread_ts, "white_check_mark")
             logger.info(f"Slack approve on {event_id} by {user}")
 
@@ -563,6 +566,7 @@ class SlackChannel:
             await self._blackboard.append_turn(event_id, turn)
             self._brain.clear_waiting(event_id)
             await self._brain.resume_if_parked(event_id)
+            self._brain.enqueue_for_processing(event_id)
             await self._safe_react(client, channel, thread_ts, "x")
             logger.info(f"Slack reject on {event_id} by {user}")
 

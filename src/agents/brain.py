@@ -4074,6 +4074,12 @@ class Brain:
         logger.info(f"Resumed parked event {event_id} -- re-enqueued")
         return True
 
+    def enqueue_for_processing(self, event_id: str) -> bool:
+        """Enqueue event for immediate reconciliation. Safe no-op if already pending/inflight."""
+        if self._scheduler:
+            return self._scheduler.enqueue(event_id)
+        return False
+
     def clear_hold_watch(self, event_id: str) -> None:
         """Clear hold_watch state. Called by LiveAPIAdapter on JARVIS message wake."""
         self._hold_watch_events.pop(event_id, None)
@@ -4530,6 +4536,7 @@ class Brain:
                 raise
             self.clear_waiting(event_id)
             await self.resume_if_parked(event_id)
+            self.enqueue_for_processing(event_id)
             logger.info(f"enforce_domain_override: {user_label} enforced {domain} on {event_id}")
             return True
         finally:
@@ -5066,6 +5073,8 @@ class Brain:
             unseen = [t for t in event.conversation if t.status.value == "sent"]
             if unseen:
                 await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
+                for t in unseen:
+                    t.status = MessageStatus.DELIVERED
                 await self._broadcast_status_update(eid, "delivered", turns=unseen)
 
             # Guard 7: waiting_for_agent

@@ -1144,6 +1144,7 @@ class LiveAPIAdapter:
             self._brain.clear_jarvis_wait(event_id)
             self._brain.clear_hold_watch(event_id)
             await self._brain.resume_if_parked(event_id)
+            self._brain.enqueue_for_processing(event_id)
         from ..models import EventStatus
         await self._blackboard.transition_event_status(
             event_id, from_status="deferred", to_status=EventStatus.ACTIVE,

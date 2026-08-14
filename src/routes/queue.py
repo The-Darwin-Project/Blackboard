@@ -268,6 +268,7 @@ async def approve_event(
         brain = await get_brain()
         brain.clear_waiting(event_id)
         resumed = await brain.resume_if_parked(event_id)
+        brain.enqueue_for_processing(event_id)
         if not resumed:
             logger.info(f"approve_event: {event_id} was not in waiting_approval (already resumed or race)")
     except RuntimeError:
@@ -305,6 +306,7 @@ async def reject_event(
         brain = await get_brain()
         brain.clear_waiting(event_id)
         resumed = await brain.resume_if_parked(event_id)
+        brain.enqueue_for_processing(event_id)
         if not resumed:
             logger.info(f"reject_event: {event_id} was not in waiting_approval (already resumed or race)")
     except RuntimeError:

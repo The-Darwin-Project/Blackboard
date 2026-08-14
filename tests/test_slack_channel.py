@@ -213,6 +213,8 @@ class TestOnDmMessage:
         assert appended_turn.actor == "user"
         assert appended_turn.thoughts == "follow up"
         sc._brain.clear_waiting.assert_called_once_with("evt-exist01")
+        sc._brain.resume_if_parked.assert_called_once_with("evt-exist01")
+        sc._brain.enqueue_for_processing.assert_called_once_with("evt-exist01")
 
     @pytest.mark.asyncio
     async def test_non_im_no_thread_drops(self):
@@ -246,6 +248,100 @@ class TestOnDmMessage:
         )
 
         sc._blackboard.create_event.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: message ingestion paths call enqueue_for_processing (evt-4eeff00c Fix 1)
+# ---------------------------------------------------------------------------
+
+
+class TestAppMentionReplyEnqueues:
+    """@mention reply on an existing open event (RC-1 ingestion path #1)."""
+
+    @pytest.mark.asyncio
+    async def test_reply_on_open_event_enqueues(self):
+        sc, captured = _make_channel()
+        on_mention = captured["event:app_mention"]
+
+        event_doc = _mock_event_doc(event_id="evt-open0001", status="active")
+        sc._blackboard.get_event_by_slack_thread.return_value = "evt-open0001"
+        sc._blackboard.get_event.return_value = event_doc
+
+        client = AsyncMock()
+        client.users_info.return_value = _user_info_response("Dana")
+
+        await on_mention(
+            {
+                "channel": "C_INFRA",
+                "user": "U_USER",
+                "text": "<@BOT> follow up question",
+                "ts": "1700000002.000001",
+                "thread_ts": "1700000001.000001",
+            },
+            client,
+        )
+
+        sc._blackboard.append_turn.assert_called_once()
+        sc._brain.clear_waiting.assert_called_once_with("evt-open0001")
+        sc._brain.resume_if_parked.assert_called_once_with("evt-open0001")
+        sc._brain.enqueue_for_processing.assert_called_once_with("evt-open0001")
+
+
+class TestApproveRejectActionsEnqueue:
+    """darwin_approve / darwin_reject Block Kit actions (RC-1 ingestion paths #2, #3)."""
+
+    @staticmethod
+    def _action_body(event_id: str = "evt-appr0001") -> dict:
+        return {
+            "user": {"id": "U_USER"},
+            "channel": {"id": "C_INFRA"},
+            "message": {"ts": "1700000001.000001"},
+            "actions": [{"value": event_id}],
+        }
+
+    @pytest.mark.asyncio
+    async def test_approve_enqueues(self):
+        sc, captured = _make_channel()
+        handle_approve = captured["action:darwin_approve"]
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id="evt-appr0001")
+        ack = AsyncMock()
+        client = AsyncMock()
+
+        await handle_approve(ack, self._action_body(), client)
+
+        ack.assert_awaited_once()
+        sc._blackboard.append_turn.assert_called_once()
+        sc._brain.clear_waiting.assert_called_once_with("evt-appr0001")
+        sc._brain.resume_if_parked.assert_called_once_with("evt-appr0001")
+        sc._brain.enqueue_for_processing.assert_called_once_with("evt-appr0001")
+
+    @pytest.mark.asyncio
+    async def test_reject_enqueues(self):
+        sc, captured = _make_channel()
+        handle_reject = captured["action:darwin_reject"]
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id="evt-rej00001")
+        ack = AsyncMock()
+        client = AsyncMock()
+
+        await handle_reject(ack, self._action_body(event_id="evt-rej00001"), client)
+
+        ack.assert_awaited_once()
+        sc._blackboard.append_turn.assert_called_once()
+        sc._brain.clear_waiting.assert_called_once_with("evt-rej00001")
+        sc._brain.resume_if_parked.assert_called_once_with("evt-rej00001")
+        sc._brain.enqueue_for_processing.assert_called_once_with("evt-rej00001")
+
+    @pytest.mark.asyncio
+    async def test_approve_no_enqueue_when_event_missing(self):
+        sc, captured = _make_channel()
+        handle_approve = captured["action:darwin_approve"]
+        sc._blackboard.get_event.return_value = None
+        ack = AsyncMock()
+        client = AsyncMock()
+
+        await handle_approve(ack, self._action_body(), client)
+
+        sc._brain.enqueue_for_processing.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
