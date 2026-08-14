@@ -142,12 +142,12 @@ class TestTurnToPartsLabeling:
 
         assert parts == rp
 
-    def test_t5_brain_phase_gets_system_phase_prefix(self):
+    def test_t5_brain_phase_gets_friday_prefix(self):
         turn = _make_turn(actor="brain", action="phase", thoughts="Phase: VERIFY")
         parts = Brain._turn_to_parts(turn)
 
         assert len(parts) >= 1
-        assert parts[0]["text"].startswith("[SYSTEM phase]: ")
+        assert parts[0]["text"].startswith("[FRIDAY phase]: ")
         assert "Phase: VERIFY" in parts[0]["text"]
 
     def test_t11_brain_response_no_response_parts_no_prefix(self):
