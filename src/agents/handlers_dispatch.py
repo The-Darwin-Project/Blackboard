@@ -32,13 +32,22 @@ async def handle_reply_to_agent(
 ) -> bool:
     agent_id = args.get("agent_id", "")
     message = args.get("message", "")
+
+    running_agent = ctx.get_active_agent_for_event(event_id)
+    event_has_active_task = ctx.is_task_running(event_id)
+
+    if not (event_has_active_task and running_agent == agent_id):
+        logger.info(
+            "reply_to_agent: no active task for %s on %s — transparent redirect to message_agent",
+            agent_id, event_id,
+        )
+        return await handle_message_agent(ctx, event_id, args, response_parts)
+
     from ..dependencies import get_registry_and_bridge
     registry, _ = get_registry_and_bridge()
     agent_conn = None
     if registry:
-        agent_conn = await registry.get_by_id(agent_id)
-        if not agent_conn:
-            agent_conn = await registry.get_by_event(event_id)
+        agent_conn = await registry.get_by_event(event_id)
         if not agent_conn:
             agent_conn = await registry.get_available(agent_id)
     if agent_conn and agent_conn.ws:
