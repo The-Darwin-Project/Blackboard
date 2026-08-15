@@ -4055,6 +4055,7 @@ class Brain:
         self._waiting_for_user.pop(event_id, None)
         self._idle_timeout.cancel(event_id)
         self._routing_depth.pop(event_id, None)  # Reset depth on user interaction
+        self._response_emitted_for.discard(event_id)
 
     async def resume_if_parked(self, event_id: str) -> bool:
         """Resume a waiting_approval event back to active. Returns True if resumed."""

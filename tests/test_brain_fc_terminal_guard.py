@@ -506,3 +506,73 @@ class TestRuntimeGateDoesNotClobberSilentParkInvalidation:
         tool_results = _turns_by_action(brain, "tool_result")
         assert len(tool_results) == 1
         assert "[GATE]" in tool_results[0].thoughts
+
+
+class TestClearWaitingResetsResponseEmittedAcrossCycles:
+    """Regression guard: clear_waiting() must discard the event from
+    _response_emitted_for, so a stale flag from a prior park cycle can't
+    defeat the SILENT_PARK invalidation in a later cycle.
+
+    Without this reset, the sequence is: cycle 1 flushes a response and parks
+    (setting _response_emitted_for) -> user sends a new message, which calls
+    clear_waiting() -> cycle 2 begins and the LLM's first action is
+    wait_for_user with no new text flush. If the flag is still stale-True,
+    the invalidation incorrectly re-admits wait_for_user using cycle 1's
+    already-consumed response, and the brain silently re-parks without ever
+    answering the new message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_flag_does_not_survive_clear_waiting_into_next_cycle(self):
+        event_id = "evt-cc105cc5"
+        brain = _make_brain(stream_factory=lambda **kw: None)  # overridden per-call below
+        event = _make_event(event_id=event_id, source="slack")
+
+        tools_without_wait = ["classify_event", "select_agent", "consult_deep_memory"]
+
+        # Cycle 1: text response flushed, then wait_for_user -- SILENT_PARK
+        # invalidation re-admits it because a response was just emitted.
+        cycle1_chunks = [
+            _Chunk(text="Here's my response to you."),
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "casual park"})),
+        ]
+        brain._adapter.generate_stream = MagicMock(side_effect=lambda **kw: MockStream(cycle1_chunks))
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            await brain._process_with_llm(event_id, event, response_emitted=False)
+
+        brain._execute_function_call.assert_awaited_once()
+        assert event_id in brain._response_emitted_for, (
+            "precondition: cycle 1's text flush must mark the event as having emitted a response"
+        )
+
+        # User replies -- the real system calls clear_waiting() on this transition
+        # (main.py WS handler / queue.py REST endpoint), which must also reset
+        # the per-cycle response-emitted flag.
+        brain.clear_waiting(event_id)
+        assert event_id not in brain._response_emitted_for, (
+            "clear_waiting() must discard the event from _response_emitted_for "
+            "so a stale flag from the prior cycle can't leak into the next one"
+        )
+
+        # Cycle 2: wait_for_user is the FIRST action, with no text flushed this
+        # cycle. With the flag correctly cleared, invalidation must not fire --
+        # wait_for_user stays rejected, forcing the brain to actually answer.
+        brain._execute_function_call.reset_mock()
+        brain._append_and_broadcast.reset_mock()
+        cycle2_chunks = [
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "premature park"})),
+        ]
+        brain._adapter.generate_stream = MagicMock(side_effect=lambda **kw: MockStream(cycle2_chunks))
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            result = await brain._process_with_llm(event_id, event, response_emitted=False)
+
+        assert result is True
+        brain._execute_function_call.assert_not_awaited()
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 1, (
+            "wait_for_user was incorrectly re-admitted using a stale "
+            "_response_emitted_for flag from the prior park/resume cycle"
+        )
+        assert "[GATE]" in tool_results[0].thoughts
