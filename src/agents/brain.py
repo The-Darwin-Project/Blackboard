@@ -418,7 +418,7 @@ class _BatchContext:
         self._injected = False
 
     async def append_and_broadcast(self, event_id: str, turn: "ConversationTurn", event: "EventDocument | None" = None) -> int:
-        if not self._injected and turn.action == "tool_result":
+        if not self._injected and turn.waitingFor != "google_web_search":
             if self._batch_size is not None:
                 turn.batch_size = self._batch_size
             if self._batch_index is not None:
@@ -1727,6 +1727,15 @@ class Brain:
 
             batch_fcs = function_calls[:_MAX_BATCH_SIZE]
             batch_size = len(batch_fcs)
+
+            # H2 fix: filter captured_parts to only executed FCs (maintains replay parity)
+            if len(function_calls) > _MAX_BATCH_SIZE:
+                kept_fc_names = {fc["functionCall"]["name"] for fc in batch_fcs}
+                captured_parts = [
+                    p for p in captured_parts
+                    if not p.get("functionCall") or p["functionCall"].get("name") in kept_fc_names
+                ]
+
             logger.info(
                 "Parallel FC batch for %s: %d FCs [%s]",
                 event_id, batch_size,
@@ -2905,10 +2914,11 @@ class Brain:
             skill_injected_by_v2 = False
 
             # -- FC/FR-aware replay for tool_result turns (v2 path) --
+            # Batch-marked turns of ANY action type also enter this path (C1 fix)
             if (
                 _THOUGHT_SIG_V2
                 and turn.actor == "brain"
-                and turn.action == "tool_result"
+                and (turn.action == "tool_result" or turn.batch_size or turn.batch_index)
                 and turn.response_parts
                 and any(p.get("functionCall") for p in turn.response_parts)
             ):
@@ -2958,7 +2968,7 @@ class Brain:
                             fc0_name = batch_fc_names[0] if batch_fc_names else None
                             all_frs = [_cp_build_single_fr(turn, fc0_name)]
 
-                            # Look-ahead for batch_index continuation turns
+                            # Look-ahead for batch_index continuation turns (any action)
                             for bi in range(1, turn.batch_size):
                                 found = False
                                 for scan_idx in range(idx + 1, len(event.conversation)):
@@ -2966,7 +2976,6 @@ class Brain:
                                     if (
                                         scan_turn.batch_index == bi
                                         and scan_turn.actor == "brain"
-                                        and scan_turn.action == "tool_result"
                                     ):
                                         fc_name_for_bi = (
                                             batch_fc_names[bi]

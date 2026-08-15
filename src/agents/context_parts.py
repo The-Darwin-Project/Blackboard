@@ -162,7 +162,9 @@ def compress_contents(contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -
     conv_msgs = contents[1:]
 
     # Pre-pass: identify FC/FR pair indices (must prune atomically).
-    # Batch-aware: only pair when FC count == FR count (count parity).
+    # Batch-aware (v2 only): use count parity. Flag-off: any FC + any FR pairs.
+    import os as _os
+    _sig_v2 = _os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
     pair_buddy: dict[int, int] = {}
     for i in range(len(conv_msgs) - 1):
         msg_i = conv_msgs[i]
@@ -171,9 +173,14 @@ def compress_contents(contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -
             continue
         fc_count = sum(1 for p in msg_i.get("parts", []) if p.get("functionCall"))
         fr_count = sum(1 for p in msg_next.get("parts", []) if p.get("functionResponse"))
-        if fc_count > 0 and fr_count > 0 and fc_count == fr_count:
-            pair_buddy[i] = i + 1
-            pair_buddy[i + 1] = i
+        if _sig_v2:
+            if fc_count > 0 and fr_count > 0 and fc_count == fr_count:
+                pair_buddy[i] = i + 1
+                pair_buddy[i + 1] = i
+        else:
+            if fc_count > 0 and fr_count > 0:
+                pair_buddy[i] = i + 1
+                pair_buddy[i + 1] = i
 
     tail_budget = 200_000
     kept_indices: list[int] = []
