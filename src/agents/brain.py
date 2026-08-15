@@ -402,6 +402,32 @@ _ERROR_TEXT_MAX = 300
 
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
+_MAX_BATCH_SIZE = 4
+
+
+class _BatchContext:
+    """Wraps _tool_ctx to inject batch markers on the FIRST tool_result turn per FC."""
+
+    __slots__ = ("_inner", "_batch_size", "_batch_index", "_injected")
+
+    def __init__(self, inner_ctx: "ToolContext", batch_size: int | None, batch_index: int | None):
+        self._inner = inner_ctx
+        self._batch_size = batch_size
+        self._batch_index = batch_index
+        self._injected = False
+
+    async def append_and_broadcast(self, event_id: str, turn: "ConversationTurn", event: "EventDocument | None" = None) -> int:
+        if not self._injected and turn.action == "tool_result":
+            if self._batch_size is not None:
+                turn.batch_size = self._batch_size
+            if self._batch_index is not None:
+                turn.batch_index = self._batch_index
+            self._injected = True
+        return await self._inner.append_and_broadcast(event_id, turn, event)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
 
 def _sanitize_error_text(error: BaseException) -> str:
     """Strip HTML from API error responses and truncate to a readable summary."""
@@ -1678,7 +1704,114 @@ class Brain:
             grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
             logger.info(f"Google Search grounding for {event_id}: {len(resolved_chunks)} sources (resolved)")
 
-        # Process the final result
+        # -- Parallel FC batch detection (v2 only) --
+        function_calls = [
+            p for p in (captured_parts or []) if p.get("functionCall")
+        ]
+        if _THOUGHT_SIG_V2 and len(function_calls) > 1:
+            # Flush text before batch
+            if accumulated_text and not response_emitted:
+                response_turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain",
+                    action="response",
+                    thoughts=accumulated_text,
+                    evidence=grounding_evidence if grounding_evidence else None,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, response_turn)
+                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                self._last_processed[event_id] = time.time()
+                self._response_emitted_for.add(event_id)
+
+            batch_fcs = function_calls[:_MAX_BATCH_SIZE]
+            batch_size = len(batch_fcs)
+            logger.info(
+                "Parallel FC batch for %s: %d FCs [%s]",
+                event_id, batch_size,
+                ", ".join(fc["functionCall"]["name"] for fc in batch_fcs),
+            )
+
+            # RECALL fires once for entire batch (not per-FC)
+            if reflex_chunker and reflex_searcher:
+                final_window = reflex_chunker.flush()
+                if final_window:
+                    reflex_searcher.fire(final_window)
+
+            if reflex_searcher and event_id not in self._reflex_fired_for:
+                try:
+                    lessons = await reflex_searcher.gather(timeout=0.5)
+                    if lessons:
+                        titles = [l.get("payload", {}).get("title") or l.get("payload", {}).get("topic", "") for l in lessons]
+                        self._recall_lessons[event_id] = lessons
+                        self._reflex_fired_for.add(event_id)
+                        first_fc_name = batch_fcs[0]["functionCall"]["name"]
+                        try:
+                            await self._broadcast({
+                                "type": "brain_recall_hit",
+                                "event_id": event_id,
+                                "lesson_count": len(lessons),
+                                "titles": titles,
+                                "blocked_tool": first_fc_name,
+                            })
+                        except Exception as be:
+                            logger.warning(f"RECALL broadcast failed for {event_id} (non-fatal): {be}")
+                        return True
+                except Exception as e:
+                    logger.warning(f"Memory reflex gate error for {event_id}: {e}")
+
+            self._reasoning_by_event[event_id] = accumulated_thoughts or None
+
+            for i, fc_part in enumerate(batch_fcs):
+                fc_name = fc_part["functionCall"]["name"]
+                fc_args = fc_part["functionCall"].get("args", {})
+
+                # Gate re-eval for FC[1+] (explicit Redis re-fetch)
+                if i > 0:
+                    event = await self.blackboard.get_event(event_id)
+                    from .tool_gates import evaluate_gates, build_gate_context
+                    brain_phase = _resolve_phase(event.brain_phase)
+                    gate_ctx = build_gate_context(
+                        event=event,
+                        brain_phase=brain_phase,
+                        context_flags=context_flags,
+                        is_defer_wake=is_defer_wake,
+                        iteration=iteration,
+                        jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+                        jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                    )
+                    refreshed_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                    valid_names = {t["name"] for t in refreshed_tools}
+                    if fc_name not in valid_names:
+                        logger.warning(
+                            "Batch FC[%d] %s rejected by gate after FC[%d]",
+                            i, fc_name, i - 1,
+                        )
+                        break
+
+                grounding = grounding_evidence if i == 0 else None
+                rp = captured_parts if i == 0 else None
+
+                batch_ctx = _BatchContext(
+                    self._tool_ctx,
+                    batch_size=batch_size if i == 0 else None,
+                    batch_index=i if i > 0 else None,
+                )
+                result = await self._execute_function_call(
+                    event_id, fc_name, fc_args,
+                    response_parts=rp,
+                    grounding_evidence=grounding,
+                    _ctx_override=batch_ctx,
+                )
+
+                if not result:
+                    break
+                if await self._is_event_closed(event_id):
+                    break
+
+            return False
+
+        # Process the final result (single-FC path, unchanged)
         if function_call:
             # Flush text response before executing tool (mixed text + function call)
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
@@ -2991,6 +3124,7 @@ class Brain:
         args: dict,
         response_parts: list[dict] | None = None,
         grounding_evidence: str | None = None,
+        _ctx_override: "_BatchContext | None" = None,
     ) -> bool:
         """
         Thin dispatcher: pulse emission + registry lookup + ToolContext delegation.
@@ -2999,7 +3133,12 @@ class Brain:
         Returns False for all other cases (close, wait, dispatch).
         Called within per-event asyncio.Lock (primary path) or via
         execute_tool_locked (off-lock background tasks).
+
+        _ctx_override: when set, passed to handler instead of self._tool_ctx
+        (used by parallel-FC batch execution to inject batch markers).
         """
+        ctx = _ctx_override or self._tool_ctx
+
         if grounding_evidence:
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -3009,7 +3148,7 @@ class Brain:
                 evidence=grounding_evidence,
                 response_parts=response_parts,
             )
-            await self._append_and_broadcast(event_id, turn)
+            await ctx.append_and_broadcast(event_id, turn)
             response_parts = None
 
         if function_name != "respond_to_jarvis":
@@ -3025,7 +3164,7 @@ class Brain:
         handler = HANDLER_REGISTRY.get(function_name)
         if handler:
             try:
-                return await handler(self._tool_ctx, event_id, args, response_parts)
+                return await handler(ctx, event_id, args, response_parts)
             except Exception as e:
                 logger.error(f"Handler {function_name} failed for {event_id}: {e}", exc_info=True)
                 error_turn = ConversationTurn(
@@ -3036,7 +3175,7 @@ class Brain:
                              "Consider an alternative approach or retry.",
                     response_parts=response_parts,
                 )
-                await self._append_and_broadcast(event_id, error_turn)
+                await ctx.append_and_broadcast(event_id, error_turn)
                 return False
         else:
             logger.warning(f"[UNKNOWN] function call: {function_name} for {event_id}")
@@ -3047,7 +3186,7 @@ class Brain:
                 thoughts=f"Unknown tool '{function_name}'. Available tools are listed in your function declarations.",
                 response_parts=response_parts,
             )
-            await self._append_and_broadcast(event_id, unknown_turn)
+            await ctx.append_and_broadcast(event_id, unknown_turn)
             return False
 
     async def execute_tool_locked(
