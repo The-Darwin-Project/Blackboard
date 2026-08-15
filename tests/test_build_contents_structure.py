@@ -1762,3 +1762,147 @@ class TestParallelFunctionCallExecution:
             f"not 'something_else' (from waitingFor). Got: "
             f"{fr_parts_all[1]['functionResponse']['name']}"
         )
+
+    # -----------------------------------------------------------------------
+    # T51-T52: PR #189 remediation -- grounding+batch replay & idempotency
+    # padding regression tests (correctness HIGH + reliability HIGH fixes).
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_t51_grounding_batch_head_still_gets_native_fc_fr_replay(self):
+        """Regression test for the correctness HIGH: when grounding co-occurs with a
+        parallel-FC batch, _execute_function_call's synthetic waitingFor="google_web_search"
+        turn is the ONLY turn that ever carries the batch's real response_parts (the
+        handler's own turn gets response_parts cleared to None). Before the fix,
+        _BatchContext unconditionally excluded google_web_search turns from batch-marker
+        injection AND _build_contents unconditionally excluded them from native FC/FR
+        replay -- together silently dropping the whole batch to legacy text-fallback.
+
+        Both guards now special-case batch heads (turn.batch_size set / turn carries
+        real FC parts), so this turn must still produce native FC/FR replay.
+        """
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="handle this"),
+            # This is the synthetic grounding wrapper turn _execute_function_call creates
+            # when grounding_evidence is set -- it carries the batch's real FC parts and
+            # (post-fix) the batch marker, even though waitingFor == "google_web_search".
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="google_web_search", evidence="\n\n## Web Search Context\n\n...",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched developer",
+                batch_index=1,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fc_parts_all = [
+            p
+            for msg in contents if msg["role"] == "model"
+            for p in msg.get("parts", []) if "functionCall" in p
+        ]
+        assert len(fc_parts_all) == 2, (
+            f"Expected native replay of both FCs despite the grounding wrapper turn, "
+            f"got {len(fc_parts_all)} functionCall parts (legacy text-fallback bug "
+            f"would silently drop these to 0)"
+        )
+        assert fc_parts_all[0]["functionCall"]["name"] == "classify_event"
+        assert fc_parts_all[1]["functionCall"]["name"] == "select_agent"
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 2, (
+            f"Expected 2 functionResponse parts, got {len(fr_parts_all)}"
+        )
+        assert fr_parts_all[0]["functionResponse"]["name"] == "classify_event"
+        assert fr_parts_all[1]["functionResponse"]["name"] == "select_agent"
+
+    @pytest.mark.asyncio
+    async def test_t52_non_idempotent_tool_replay_padding_warns_against_reissue(self):
+        """Regression test for the reliability HIGH: if a batch FC with side effects
+        (select_agent/ask_agent_for_state/defer_event) completes its external effect but
+        the process crashes before the corresponding turn is persisted, replay padding
+        must NOT say "execution interrupted" (reads as "safe to retry") -- it must warn
+        that the side effect may have already run."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "defer_event", "args": {"reason": "waiting"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            # No batch_index=1 continuation turn -- simulates a crash before defer_event's
+            # turn was persisted.
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 2
+        padded = fr_parts_all[1]["functionResponse"]
+        assert padded["name"] == "defer_event"
+        assert padded["response"]["result"] != "execution interrupted", (
+            "non-idempotent tool must not use the 'safe to retry' phrasing"
+        )
+        assert "do not blindly re-issue" in padded["response"]["result"].lower()
+
+    @pytest.mark.asyncio
+    async def test_t52b_idempotent_tool_replay_padding_unchanged(self):
+        """Sanity check: idempotent tools (not in _NON_IDEMPOTENT_TOOLS) keep the
+        original 'execution interrupted' padding -- only the non-idempotent set changed."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "lookup_journal", "args": {}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            # No continuation turn for lookup_journal either -- same crash scenario.
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 2
+        padded = fr_parts_all[1]["functionResponse"]
+        assert padded["name"] == "lookup_journal"
+        assert padded["response"]["result"] == "execution interrupted"
