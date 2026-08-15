@@ -997,3 +997,111 @@ class TestFCFREdgeCases:
         )
         # Should use generic tool label since waitingFor is None
         assert "[SYSTEM tool]:" in parts[0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# T32: Regression guard for PR #186 — classify_event triage+nudge dedup pair
+# ---------------------------------------------------------------------------
+
+class TestClassifyEventTriageNudgeDedupSig:
+    """Regression test for the FC-dedup sibling-sig discard bug fixed in a05299e8.
+
+    handle_classify_event (handlers_state.py) threads the SAME response_parts
+    onto both the triage turn (action="triage") and the immediately-following
+    nudge turn (action="tool_result", waitingFor="classify_event"). The triage
+    turn's raw response_parts (a functionCall lacking thought_signature, with a
+    sibling thought part carrying one) go through turn_to_parts()'s raw
+    passthrough and get marked as "emitted" for FC-dedup purposes. The nudge
+    turn then re-derives fc_parts via extract_model_parts() (which DOES apply
+    the sibling-sig fix-up) but _build_contents' dedup discards that corrected
+    copy because the triage turn already claimed the emission slot.
+
+    Before a05299e8, turn_to_parts()'s raw passthrough did not apply the
+    sibling-sig defense, so the surviving (triage) emission kept a bare,
+    signature-less functionCall — silently defeating the PR's core purpose on
+    every single classify_event call. This test pins the fixed behavior: the
+    functionCall content that survives the dedup must carry the signature.
+    """
+
+    @pytest.mark.asyncio
+    async def test_t32_sig_survives_classify_event_dedup_pair(self):
+        """Repro shape: sibling thought carries the sig, the FC part does not.
+
+        Runs a classify_event triage+nudge turn pair (identical response_parts,
+        as produced by handle_classify_event) through Brain._build_contents()
+        with BRAIN_THOUGHT_SIG_V2 on, and asserts the surviving model:FC
+        content has thought_signature attached post-dedup.
+        """
+        response_parts = [
+            {"thought": True, "thought_signature": "c2lnX2RhdGE="},
+            {"functionCall": {
+                "name": "classify_event",
+                "args": {"domain": "clear", "reasoning": "known pattern"},
+            }},
+        ]
+        conversation = [
+            # triage turn — handle_classify_event's first ConversationTurn
+            _make_turn(
+                turn=1, actor="brain", action="triage",
+                thoughts="Cynefin: CLEAR. known pattern",
+                response_parts=response_parts,
+            ),
+            # nudge turn — handle_classify_event's second ConversationTurn,
+            # sharing the identical response_parts list with the triage turn
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="classify_event",
+                evidence="Domain set: CLEAR. Known solution exists.",
+                response_parts=response_parts,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fc_msgs = [
+            msg for msg in contents
+            if msg["role"] == "model"
+            and any("functionCall" in p for p in msg.get("parts", []))
+        ]
+        assert len(fc_msgs) == 1, (
+            f"Expected exactly 1 surviving model:FC from the dedup pair, got {len(fc_msgs)}"
+        )
+
+        fc_part = next(p for p in fc_msgs[0]["parts"] if "functionCall" in p)
+        assert fc_part["functionCall"]["name"] == "classify_event"
+        assert fc_part.get("thought_signature") == "c2lnX2RhdGE=", (
+            "thought_signature did not survive the classify_event "
+            "triage+nudge dedup pair — sibling-sig defense was not applied "
+            "to the surviving (raw-passthrough) emission"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t32b_flag_off_no_response_parts_threaded(self):
+        """With BRAIN_THOUGHT_SIG_V2 off, handlers_state.py never threads
+        response_parts onto triage/nudge turns (opt-in/default-off design) —
+        confirm _build_contents degrades to plain text with no leaked FC/sig.
+        """
+        conversation = [
+            _make_turn(
+                turn=1, actor="brain", action="triage",
+                thoughts="Cynefin: CLEAR.", response_parts=None,
+            ),
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="classify_event",
+                evidence="Domain set: CLEAR.", response_parts=None,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", False):
+            contents = await Brain._build_contents(brain, event)
+
+        for msg in contents:
+            for part in msg.get("parts", []):
+                assert "functionCall" not in part
+                assert "thought_signature" not in part
