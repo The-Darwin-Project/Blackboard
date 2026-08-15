@@ -2758,6 +2758,7 @@ class Brain:
         header_separated = False
         last_non_brain_pos: tuple[int, int] | None = None
         _fc_emitted_for_turn: set[int] = set()
+        _last_emitted_idx: int | None = None
 
         for idx, turn in enumerate(event.conversation):
             role = "model" if turn.actor == "brain" else "user"
@@ -2804,8 +2805,15 @@ class Brain:
                             if refs:
                                 skill_prefix = refs
 
-                        # Positional dedup: skip model:FC if preceding turn emitted it
-                        preceding_emitted = (idx - 1) in _fc_emitted_for_turn
+                        # Dedup: skip model:FC if the last turn that actually contributed
+                        # content already emitted it. Keyed off the last-emission index
+                        # rather than raw (idx - 1) adjacency, since filtered-out turns
+                        # (e.g. dispatcher acknowledge/connected) occupy an index without
+                        # contributing content and would otherwise defeat the dedup.
+                        preceding_emitted = (
+                            _last_emitted_idx is not None
+                            and _last_emitted_idx in _fc_emitted_for_turn
+                        )
 
                         if not preceding_emitted:
                             # Case B: emit model:FC (inline merge-check)
@@ -2855,7 +2863,7 @@ class Brain:
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
 
-            # Track FC emission from brain.response turns (for positional dedup)
+            # Track FC emission from brain.response turns (for dedup)
             if (
                 turn.actor == "brain"
                 and turn.action != "tool_result"
@@ -2863,6 +2871,8 @@ class Brain:
                 and any(p.get("functionCall") for p in turn.response_parts)
             ):
                 _fc_emitted_for_turn.add(idx)
+
+            _last_emitted_idx = idx
 
         if last_non_brain_pos:
             ci, pi = last_non_brain_pos
