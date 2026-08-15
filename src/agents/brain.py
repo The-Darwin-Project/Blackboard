@@ -216,6 +216,7 @@ import httpx
 
 from src.agents.context_parts import (
     build_function_response as _cp_build_function_response,
+    build_single_function_response as _cp_build_single_fr,
     compress_contents as _cp_compress_contents,
     estimate_msg_tokens as _cp_estimate_msg_tokens,
     estimate_tokens as _cp_estimate_tokens,

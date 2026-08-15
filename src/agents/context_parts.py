@@ -95,6 +95,32 @@ def build_function_response(turn: "ConversationTurn", skill_prefix: str = "") ->
     return [{"functionResponse": {"name": tool_name, "response": {"result": response_text}}}]
 
 
+_XML_FENCE_TAGS = (
+    "</functionResponse>", "</description>", "</job_log>",
+    "</comments>", "</mention_request>", "</issue_body>",
+)
+
+
+def build_single_function_response(turn: "ConversationTurn", fc_name: str | None = None) -> dict:
+    """Build one functionResponse dict for a single turn in a batch.
+
+    Unlike build_function_response (returns list[dict]), this returns a single
+    dict for assembly into multi-FR user Content by the batch replay path.
+    """
+    tool_name = fc_name or "unknown_tool"
+    if not fc_name and turn.response_parts:
+        for p in turn.response_parts:
+            if p.get("functionCall"):
+                tool_name = p["functionCall"].get("name", "unknown_tool")
+                break
+    if tool_name == "unknown_tool" and turn.waitingFor:
+        tool_name = turn.waitingFor
+    response_text = turn.evidence or turn.thoughts or ""
+    for tag in _XML_FENCE_TAGS:
+        response_text = response_text.replace(tag, "")
+    return {"functionResponse": {"name": tool_name, "response": {"result": response_text}}}
+
+
 def estimate_msg_tokens(msg: dict) -> int:
     """Char count for a single Content message (text + FC args + FR response + sig)."""
     chars = 0
