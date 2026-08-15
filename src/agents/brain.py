@@ -1686,18 +1686,27 @@ class Brain:
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
             if accumulated_text and not response_emitted:
-                response_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="response",
-                    thoughts=accumulated_text,
-                    evidence=grounding_evidence if grounding_evidence else None,
-                    response_parts=captured_parts,
-                )
-                await self._append_and_broadcast(event_id, response_turn)
-                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
-                self._last_processed[event_id] = time.time()
-                self._response_emitted_for.add(event_id)
+                if is_terminal:
+                    response_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="response",
+                        thoughts=accumulated_text,
+                        evidence=grounding_evidence if grounding_evidence else None,
+                        response_parts=captured_parts,
+                    )
+                    await self._append_and_broadcast(event_id, response_turn)
+                    await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                    self._last_processed[event_id] = time.time()
+                    self._response_emitted_for.add(event_id)
+                else:
+                    narration_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="thoughts",
+                        thoughts=accumulated_text,
+                    )
+                    await self._append_and_broadcast(event_id, narration_turn)
 
             valid_tool_names = {t["name"] for t in active_tools}
             # SILENT_PARK invalidation: if we just flushed a brain.response above,
