@@ -533,6 +533,108 @@ class TestGuard7StaleRaceDetection:
         )
 
 
+class TestGuard1NoRetrigger:
+    """T-1: Guard 1 must NOT re-enqueue events whose non-brain turns are already DELIVERED.
+
+    Regression: Before the fix, Guard 1's has_new_input check included delivered
+    non-brain turns, causing infinite re-processing loops when a running task's
+    earlier conversation had already-evaluated turns (status progressed sent→delivered).
+    """
+
+    @pytest.mark.asyncio
+    async def test_guard1_delivered_only_not_enqueued(self):
+        """Negative: active task + only DELIVERED non-brain turns → has_new_input=False → skip."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="developer", action="result", status="delivered"),
+            _make_turn(actor="brain", action="route", status="evaluated"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" not in result, (
+            "Guard 1 must NOT re-trigger on already-delivered non-brain turns"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_sent_non_brain_enqueued(self):
+        """Positive: active task + one SENT non-brain turn → has_new_input=True → enqueue."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="developer", action="result", status="delivered"),
+            _make_turn(actor="user", action="message", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result, (
+            "Guard 1 must enqueue when a fresh SENT non-brain turn exists"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_mixed_delivered_and_sent_enqueued(self):
+        """Mixed: old delivered + fresh sent non-brain → enqueue (sent wins)."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="sysadmin", action="result", status="delivered"),
+            _make_turn(actor="brain", action="thoughts", status="evaluated"),
+            _make_turn(actor="jarvis", action="message", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" in result, (
+            "Guard 1 must enqueue when ANY sent non-brain turn exists, regardless of old delivered turns"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_brain_sent_only_not_enqueued(self):
+        """Brain-authored SENT turns do NOT count as new input (brain is the orchestrator)."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="thoughts", status="sent"),
+            _make_turn(actor="brain", action="route", status="sent"),
+        ]
+        events = {"evt-1": _make_event("evt-1", conversation=turns)}
+        result = _scan_logic(
+            active_ids=["evt-1"],
+            events=events,
+            active_tasks=active_tasks,
+            waiting_for_user=set(),
+            waiting_for_jarvis={},
+            event_locks={},
+            last_processed={},
+            waiting_for_agent={},
+        )
+        assert "evt-1" not in result, (
+            "Guard 1 must NOT enqueue when only brain-authored turns are SENT"
+        )
+
+
 def _scan_logic(
     active_ids: list[str],
     events: dict[str, EventDocument],
@@ -562,10 +664,7 @@ def _scan_logic(
             event = events.get(eid)
             if event:
                 unseen = [t for t in event.conversation if t.status.value == "sent"]
-                has_new_input = any(t.actor != "brain" for t in unseen) or any(
-                    t.status.value == "delivered" and t.actor != "brain"
-                    for t in event.conversation
-                )
+                has_new_input = any(t.actor != "brain" for t in unseen)
                 if has_new_input:
                     to_enqueue.append(eid)
             continue

@@ -4086,6 +4086,18 @@ class Brain:
                 logger.info(f"Cleared corrupted session for {agent_name} on {event_id}")
             # Lock released -- Brain continues freely
 
+            if is_error_result and result_str_check:
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor=agent_name, action="error",
+                    thoughts=result_str_check,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                self._release_task_state(event_id)
+                if not await self._is_event_closed(event_id) and self._scheduler:
+                    self._scheduler.enqueue(event_id)
+                return
+
             # Parse result -- check for structured responses (question, agent_busy)
             # Note: unreachable in message mode (team_send_results blocked by MCP notInModes,
             # so callbackResult is null and stdout is plain text, never structured JSON).
@@ -5291,10 +5303,7 @@ class Brain:
                     if unseen:
                         await self.blackboard.mark_turns_delivered(eid, len(event.conversation))
                         await self._broadcast_status_update(eid, "delivered", turns=unseen)
-                    has_new_input = any(t.actor != "brain" for t in unseen) or any(
-                        t.status.value == "delivered" and t.actor != "brain"
-                        for t in event.conversation
-                    )
+                    has_new_input = any(t.actor != "brain" for t in unseen)
                     if has_new_input:
                         has_huddle = any(t.action == "huddle" for t in unseen)
                         if has_huddle:
