@@ -2763,6 +2763,7 @@ class Brain:
             role = "model" if turn.actor == "brain" else "user"
             if turn.actor == "brain" and turn.action == "tool_result":
                 role = "user"
+            skill_injected_by_v2 = False
 
             # -- FC/FR-aware replay for tool_result turns (v2 path) --
             if (
@@ -2796,6 +2797,7 @@ class Brain:
                         # Skill injection check (before FC/FR emission)
                         skill_prefix = ""
                         if turn is target_skill_turn and self._skill_loader:
+                            skill_injected_by_v2 = True
                             refs = self._skill_loader.build_skill_refs(
                                 turn.waitingFor, event.brain_phase, event.source,
                             )
@@ -2831,15 +2833,9 @@ class Brain:
                 if not parts:
                     continue
 
-            # Skill injection (standard path — skipped if v2 already handled it)
+            # Skill injection (standard path — skipped only if v2 already injected it)
             if turn is target_skill_turn and self._skill_loader and parts[0].get("text"):
-                if not (
-                    _THOUGHT_SIG_V2
-                    and turn.actor == "brain"
-                    and turn.action == "tool_result"
-                    and turn.response_parts
-                    and any(p.get("functionCall") for p in turn.response_parts)
-                ):
+                if not skill_injected_by_v2:
                     refs = self._skill_loader.build_skill_refs(
                         turn.waitingFor, event.brain_phase, event.source,
                     )
