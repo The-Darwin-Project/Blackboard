@@ -402,3 +402,177 @@ class TestRecallContinuation:
 
         # Auto-park still fires off the sole (terminal) text-only response for slack/chat sources.
         assert "evt-cc105cc5" in brain._waiting_for_user
+
+
+class TestRuntimeGateDoesNotClobberSilentParkInvalidation:
+    """Regression guard: when SILENT_PARK strips wait_for_user pre-call but
+    _response_emitted_for confirms a brain.response was flushed, the invalidation
+    must re-admit wait_for_user and let it execute.
+
+    This exact regression was reintroduced twice (Aug 4 commit 2f297957, Aug 15
+    commit b9a130c33) by blind restoration of a redundant gate check that
+    recomputed valid_tool_names from active_tools without the invalidation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wait_for_user_executes_when_invalidation_fires(self):
+        """SILENT_PARK strips wait_for_user, but _response_emitted_for is set
+        (text flush satisfied the gate premise). wait_for_user must execute."""
+        chunks = [
+            _Chunk(text="Here's my response to you."),
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "casual park"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="slack")
+
+        tools_without_wait = ["classify_event", "select_agent", "consult_deep_memory"]
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            await brain._process_with_llm(
+                "evt-cc105cc5", event, response_emitted=False,
+            )
+
+        brain._execute_function_call.assert_awaited_once()
+        call_args = brain._execute_function_call.call_args[0]
+        assert call_args[1] == "wait_for_user"
+
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 0, (
+            f"wait_for_user was rejected despite invalidation: {[t.thoughts for t in tool_results]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stripped_tool_without_invalidation_still_rejected(self):
+        """A gate-stripped tool that is NOT wait_for_user (or has no
+        _response_emitted_for) must still be rejected normally."""
+        chunks = [
+            _Chunk(function_call=FunctionCall(name="close_event", args={"summary": "done"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="slack")
+
+        tools_without_close = ["classify_event", "wait_for_user", "select_agent"]
+
+        with _gate_patch(tools_without_close), _gate_ctx_patch():
+            result = await brain._process_with_llm(
+                "evt-cc105cc5", event, response_emitted=False,
+            )
+
+        assert result is True
+        brain._execute_function_call.assert_not_awaited()
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 1
+        assert "[GATE]" in tool_results[0].thoughts or "[UNKNOWN]" in tool_results[0].thoughts
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_still_rejected(self):
+        """Spec T-2: a tool not in BRAIN_TOOL_SCHEMAS is rejected as [UNKNOWN]."""
+        chunks = [
+            _Chunk(function_call=FunctionCall(name="nonexistent_tool", args={})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="slack")
+
+        with _gate_patch(["classify_event", "wait_for_user"]), _gate_ctx_patch():
+            result = await brain._process_with_llm(
+                "evt-cc105cc5", event, response_emitted=False,
+            )
+
+        assert result is True
+        brain._execute_function_call.assert_not_awaited()
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 1
+        assert "[UNKNOWN]" in tool_results[0].thoughts
+
+    @pytest.mark.asyncio
+    async def test_wait_for_user_rejected_without_response_emitted(self):
+        """Edge case: wait_for_user stripped AND no text flush (no _response_emitted_for).
+        The invalidation must NOT fire — wait_for_user stays rejected."""
+        chunks = [
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "park"})),
+        ]
+        brain = _make_brain(stream_factory=lambda **kw: MockStream(chunks))
+        event = _make_event(source="slack")
+
+        tools_without_wait = ["classify_event", "select_agent"]
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            result = await brain._process_with_llm(
+                "evt-cc105cc5", event, response_emitted=False,
+            )
+
+        assert result is True
+        brain._execute_function_call.assert_not_awaited()
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 1
+        assert "[GATE]" in tool_results[0].thoughts
+
+
+class TestClearWaitingResetsResponseEmittedAcrossCycles:
+    """Regression guard: clear_waiting() must discard the event from
+    _response_emitted_for, so a stale flag from a prior park cycle can't
+    defeat the SILENT_PARK invalidation in a later cycle.
+
+    Without this reset, the sequence is: cycle 1 flushes a response and parks
+    (setting _response_emitted_for) -> user sends a new message, which calls
+    clear_waiting() -> cycle 2 begins and the LLM's first action is
+    wait_for_user with no new text flush. If the flag is still stale-True,
+    the invalidation incorrectly re-admits wait_for_user using cycle 1's
+    already-consumed response, and the brain silently re-parks without ever
+    answering the new message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_flag_does_not_survive_clear_waiting_into_next_cycle(self):
+        event_id = "evt-cc105cc5"
+        brain = _make_brain(stream_factory=lambda **kw: None)  # overridden per-call below
+        event = _make_event(event_id=event_id, source="slack")
+
+        tools_without_wait = ["classify_event", "select_agent", "consult_deep_memory"]
+
+        # Cycle 1: text response flushed, then wait_for_user -- SILENT_PARK
+        # invalidation re-admits it because a response was just emitted.
+        cycle1_chunks = [
+            _Chunk(text="Here's my response to you."),
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "casual park"})),
+        ]
+        brain._adapter.generate_stream = MagicMock(side_effect=lambda **kw: MockStream(cycle1_chunks))
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            await brain._process_with_llm(event_id, event, response_emitted=False)
+
+        brain._execute_function_call.assert_awaited_once()
+        assert event_id in brain._response_emitted_for, (
+            "precondition: cycle 1's text flush must mark the event as having emitted a response"
+        )
+
+        # User replies -- the real system calls clear_waiting() on this transition
+        # (main.py WS handler / queue.py REST endpoint), which must also reset
+        # the per-cycle response-emitted flag.
+        brain.clear_waiting(event_id)
+        assert event_id not in brain._response_emitted_for, (
+            "clear_waiting() must discard the event from _response_emitted_for "
+            "so a stale flag from the prior cycle can't leak into the next one"
+        )
+
+        # Cycle 2: wait_for_user is the FIRST action, with no text flushed this
+        # cycle. With the flag correctly cleared, invalidation must not fire --
+        # wait_for_user stays rejected, forcing the brain to actually answer.
+        brain._execute_function_call.reset_mock()
+        brain._append_and_broadcast.reset_mock()
+        cycle2_chunks = [
+            _Chunk(function_call=FunctionCall(name="wait_for_user", args={"reason": "premature park"})),
+        ]
+        brain._adapter.generate_stream = MagicMock(side_effect=lambda **kw: MockStream(cycle2_chunks))
+
+        with _gate_patch(tools_without_wait), _gate_ctx_patch():
+            result = await brain._process_with_llm(event_id, event, response_emitted=False)
+
+        assert result is True
+        brain._execute_function_call.assert_not_awaited()
+        tool_results = _turns_by_action(brain, "tool_result")
+        assert len(tool_results) == 1, (
+            "wait_for_user was incorrectly re-admitted using a stale "
+            "_response_emitted_for flag from the prior park/resume cycle"
+        )
+        assert "[GATE]" in tool_results[0].thoughts
