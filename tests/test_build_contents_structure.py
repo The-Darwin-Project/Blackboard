@@ -8,12 +8,16 @@
 # 4. [Pattern]: _make_event/_make_turn helpers follow test_brain_loop_plumbing.py conventions.
 # 5. [Pattern]: T-13+ tests verify native FC/FR propagation gated by _THOUGHT_SIG_V2.
 #    Feature flag patched via monkeypatch on `src.agents.brain._THOUGHT_SIG_V2`.
+# 6. [Pattern]: T-40+ tests verify parallel FC batch execution and replay.
+#    _BatchContext wraps _tool_ctx to inject batch_size/batch_index on tool_result turns.
+#    _MAX_BATCH_SIZE (default 4) caps the number of FCs per batch.
 """Unit tests for _turn_to_parts labeling and _build_contents structural markers.
 
-Spec IDs: T1–T31.
+Spec IDs: T1–T50.
 Verifies prefix labeling ([USER], [SYSTEM X], [AGENT Y]),
 delta markers, header boundaries, FC/FR pairing, thought_signature propagation,
-and compression safety for native function call/response contents.
+compression safety for native function call/response contents,
+and parallel function call batch execution/replay (T40–T50).
 """
 from __future__ import annotations
 
@@ -45,11 +49,14 @@ def _make_turn(
     evidence: str | None = None,
     waitingFor: str | None = None,
     response_parts: list[dict] | None = None,
+    batch_size: int | None = None,
+    batch_index: int | None = None,
 ) -> ConversationTurn:
     return ConversationTurn(
         turn=turn, actor=actor, action=action,
         thoughts=thoughts, result=result, evidence=evidence,
         waitingFor=waitingFor, response_parts=response_parts,
+        batch_size=batch_size, batch_index=batch_index,
     )
 
 
@@ -1105,3 +1112,653 @@ class TestClassifyEventTriageNudgeDedupSig:
             for part in msg.get("parts", []):
                 assert "functionCall" not in part
                 assert "thought_signature" not in part
+
+
+# ---------------------------------------------------------------------------
+# T40–T50: Parallel Function Call Batch Execution & Replay
+# ---------------------------------------------------------------------------
+
+class TestParallelFunctionCallExecution:
+    """Tests for parallel FC batch execution and replay.
+
+    When _THOUGHT_SIG_V2 is True and the model emits multiple functionCall
+    parts in a single response, the Brain executes them sequentially in-order,
+    storing batch_size on the head turn and batch_index on continuation turns.
+    _build_contents replays these as model:[FC1,...,FCn] + user:[FR1,...,FRn].
+    """
+
+    @pytest.mark.asyncio
+    async def test_t40_two_fc_batch_replay_emits_paired_contents(self):
+        """2 FCs in response_parts, 2 continuation turns → model:[FC1,FC2] + user:[FR1,FR2]."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="handle this"),
+            _make_turn(
+                turn=2, actor="brain", action="response",
+                response_parts=[fc1, fc2, sig],
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            _make_turn(
+                turn=4, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched developer",
+                batch_index=1,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fc_parts_all = [
+            p
+            for msg in contents if msg["role"] == "model"
+            for p in msg.get("parts", []) if "functionCall" in p
+        ]
+        assert len(fc_parts_all) == 2, (
+            f"Expected 2 functionCall parts across model Contents, got {len(fc_parts_all)}"
+        )
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 2, (
+            f"Expected 2 functionResponse parts across user Contents, got {len(fr_parts_all)}"
+        )
+
+        assert fc_parts_all[0]["functionCall"]["name"] == "classify_event"
+        assert fc_parts_all[1]["functionCall"]["name"] == "select_agent"
+        assert fr_parts_all[0]["functionResponse"]["name"] == "classify_event"
+        assert fr_parts_all[1]["functionResponse"]["name"] == "select_agent"
+
+    @pytest.mark.asyncio
+    async def test_t41_batch_context_proxy_injects_markers(self):
+        """_BatchContext injects batch_size on head turn and batch_index on continuation."""
+        from src.agents.brain import _BatchContext
+
+        appended_turns: list[ConversationTurn] = []
+
+        class _TrackingCtx:
+            async def append_and_broadcast(self, eid, turn, event=None):
+                appended_turns.append(turn)
+                return len(appended_turns)
+            def __getattr__(self, name):
+                return AsyncMock()
+
+        inner = _TrackingCtx()
+
+        # FC[0]: batch_size=3, batch_index=None
+        head_ctx = _BatchContext(inner, batch_size=3, batch_index=None)
+        head_turn = ConversationTurn(
+            turn=1, actor="brain", action="tool_result",
+            waitingFor="classify_event", evidence="Domain: CLEAR",
+        )
+        await head_ctx.append_and_broadcast("evt-test", head_turn)
+        assert head_turn.batch_size == 3, f"Head turn batch_size should be 3, got {head_turn.batch_size}"
+        assert head_turn.batch_index is None
+
+        # FC[2]: batch_size=None, batch_index=2
+        cont_ctx = _BatchContext(inner, batch_size=None, batch_index=2)
+        cont_turn = ConversationTurn(
+            turn=3, actor="brain", action="tool_result",
+            waitingFor="set_phase", evidence="Phase: DISPATCH",
+        )
+        await cont_ctx.append_and_broadcast("evt-test", cont_turn)
+        assert cont_turn.batch_index == 2, f"Continuation turn batch_index should be 2, got {cont_turn.batch_index}"
+        assert cont_turn.batch_size is None
+
+        # Verify injection is one-shot: second call on same ctx does NOT re-inject
+        extra_turn = ConversationTurn(
+            turn=4, actor="brain", action="tool_result",
+            waitingFor="extra", evidence="extra",
+        )
+        await head_ctx.append_and_broadcast("evt-test", extra_turn)
+        assert extra_turn.batch_size is None, "Second tool_result on same ctx should not get batch_size"
+
+    @pytest.mark.asyncio
+    async def test_t42_batch_stop_on_false_fc2_never_executes(self):
+        """FC[0]→True, FC[1]→False → FC[2] never called; only 2 tool_result turns."""
+        from src.agents.brain import _BatchContext
+
+        appended_turns: list[ConversationTurn] = []
+
+        class _TrackingCtx:
+            async def append_and_broadcast(self, eid, turn, event=None):
+                appended_turns.append(turn)
+                return len(appended_turns)
+            def __getattr__(self, name):
+                return AsyncMock()
+
+        inner = _TrackingCtx()
+
+        fcs = [
+            {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}},
+            {"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}},
+            {"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}},
+        ]
+
+        execute_results = {"classify_event": True, "select_agent": False}
+        executed_names: list[str] = []
+
+        for i, fc in enumerate(fcs):
+            name = fc["functionCall"]["name"]
+            ctx = _BatchContext(
+                inner,
+                batch_size=len(fcs) if i == 0 else None,
+                batch_index=i if i > 0 else None,
+            )
+            turn = ConversationTurn(
+                turn=i + 1, actor="brain", action="tool_result",
+                waitingFor=name, evidence=f"Result: {name}",
+            )
+            await ctx.append_and_broadcast("evt-test", turn)
+            executed_names.append(name)
+            if not execute_results.get(name, True):
+                break
+
+        assert executed_names == ["classify_event", "select_agent"], (
+            f"FC[2] should not have been called. Executed: {executed_names}"
+        )
+        assert len(appended_turns) == 2, (
+            f"Only 2 tool_result turns should be created, got {len(appended_turns)}"
+        )
+        assert appended_turns[0].batch_size == 3
+        assert appended_turns[1].batch_index == 1
+
+    @pytest.mark.asyncio
+    async def test_t43_gate_re_evaluation_after_classify(self):
+        """classify_event changes domain → select_agent available for FC[1].
+
+        After FC[0] (classify_event), gate re-evaluation makes select_agent
+        available. Verify FC[1] (select_agent) passes the re-evaluated gate.
+        """
+        from src.agents.brain import _BatchContext
+
+        appended_turns: list[ConversationTurn] = []
+        gate_state = {"domain": "disorder", "classified": False}
+
+        class _TrackingCtx:
+            async def append_and_broadcast(self, eid, turn, event=None):
+                appended_turns.append(turn)
+                return len(appended_turns)
+            def __getattr__(self, name):
+                return AsyncMock()
+
+        inner = _TrackingCtx()
+
+        fcs = [
+            {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}},
+            {"functionCall": {"name": "select_agent", "args": {"agent": "developer"}}},
+        ]
+
+        executed_names: list[str] = []
+
+        for i, fc in enumerate(fcs):
+            name = fc["functionCall"]["name"]
+            available_tools = {"classify_event"}
+            if gate_state["classified"]:
+                available_tools.add("select_agent")
+
+            if name not in available_tools:
+                break
+
+            ctx = _BatchContext(
+                inner,
+                batch_size=len(fcs) if i == 0 else None,
+                batch_index=i if i > 0 else None,
+            )
+            turn = ConversationTurn(
+                turn=i + 1, actor="brain", action="tool_result",
+                waitingFor=name, evidence=f"Result: {name}",
+            )
+            await ctx.append_and_broadcast("evt-test", turn)
+            executed_names.append(name)
+
+            if name == "classify_event":
+                gate_state["domain"] = "clear"
+                gate_state["classified"] = True
+
+        assert "classify_event" in executed_names
+        assert "select_agent" in executed_names, (
+            "select_agent should execute after classify_event re-evaluates gates"
+        )
+        assert len(appended_turns) == 2
+
+    @pytest.mark.asyncio
+    async def test_t44_mid_batch_crash_pads_missing_fr(self):
+        """batch_size=3, batch_index=1 exists, batch_index=2 missing → error FR pad."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "dev"}}}
+        fc3 = {"functionCall": {"name": "set_phase", "args": {"phase": "dispatch"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="response",
+                response_parts=[fc1, fc2, fc3, sig],
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, fc3, sig],
+                batch_size=3,
+            ),
+            _make_turn(
+                turn=4, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched",
+                batch_index=1,
+            ),
+            # NO batch_index=2 turn — simulates crash/interruption
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 3, (
+            f"Expected 3 FRs (2 real + 1 error pad), got {len(fr_parts_all)}"
+        )
+
+        error_pad = fr_parts_all[2]
+        assert error_pad["functionResponse"]["name"] == "set_phase", (
+            f"Error pad FR should be named 'set_phase', got {error_pad['functionResponse']['name']}"
+        )
+        result_text = error_pad["functionResponse"]["response"].get("result", "")
+        assert "interrupt" in result_text.lower() or "error" in result_text.lower(), (
+            f"Error pad result should indicate interruption: {result_text}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t45_grounding_turn_excluded_from_batch_lookahead(self):
+        """Synthetic google_web_search turn NOT consumed by batch look-ahead."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "dev"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+        grounding_fc = {"functionCall": {"name": "google_web_search", "args": {}}}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            # Synthetic grounding turn (preceding the batch)
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="google_web_search", evidence="Search results...",
+                response_parts=[grounding_fc],
+            ),
+            # brain.response with 2 FCs
+            _make_turn(
+                turn=3, actor="brain", action="response",
+                response_parts=[fc1, fc2, sig],
+            ),
+            # Batch head
+            _make_turn(
+                turn=4, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            # Batch continuation
+            _make_turn(
+                turn=5, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched",
+                batch_index=1,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        # Grounding turn should use text fallback (not native FC)
+        all_text = _all_text(contents)
+        assert "[SYSTEM google_web_search]:" in all_text, (
+            "Grounding turn should use text fallback, not native FC/FR"
+        )
+
+        # Batch FCs should still be present
+        batch_fc_parts = [
+            p
+            for msg in contents if msg["role"] == "model"
+            for p in msg.get("parts", [])
+            if "functionCall" in p
+            and p["functionCall"]["name"] != "google_web_search"
+        ]
+        assert len(batch_fc_parts) == 2, (
+            f"Expected 2 batch FC parts (classify_event, select_agent), got {len(batch_fc_parts)}"
+        )
+
+        # Batch FRs should pair correctly
+        batch_fr_parts = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", [])
+            if "functionResponse" in p
+            and p["functionResponse"]["name"] in ("classify_event", "select_agent")
+        ]
+        assert len(batch_fr_parts) == 2, (
+            f"Expected 2 batch FR parts, got {len(batch_fr_parts)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t46_flag_off_parallel_fcs_fall_through_to_last_wins(self):
+        """_THOUGHT_SIG_V2=False → only last FC from scalar function_call executes."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "dev"}}}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched",
+                response_parts=[fc1, fc2],
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", False):
+            contents = await Brain._build_contents(brain, event)
+
+        # No native functionCall in output when flag is off
+        for msg in contents:
+            for part in msg.get("parts", []):
+                assert "functionCall" not in part, (
+                    "functionCall should not appear when _THOUGHT_SIG_V2=False"
+                )
+                assert "functionResponse" not in part, (
+                    "functionResponse should not appear when _THOUGHT_SIG_V2=False"
+                )
+
+        # No batch_size or batch_index should be set on any turns
+        for turn in event.conversation:
+            assert turn.batch_size is None, "batch_size should not be set when flag is off"
+            assert turn.batch_index is None, "batch_index should not be set when flag is off"
+
+    @pytest.mark.asyncio
+    async def test_t47_compression_prunes_batch_fc_fr_pair_atomically(self):
+        """2-FC/2-FR batch pair must be pruned together, never one without the other."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "dev"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        # Build a long conversation to push over budget, with a batch pair embedded
+        conversation = []
+        turn_num = 0
+
+        for i in range(20):
+            turn_num += 1
+            conversation.append(
+                _make_turn(turn=turn_num, actor="brain", action="response",
+                           thoughts="padding " * 200)
+            )
+            turn_num += 1
+            conversation.append(
+                _make_turn(turn=turn_num, actor="user", action="message",
+                           thoughts=f"msg {i}")
+            )
+
+        # Batch pair at the end (recent — more likely to survive compression)
+        turn_num += 1
+        conversation.append(
+            _make_turn(
+                turn=turn_num, actor="brain", action="response",
+                response_parts=[fc1, fc2, sig],
+            )
+        )
+        turn_num += 1
+        conversation.append(
+            _make_turn(
+                turn=turn_num, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            )
+        )
+        turn_num += 1
+        conversation.append(
+            _make_turn(
+                turn=turn_num, actor="brain", action="tool_result",
+                waitingFor="select_agent", evidence="Dispatched",
+                batch_index=1,
+            )
+        )
+
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True), \
+             patch("src.agents.brain._CONTENT_BUDGET", 100):
+            contents = await Brain._build_contents(brain, event)
+
+        # Verify atomicity: if any FC exists, matching FR must exist, and vice versa
+        fc_names = set()
+        fr_names = set()
+        for msg in contents:
+            for p in msg.get("parts", []):
+                if "functionCall" in p:
+                    fc_names.add(p["functionCall"]["name"])
+                if "functionResponse" in p:
+                    fr_names.add(p["functionResponse"]["name"])
+
+        # Either both survive or both are pruned
+        assert fc_names == fr_names, (
+            f"FC/FR mismatch after compression — orphaned entries. "
+            f"FCs: {fc_names}, FRs: {fr_names}"
+        )
+
+        # No orphaned model:FC without following user:FR
+        for i, msg in enumerate(contents):
+            if msg["role"] == "model" and any(
+                "functionCall" in p for p in msg.get("parts", [])
+            ):
+                assert i + 1 < len(contents), f"Orphaned model:FC at index {i}"
+                assert contents[i + 1]["role"] == "user", (
+                    f"Orphaned model:FC at index {i} — next is role={contents[i + 1]['role']}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_t48_recall_fires_once_before_fc0_not_between(self):
+        """RECALL (reflex_chunker.flush) fires exactly once before FC[0], not between FCs."""
+        from src.agents.brain import _BatchContext
+
+        flush_call_log: list[str] = []
+
+        class _TrackingCtx:
+            async def append_and_broadcast(self, eid, turn, event=None):
+                return 1
+            def __getattr__(self, name):
+                return AsyncMock()
+
+        inner = _TrackingCtx()
+
+        fcs = [
+            {"functionCall": {"name": "classify_event", "args": {}}},
+            {"functionCall": {"name": "select_agent", "args": {}}},
+            {"functionCall": {"name": "set_phase", "args": {}}},
+        ]
+
+        class MockReflex:
+            def flush(self):
+                flush_call_log.append("flush")
+                return "thinking about it"
+
+        reflex_chunker = MockReflex()
+
+        # Flush before batch (once)
+        final_window = reflex_chunker.flush()
+        assert final_window, "reflex_chunker.flush should return thinking text"
+
+        # Execute batch — NO flush between FCs
+        for i, fc in enumerate(fcs):
+            ctx = _BatchContext(
+                inner,
+                batch_size=len(fcs) if i == 0 else None,
+                batch_index=i if i > 0 else None,
+            )
+            turn = ConversationTurn(
+                turn=i + 1, actor="brain", action="tool_result",
+                waitingFor=fc["functionCall"]["name"], evidence="OK",
+            )
+            await ctx.append_and_broadcast("evt-test", turn)
+            # Contract: no flush between FCs
+
+        assert len(flush_call_log) == 1, (
+            f"reflex_chunker.flush() should be called exactly once (before FC[0]), "
+            f"got {len(flush_call_log)} calls"
+        )
+
+    def test_t49_batch_cap_truncates_to_max_batch_size(self):
+        """6 FCs truncated to _MAX_BATCH_SIZE (4)."""
+        from src.agents.brain import _MAX_BATCH_SIZE
+
+        assert _MAX_BATCH_SIZE == 4, (
+            f"_MAX_BATCH_SIZE expected to be 4, got {_MAX_BATCH_SIZE}"
+        )
+
+        captured_parts = [
+            {"functionCall": {"name": f"tool_{i}", "args": {"x": i}}}
+            for i in range(6)
+        ] + [{"thought": True, "thought_signature": "c2lnX2RhdGE="}]
+
+        fc_parts = [p for p in captured_parts if "functionCall" in p]
+        assert len(fc_parts) == 6
+
+        # Apply batch cap (contract: only first _MAX_BATCH_SIZE FCs execute)
+        truncated = fc_parts[:_MAX_BATCH_SIZE]
+        assert len(truncated) == 4, (
+            f"Expected 4 FCs after truncation, got {len(truncated)}"
+        )
+
+        # Verify the correct 4 FCs survive (first 4 in order)
+        surviving_names = [p["functionCall"]["name"] for p in truncated]
+        assert surviving_names == ["tool_0", "tool_1", "tool_2", "tool_3"]
+
+        # tool_4 and tool_5 should be excluded
+        excluded_names = [p["functionCall"]["name"] for p in fc_parts[_MAX_BATCH_SIZE:]]
+        assert "tool_4" in excluded_names
+        assert "tool_5" in excluded_names
+
+    @pytest.mark.asyncio
+    async def test_t49b_batch_cap_reflected_in_head_turn_response_parts(self):
+        """Head turn's response_parts should only contain first 4 FC entries (+ sig)."""
+        from src.agents.brain import _MAX_BATCH_SIZE
+
+        fc_parts = [
+            {"functionCall": {"name": f"tool_{i}", "args": {"x": i}}}
+            for i in range(6)
+        ]
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        # Build conversation as if the batch was capped at 4
+        capped_fcs = fc_parts[:_MAX_BATCH_SIZE]
+        response_parts = capped_fcs + [sig]
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="response",
+                response_parts=response_parts,
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="tool_0", evidence="Result 0",
+                response_parts=response_parts,
+                batch_size=4,
+            ),
+            _make_turn(turn=4, actor="brain", action="tool_result",
+                       waitingFor="tool_1", evidence="Result 1", batch_index=1),
+            _make_turn(turn=5, actor="brain", action="tool_result",
+                       waitingFor="tool_2", evidence="Result 2", batch_index=2),
+            _make_turn(turn=6, actor="brain", action="tool_result",
+                       waitingFor="tool_3", evidence="Result 3", batch_index=3),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fc_parts_all = [
+            p
+            for msg in contents if msg["role"] == "model"
+            for p in msg.get("parts", []) if "functionCall" in p
+        ]
+        assert len(fc_parts_all) == 4, (
+            f"Expected 4 FC parts after batch cap, got {len(fc_parts_all)}"
+        )
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 4, (
+            f"Expected 4 FR parts (one per capped FC), got {len(fr_parts_all)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_t50_fr_names_from_head_turn_order_not_waiting_for(self):
+        """FR names derived from head turn's response_parts FC order, not waitingFor."""
+        fc1 = {"functionCall": {"name": "classify_event", "args": {"domain": "clear"}}}
+        fc2 = {"functionCall": {"name": "select_agent", "args": {"agent": "dev"}}}
+        sig = {"thought": True, "thought_signature": "c2lnX2RhdGE="}
+
+        conversation = [
+            _make_turn(turn=1, actor="user", action="message", thoughts="go"),
+            _make_turn(
+                turn=2, actor="brain", action="response",
+                response_parts=[fc1, fc2, sig],
+            ),
+            _make_turn(
+                turn=3, actor="brain", action="tool_result",
+                waitingFor="classify_event", evidence="Domain: CLEAR",
+                response_parts=[fc1, fc2, sig],
+                batch_size=2,
+            ),
+            # Continuation turn has WRONG waitingFor — FR name must come from
+            # head turn's response_parts order (fc2 = "select_agent"), not this field
+            _make_turn(
+                turn=4, actor="brain", action="tool_result",
+                waitingFor="something_else", evidence="Dispatched",
+                batch_index=1,
+            ),
+        ]
+        event = _make_event(conversation=conversation)
+        brain = _make_brain_mock()
+
+        with patch("src.agents.brain._THOUGHT_SIG_V2", True):
+            contents = await Brain._build_contents(brain, event)
+
+        fr_parts_all = [
+            p
+            for msg in contents if msg["role"] == "user"
+            for p in msg.get("parts", []) if "functionResponse" in p
+        ]
+        assert len(fr_parts_all) == 2, (
+            f"Expected 2 FR parts, got {len(fr_parts_all)}"
+        )
+
+        assert fr_parts_all[0]["functionResponse"]["name"] == "classify_event"
+        # The critical assertion: FR for continuation uses head turn's FC order
+        assert fr_parts_all[1]["functionResponse"]["name"] == "select_agent", (
+            f"FR[1] name should be 'select_agent' (from head turn FC order), "
+            f"not 'something_else' (from waitingFor). Got: "
+            f"{fr_parts_all[1]['functionResponse']['name']}"
+        )

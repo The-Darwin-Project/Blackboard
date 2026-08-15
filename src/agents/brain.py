@@ -2942,11 +2942,16 @@ class Brain:
                                 if p.get("functionCall")
                             ][:turn.batch_size]
 
-                            # Emit model Content with ALL FC parts
-                            if contents and contents[-1]["role"] == "model":
-                                contents[-1]["parts"].extend(fc_parts)
-                            else:
-                                contents.append({"role": "model", "parts": list(fc_parts)})
+                            # Dedup: skip model:FC if preceding turn already emitted
+                            preceding_emitted = (
+                                _last_emitted_idx is not None
+                                and _last_emitted_idx in _fc_emitted_for_turn
+                            )
+                            if not preceding_emitted:
+                                if contents and contents[-1]["role"] == "model":
+                                    contents[-1]["parts"].extend(fc_parts)
+                                else:
+                                    contents.append({"role": "model", "parts": list(fc_parts)})
                             _fc_emitted_for_turn.add(idx)
 
                             # Build FR for FC[0] (head turn)
