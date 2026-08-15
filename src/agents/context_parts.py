@@ -20,6 +20,28 @@ if TYPE_CHECKING:
 _CONTENT_BUDGET = int(os.environ.get("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 
 
+def _apply_sibling_signature(parts: list[dict]) -> list[dict]:
+    """Copy thought_signature onto any functionCall part missing one.
+
+    Source is the first sibling part in the same list that carries a
+    thought_signature. Returns the parts unchanged (same list) if no sig
+    is found or nothing needs fixing up; otherwise returns a new list
+    with only the affected entries replaced (shallow copies).
+    """
+    sig = None
+    for p in parts:
+        if p.get("thought_signature"):
+            sig = p["thought_signature"]
+            break
+    if not sig:
+        return parts
+    fixed = list(parts)
+    for i, p in enumerate(fixed):
+        if p.get("functionCall") and not p.get("thought_signature"):
+            fixed[i] = {**p, "thought_signature": sig}
+    return fixed
+
+
 def extract_model_parts(response_parts: list[dict] | None) -> list[dict]:
     """Extract model-role parts from response_parts for native FC replay.
 
@@ -35,16 +57,7 @@ def extract_model_parts(response_parts: list[dict] | None) -> list[dict]:
     ]
     if not model_parts:
         return []
-    sig = None
-    for p in model_parts:
-        if p.get("thought_signature"):
-            sig = p["thought_signature"]
-            break
-    if sig:
-        for i, p in enumerate(model_parts):
-            if p.get("functionCall") and not p.get("thought_signature"):
-                model_parts[i] = {**p, "thought_signature": sig}
-    return model_parts
+    return _apply_sibling_signature(model_parts)
 
 
 def build_function_response(turn: "ConversationTurn", skill_prefix: str = "") -> list[dict]:
@@ -227,7 +240,13 @@ def turn_to_parts(turn: "ConversationTurn") -> list[dict]:
         return parts
 
     if turn.actor == "brain" and turn.response_parts:
-        return list(turn.response_parts)
+        # Apply the same sibling-sig defense as extract_model_parts() so a
+        # functionCall part missing thought_signature (e.g. one half of a
+        # dual-stored FC that lost its sig in an earlier normalization
+        # pass) still gets it from a sibling part -- this raw passthrough
+        # is also what a later FC-dedup pass may leave standing as the
+        # final record for this turn.
+        return _apply_sibling_signature(list(turn.response_parts))
 
     text = ""
     if turn.actor == "brain":
