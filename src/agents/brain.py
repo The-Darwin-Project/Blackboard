@@ -214,6 +214,16 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 import httpx
 
+from src.agents.context_parts import (
+    build_function_response as _cp_build_function_response,
+    compress_contents as _cp_compress_contents,
+    estimate_msg_tokens as _cp_estimate_msg_tokens,
+    estimate_tokens as _cp_estimate_tokens,
+    extract_model_parts as _cp_extract_model_parts,
+    normalize_response_parts as _cp_normalize_response_parts,
+    turn_to_parts as _cp_turn_to_parts,
+)
+
 from ..models import ConversationTurn, EventDocument, EventStatus, EventType, MessageStatus, _resolve_domain, _resolve_phase
 from ..ports import BroadcastPort
 from ..utils.event_markdown import event_to_markdown
@@ -389,6 +399,8 @@ _SAFE_PATH_RE = _re.compile(r'[^a-zA-Z0-9._/\-]')
 _HTML_TAG_RE = _re.compile(r'<[^>]+>')
 
 _ERROR_TEXT_MAX = 300
+
+_THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
 
 def _sanitize_error_text(error: BaseException) -> str:
@@ -1672,7 +1684,6 @@ class Brain:
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
-            is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
             if accumulated_text and not response_emitted:
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
@@ -1720,21 +1731,6 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
-
-            # Runtime gate enforcement: reject FCs for tools stripped by gates
-            valid_tool_names = {t["name"] for t in active_tools}
-            if function_call.name not in valid_tool_names:
-                from .tool_gates import diagnose_rejection
-                rejection = diagnose_rejection(function_call.name, gate_ctx)
-                logger.warning("Runtime gate rejection for %s: %s (%s)", event_id, function_call.name, rejection)
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain", action="tool_result",
-                    thoughts=rejection,
-                    response_parts=captured_parts,
-                )
-                await self._append_and_broadcast(event_id, turn)
-                return True
 
             # Flush remaining thinking buffer for final sentence search
             if reflex_chunker and reflex_searcher:
@@ -1962,30 +1958,8 @@ class Brain:
 
     @staticmethod
     def _normalize_response_parts(raw_parts: list) -> list[dict]:
-        """Normalize SDK Part objects to plain dicts for Redis storage.
-
-        Handles camelCase vs snake_case thought_signature across SDK versions.
-        """
-        preserved = []
-        for part in raw_parts:
-            p: dict = {}
-            if hasattr(part, 'text') and part.text:
-                p['text'] = str(part.text)
-            if hasattr(part, 'thought') and part.thought:
-                p['thought'] = True
-            if hasattr(part, 'function_call') and part.function_call:
-                fc = part.function_call
-                args = {}
-                if fc.args:
-                    args = {str(k): str(v) if isinstance(v, bytes) else v for k, v in dict(fc.args).items()}
-                p['functionCall'] = {"name": str(fc.name), "args": args}
-            sig = getattr(part, 'thought_signature', None) or getattr(part, 'thoughtSignature', None)
-            if sig:
-                import base64
-                p['thought_signature'] = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else str(sig)
-            if p:
-                preserved.append(p)
-        return preserved or [{"text": ""}]
+        """Delegate to context_parts.normalize_response_parts."""
+        return _cp_normalize_response_parts(raw_parts)
 
     # =========================================================================
     # Progressive Skill System -- Context Flags + Phase Matching
@@ -2767,22 +2741,96 @@ class Brain:
         contents: list[dict] = [{"role": "user", "parts": [{"text": context_text}]}]
         header_separated = False
         last_non_brain_pos: tuple[int, int] | None = None
+        _fc_emitted_for_turn: set[int] = set()
 
-        for turn in event.conversation:
+        for idx, turn in enumerate(event.conversation):
             role = "model" if turn.actor == "brain" else "user"
             if turn.actor == "brain" and turn.action == "tool_result":
                 role = "user"
-            parts = self._turn_to_parts(turn)
-            if not parts:
-                continue
 
-            if turn is target_skill_turn:
-                refs = self._skill_loader.build_skill_refs(
-                    turn.waitingFor, event.brain_phase, event.source,
+            # -- FC/FR-aware replay for tool_result turns (v2 path) --
+            if (
+                _THOUGHT_SIG_V2
+                and turn.actor == "brain"
+                and turn.action == "tool_result"
+                and turn.response_parts
+                and any(p.get("functionCall") for p in turn.response_parts)
+            ):
+                # Guard: exclude grounding turns from native FC/FR replay.
+                # Two cases: (a) pure grounding (FC name == "google_web_search"),
+                # (b) synthetic pre-turns (FC name != waitingFor, e.g. real FC
+                # carried on a google_web_search wrapper turn).
+                fc_names_in_parts = {
+                    p["functionCall"].get("name")
+                    for p in turn.response_parts
+                    if p.get("functionCall")
+                }
+                is_grounding_excluded = (
+                    "google_web_search" in fc_names_in_parts
+                    or (
+                        turn.waitingFor
+                        and fc_names_in_parts
+                        and turn.waitingFor not in fc_names_in_parts
+                    )
                 )
-                if refs and parts[0].get("text"):
-                    parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
 
+                if not is_grounding_excluded:
+                    fc_parts = self._extract_model_parts(turn.response_parts)
+                    if fc_parts:
+                        # Skill injection check (before FC/FR emission)
+                        skill_prefix = ""
+                        if turn is target_skill_turn and self._skill_loader:
+                            refs = self._skill_loader.build_skill_refs(
+                                turn.waitingFor, event.brain_phase, event.source,
+                            )
+                            if refs:
+                                skill_prefix = refs
+
+                        # Positional dedup: skip model:FC if preceding turn emitted it
+                        preceding_emitted = (idx - 1) in _fc_emitted_for_turn
+
+                        if not preceding_emitted:
+                            # Case B: emit model:FC (inline merge-check)
+                            if contents and contents[-1]["role"] == "model":
+                                contents[-1]["parts"].extend(fc_parts)
+                            else:
+                                contents.append({"role": "model", "parts": list(fc_parts)})
+                        _fc_emitted_for_turn.add(idx)
+
+                        # Build user:FR — falls through to merge logic below
+                        parts = self._build_function_response(turn, skill_prefix)
+                        role = "user"
+                    else:
+                        # No valid FC extracted — text fallback
+                        parts = self._turn_to_parts(turn)
+                        if not parts:
+                            continue
+                else:
+                    # Grounding excluded — text fallback
+                    parts = self._turn_to_parts(turn)
+                    if not parts:
+                        continue
+            else:
+                parts = self._turn_to_parts(turn)
+                if not parts:
+                    continue
+
+            # Skill injection (standard path — skipped if v2 already handled it)
+            if turn is target_skill_turn and self._skill_loader and parts[0].get("text"):
+                if not (
+                    _THOUGHT_SIG_V2
+                    and turn.actor == "brain"
+                    and turn.action == "tool_result"
+                    and turn.response_parts
+                    and any(p.get("functionCall") for p in turn.response_parts)
+                ):
+                    refs = self._skill_loader.build_skill_refs(
+                        turn.waitingFor, event.brain_phase, event.source,
+                    )
+                    if refs and parts[0].get("text"):
+                        parts[0]["text"] = f"{refs}\n{parts[0]['text']}"
+
+            # -- Merge into contents (existing logic, unchanged) --
             if contents and contents[-1]["role"] == role:
                 if not header_separated and len(contents) == 1:
                     contents[0]["parts"].append({"text": "\n\n--- CONVERSATION ---\n\n"})
@@ -2794,6 +2842,15 @@ class Brain:
                 if turn.actor != "brain":
                     last_non_brain_pos = (len(contents), 0)
                 contents.append({"role": role, "parts": parts})
+
+            # Track FC emission from brain.response turns (for positional dedup)
+            if (
+                turn.actor == "brain"
+                and turn.action != "tool_result"
+                and turn.response_parts
+                and any(p.get("functionCall") for p in turn.response_parts)
+            ):
+                _fc_emitted_for_turn.add(idx)
 
         if last_non_brain_pos:
             ci, pi = last_non_brain_pos
@@ -2809,121 +2866,41 @@ class Brain:
 
     @staticmethod
     def _turn_to_parts(turn: ConversationTurn) -> list[dict]:
-        """Convert a single ConversationTurn to semantically-labelled parts.
+        """Delegate to context_parts.turn_to_parts."""
+        return _cp_turn_to_parts(turn)
 
-        Labels: [USER], [SYSTEM tool], [AGENT y], [FRIDAY action]. Brain's own response_parts are unlabelled.
-        """
-        if turn.actor == "brain" and turn.action in ("thoughts", "intermediate"):
-            return []
+    # =========================================================================
+    # FC/FR Replay Helpers (thought_signature v2)
+    # =========================================================================
 
-        if turn.actor == "dispatcher" and turn.action in ("acknowledge", "connected"):
-            return []
+    @staticmethod
+    def _extract_model_parts(response_parts: list[dict] | None) -> list[dict]:
+        """Delegate to context_parts.extract_model_parts."""
+        return _cp_extract_model_parts(response_parts)
 
-        if turn.actor == "brain" and turn.action == "tool_result":
-            tool_name = turn.waitingFor or "tool"
-            text = f"[SYSTEM {tool_name}]: {turn.evidence or turn.thoughts or ''}"
-            parts: list[dict] = [{"text": text}]
-            if turn.response_parts:
-                for rp in turn.response_parts:
-                    if rp.get("thought_signature"):
-                        parts[0]["thought_signature"] = rp["thought_signature"]
-                        break
-            return parts
-
-        if turn.actor == "brain" and turn.response_parts:
-            return list(turn.response_parts)
-
-        text = ""
-        if turn.actor == "brain":
-            text = turn.thoughts or ""
-            if turn.evidence:
-                text = f"{text}\n{turn.evidence}" if text else turn.evidence
-            if turn.action not in ("response",):
-                text = f"[FRIDAY {turn.action}]: {text}" if text else f"[FRIDAY {turn.action}]"
-        elif turn.actor == "user":
-            raw = turn.thoughts or turn.result or ""
-            if turn.user_name:
-                text = f"[USER {turn.user_name}]: {raw}"
-            else:
-                text = f"[USER]: {raw}"
-        elif turn.actor == "jarvis" and turn.action == "message":
-            text = (
-                f"[AGENT jarvis]: {turn.thoughts or turn.result or ''}\n\n"
-                f"JARVIS asked you a question. Send your answer back to JARVIS before doing anything else."
-            )
-        else:
-            raw = turn.evidence or turn.result or turn.thoughts or ""
-            text = f"[AGENT {turn.actor}]: {raw}" if raw else f"[AGENT {turn.actor}]"
-
-        parts: list[dict] = [{"text": text}]
-
-        if turn.image:
-            try:
-                header, b64data = turn.image.split(",", 1)
-                mime_type = header.split(":")[1].split(";")[0]
-                image_bytes = base64.b64decode(b64data)
-                parts.append({"bytes": image_bytes, "mime_type": mime_type})
-            except Exception:
-                pass
-
-        return parts
+    @staticmethod
+    def _build_function_response(turn: "ConversationTurn", skill_prefix: str = "") -> list[dict]:
+        """Delegate to context_parts.build_function_response."""
+        return _cp_build_function_response(turn, skill_prefix)
 
     # =========================================================================
     # Conversation Compression (progressive, no LLM call)
     # =========================================================================
 
     @staticmethod
-    def _estimate_tokens(contents: list[dict]) -> int:
-        """Rough token estimate: ~4 chars per token."""
-        total_chars = sum(
-            len(str(part.get("text", "")))
-            for msg in contents for part in msg.get("parts", [])
-        )
-        return total_chars // 4
+    def _estimate_msg_tokens(msg: dict) -> int:
+        """Delegate to context_parts.estimate_msg_tokens."""
+        return _cp_estimate_msg_tokens(msg)
+
+    @classmethod
+    def _estimate_tokens(cls, contents: list[dict]) -> int:
+        """Delegate to context_parts.estimate_tokens."""
+        return _cp_estimate_tokens(contents)
 
     @classmethod
     def _compress_contents(cls, contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -> list[dict]:
-        """Tail-keep prune: drop oldest conversation turns when over budget.
-
-        First message (event context header) always kept intact.
-        No truncation of individual turns — full fidelity until prune threshold.
-        When over budget: keep header + last ~200K tokens of conversation from the end.
-        """
-        if len(contents) <= 3:
-            return contents
-
-        if cls._estimate_tokens(contents) < max_tokens:
-            return contents
-
-        context_msg = contents[0]
-        conv_msgs = contents[1:]
-
-        tail_budget = 200_000
-        kept: list[dict] = []
-        running_tokens = 0
-
-        for msg in reversed(conv_msgs):
-            msg_tokens = sum(
-                len(str(p.get("text", ""))) // 4
-                for p in msg.get("parts", [])
-            )
-            if running_tokens + msg_tokens > tail_budget and kept:
-                break
-            kept.append(msg)
-            running_tokens += msg_tokens
-
-        kept.reverse()
-
-        if kept and kept[0] != conv_msgs[0]:
-            pruned_count = len(conv_msgs) - len(kept)
-            first_kept_idx = len(conv_msgs) - len(kept) + 1
-            marker = {"role": "user", "parts": [{"text": (
-                f"[{pruned_count} earlier turns (1-{first_kept_idx - 1}) pruned for context window. "
-                f"Use recall_pruned_turns(from_turn, to_turn) to retrieve if needed.]"
-            )}]}
-            return [context_msg, marker] + kept
-
-        return [context_msg] + kept
+        """Delegate to context_parts.compress_contents."""
+        return _cp_compress_contents(contents, max_tokens)
 
     # =========================================================================
     # Function Call Dispatcher
