@@ -9,6 +9,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
+from src.agents.brain import Brain
 from src.models import EventDocument, EventInput, EventStatus, ConversationTurn, EventEvidence
 
 
@@ -539,7 +540,22 @@ class TestGuard1NoRetrigger:
     Regression: Before the fix, Guard 1's has_new_input check included delivered
     non-brain turns, causing infinite re-processing loops when a running task's
     earlier conversation had already-evaluated turns (status progressed sent→delivered).
+
+    Codereview PR #192 HIGH finding: these tests used to exercise `_scan_logic`, a
+    hand-maintained duplicate of Guard 1 that is never imported from brain.py --
+    reverting the real fix in `Brain._scan_active_for_reconcile` would leave this
+    class green. They now call the actual production method instead.
     """
+
+    @staticmethod
+    def _make_brain_for_scan(event: EventDocument, active_tasks: dict) -> Brain:
+        bb = AsyncMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={event.id: "active"})
+        bb.get_event = AsyncMock(return_value=event)
+        bb.mark_turns_delivered = AsyncMock()
+        brain = Brain(blackboard=bb, agents={})
+        brain._active_tasks = active_tasks
+        return brain
 
     @pytest.mark.asyncio
     async def test_guard1_delivered_only_not_enqueued(self):
@@ -549,17 +565,9 @@ class TestGuard1NoRetrigger:
             _make_turn(actor="developer", action="result", status="delivered"),
             _make_turn(actor="brain", action="route", status="evaluated"),
         ]
-        events = {"evt-1": _make_event("evt-1", conversation=turns)}
-        result = _scan_logic(
-            active_ids=["evt-1"],
-            events=events,
-            active_tasks=active_tasks,
-            waiting_for_user=set(),
-            waiting_for_jarvis={},
-            event_locks={},
-            last_processed={},
-            waiting_for_agent={},
-        )
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
         assert "evt-1" not in result, (
             "Guard 1 must NOT re-trigger on already-delivered non-brain turns"
         )
@@ -572,17 +580,9 @@ class TestGuard1NoRetrigger:
             _make_turn(actor="developer", action="result", status="delivered"),
             _make_turn(actor="user", action="message", status="sent"),
         ]
-        events = {"evt-1": _make_event("evt-1", conversation=turns)}
-        result = _scan_logic(
-            active_ids=["evt-1"],
-            events=events,
-            active_tasks=active_tasks,
-            waiting_for_user=set(),
-            waiting_for_jarvis={},
-            event_locks={},
-            last_processed={},
-            waiting_for_agent={},
-        )
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
         assert "evt-1" in result, (
             "Guard 1 must enqueue when a fresh SENT non-brain turn exists"
         )
@@ -596,17 +596,9 @@ class TestGuard1NoRetrigger:
             _make_turn(actor="brain", action="thoughts", status="evaluated"),
             _make_turn(actor="jarvis", action="message", status="sent"),
         ]
-        events = {"evt-1": _make_event("evt-1", conversation=turns)}
-        result = _scan_logic(
-            active_ids=["evt-1"],
-            events=events,
-            active_tasks=active_tasks,
-            waiting_for_user=set(),
-            waiting_for_jarvis={},
-            event_locks={},
-            last_processed={},
-            waiting_for_agent={},
-        )
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
         assert "evt-1" in result, (
             "Guard 1 must enqueue when ANY sent non-brain turn exists, regardless of old delivered turns"
         )
@@ -619,17 +611,9 @@ class TestGuard1NoRetrigger:
             _make_turn(actor="brain", action="thoughts", status="sent"),
             _make_turn(actor="brain", action="route", status="sent"),
         ]
-        events = {"evt-1": _make_event("evt-1", conversation=turns)}
-        result = _scan_logic(
-            active_ids=["evt-1"],
-            events=events,
-            active_tasks=active_tasks,
-            waiting_for_user=set(),
-            waiting_for_jarvis={},
-            event_locks={},
-            last_processed={},
-            waiting_for_agent={},
-        )
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
         assert "evt-1" not in result, (
             "Guard 1 must NOT enqueue when only brain-authored turns are SENT"
         )

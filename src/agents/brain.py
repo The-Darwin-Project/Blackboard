@@ -185,6 +185,16 @@
 #     use .get(agent_name, default) -- never bracket access -- so an out-of-vocabulary role fails safe.
 #     `effort` (FRIDAY's optional select_agent param) passes through for BOTH local + ephemeral dispatch
 #     and never invalidates --resume (unlike mode, which does on change).
+# 47. [Pattern]: _agent_error_streak (dict[str,int]) caps consecutive "Error:" dispatch
+#     results per event at MAX_AGENT_ERROR_STREAK (codereview PR #192 HIGH finding: the
+#     is_error_result gate used to unconditionally call _scheduler.enqueue, looping
+#     forever against a deterministically-failing agent). 1st error: immediate re-enqueue
+#     (unchanged legacy behavior). 2nd..last-1: AGENT_ERROR_BACKOFF_SECONDS * (streak-1)
+#     defer via _defer_event_safely. Final streak: circuit-breaks via _close_and_broadcast
+#     instead of re-enqueueing. Reset to 0 on any non-error dispatch result.
+#     _write_terminal_turn/_reenqueue_if_open/_finalize_agent_turn factor out the
+#     write-turn -> release-task-state -> re-enqueue sequence shared by the
+#     question/agent_busy/empty-result/error early-return paths (was hand-copied 4x).
 """
 The Brain Orchestrator - Thin Python Shell, LLM Does the Thinking.
 
@@ -287,6 +297,8 @@ import src.agents.handlers_dispatch  # noqa: F401
 MAX_TURNS_PER_EVENT = 100
 NUDGE_INTERVAL_SECONDS = 1800  # 30 min idle before automated nudge
 MAX_NUDGES_BEFORE_ESCALATION = 3  # consecutive nudges before human escalation
+MAX_AGENT_ERROR_STREAK = 3  # consecutive "Error:" dispatch results before circuit-breaking an event
+AGENT_ERROR_BACKOFF_SECONDS = 30  # defer delay per streak step between the 1st and last attempt
 
 # ---------------------------------------------------------------------------
 # RECALL tool-name filter (Layer 4 defense-in-depth)
@@ -449,8 +461,12 @@ class _BatchContext:
         return getattr(self._inner, name)
 
 
-def _sanitize_error_text(error: BaseException) -> str:
-    """Strip HTML from API error responses and truncate to a readable summary."""
+def _sanitize_error_text(error: "BaseException | str") -> str:
+    """Strip HTML from API error responses and truncate to a readable summary.
+
+    Accepts a raw error string too (not just exceptions) -- e.g. dispatch results
+    that already arrive as "Error: ..." text with no exception object behind them.
+    """
     raw = str(error)
     if '<' in raw and '>' in raw:
         raw = _HTML_TAG_RE.sub('', raw)
@@ -730,6 +746,10 @@ class Brain:
         self._last_processed: dict[str, float] = {}
         # Orphan re-queue attempts per event (blank events stuck in active set)
         self._orphan_requeue_count: dict[str, int] = {}
+        # Consecutive "Error:" dispatch results per event (codereview PR #192 HIGH
+        # finding: unbounded error-retrigger loop). Reset on any non-error dispatch
+        # result. Capped at MAX_AGENT_ERROR_STREAK -- see _run_agent_task.
+        self._agent_error_streak: dict[str, int] = {}
         # In-process counter: how many times _defer_event_safely swallowed a failed
         # defer_event call. Sensing signal for the codereview finding that relying
         # solely on a log line + ResyncTrigger rediscovery had no persistent,
@@ -3726,6 +3746,61 @@ class Brain:
             )
             return False
 
+    async def _write_terminal_turn(
+        self,
+        event_id: str,
+        agent_name: str,
+        action: str,
+        thoughts: str,
+        *,
+        requesting_agent: Optional[str] = None,
+    ) -> None:
+        """Write a terminal conversation turn for an agent task and release task state.
+
+        Shared by the question / agent_busy / empty-result / error early-return
+        paths in _run_agent_task -- each previously hand-copied this same
+        build-turn -> append_and_broadcast -> release_task_state sequence
+        (codereview PR #192 HIGH finding: 4th+ near-identical block). Task-state
+        release MUST happen before any subsequent await (see AI-rules #15
+        TOCTOU ordering invariant), which is why re-enqueue/defer is a separate
+        step (_reenqueue_if_open) rather than folded in here.
+        """
+        turn = ConversationTurn(
+            turn=(await self._next_turn_number(event_id)),
+            actor=agent_name,
+            action=action,
+            thoughts=thoughts,
+            requestingAgent=requesting_agent,
+        )
+        await self._append_and_broadcast(event_id, turn)
+        self._release_task_state(event_id)
+
+    async def _reenqueue_if_open(self, event_id: str) -> None:
+        """Re-enqueue an event for the next Brain decision, unless it closed meanwhile."""
+        if not await self._is_event_closed(event_id) and self._scheduler:
+            self._scheduler.enqueue(event_id)
+
+    async def _finalize_agent_turn(
+        self,
+        event_id: str,
+        agent_name: str,
+        action: str,
+        thoughts: str,
+        *,
+        requesting_agent: Optional[str] = None,
+    ) -> None:
+        """Write a terminal turn and immediately re-enqueue the event.
+
+        For the question / agent_busy / empty-result paths, where an unconditional
+        immediate re-enqueue is correct -- these are not the same failure class as
+        the error-retrigger loop (they don't repeat on their own; the error path
+        below has its own backoff/circuit-breaker instead of using this helper).
+        """
+        await self._write_terminal_turn(
+            event_id, agent_name, action, thoughts, requesting_agent=requesting_agent,
+        )
+        await self._reenqueue_if_open(event_id)
+
     async def _run_agent_task(
         self,
         event_id: str,
@@ -4077,6 +4152,8 @@ class Brain:
             # Track session + mode for follow-ups -- clear on failure to prevent corrupted resume loops
             result_str_check = str(result).strip() if result else ""
             is_error_result = result_str_check.startswith("Error:") or not result_str_check
+            if not is_error_result:
+                self._agent_error_streak.pop(event_id, None)
             if session_id and not is_error_result:
                 self._agent_sessions.setdefault(event_id, {})[agent_name] = session_id
                 self._agent_session_modes.setdefault(event_id, {})[agent_name] = mode or ""
@@ -4087,15 +4164,36 @@ class Brain:
             # Lock released -- Brain continues freely
 
             if is_error_result and result_str_check:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor=agent_name, action="error",
-                    thoughts=result_str_check,
+                # Circuit breaker (codereview PR #192 HIGH finding): an unconditional
+                # immediate re-enqueue here loops forever against a deterministically
+                # failing agent (error -> enqueue -> dispatch -> error). Give one
+                # immediate retry, then back off, then trip the breaker and close --
+                # mirrors the cap-then-close-as-error idiom in _handle_orphan_blank_event.
+                streak = self._agent_error_streak.get(event_id, 0) + 1
+                self._agent_error_streak[event_id] = streak
+                await self._write_terminal_turn(
+                    event_id, agent_name, "error", _sanitize_error_text(result_str_check),
                 )
-                await self._append_and_broadcast(event_id, turn)
-                self._release_task_state(event_id)
-                if not await self._is_event_closed(event_id) and self._scheduler:
-                    self._scheduler.enqueue(event_id)
+                if streak >= MAX_AGENT_ERROR_STREAK:
+                    self._agent_error_streak.pop(event_id, None)
+                    logger.error(
+                        f"Agent {agent_name} circuit-broken for {event_id} after "
+                        f"{streak} consecutive error results"
+                    )
+                    await self._close_and_broadcast(
+                        event_id,
+                        f"Agent {agent_name} failed {streak} consecutive times without "
+                        f"recovering. Closing to stop the retrigger loop.",
+                        close_reason="error",
+                    )
+                    return
+                if streak == 1:
+                    await self._reenqueue_if_open(event_id)
+                else:
+                    backoff = AGENT_ERROR_BACKOFF_SECONDS * (streak - 1)
+                    await self._defer_event_safely(
+                        event_id, backoff, f"Agent error retry backoff (streak={streak})",
+                    )
                 return
 
             # Parse result -- check for structured responses (question, agent_busy)
@@ -4105,31 +4203,19 @@ class Brain:
                 result_data = json.loads(result)
                 if isinstance(result_data, dict):
                     if result_data.get("type") == "question":
-                        turn = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor=agent_name,
-                            action="question",
-                            thoughts=result_data.get("message", ""),
-                            requestingAgent=result_data.get("requestingAgent", ""),
+                        await self._finalize_agent_turn(
+                            event_id, agent_name, "question",
+                            result_data.get("message", ""),
+                            requesting_agent=result_data.get("requestingAgent", ""),
                         )
-                        await self._append_and_broadcast(event_id, turn)
-                        self._release_task_state(event_id)
-                        if not await self._is_event_closed(event_id) and self._scheduler:
-                            self._scheduler.enqueue(event_id)
                         return
 
                     if result_data.get("type") == "agent_busy":
-                        turn = ConversationTurn(
-                            turn=(await self._next_turn_number(event_id)),
-                            actor=agent_name,
-                            action="busy",
-                            thoughts=result_data.get("message", f"{agent_name} is busy after retries"),
-                        )
-                        await self._append_and_broadcast(event_id, turn)
                         logger.warning(f"Agent {agent_name} busy for {event_id}, returning to Brain")
-                        self._release_task_state(event_id)
-                        if not await self._is_event_closed(event_id) and self._scheduler:
-                            self._scheduler.enqueue(event_id)
+                        await self._finalize_agent_turn(
+                            event_id, agent_name, "busy",
+                            result_data.get("message", f"{agent_name} is busy after retries"),
+                        )
                         return
             except (json.JSONDecodeError, TypeError):
                 pass  # Not a JSON question, treat as regular result
@@ -4137,17 +4223,11 @@ class Brain:
             # Handle empty result as an error (Gemini CLI returned no output)
             result_str = str(result).strip() if result else ""
             if not result_str:
-                turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor=agent_name,
-                    action="error",
-                    thoughts="Agent returned empty response (Gemini CLI produced no output). May need retry.",
-                )
-                await self._append_and_broadcast(event_id, turn)
                 logger.warning(f"Agent {agent_name} returned EMPTY result for {event_id}")
-                self._release_task_state(event_id)
-                if not await self._is_event_closed(event_id) and self._scheduler:
-                    self._scheduler.enqueue(event_id)
+                await self._finalize_agent_turn(
+                    event_id, agent_name, "error",
+                    "Agent returned empty response (Gemini CLI produced no output). May need retry.",
+                )
                 return
 
             # Message-mode: agent typically delivers content via progress turns (team_send_message).
