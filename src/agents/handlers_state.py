@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,11 @@ if TYPE_CHECKING:
     from .tool_router import ToolContext
 
 logger = logging.getLogger("darwin.brain")
+
+# Mirrors brain.py's _THOUGHT_SIG_V2 (duplicated, not imported -- this module's
+# @ai-rules forbid importing Brain). Keeps classify_event's extra non-tool_result
+# response_parts threading opt-in-only, matching the PR's default-off design.
+_THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +323,7 @@ async def handle_classify_event(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="triage",
         thoughts=thoughts,
+        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
         timestamp=time.time(),
     )
     await ctx.append_and_broadcast(event_id, turn)
@@ -335,6 +342,8 @@ async def handle_classify_event(
         turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="tool_result",
         evidence=directive,
+        waitingFor="classify_event",
+        response_parts=response_parts if _THOUGHT_SIG_V2 else None,
         timestamp=time.time(),
     )
     await ctx.append_and_broadcast(event_id, nudge)
