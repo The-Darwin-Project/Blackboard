@@ -77,6 +77,8 @@ def build_function_response(turn: "ConversationTurn", skill_prefix: str = "") ->
         response_text = response_text.replace("</description>", "")
         response_text = response_text.replace("</job_log>", "")
         response_text = response_text.replace("</comments>", "")
+        response_text = response_text.replace("</mention_request>", "")
+        response_text = response_text.replace("</issue_body>", "")
     return [{"functionResponse": {"name": tool_name, "response": {"result": response_text}}}]
 
 
