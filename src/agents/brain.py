@@ -405,6 +405,13 @@ _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("t
 
 _MAX_BATCH_SIZE = 4
 
+# Tools with side effects that are NOT safe to blindly re-issue (dispatching an
+# agent, deferring an event). When a batch FC's turn never got persisted before
+# a crash, the replay padding below must not claim "execution interrupted" for
+# these -- that phrasing reads as "nothing happened, safe to retry" and can
+# cause the LLM to re-dispatch/re-defer a call whose side effect already ran.
+_NON_IDEMPOTENT_TOOLS = frozenset({"select_agent", "ask_agent_for_state", "defer_event"})
+
 
 class _BatchContext:
     """Wraps _tool_ctx to inject batch markers on the FIRST tool_result turn per FC."""
@@ -418,7 +425,19 @@ class _BatchContext:
         self._injected = False
 
     async def append_and_broadcast(self, event_id: str, turn: "ConversationTurn", event: "EventDocument | None" = None) -> int:
-        if not self._injected and turn.waitingFor != "google_web_search" and turn.action != "triage":
+        # A turn is excluded from marker injection only if it's a PURE grounding
+        # turn (waitingFor=="google_web_search" and no functionCall parts). When
+        # grounding co-occurs with a batch FC, _execute_function_call's synthetic
+        # google_web_search wrapper turn is the one carrying the batch's real
+        # response_parts (the handler's own turn that follows gets response_parts
+        # cleared to None) -- that turn MUST receive the batch marker or the whole
+        # batch silently loses native FC/FR replay (see is_grounding_excluded in
+        # _build_contents, which is aware of this same carries_fc distinction).
+        carries_fc = bool(turn.response_parts) and any(
+            p.get("functionCall") for p in turn.response_parts
+        )
+        is_pure_grounding = turn.waitingFor == "google_web_search" and not carries_fc
+        if not self._injected and not is_pure_grounding and turn.action != "triage":
             if self._batch_size is not None:
                 turn.batch_size = self._batch_size
             if self._batch_index is not None:
@@ -1781,37 +1800,64 @@ class Brain:
                 fc_name = fc_part["functionCall"]["name"]
                 fc_args = fc_part["functionCall"].get("args", {})
 
-                # Gate re-eval for FC[1+] (explicit Redis re-fetch)
-                if i > 0:
-                    event = await self.blackboard.get_event(event_id)
-                    from .tool_gates import evaluate_gates, build_gate_context
-                    brain_phase = _resolve_phase(event.brain_phase)
-                    gate_ctx = build_gate_context(
-                        event=event,
-                        brain_phase=brain_phase,
-                        context_flags=context_flags,
-                        is_defer_wake=is_defer_wake,
-                        iteration=iteration,
-                        jarvis_already_waiting=event_id in self._waiting_for_jarvis,
-                        jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
-                    )
-                    refreshed_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
-                    valid_names = {t["name"] for t in refreshed_tools}
-                    if fc_name not in valid_names:
-                        logger.warning(
-                            "Batch FC[%d] %s rejected by gate after FC[%d]",
-                            i, fc_name, i - 1,
-                        )
-                        break
-
-                grounding = grounding_evidence if i == 0 else None
-                rp = captured_parts if i == 0 else None
-
                 batch_ctx = _BatchContext(
                     self._tool_ctx,
                     batch_size=batch_size if i == 0 else None,
                     batch_index=i if i > 0 else None,
                 )
+
+                # Authorization re-check for every FC in the batch, not just FC[1+].
+                # FC[0] is checked against the same `active_tools` set the single-FC
+                # path uses for its defense-in-depth re-validation (see valid_tool_names
+                # below) -- it was generated under that toolset, so no fresh Redis
+                # fetch is needed. FC[1+] gets an explicit re-fetch + re-evaluation
+                # since executing FC[0..i-1] may have changed brain_phase/event state
+                # (e.g. classify_event firing before select_agent).
+                try:
+                    if i == 0:
+                        valid_names = {t["name"] for t in active_tools}
+                    else:
+                        event = await self.blackboard.get_event(event_id)
+                        from .tool_gates import evaluate_gates, build_gate_context
+                        brain_phase = _resolve_phase(event.brain_phase)
+                        gate_ctx = build_gate_context(
+                            event=event,
+                            brain_phase=brain_phase,
+                            context_flags=context_flags,
+                            is_defer_wake=is_defer_wake,
+                            iteration=iteration,
+                            jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+                            jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                        )
+                        refreshed_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                        valid_names = {t["name"] for t in refreshed_tools}
+                except Exception as e:
+                    logger.error(
+                        "Batch gate re-eval failed for %s at FC[%d] %s: %s",
+                        event_id, i, fc_name, e, exc_info=True,
+                    )
+                    error_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="tool_result",
+                        thoughts=f"Internal error re-checking authorization before {fc_name} "
+                                 f"(batch position {i}): {str(e)[:200]}. Batch execution halted; "
+                                 "remaining queued calls in this batch were not run.",
+                        response_parts=captured_parts if i == 0 else None,
+                    )
+                    await batch_ctx.append_and_broadcast(event_id, error_turn)
+                    break
+
+                if fc_name not in valid_names:
+                    logger.warning(
+                        "Batch FC[%d] %s rejected by gate%s",
+                        i, fc_name, "" if i == 0 else f" after FC[{i - 1}]",
+                    )
+                    break
+
+                grounding = grounding_evidence if i == 0 else None
+                rp = captured_parts if i == 0 else None
+
                 result = await self._execute_function_call(
                     event_id, fc_name, fc_args,
                     response_parts=rp,
@@ -1826,7 +1872,7 @@ class Brain:
 
             return False
 
-        # Process the final result (single-FC path, unchanged)
+        # Process the final result (single-FC path)
         if function_call:
             # Flush text response before executing tool (mixed text + function call)
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
@@ -1834,18 +1880,27 @@ class Brain:
             # final answer and must bypass the guard.
             is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
             if accumulated_text and not response_emitted:
-                response_turn = ConversationTurn(
-                    turn=(await self._next_turn_number(event_id)),
-                    actor="brain",
-                    action="response",
-                    thoughts=accumulated_text,
-                    evidence=grounding_evidence if grounding_evidence else None,
-                    response_parts=captured_parts,
-                )
-                await self._append_and_broadcast(event_id, response_turn)
-                await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
-                self._last_processed[event_id] = time.time()
-                self._response_emitted_for.add(event_id)
+                if is_terminal:
+                    response_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="response",
+                        thoughts=accumulated_text,
+                        evidence=grounding_evidence if grounding_evidence else None,
+                        response_parts=captured_parts,
+                    )
+                    await self._append_and_broadcast(event_id, response_turn)
+                    await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                    self._last_processed[event_id] = time.time()
+                    self._response_emitted_for.add(event_id)
+                else:
+                    narration_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="thoughts",
+                        thoughts=accumulated_text,
+                    )
+                    await self._append_and_broadcast(event_id, narration_turn)
 
             valid_tool_names = {t["name"] for t in active_tools}
             # SILENT_PARK invalidation: if we just flushed a brain.response above,
@@ -2930,7 +2985,14 @@ class Brain:
                 # Guard: exclude grounding turns from native FC/FR replay.
                 # Two cases: (a) pure grounding (FC name == "google_web_search"),
                 # (b) synthetic pre-turns (FC name != waitingFor, e.g. real FC
-                # carried on a google_web_search wrapper turn).
+                # carried on a google_web_search wrapper turn) -- EXCEPT when the
+                # turn is a batch head (turn.batch_size set): there, the wrapper
+                # turn carrying grounding evidence is the ONLY turn that ever holds
+                # the batch's real response_parts (the handler's own turn that
+                # follows has response_parts cleared to None), so excluding it here
+                # would silently drop native FC/FR replay for the WHOLE batch, not
+                # just the grounding display. The batch-replay branch below handles
+                # such turns correctly regardless of turn.waitingFor.
                 fc_names_in_parts = {
                     p["functionCall"].get("name")
                     for p in turn.response_parts
@@ -2942,6 +3004,7 @@ class Brain:
                         turn.waitingFor
                         and fc_names_in_parts
                         and turn.waitingFor not in fc_names_in_parts
+                        and not turn.batch_size
                     )
                 )
 
@@ -2999,10 +3062,20 @@ class Brain:
                                         if bi < len(batch_fc_names)
                                         else "unknown_tool"
                                     )
+                                    if pad_name in _NON_IDEMPOTENT_TOOLS:
+                                        pad_result = (
+                                            "unknown -- the process may have crashed after this "
+                                            "call's side effect already ran (e.g. an agent may "
+                                            "already be dispatched, or the event may already be "
+                                            "deferred). Do NOT blindly re-issue this exact call; "
+                                            "check current event state first."
+                                        )
+                                    else:
+                                        pad_result = "execution interrupted"
                                     all_frs.append({
                                         "functionResponse": {
                                             "name": pad_name,
-                                            "response": {"result": "execution interrupted"},
+                                            "response": {"result": pad_result},
                                         }
                                     })
 
