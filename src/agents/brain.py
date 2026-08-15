@@ -2893,8 +2893,12 @@ class Brain:
         last_non_brain_pos: tuple[int, int] | None = None
         _fc_emitted_for_turn: set[int] = set()
         _last_emitted_idx: int | None = None
+        _skip_set: set[int] = set()
 
         for idx, turn in enumerate(event.conversation):
+            if idx in _skip_set:
+                continue
+
             role = "model" if turn.actor == "brain" else "user"
             if turn.actor == "brain" and turn.action == "tool_result":
                 role = "user"
@@ -2927,6 +2931,71 @@ class Brain:
                 )
 
                 if not is_grounding_excluded:
+                    # -- Batch replay path: 1 model Content + 1 user Content --
+                    if turn.batch_size and turn.batch_size > 1:
+                        fc_parts = self._extract_model_parts(turn.response_parts)
+                        if fc_parts:
+                            # Derive canonical FC names from head turn's response_parts order
+                            batch_fc_names = [
+                                p["functionCall"]["name"]
+                                for p in turn.response_parts
+                                if p.get("functionCall")
+                            ][:turn.batch_size]
+
+                            # Emit model Content with ALL FC parts
+                            if contents and contents[-1]["role"] == "model":
+                                contents[-1]["parts"].extend(fc_parts)
+                            else:
+                                contents.append({"role": "model", "parts": list(fc_parts)})
+                            _fc_emitted_for_turn.add(idx)
+
+                            # Build FR for FC[0] (head turn)
+                            fc0_name = batch_fc_names[0] if batch_fc_names else None
+                            all_frs = [_cp_build_single_fr(turn, fc0_name)]
+
+                            # Look-ahead for batch_index continuation turns
+                            for bi in range(1, turn.batch_size):
+                                found = False
+                                for scan_idx in range(idx + 1, len(event.conversation)):
+                                    scan_turn = event.conversation[scan_idx]
+                                    if (
+                                        scan_turn.batch_index == bi
+                                        and scan_turn.actor == "brain"
+                                        and scan_turn.action == "tool_result"
+                                    ):
+                                        fc_name_for_bi = (
+                                            batch_fc_names[bi]
+                                            if bi < len(batch_fc_names)
+                                            else None
+                                        )
+                                        all_frs.append(
+                                            _cp_build_single_fr(scan_turn, fc_name_for_bi)
+                                        )
+                                        _skip_set.add(scan_idx)
+                                        found = True
+                                        break
+                                if not found:
+                                    pad_name = (
+                                        batch_fc_names[bi]
+                                        if bi < len(batch_fc_names)
+                                        else "unknown_tool"
+                                    )
+                                    all_frs.append({
+                                        "functionResponse": {
+                                            "name": pad_name,
+                                            "response": {"result": "execution interrupted"},
+                                        }
+                                    })
+
+                            # Emit ONE user Content with all FRs
+                            if contents and contents[-1]["role"] == "user":
+                                contents[-1]["parts"].extend(all_frs)
+                            else:
+                                contents.append({"role": "user", "parts": all_frs})
+
+                            _last_emitted_idx = idx
+                            continue
+
                     fc_parts = self._extract_model_parts(turn.response_parts)
                     if fc_parts:
                         # Skill injection check (before FC/FR emission)
