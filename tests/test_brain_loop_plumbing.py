@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.brain import Brain, _BrainToolContext
+from src.agents.brain import (
+    Brain,
+    _BrainToolContext,
+    MAX_AGENT_ERROR_STREAK,
+    AGENT_ERROR_BACKOFF_SECONDS,
+)
 from src.agents.handlers_state import handle_wait_for_agent
 from src.models import (
     ConversationTurn,
@@ -478,3 +483,127 @@ class TestErrorResultTurnType:
 
         # stamp_event IS called on success
         brain.blackboard.stamp_event.assert_called_once()
+
+
+# =========================================================================
+# QE regression (PR #192 HIGH finding follow-up): _agent_error_streak
+# circuit-breaker/backoff transitions in _run_agent_task's error gate.
+# =========================================================================
+class TestAgentErrorCircuitBreaker:
+    """Consecutive 'Error:' dispatch results for the same event must not
+    re-enqueue unconditionally forever.
+
+    Regression: before this fix, every "Error: ..." dispatch result re-enqueued
+    the event immediately with zero backoff, so a deterministically failing
+    agent looped forever (error -> enqueue -> dispatch -> error). The fix caps
+    consecutive error results per event_id in `_agent_error_streak`:
+      - streak 1 (of MAX_AGENT_ERROR_STREAK=3): immediate re-enqueue (legacy
+        behavior preserved, covered by TestErrorResultTurnType above).
+      - streak 2..last-1: defer via `_defer_event_safely` with backoff =
+        AGENT_ERROR_BACKOFF_SECONDS * (streak - 1).
+      - streak == MAX_AGENT_ERROR_STREAK: circuit-breaks -- pops the streak
+        counter and force-closes the event via `_close_and_broadcast` instead
+        of re-enqueueing or deferring.
+    """
+
+    @staticmethod
+    def _make_brain_for_circuit_breaker(initial_streak: int = 0) -> Brain:
+        brain = TestErrorResultTurnType._make_brain_for_run_agent_task()
+        brain.execute_tool_locked = AsyncMock(return_value=None)
+        brain._close_and_broadcast = AsyncMock()
+        if initial_streak:
+            brain._agent_error_streak["evt-err"] = initial_streak
+        return brain
+
+    @staticmethod
+    def _patched_dispatch(brain: Brain, error_text: str = "Error: agent crashed"):
+        mock_registry = AsyncMock()
+        mock_registry.get_available = AsyncMock(return_value=None)
+        mock_bridge = MagicMock()
+        mock_dispatch_cm = patch(
+            "src.agents.brain.dispatch_to_agent", new_callable=AsyncMock,
+        )
+        return (
+            patch("src.dependencies.get_registry_and_bridge", return_value=(mock_registry, mock_bridge)),
+            mock_dispatch_cm,
+            error_text,
+        )
+
+    async def _run_with_error(self, brain: Brain, error_text: str = "Error: agent crashed"):
+        registry_patch, dispatch_patch, error_text = self._patched_dispatch(brain, error_text)
+        with registry_patch, dispatch_patch as mock_dispatch:
+            mock_dispatch.return_value = (error_text, None)
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+    @pytest.mark.asyncio
+    async def test_streak_1_immediate_reenqueue_no_defer_no_close(self):
+        """First consecutive error (streak=1): immediate re-enqueue, no defer, no circuit-break."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=0)
+
+        await self._run_with_error(brain)
+
+        assert brain._agent_error_streak.get("evt-err") == 1
+        brain._scheduler.enqueue.assert_called_once_with("evt-err")
+        brain.execute_tool_locked.assert_not_called()
+        brain._close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_streak_2_defers_with_backoff_no_immediate_reenqueue(self):
+        """Second consecutive error (streak=2): defers via execute_tool_locked(defer_event),
+        with backoff = AGENT_ERROR_BACKOFF_SECONDS * (streak - 1); no immediate re-enqueue."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=1)
+
+        await self._run_with_error(brain)
+
+        assert brain._agent_error_streak.get("evt-err") == 2
+        brain._scheduler.enqueue.assert_not_called()
+        brain._close_and_broadcast.assert_not_called()
+        brain.execute_tool_locked.assert_called_once()
+        call = brain.execute_tool_locked.call_args
+        assert call.args[0] == "evt-err"
+        assert call.args[1] == "defer_event"
+        assert call.args[2]["delay_seconds"] == AGENT_ERROR_BACKOFF_SECONDS * (2 - 1)
+
+    @pytest.mark.asyncio
+    async def test_streak_3_trips_breaker_and_closes_event(self):
+        """Third consecutive error (streak == MAX_AGENT_ERROR_STREAK): circuit-breaks --
+        closes the event instead of re-enqueueing or deferring, and clears the streak."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=MAX_AGENT_ERROR_STREAK - 1)
+
+        await self._run_with_error(brain)
+
+        assert "evt-err" not in brain._agent_error_streak, (
+            "Streak counter must be cleared once the breaker trips"
+        )
+        brain._scheduler.enqueue.assert_not_called()
+        brain.execute_tool_locked.assert_not_called()
+        brain._close_and_broadcast.assert_called_once()
+        close_call = brain._close_and_broadcast.call_args
+        assert close_call.args[0] == "evt-err"
+        assert close_call.kwargs.get("close_reason") == "error"
+
+    @pytest.mark.asyncio
+    async def test_streak_resets_after_non_error_result(self):
+        """A successful (non-error) dispatch result clears any prior error streak."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=2)
+
+        registry_patch, dispatch_patch, _ = self._patched_dispatch(brain)
+        with registry_patch, dispatch_patch as mock_dispatch:
+            mock_dispatch.return_value = ("All done. Changes committed.", "session-123")
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+        assert "evt-err" not in brain._agent_error_streak, (
+            "Streak must reset to allow a fresh error streak after a successful result"
+        )
