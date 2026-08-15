@@ -418,7 +418,7 @@ class _BatchContext:
         self._injected = False
 
     async def append_and_broadcast(self, event_id: str, turn: "ConversationTurn", event: "EventDocument | None" = None) -> int:
-        if not self._injected and turn.waitingFor != "google_web_search":
+        if not self._injected and turn.waitingFor != "google_web_search" and turn.action != "triage":
             if self._batch_size is not None:
                 turn.batch_size = self._batch_size
             if self._batch_index is not None:
@@ -1728,13 +1728,18 @@ class Brain:
             batch_fcs = function_calls[:_MAX_BATCH_SIZE]
             batch_size = len(batch_fcs)
 
-            # H2 fix: filter captured_parts to only executed FCs (maintains replay parity)
+            # H2 fix: positional truncation of captured_parts to executed FCs only
             if len(function_calls) > _MAX_BATCH_SIZE:
-                kept_fc_names = {fc["functionCall"]["name"] for fc in batch_fcs}
-                captured_parts = [
-                    p for p in captured_parts
-                    if not p.get("functionCall") or p["functionCall"].get("name") in kept_fc_names
-                ]
+                fc_count = 0
+                filtered = []
+                for p in captured_parts:
+                    if p.get("functionCall"):
+                        if fc_count < _MAX_BATCH_SIZE:
+                            filtered.append(p)
+                        fc_count += 1
+                    else:
+                        filtered.append(p)
+                captured_parts = filtered
 
             logger.info(
                 "Parallel FC batch for %s: %d FCs [%s]",
