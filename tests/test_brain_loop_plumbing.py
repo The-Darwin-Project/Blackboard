@@ -14,11 +14,16 @@ Tests:
 - Guard 1 precedence over Guard 7 (T-7)
 """
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.brain import Brain, _BrainToolContext
+from src.agents.brain import (
+    Brain,
+    _BrainToolContext,
+    MAX_AGENT_ERROR_STREAK,
+    AGENT_ERROR_BACKOFF_SECONDS,
+)
 from src.agents.handlers_state import handle_wait_for_agent
 from src.models import (
     ConversationTurn,
@@ -363,4 +368,242 @@ class TestGuard1Precedence:
         # waiting_for_agent dict must remain intact
         assert "evt-test" in waiting_for_agent, (
             "waiting_for_agent must survive — Guard 7 never reached after Guard 1 continue"
+        )
+
+
+# =========================================================================
+# T-2 (scan-lifecycle-fix-188): Error-result produces action="error"
+# =========================================================================
+class TestErrorResultTurnType:
+    """Error result from dispatch_to_agent must write action='error', not 'execute'.
+
+    Regression: Before the fix, "Error: ..." strings from dispatch passed through
+    the normal result path and received action="execute", making it impossible for
+    the Brain to distinguish agent errors from successful execution in conversation.
+    """
+
+    @staticmethod
+    def _make_brain_for_run_agent_task() -> Brain:
+        bb = AsyncMock()
+        bb.get_event = AsyncMock(return_value=_make_event(
+            event_id="evt-err", source="chat", conversation=[],
+        ))
+        bb.stamp_event = AsyncMock()
+        bb.mark_turn_status = AsyncMock()
+        bb.get_service = AsyncMock(return_value=None)
+        brain = Brain(blackboard=bb, agents={})
+        brain._ws_mode = "reverse"
+        brain._append_and_broadcast = AsyncMock(return_value=5)
+        brain._broadcast = AsyncMock()
+        brain._broadcast_turn = AsyncMock()
+        brain._broadcast_status_update = AsyncMock()
+        brain._next_turn_number = AsyncMock(return_value=2)
+        brain._is_event_closed = AsyncMock(return_value=False)
+        brain._emit_executive_pulse = AsyncMock()
+        brain.write_event_to_volume = AsyncMock()
+        brain._scheduler = MagicMock()
+        brain._scheduler.enqueue = MagicMock()
+        brain._dispatch_semaphore = None
+        brain._ephemeral_provisioner = None
+        return brain
+
+    @pytest.mark.asyncio
+    async def test_error_result_writes_action_error(self):
+        """T-2: dispatch returns 'Error: ...' → turn.action='error', no stamp_event, re-enqueue."""
+        brain = self._make_brain_for_run_agent_task()
+
+        mock_registry = AsyncMock()
+        mock_registry.get_available = AsyncMock(return_value=None)
+        mock_bridge = MagicMock()
+
+        with (
+            patch("src.dependencies.get_registry_and_bridge", return_value=(mock_registry, mock_bridge)),
+            patch("src.agents.brain.dispatch_to_agent", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            mock_dispatch.return_value = ("Error: Agent busy, task rejected.", None)
+
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+        # Verify turn was written with action="error"
+        assert brain._append_and_broadcast.call_count >= 1
+        # Find the turn written after dispatch (skip initial "starting..." progress broadcast)
+        written_turns = [
+            call.args[1] for call in brain._append_and_broadcast.call_args_list
+            if hasattr(call.args[1], "action")
+        ]
+        error_turns = [t for t in written_turns if t.action == "error"]
+        assert len(error_turns) == 1, (
+            f"Expected exactly one error turn, got actions: {[t.action for t in written_turns]}"
+        )
+        assert "Agent busy" in error_turns[0].thoughts or "Agent busy" in (error_turns[0].result or "")
+
+        # stamp_event must NOT be called for errors (no last_completed_at)
+        brain.blackboard.stamp_event.assert_not_called()
+
+        # Event should be re-enqueued for Brain to decide next steps
+        brain._scheduler.enqueue.assert_called_with("evt-err")
+
+    @pytest.mark.asyncio
+    async def test_successful_result_writes_action_execute(self):
+        """Positive control: non-error dispatch result still produces action='execute'."""
+        brain = self._make_brain_for_run_agent_task()
+
+        mock_registry = AsyncMock()
+        mock_registry.get_available = AsyncMock(return_value=None)
+        mock_bridge = MagicMock()
+
+        with (
+            patch("src.dependencies.get_registry_and_bridge", return_value=(mock_registry, mock_bridge)),
+            patch("src.agents.brain.dispatch_to_agent", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            mock_dispatch.return_value = ("All done. Changes committed to branch.", "session-123")
+
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+        written_turns = [
+            call.args[1] for call in brain._append_and_broadcast.call_args_list
+            if hasattr(call.args[1], "action")
+        ]
+        execute_turns = [t for t in written_turns if t.action == "execute"]
+        assert len(execute_turns) == 1, (
+            f"Expected action='execute' for successful result, got: {[t.action for t in written_turns]}"
+        )
+
+        # stamp_event IS called on success
+        brain.blackboard.stamp_event.assert_called_once()
+
+
+# =========================================================================
+# QE regression (PR #192 HIGH finding follow-up): _agent_error_streak
+# circuit-breaker/backoff transitions in _run_agent_task's error gate.
+# =========================================================================
+class TestAgentErrorCircuitBreaker:
+    """Consecutive 'Error:' dispatch results for the same event must not
+    re-enqueue unconditionally forever.
+
+    Regression: before this fix, every "Error: ..." dispatch result re-enqueued
+    the event immediately with zero backoff, so a deterministically failing
+    agent looped forever (error -> enqueue -> dispatch -> error). The fix caps
+    consecutive error results per event_id in `_agent_error_streak`:
+      - streak 1 (of MAX_AGENT_ERROR_STREAK=3): immediate re-enqueue (legacy
+        behavior preserved, covered by TestErrorResultTurnType above).
+      - streak 2..last-1: defer via `_defer_event_safely` with backoff =
+        AGENT_ERROR_BACKOFF_SECONDS * (streak - 1).
+      - streak == MAX_AGENT_ERROR_STREAK: circuit-breaks -- pops the streak
+        counter and force-closes the event via `_close_and_broadcast` instead
+        of re-enqueueing or deferring.
+    """
+
+    @staticmethod
+    def _make_brain_for_circuit_breaker(initial_streak: int = 0) -> Brain:
+        brain = TestErrorResultTurnType._make_brain_for_run_agent_task()
+        brain.execute_tool_locked = AsyncMock(return_value=None)
+        brain._close_and_broadcast = AsyncMock()
+        if initial_streak:
+            brain._agent_error_streak["evt-err"] = initial_streak
+        return brain
+
+    @staticmethod
+    def _patched_dispatch(brain: Brain, error_text: str = "Error: agent crashed"):
+        mock_registry = AsyncMock()
+        mock_registry.get_available = AsyncMock(return_value=None)
+        mock_bridge = MagicMock()
+        mock_dispatch_cm = patch(
+            "src.agents.brain.dispatch_to_agent", new_callable=AsyncMock,
+        )
+        return (
+            patch("src.dependencies.get_registry_and_bridge", return_value=(mock_registry, mock_bridge)),
+            mock_dispatch_cm,
+            error_text,
+        )
+
+    async def _run_with_error(self, brain: Brain, error_text: str = "Error: agent crashed"):
+        registry_patch, dispatch_patch, error_text = self._patched_dispatch(brain, error_text)
+        with registry_patch, dispatch_patch as mock_dispatch:
+            mock_dispatch.return_value = (error_text, None)
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+    @pytest.mark.asyncio
+    async def test_streak_1_immediate_reenqueue_no_defer_no_close(self):
+        """First consecutive error (streak=1): immediate re-enqueue, no defer, no circuit-break."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=0)
+
+        await self._run_with_error(brain)
+
+        assert brain._agent_error_streak.get("evt-err") == 1
+        brain._scheduler.enqueue.assert_called_once_with("evt-err")
+        brain.execute_tool_locked.assert_not_called()
+        brain._close_and_broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_streak_2_defers_with_backoff_no_immediate_reenqueue(self):
+        """Second consecutive error (streak=2): defers via execute_tool_locked(defer_event),
+        with backoff = AGENT_ERROR_BACKOFF_SECONDS * (streak - 1); no immediate re-enqueue."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=1)
+
+        await self._run_with_error(brain)
+
+        assert brain._agent_error_streak.get("evt-err") == 2
+        brain._scheduler.enqueue.assert_not_called()
+        brain._close_and_broadcast.assert_not_called()
+        brain.execute_tool_locked.assert_called_once()
+        call = brain.execute_tool_locked.call_args
+        assert call.args[0] == "evt-err"
+        assert call.args[1] == "defer_event"
+        assert call.args[2]["delay_seconds"] == AGENT_ERROR_BACKOFF_SECONDS * (2 - 1)
+
+    @pytest.mark.asyncio
+    async def test_streak_3_trips_breaker_and_closes_event(self):
+        """Third consecutive error (streak == MAX_AGENT_ERROR_STREAK): circuit-breaks --
+        closes the event instead of re-enqueueing or deferring, and clears the streak."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=MAX_AGENT_ERROR_STREAK - 1)
+
+        await self._run_with_error(brain)
+
+        assert "evt-err" not in brain._agent_error_streak, (
+            "Streak counter must be cleared once the breaker trips"
+        )
+        brain._scheduler.enqueue.assert_not_called()
+        brain.execute_tool_locked.assert_not_called()
+        brain._close_and_broadcast.assert_called_once()
+        close_call = brain._close_and_broadcast.call_args
+        assert close_call.args[0] == "evt-err"
+        assert close_call.kwargs.get("close_reason") == "error"
+
+    @pytest.mark.asyncio
+    async def test_streak_resets_after_non_error_result(self):
+        """A successful (non-error) dispatch result clears any prior error streak."""
+        brain = self._make_brain_for_circuit_breaker(initial_streak=2)
+
+        registry_patch, dispatch_patch, _ = self._patched_dispatch(brain)
+        with registry_patch, dispatch_patch as mock_dispatch:
+            mock_dispatch.return_value = ("All done. Changes committed.", "session-123")
+            await brain._run_agent_task(
+                event_id="evt-err",
+                agent_name="developer",
+                agent=None,
+                task="Fix the bug",
+                event_md_path="/tmp/evt.md",
+            )
+
+        assert "evt-err" not in brain._agent_error_streak, (
+            "Streak must reset to allow a fresh error streak after a successful result"
         )

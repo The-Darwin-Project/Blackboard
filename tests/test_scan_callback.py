@@ -9,6 +9,7 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
+from src.agents.brain import Brain
 from src.models import EventDocument, EventInput, EventStatus, ConversationTurn, EventEvidence
 
 
@@ -533,6 +534,91 @@ class TestGuard7StaleRaceDetection:
         )
 
 
+class TestGuard1NoRetrigger:
+    """T-1: Guard 1 must NOT re-enqueue events whose non-brain turns are already DELIVERED.
+
+    Regression: Before the fix, Guard 1's has_new_input check included delivered
+    non-brain turns, causing infinite re-processing loops when a running task's
+    earlier conversation had already-evaluated turns (status progressed sent→delivered).
+
+    Codereview PR #192 HIGH finding: these tests used to exercise `_scan_logic`, a
+    hand-maintained duplicate of Guard 1 that is never imported from brain.py --
+    reverting the real fix in `Brain._scan_active_for_reconcile` would leave this
+    class green. They now call the actual production method instead.
+    """
+
+    @staticmethod
+    def _make_brain_for_scan(event: EventDocument, active_tasks: dict) -> Brain:
+        bb = AsyncMock()
+        bb.get_active_events_with_status = AsyncMock(return_value={event.id: "active"})
+        bb.get_event = AsyncMock(return_value=event)
+        bb.mark_turns_delivered = AsyncMock()
+        brain = Brain(blackboard=bb, agents={})
+        brain._active_tasks = active_tasks
+        return brain
+
+    @pytest.mark.asyncio
+    async def test_guard1_delivered_only_not_enqueued(self):
+        """Negative: active task + only DELIVERED non-brain turns → has_new_input=False → skip."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="developer", action="result", status="delivered"),
+            _make_turn(actor="brain", action="route", status="evaluated"),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-1" not in result, (
+            "Guard 1 must NOT re-trigger on already-delivered non-brain turns"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_sent_non_brain_enqueued(self):
+        """Positive: active task + one SENT non-brain turn → has_new_input=True → enqueue."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="developer", action="result", status="delivered"),
+            _make_turn(actor="user", action="message", status="sent"),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-1" in result, (
+            "Guard 1 must enqueue when a fresh SENT non-brain turn exists"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_mixed_delivered_and_sent_enqueued(self):
+        """Mixed: old delivered + fresh sent non-brain → enqueue (sent wins)."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="sysadmin", action="result", status="delivered"),
+            _make_turn(actor="brain", action="thoughts", status="evaluated"),
+            _make_turn(actor="jarvis", action="message", status="sent"),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-1" in result, (
+            "Guard 1 must enqueue when ANY sent non-brain turn exists, regardless of old delivered turns"
+        )
+
+    @pytest.mark.asyncio
+    async def test_guard1_brain_sent_only_not_enqueued(self):
+        """Brain-authored SENT turns do NOT count as new input (brain is the orchestrator)."""
+        active_tasks = {"evt-1": MagicMock(done=MagicMock(return_value=False))}
+        turns = [
+            _make_turn(actor="brain", action="thoughts", status="sent"),
+            _make_turn(actor="brain", action="route", status="sent"),
+        ]
+        event = _make_event("evt-1", conversation=turns)
+        brain = self._make_brain_for_scan(event, active_tasks)
+        result = await brain._scan_active_for_reconcile()
+        assert "evt-1" not in result, (
+            "Guard 1 must NOT enqueue when only brain-authored turns are SENT"
+        )
+
+
 def _scan_logic(
     active_ids: list[str],
     events: dict[str, EventDocument],
@@ -562,10 +648,7 @@ def _scan_logic(
             event = events.get(eid)
             if event:
                 unseen = [t for t in event.conversation if t.status.value == "sent"]
-                has_new_input = any(t.actor != "brain" for t in unseen) or any(
-                    t.status.value == "delivered" and t.actor != "brain"
-                    for t in event.conversation
-                )
+                has_new_input = any(t.actor != "brain" for t in unseen)
                 if has_new_input:
                     to_enqueue.append(eid)
             continue
