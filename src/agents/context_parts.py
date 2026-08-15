@@ -4,6 +4,8 @@
 # 2. [Pattern]: All functions operate on structured dicts (Gemini Content format).
 # 3. [Gotcha]: Imported by brain.py — zero circular imports. No sibling agent imports.
 # 4. [Boundary]: _build_contents stays in brain.py (needs self.blackboard, self._skill_loader).
+# 5. [Batch]: build_single_function_response returns ONE dict (not list) for multi-FR assembly.
+#    compress_contents uses FC/FR count parity for atomic pruning of batch pairs.
 """Pure-function helpers for conversation content building and compression.
 
 Extracted from brain.py for modularity. These have zero dependencies on
@@ -159,17 +161,17 @@ def compress_contents(contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -
     context_msg = contents[0]
     conv_msgs = contents[1:]
 
-    # Pre-pass: identify FC/FR pair indices (must prune atomically)
+    # Pre-pass: identify FC/FR pair indices (must prune atomically).
+    # Batch-aware: only pair when FC count == FR count (count parity).
     pair_buddy: dict[int, int] = {}
     for i in range(len(conv_msgs) - 1):
         msg_i = conv_msgs[i]
         msg_next = conv_msgs[i + 1]
-        if (
-            msg_i["role"] == "model"
-            and any(p.get("functionCall") for p in msg_i.get("parts", []))
-            and msg_next["role"] == "user"
-            and any(p.get("functionResponse") for p in msg_next.get("parts", []))
-        ):
+        if msg_i["role"] != "model" or msg_next["role"] != "user":
+            continue
+        fc_count = sum(1 for p in msg_i.get("parts", []) if p.get("functionCall"))
+        fr_count = sum(1 for p in msg_next.get("parts", []) if p.get("functionResponse"))
+        if fc_count > 0 and fr_count > 0 and fc_count == fr_count:
             pair_buddy[i] = i + 1
             pair_buddy[i + 1] = i
 
