@@ -332,6 +332,8 @@ class ConversationTurn(BaseModel):
     user_name: Optional[str] = Field(None, description="Display name for multi-user conversations (e.g., 'Albert O.')")
     timestamp: float = Field(default_factory=time.time)
     response_parts: Optional[list[dict]] = Field(None, description="Raw model response parts for multi-turn replay (thought_signature, functionCall)")
+    batch_size: Optional[int] = Field(None, description="Number of parallel FCs in this batch (set on first turn only)")
+    batch_index: Optional[int] = Field(None, description="Position in parallel batch (1-based, set on continuation turns)")
 
 
 _PHASE_ALIASES: dict[str, str] = {
