@@ -12,6 +12,9 @@ Verifies the is_terminal split in _process_with_llm's FC-path emission:
 - Regression: a non-terminal-FC iteration followed by a text-only iteration must
   produce exactly ONE brain.response (the original bug produced two).
 - SILENT_PARK gate: narration-only text must not satisfy "respond before parking".
+- RECALL continuation: when the memory reflex gate intercepts a non-terminal FC before
+  it executes, the pre-reflex narration is still thoughts-only, and the eventual
+  post-RECALL text-only answer is the sole brain.response for the cycle.
 """
 from __future__ import annotations
 
@@ -338,3 +341,64 @@ class TestSilentParkGateInteraction:
             self._turn("brain", "thoughts"),
         ]
         assert _pred_silent_park(self._ctx(conversation, source="headhunter")) is False
+
+
+class TestRecallContinuation:
+    """Memory reflex (RECALL) gate intercepts a non-terminal FC before it executes,
+    re-invoking the LLM. The pre-reflex narration must still be downgraded to
+    brain.thoughts, and the eventual post-RECALL text-only answer must be the sole
+    brain.response across the whole cycle -- same invariant as the double-message
+    regression, but exercised through the RECALL early-return path instead of a
+    normal tool execution."""
+
+    @pytest.mark.asyncio
+    async def test_recall_continuation_single_response(self):
+        iter0_chunks = [
+            _Chunk(text="Let me check for similar issues first."),
+            _Chunk(function_call=FunctionCall(name="classify_event", args={})),
+        ]
+        iter1_chunks = [_Chunk(text="Based on a past incident, this is a config drift issue.")]
+        streams = iter([MockStream(iter0_chunks), MockStream(iter1_chunks)])
+
+        brain = _make_brain(stream_factory=lambda **kw: next(streams))
+        event = _make_event(source="slack")
+
+        mock_searcher = MagicMock()
+        mock_searcher.gather = AsyncMock(return_value=[{"payload": {"title": "past incident"}, "score": 0.91}])
+        mock_searcher.fire = MagicMock()
+        mock_chunker = MagicMock()
+        mock_chunker.feed = MagicMock(return_value=None)
+        mock_chunker.flush = MagicMock(return_value=None)
+        brain._create_reflex_pair = MagicMock(return_value=(mock_chunker, mock_searcher))
+
+        with _gate_patch(["classify_event", "wait_for_user"]), _gate_ctx_patch():
+            # Iteration 0: non-terminal FC -- RECALL fires before the tool executes.
+            should_continue = await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=0, response_emitted=False,
+            )
+            response_emitted = "evt-cc105cc5" in brain._response_emitted_for
+            assert should_continue is True, "RECALL block re-invokes the LLM -- loop must continue"
+            assert response_emitted is False, (
+                "non-terminal FC narration must not flip response_emitted even when "
+                "the tool never actually executes (RECALL intercepted it)"
+            )
+            brain._execute_function_call.assert_not_awaited()
+            assert "evt-cc105cc5" in brain._reflex_fired_for
+
+            # Iteration 1: text-only answer produced after RECALL context injection.
+            await brain._process_with_llm(
+                "evt-cc105cc5", event, iteration=1, response_emitted=response_emitted,
+            )
+
+        response_turns = _turns_by_action(brain, "response")
+        assert len(response_turns) == 1, (
+            f"expected exactly one brain.response across the RECALL cycle, got {len(response_turns)}"
+        )
+        assert response_turns[0].thoughts == "Based on a past incident, this is a config drift issue."
+
+        thoughts_turns = _turns_by_action(brain, "thoughts")
+        assert len(thoughts_turns) == 1
+        assert thoughts_turns[0].thoughts == "Let me check for similar issues first."
+
+        # Auto-park still fires off the sole (terminal) text-only response for slack/chat sources.
+        assert "evt-cc105cc5" in brain._waiting_for_user
