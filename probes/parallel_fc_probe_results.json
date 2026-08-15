@@ -1,0 +1,447 @@
+{
+  "timestamp": "2026-08-15T00:22:49",
+  "models": [
+    "gemini-3.1-pro-preview-customtools",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash"
+  ],
+  "total_observations": 30,
+  "parallel_fc_rate": 0.23333333333333334,
+  "gate_violations": 0,
+  "observations": [
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 0,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 10323.316064983374,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 1,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 10415.017988008913,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 2,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 11045.5644740141,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 3,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 11311.595649982337,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 4,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 9597.154324001167,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 5,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 9129.693746974226,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 6,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 9551.900287013268,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 7,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 11166.266232990893,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 8,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 7027.767959982157,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.1-pro-preview-customtools",
+      "prompt_idx": 9,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 10505.589620996034,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 0,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5976.588793011615,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 1,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 7137.4686819908675,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 2,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5008.480044984026,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 3,
+      "fc_count": 2,
+      "fc_order": [
+        "classify_event",
+        "select_agent"
+      ],
+      "signatures": {
+        "classify_event": true,
+        "select_agent": false
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5989.113273011753,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 4,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5447.721586999251,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 5,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4860.461545002181,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 6,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4534.989284002222,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 7,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4861.53997699148,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 8,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 7650.814024993451,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.7-flash",
+      "prompt_idx": 9,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 3956.847438996192,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 0,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5404.087417991832,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 1,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 6563.618073996622,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 2,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4986.516253004083,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 3,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 6322.6646250113845,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 4,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5243.959177023498,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 5,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4952.222059015185,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 6,
+      "fc_count": 1,
+      "fc_order": [
+        "consult_deep_memory"
+      ],
+      "signatures": {
+        "consult_deep_memory": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 9050.586956000188,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 7,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4898.656532983296,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 8,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 5095.7879750058055,
+      "error": ""
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "prompt_idx": 9,
+      "fc_count": 1,
+      "fc_order": [
+        "classify_event"
+      ],
+      "signatures": {
+        "classify_event": true
+      },
+      "has_text_before_fc": false,
+      "latency_ms": 4295.386533020064,
+      "error": ""
+    }
+  ]
+}

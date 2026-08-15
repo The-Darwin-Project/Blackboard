@@ -4,6 +4,8 @@
 # 2. [Pattern]: All functions operate on structured dicts (Gemini Content format).
 # 3. [Gotcha]: Imported by brain.py — zero circular imports. No sibling agent imports.
 # 4. [Boundary]: _build_contents stays in brain.py (needs self.blackboard, self._skill_loader).
+# 5. [Batch]: build_single_function_response returns ONE dict (not list) for multi-FR assembly.
+#    compress_contents uses FC/FR count parity for atomic pruning of batch pairs.
 """Pure-function helpers for conversation content building and compression.
 
 Extracted from brain.py for modularity. These have zero dependencies on
@@ -95,6 +97,32 @@ def build_function_response(turn: "ConversationTurn", skill_prefix: str = "") ->
     return [{"functionResponse": {"name": tool_name, "response": {"result": response_text}}}]
 
 
+_XML_FENCE_TAGS = (
+    "</functionResponse>", "</description>", "</job_log>",
+    "</comments>", "</mention_request>", "</issue_body>",
+)
+
+
+def build_single_function_response(turn: "ConversationTurn", fc_name: str | None = None) -> dict:
+    """Build one functionResponse dict for a single turn in a batch.
+
+    Unlike build_function_response (returns list[dict]), this returns a single
+    dict for assembly into multi-FR user Content by the batch replay path.
+    """
+    tool_name = fc_name or "unknown_tool"
+    if not fc_name and turn.response_parts:
+        for p in turn.response_parts:
+            if p.get("functionCall"):
+                tool_name = p["functionCall"].get("name", "unknown_tool")
+                break
+    if tool_name == "unknown_tool" and turn.waitingFor:
+        tool_name = turn.waitingFor
+    response_text = turn.evidence or turn.thoughts or ""
+    for tag in _XML_FENCE_TAGS:
+        response_text = response_text.replace(tag, "")
+    return {"functionResponse": {"name": tool_name, "response": {"result": response_text}}}
+
+
 def estimate_msg_tokens(msg: dict) -> int:
     """Char count for a single Content message (text + FC args + FR response + sig)."""
     chars = 0
@@ -133,19 +161,26 @@ def compress_contents(contents: list[dict], max_tokens: int = _CONTENT_BUDGET) -
     context_msg = contents[0]
     conv_msgs = contents[1:]
 
-    # Pre-pass: identify FC/FR pair indices (must prune atomically)
+    # Pre-pass: identify FC/FR pair indices (must prune atomically).
+    # Batch-aware (v2 only): use count parity. Flag-off: any FC + any FR pairs.
+    import os as _os
+    _sig_v2 = _os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
     pair_buddy: dict[int, int] = {}
     for i in range(len(conv_msgs) - 1):
         msg_i = conv_msgs[i]
         msg_next = conv_msgs[i + 1]
-        if (
-            msg_i["role"] == "model"
-            and any(p.get("functionCall") for p in msg_i.get("parts", []))
-            and msg_next["role"] == "user"
-            and any(p.get("functionResponse") for p in msg_next.get("parts", []))
-        ):
-            pair_buddy[i] = i + 1
-            pair_buddy[i + 1] = i
+        if msg_i["role"] != "model" or msg_next["role"] != "user":
+            continue
+        fc_count = sum(1 for p in msg_i.get("parts", []) if p.get("functionCall"))
+        fr_count = sum(1 for p in msg_next.get("parts", []) if p.get("functionResponse"))
+        if _sig_v2:
+            if fc_count > 0 and fr_count > 0 and fc_count == fr_count:
+                pair_buddy[i] = i + 1
+                pair_buddy[i + 1] = i
+        else:
+            if fc_count > 0 and fr_count > 0:
+                pair_buddy[i] = i + 1
+                pair_buddy[i + 1] = i
 
     tail_budget = 200_000
     kept_indices: list[int] = []

@@ -375,6 +375,26 @@ async def handle_defer_event(
         )
         await ctx.append_and_broadcast(event_id, turn)
         return False
+
+    # Idempotency guard: if a prior defer_event call already landed (status
+    # persisted) but its confirming turn/response never reached the LLM
+    # (e.g. crash mid-batch-replay), the LLM may re-issue this exact call
+    # believing it "never happened". No-op instead of deferring twice.
+    bb = ctx.get_blackboard()
+    existing_event = await bb.get_event(event_id)
+    if existing_event and existing_event.status == EventStatus.DEFERRED:
+        logger.info(f"Ignoring duplicate defer_event for {event_id}: already deferred")
+        dup_turn = ConversationTurn(
+            turn=(await ctx.next_turn_number(event_id)),
+            actor="brain",
+            action="tool_result",
+            thoughts="This event is already deferred. Skipping duplicate defer_event call.",
+            waitingFor="defer_event",
+            response_parts=response_parts,
+        )
+        await ctx.append_and_broadcast(event_id, dup_turn)
+        return False
+
     ctx.clear_waiting_for_agent(event_id)
     reason = args.get("reason", "Deferred by Brain")
     delay = max(30, min(int(args.get("delay_seconds", 60)), 3600))
@@ -388,7 +408,6 @@ async def handle_defer_event(
         waitingFor="defer_event",
     )
     await ctx.append_and_broadcast(event_id, turn)
-    bb = ctx.get_blackboard()
     success = await bb.defer_event_status(event_id, defer_until, delay)
     if success:
         await ctx.broadcast({

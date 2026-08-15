@@ -216,6 +216,7 @@ import httpx
 
 from src.agents.context_parts import (
     build_function_response as _cp_build_function_response,
+    build_single_function_response as _cp_build_single_fr,
     compress_contents as _cp_compress_contents,
     estimate_msg_tokens as _cp_estimate_msg_tokens,
     estimate_tokens as _cp_estimate_tokens,
@@ -401,6 +402,51 @@ _HTML_TAG_RE = _re.compile(r'<[^>]+>')
 _ERROR_TEXT_MAX = 300
 
 _THOUGHT_SIG_V2 = os.environ.get("BRAIN_THOUGHT_SIG_V2", "false").lower() in ("true", "1", "yes")
+
+_MAX_BATCH_SIZE = 4
+
+# Tools with side effects that are NOT safe to blindly re-issue (dispatching an
+# agent, deferring an event). When a batch FC's turn never got persisted before
+# a crash, the replay padding below must not claim "execution interrupted" for
+# these -- that phrasing reads as "nothing happened, safe to retry" and can
+# cause the LLM to re-dispatch/re-defer a call whose side effect already ran.
+_NON_IDEMPOTENT_TOOLS = frozenset({"select_agent", "ask_agent_for_state", "defer_event"})
+
+
+class _BatchContext:
+    """Wraps _tool_ctx to inject batch markers on the FIRST tool_result turn per FC."""
+
+    __slots__ = ("_inner", "_batch_size", "_batch_index", "_injected")
+
+    def __init__(self, inner_ctx: "ToolContext", batch_size: int | None, batch_index: int | None):
+        self._inner = inner_ctx
+        self._batch_size = batch_size
+        self._batch_index = batch_index
+        self._injected = False
+
+    async def append_and_broadcast(self, event_id: str, turn: "ConversationTurn", event: "EventDocument | None" = None) -> int:
+        # A turn is excluded from marker injection only if it's a PURE grounding
+        # turn (waitingFor=="google_web_search" and no functionCall parts). When
+        # grounding co-occurs with a batch FC, _execute_function_call's synthetic
+        # google_web_search wrapper turn is the one carrying the batch's real
+        # response_parts (the handler's own turn that follows gets response_parts
+        # cleared to None) -- that turn MUST receive the batch marker or the whole
+        # batch silently loses native FC/FR replay (see is_grounding_excluded in
+        # _build_contents, which is aware of this same carries_fc distinction).
+        carries_fc = bool(turn.response_parts) and any(
+            p.get("functionCall") for p in turn.response_parts
+        )
+        is_pure_grounding = turn.waitingFor == "google_web_search" and not carries_fc
+        if not self._injected and not is_pure_grounding and turn.action != "triage":
+            if self._batch_size is not None:
+                turn.batch_size = self._batch_size
+            if self._batch_index is not None:
+                turn.batch_index = self._batch_index
+            self._injected = True
+        return await self._inner.append_and_broadcast(event_id, turn, event)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
 
 
 def _sanitize_error_text(error: BaseException) -> str:
@@ -1678,7 +1724,164 @@ class Brain:
             grounding_evidence = f"\n\n## Web Search Context\n\nQueries: {queries}\n\nSources:\n{sources}"
             logger.info(f"Google Search grounding for {event_id}: {len(resolved_chunks)} sources (resolved)")
 
-        # Process the final result
+        # -- Parallel FC batch detection (v2 only) --
+        function_calls = [
+            p for p in (captured_parts or []) if p.get("functionCall")
+        ]
+        if _THOUGHT_SIG_V2 and len(function_calls) > 1:
+            # Flush text before batch
+            if accumulated_text and not response_emitted:
+                if is_terminal:
+                    response_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="response",
+                        thoughts=accumulated_text,
+                        evidence=grounding_evidence if grounding_evidence else None,
+                        response_parts=captured_parts,
+                    )
+                    await self._append_and_broadcast(event_id, response_turn)
+                    await self._emit_executive_pulse(event_id, [("tool:brain_response", "tool")])
+                    self._last_processed[event_id] = time.time()
+                    self._response_emitted_for.add(event_id)
+                else:
+                    narration_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="thoughts",
+                        thoughts=accumulated_text,
+                    )
+                    await self._append_and_broadcast(event_id, narration_turn)
+
+            batch_fcs = function_calls[:_MAX_BATCH_SIZE]
+            batch_size = len(batch_fcs)
+
+            # H2 fix: positional truncation of captured_parts to executed FCs only
+            if len(function_calls) > _MAX_BATCH_SIZE:
+                fc_count = 0
+                filtered = []
+                for p in captured_parts:
+                    if p.get("functionCall"):
+                        if fc_count < _MAX_BATCH_SIZE:
+                            filtered.append(p)
+                        fc_count += 1
+                    else:
+                        filtered.append(p)
+                captured_parts = filtered
+
+            logger.info(
+                "Parallel FC batch for %s: %d FCs [%s]",
+                event_id, batch_size,
+                ", ".join(fc["functionCall"]["name"] for fc in batch_fcs),
+            )
+
+            # RECALL fires once for entire batch (not per-FC)
+            if reflex_chunker and reflex_searcher:
+                final_window = reflex_chunker.flush()
+                if final_window:
+                    reflex_searcher.fire(final_window)
+
+            if reflex_searcher and event_id not in self._reflex_fired_for:
+                try:
+                    lessons = await reflex_searcher.gather(timeout=0.5)
+                    if lessons:
+                        titles = [l.get("payload", {}).get("title") or l.get("payload", {}).get("topic", "") for l in lessons]
+                        self._recall_lessons[event_id] = lessons
+                        self._reflex_fired_for.add(event_id)
+                        first_fc_name = batch_fcs[0]["functionCall"]["name"]
+                        try:
+                            await self._broadcast({
+                                "type": "brain_recall_hit",
+                                "event_id": event_id,
+                                "lesson_count": len(lessons),
+                                "titles": titles,
+                                "blocked_tool": first_fc_name,
+                            })
+                        except Exception as be:
+                            logger.warning(f"RECALL broadcast failed for {event_id} (non-fatal): {be}")
+                        return True
+                except Exception as e:
+                    logger.warning(f"Memory reflex gate error for {event_id}: {e}")
+
+            self._reasoning_by_event[event_id] = accumulated_thoughts or None
+
+            for i, fc_part in enumerate(batch_fcs):
+                fc_name = fc_part["functionCall"]["name"]
+                fc_args = fc_part["functionCall"].get("args", {})
+
+                batch_ctx = _BatchContext(
+                    self._tool_ctx,
+                    batch_size=batch_size if i == 0 else None,
+                    batch_index=i if i > 0 else None,
+                )
+
+                # Authorization re-check for every FC in the batch, not just FC[1+].
+                # FC[0] is checked against the same `active_tools` set the single-FC
+                # path uses for its defense-in-depth re-validation (see valid_tool_names
+                # below) -- it was generated under that toolset, so no fresh Redis
+                # fetch is needed. FC[1+] gets an explicit re-fetch + re-evaluation
+                # since executing FC[0..i-1] may have changed brain_phase/event state
+                # (e.g. classify_event firing before select_agent).
+                try:
+                    if i == 0:
+                        valid_names = {t["name"] for t in active_tools}
+                    else:
+                        event = await self.blackboard.get_event(event_id)
+                        from .tool_gates import evaluate_gates, build_gate_context
+                        brain_phase = _resolve_phase(event.brain_phase)
+                        gate_ctx = build_gate_context(
+                            event=event,
+                            brain_phase=brain_phase,
+                            context_flags=context_flags,
+                            is_defer_wake=is_defer_wake,
+                            iteration=iteration,
+                            jarvis_already_waiting=event_id in self._waiting_for_jarvis,
+                            jarvis_wait_count=self._jarvis_wait_count.get(event_id, 0),
+                        )
+                        refreshed_tools = evaluate_gates(BRAIN_TOOL_SCHEMAS, gate_ctx)
+                        valid_names = {t["name"] for t in refreshed_tools}
+                except Exception as e:
+                    logger.error(
+                        "Batch gate re-eval failed for %s at FC[%d] %s: %s",
+                        event_id, i, fc_name, e, exc_info=True,
+                    )
+                    error_turn = ConversationTurn(
+                        turn=(await self._next_turn_number(event_id)),
+                        actor="brain",
+                        action="tool_result",
+                        thoughts=f"Internal error re-checking authorization before {fc_name} "
+                                 f"(batch position {i}): {str(e)[:200]}. Batch execution halted; "
+                                 "remaining queued calls in this batch were not run.",
+                        response_parts=captured_parts if i == 0 else None,
+                    )
+                    await batch_ctx.append_and_broadcast(event_id, error_turn)
+                    break
+
+                if fc_name not in valid_names:
+                    logger.warning(
+                        "Batch FC[%d] %s rejected by gate%s",
+                        i, fc_name, "" if i == 0 else f" after FC[{i - 1}]",
+                    )
+                    break
+
+                grounding = grounding_evidence if i == 0 else None
+                rp = captured_parts if i == 0 else None
+
+                result = await self._execute_function_call(
+                    event_id, fc_name, fc_args,
+                    response_parts=rp,
+                    grounding_evidence=grounding,
+                    _ctx_override=batch_ctx,
+                )
+
+                if not result:
+                    break
+                if await self._is_event_closed(event_id):
+                    break
+
+            return False
+
+        # Process the final result (single-FC path)
         if function_call:
             # Flush text response before executing tool (mixed text + function call)
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
@@ -2768,25 +2971,37 @@ class Brain:
         last_non_brain_pos: tuple[int, int] | None = None
         _fc_emitted_for_turn: set[int] = set()
         _last_emitted_idx: int | None = None
+        _skip_set: set[int] = set()
 
         for idx, turn in enumerate(event.conversation):
+            if idx in _skip_set:
+                continue
+
             role = "model" if turn.actor == "brain" else "user"
             if turn.actor == "brain" and turn.action == "tool_result":
                 role = "user"
             skill_injected_by_v2 = False
 
             # -- FC/FR-aware replay for tool_result turns (v2 path) --
+            # Batch-marked turns of ANY action type also enter this path (C1 fix)
             if (
                 _THOUGHT_SIG_V2
                 and turn.actor == "brain"
-                and turn.action == "tool_result"
+                and (turn.action == "tool_result" or turn.batch_size or turn.batch_index)
                 and turn.response_parts
                 and any(p.get("functionCall") for p in turn.response_parts)
             ):
                 # Guard: exclude grounding turns from native FC/FR replay.
                 # Two cases: (a) pure grounding (FC name == "google_web_search"),
                 # (b) synthetic pre-turns (FC name != waitingFor, e.g. real FC
-                # carried on a google_web_search wrapper turn).
+                # carried on a google_web_search wrapper turn) -- EXCEPT when the
+                # turn is a batch head (turn.batch_size set): there, the wrapper
+                # turn carrying grounding evidence is the ONLY turn that ever holds
+                # the batch's real response_parts (the handler's own turn that
+                # follows has response_parts cleared to None), so excluding it here
+                # would silently drop native FC/FR replay for the WHOLE batch, not
+                # just the grounding display. The batch-replay branch below handles
+                # such turns correctly regardless of turn.waitingFor.
                 fc_names_in_parts = {
                     p["functionCall"].get("name")
                     for p in turn.response_parts
@@ -2798,10 +3013,90 @@ class Brain:
                         turn.waitingFor
                         and fc_names_in_parts
                         and turn.waitingFor not in fc_names_in_parts
+                        and not turn.batch_size
                     )
                 )
 
                 if not is_grounding_excluded:
+                    # -- Batch replay path: 1 model Content + 1 user Content --
+                    if turn.batch_size and turn.batch_size > 1:
+                        fc_parts = self._extract_model_parts(turn.response_parts)
+                        if fc_parts:
+                            # Derive canonical FC names from head turn's response_parts order
+                            batch_fc_names = [
+                                p["functionCall"]["name"]
+                                for p in turn.response_parts
+                                if p.get("functionCall")
+                            ][:turn.batch_size]
+
+                            # Dedup: skip model:FC if preceding turn already emitted
+                            preceding_emitted = (
+                                _last_emitted_idx is not None
+                                and _last_emitted_idx in _fc_emitted_for_turn
+                            )
+                            if not preceding_emitted:
+                                if contents and contents[-1]["role"] == "model":
+                                    contents[-1]["parts"].extend(fc_parts)
+                                else:
+                                    contents.append({"role": "model", "parts": list(fc_parts)})
+                            _fc_emitted_for_turn.add(idx)
+
+                            # Build FR for FC[0] (head turn)
+                            fc0_name = batch_fc_names[0] if batch_fc_names else None
+                            all_frs = [_cp_build_single_fr(turn, fc0_name)]
+
+                            # Look-ahead for batch_index continuation turns (any action)
+                            for bi in range(1, turn.batch_size):
+                                found = False
+                                for scan_idx in range(idx + 1, len(event.conversation)):
+                                    scan_turn = event.conversation[scan_idx]
+                                    if (
+                                        scan_turn.batch_index == bi
+                                        and scan_turn.actor == "brain"
+                                    ):
+                                        fc_name_for_bi = (
+                                            batch_fc_names[bi]
+                                            if bi < len(batch_fc_names)
+                                            else None
+                                        )
+                                        all_frs.append(
+                                            _cp_build_single_fr(scan_turn, fc_name_for_bi)
+                                        )
+                                        _skip_set.add(scan_idx)
+                                        found = True
+                                        break
+                                if not found:
+                                    pad_name = (
+                                        batch_fc_names[bi]
+                                        if bi < len(batch_fc_names)
+                                        else "unknown_tool"
+                                    )
+                                    if pad_name in _NON_IDEMPOTENT_TOOLS:
+                                        pad_result = (
+                                            "unknown -- the process may have crashed after this "
+                                            "call's side effect already ran (e.g. an agent may "
+                                            "already be dispatched, or the event may already be "
+                                            "deferred). Do NOT blindly re-issue this exact call; "
+                                            "check current event state first."
+                                        )
+                                    else:
+                                        pad_result = "execution interrupted"
+                                    all_frs.append({
+                                        "functionResponse": {
+                                            "name": pad_name,
+                                            "response": {"result": pad_result},
+                                        }
+                                    })
+
+                            # Emit ONE user Content with all FRs
+                            if contents and contents[-1]["role"] == "user":
+                                contents[-1]["parts"].extend(all_frs)
+                            else:
+                                contents.append({"role": "user", "parts": all_frs})
+
+                            _last_emitted_idx = idx
+                            continue
+
                     fc_parts = self._extract_model_parts(turn.response_parts)
                     if fc_parts:
                         # Skill injection check (before FC/FR emission)
@@ -3000,6 +3295,7 @@ class Brain:
         args: dict,
         response_parts: list[dict] | None = None,
         grounding_evidence: str | None = None,
+        _ctx_override: "_BatchContext | None" = None,
     ) -> bool:
         """
         Thin dispatcher: pulse emission + registry lookup + ToolContext delegation.
@@ -3008,7 +3304,12 @@ class Brain:
         Returns False for all other cases (close, wait, dispatch).
         Called within per-event asyncio.Lock (primary path) or via
         execute_tool_locked (off-lock background tasks).
+
+        _ctx_override: when set, passed to handler instead of self._tool_ctx
+        (used by parallel-FC batch execution to inject batch markers).
         """
+        ctx = _ctx_override or self._tool_ctx
+
         if grounding_evidence:
             turn = ConversationTurn(
                 turn=(await self._next_turn_number(event_id)),
@@ -3018,7 +3319,7 @@ class Brain:
                 evidence=grounding_evidence,
                 response_parts=response_parts,
             )
-            await self._append_and_broadcast(event_id, turn)
+            await ctx.append_and_broadcast(event_id, turn)
             response_parts = None
 
         if function_name != "respond_to_jarvis":
@@ -3034,7 +3335,7 @@ class Brain:
         handler = HANDLER_REGISTRY.get(function_name)
         if handler:
             try:
-                return await handler(self._tool_ctx, event_id, args, response_parts)
+                return await handler(ctx, event_id, args, response_parts)
             except Exception as e:
                 logger.error(f"Handler {function_name} failed for {event_id}: {e}", exc_info=True)
                 error_turn = ConversationTurn(
@@ -3045,7 +3346,7 @@ class Brain:
                              "Consider an alternative approach or retry.",
                     response_parts=response_parts,
                 )
-                await self._append_and_broadcast(event_id, error_turn)
+                await ctx.append_and_broadcast(event_id, error_turn)
                 return False
         else:
             logger.warning(f"[UNKNOWN] function call: {function_name} for {event_id}")
@@ -3056,7 +3357,7 @@ class Brain:
                 thoughts=f"Unknown tool '{function_name}'. Available tools are listed in your function declarations.",
                 response_parts=response_parts,
             )
-            await self._append_and_broadcast(event_id, unknown_turn)
+            await ctx.append_and_broadcast(event_id, unknown_turn)
             return False
 
     async def execute_tool_locked(
