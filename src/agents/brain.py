@@ -1684,6 +1684,7 @@ class Brain:
             # Suppress if a response was already emitted this cycle (RECALL gate continuation) --
             # unless the upcoming tool is terminal (loop ends), in which case this text IS the
             # final answer and must bypass the guard.
+            is_terminal = function_call.name in _CYCLE_ENDING_TOOLS
             if accumulated_text and not response_emitted:
                 response_turn = ConversationTurn(
                     turn=(await self._next_turn_number(event_id)),
@@ -1731,6 +1732,21 @@ class Brain:
                 await self._append_and_broadcast(event_id, turn)
                 return True
             logger.info(f"Brain LLM decision for {event_id}: {function_call.name}")
+
+            # Runtime gate enforcement: reject FCs for tools stripped by gates
+            valid_tool_names = {t["name"] for t in active_tools}
+            if function_call.name not in valid_tool_names:
+                from .tool_gates import diagnose_rejection
+                rejection = diagnose_rejection(function_call.name, gate_ctx)
+                logger.warning("Runtime gate rejection for %s: %s (%s)", event_id, function_call.name, rejection)
+                turn = ConversationTurn(
+                    turn=(await self._next_turn_number(event_id)),
+                    actor="brain", action="tool_result",
+                    thoughts=rejection,
+                    response_parts=captured_parts,
+                )
+                await self._append_and_broadcast(event_id, turn)
+                return True
 
             # Flush remaining thinking buffer for final sentence search
             if reflex_chunker and reflex_searcher:

@@ -314,7 +314,7 @@ async def handle_classify_event(
         await ctx.broadcast({"type": "severity_updated", "event_id": event_id, "severity": severity})
     thoughts += f" {reasoning}"
     turn = ConversationTurn(
-        turn=0,
+        turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="triage",
         thoughts=thoughts,
         response_parts=response_parts,
@@ -333,7 +333,7 @@ async def handle_classify_event(
     if intent and intent.strip():
         directive += f" Your stated intent: {intent.strip()}"
     nudge = ConversationTurn(
-        turn=0,
+        turn=(await ctx.next_turn_number(event_id)),
         actor="brain", action="tool_result",
         evidence=directive,
         waitingFor="classify_event",
