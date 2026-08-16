@@ -9,6 +9,8 @@
 // 7. [Pattern]: Ring layout: executive (r=250, fixed), skills (r=320, fixed), knowledge (r=400-650, FA2-free), events (r=800, fixed).
 // 8. [Gotcha]: Skill node color resolved INLINE during creation (SKILL_TAG_COLORS[tag_type]). getNeuronColor() has no payload access.
 // 9. [Pattern]: Ripple overlay via DOM: sigma.getContainer().appendChild(div.skill-ripple). activeRipplesRef cap=10. idempotent cleanup via `cleaned` flag.
+// 10. [Pattern]: KG Service nodes (kgServices prop) placed in knowledge ring as circles (NEURON_COLORS.service, size 5).
+//     Service-event edges via activeEvent.service match, max 3 per service. Pulse glow propagation via eventServiceMapRef.
 import { useEffect, useRef, type FC } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import { useWorkerLayoutForceAtlas2 } from '@react-sigma/layout-forceatlas2';
@@ -20,7 +22,7 @@ import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS, SKILL_TAG_COL
 import {
   getExecutiveNeurons, getStructuralEdges, eventColor, PHASE_SKILL_FOLDERS,
 } from './cortex-constants';
-import type { ActiveEvent } from '../../api/types';
+import type { ActiveEvent, KGServiceEntity } from '../../api/types';
 import type { Neuron, PulseBatch } from './types';
 // import BrainCore from './BrainCore'; // disabled -- needs its own dedicated view
 
@@ -38,7 +40,7 @@ function getNeuronColor(neuron: { type: string; id: string }): string {
 
 function getNeuronSize(heat: number, type: string): number {
   const base = type === 'agent' ? 6 : type === 'phase' ? 5 : type === 'domain' ? 5
-    : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : 3;
+    : type === 'tool' ? 4 : type === 'event' ? 8 : type === 'skill' ? 3 : type === 'service' ? 5 : 3;
   const maxGrowth = type === 'skill' ? 2 : 4;
   // Logarithmic scaling: heat=1→+0.7, heat=10→+2.3, heat=50→+3.9, heat=100→+4 (capped)
   const growth = heat > 0 ? Math.min(Math.log(heat + 1) * 1.0, maxGrowth) : 0;
@@ -51,6 +53,7 @@ interface GraphLoaderProps {
   activeEvents: ActiveEvent[];
   liveBatches: PulseBatch[];
   dimmedIds?: Set<string>;
+  kgServices?: KGServiceEntity[];
 }
 
 const FA2_SETTINGS = {
@@ -64,7 +67,7 @@ const FA2_SETTINGS = {
   linLogMode: true,
 };
 
-const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches, dimmedIds }) => {
+const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, liveBatches, dimmedIds, kgServices }) => {
   const loadGraph = useLoadGraph();
   const sigma = useSigma();
   const activityTimersRef = useRef<Map<string, number>>(new Map());
@@ -157,7 +160,29 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       });
     }
 
-    // Ring 3: Event nodes on the outermost ring
+    // Ring 3b: KG Service nodes in knowledge band (capped at 15, sorted by relationship_count desc)
+    const cappedServices = (kgServices ?? [])
+      .slice() // avoid mutating original
+      .sort((a, b) => b.relationship_count - a.relationship_count)
+      .slice(0, 15);
+    for (let si = 0; si < cappedServices.length; si++) {
+      const svc = cappedServices[si];
+      const nodeId = svc.entity_id; // already prefixed as "service:darwin-brain"
+      if (graph.hasNode(nodeId)) continue;
+      const angle = (si / Math.max(cappedServices.length, 1)) * 2 * Math.PI - Math.PI / 4;
+      const radius = RING.knowledge.min + Math.random() * (RING.knowledge.max - RING.knowledge.min);
+      graph.addNode(nodeId, {
+        x: radius * Math.cos(angle),
+        y: radius * Math.sin(angle),
+        size: getNeuronSize(0, 'service'),
+        color: NEURON_COLORS.service,
+        label: svc.entity_id.replace(/^service:/, '').slice(0, 20),
+        type: 'circle',
+        fixed: false,
+      });
+    }
+
+    // Ring 4: Event nodes on the outermost ring
     const eventCount = activeEvents.length;
     for (let i = 0; i < eventCount; i++) {
       const evt = activeEvents[i];
@@ -205,8 +230,35 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
       }
     }
 
+    // Service-event edges: connect service nodes to active event nodes via activeEvent.service
+    const serviceEdgeCounts = new Map<string, number>();
+    for (const evt of activeEvents) {
+      if (!evt.service) continue;
+      const serviceNodeId = `service:${evt.service}`;
+      if (!graph.hasNode(serviceNodeId) || !graph.hasNode(evt.id)) continue;
+      const count = serviceEdgeCounts.get(serviceNodeId) ?? 0;
+      if (count >= 3) continue;
+      serviceEdgeCounts.set(serviceNodeId, count + 1);
+      const edgeId = `svc-evt:${serviceNodeId}:${evt.id}`;
+      if (!graph.hasEdge(edgeId)) {
+        graph.addEdgeWithKey(edgeId, serviceNodeId, evt.id, {
+          color: '#f59e0b66', size: 1, type: 'line', structural: true,
+        });
+      }
+    }
+
     loadGraph(graph);
-  }, [neurons, activeEvents, loadGraph]);
+  }, [neurons, activeEvents, kgServices, loadGraph]);
+
+  // Event-to-service map for glow propagation (built from activeEvents)
+  const eventServiceMapRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    const map = new Map<string, string>();
+    for (const evt of activeEvents) {
+      if (evt.service) map.set(evt.id, `service:${evt.service}`);
+    }
+    eventServiceMapRef.current = map;
+  }, [activeEvents]);
 
   // Activity edges from liveBatches -- mutate Sigma's LIVE graph directly
   useEffect(() => {
@@ -361,6 +413,27 @@ const GraphLoader: FC<GraphLoaderProps> = ({ neurons, glowingIds, activeEvents, 
 
         if (delay > 0) { setTimeout(createEdge, delay); } else { createEdge(); }
       }
+
+      // Glow propagation: when a pulse fires for an event, glow its connected service node
+      const serviceNodeId = eventServiceMapRef.current.get(evtId);
+      if (serviceNodeId && graph.hasNode(serviceNodeId)) {
+        const glowDelay = batch.pulses.length * 120;
+        setTimeout(() => {
+          if (!graph.hasNode(serviceNodeId)) return;
+          if (!baseSizeRef.current.has(serviceNodeId)) {
+            baseSizeRef.current.set(serviceNodeId, graph.getNodeAttribute(serviceNodeId, 'size') as number);
+          }
+          const origColor = graph.getNodeAttribute(serviceNodeId, 'color') as string;
+          const svcBase = baseSizeRef.current.get(serviceNodeId)!;
+          graph.setNodeAttribute(serviceNodeId, 'color', '#fbbf24');
+          graph.setNodeAttribute(serviceNodeId, 'size', svcBase * 1.5);
+          setTimeout(() => {
+            if (!graph.hasNode(serviceNodeId)) return;
+            graph.setNodeAttribute(serviceNodeId, 'color', origColor);
+            graph.setNodeAttribute(serviceNodeId, 'size', svcBase);
+          }, 2000);
+        }, glowDelay);
+      }
     }
   }, [liveBatches, sigma, activeEvents]);
 
@@ -494,6 +567,7 @@ interface CortexGraphProps {
   glowingIds: Set<string>;
   activeEvents?: ActiveEvent[];
   liveBatches?: PulseBatch[];
+  kgServices?: KGServiceEntity[];
   dimmedIds?: Set<string>;
   onClickNeuron?: (id: string | null, pos?: { x: number; y: number }) => void;
   className?: string;
@@ -501,7 +575,7 @@ interface CortexGraphProps {
 
 export default function CortexGraph({
   neurons, glowingIds, activeEvents = [], liveBatches = [],
-  dimmedIds, onClickNeuron, className,
+  kgServices, dimmedIds, onClickNeuron, className,
 }: CortexGraphProps) {
   return (
     <div className={`relative ${className ?? ''}`} style={{ background: '#030712', width: '100%', height: '100%' }}>
@@ -530,6 +604,7 @@ export default function CortexGraph({
           glowingIds={glowingIds}
           activeEvents={activeEvents}
           liveBatches={liveBatches}
+          kgServices={kgServices}
           dimmedIds={dimmedIds}
         />
         <FA2Controller />

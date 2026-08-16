@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .agents.brain import Brain
     from .agents.developer import Developer
     from .agents.sysadmin import SysAdmin
+    from .memory.knowledge_graph import KnowledgeGraphStore
     from .observers.kargo import KargoObserver
     from .observers.argocd import ArgoCDObserver
 
@@ -148,6 +149,19 @@ def set_argocd_observer(observer: "ArgoCDObserver") -> None:
 async def get_argocd_observer() -> Optional["ArgoCDObserver"]:
     """Get the ArgoCDObserver instance. Returns None when ARGOCD_OBSERVER_ENABLED=false."""
     return _argocd_observer
+
+
+# KnowledgeGraphStore (set by main.py lifespan when KG_POSTGRES_URL is configured)
+_kg_store: Optional["KnowledgeGraphStore"] = None
+
+
+def set_kg_store(store: "KnowledgeGraphStore") -> None:
+    global _kg_store
+    _kg_store = store
+
+
+async def get_kg_store() -> Optional["KnowledgeGraphStore"]:
+    return _kg_store
 
 
 # Registry + Bridge (set by main.py lifespan, read by brain.py dispatch)

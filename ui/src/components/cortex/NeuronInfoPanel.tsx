@@ -8,12 +8,13 @@ import { memo, useEffect, useLayoutEffect, useRef, useState, type FC, type React
 import { X } from 'lucide-react';
 import { NEURON_COLORS, AGENT_NEURON_COLORS, DOMAIN_NEURON_COLORS, SKILL_TAG_COLORS } from '../../constants/colors';
 import { NEURON_DESCRIPTIONS } from './cortex-constants';
+import type { KGServiceDetail } from '../../api/types';
 import type { Neuron } from './types';
 
 const asString = (v: unknown): string => typeof v === 'string' ? v : '';
 const asNumber = (v: unknown): number => typeof v === 'number' ? v : 0;
 const asStringArray = (v: unknown): string[] => Array.isArray(v) ? v.filter(i => typeof i === 'string') : [];
-const describeNeuron = (id: string) => NEURON_DESCRIPTIONS[id] ?? id.replace(/^(tool|phase|agent|domain):/, '').replace(/_/g, ' ');
+const describeNeuron = (id: string) => NEURON_DESCRIPTIONS[id] ?? id.replace(/^(tool|phase|agent|domain|service):/, '').replace(/_/g, ' ');
 
 const Hdr: FC<{ text: string }> = ({ text }) => (
   <div className="text-[10px] text-text-muted uppercase tracking-wider mb-1">{text}</div>
@@ -28,9 +29,10 @@ interface NeuronInfoPanelProps {
   neuron: Neuron;
   position: { x: number; y: number };
   onClose: () => void;
+  serviceDetail?: KGServiceDetail;
 }
 
-const NeuronInfoPanel: FC<NeuronInfoPanelProps> = ({ neuron, position, onClose }) => {
+const NeuronInfoPanel: FC<NeuronInfoPanelProps> = ({ neuron, position, onClose, serviceDetail }) => {
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState(position);
   const p = neuron.payload;
@@ -103,6 +105,43 @@ const NeuronInfoPanel: FC<NeuronInfoPanelProps> = ({ neuron, position, onClose }
         {phaseFolder && <Badge text={phaseFolder} />}
       </div>
       {neuron.heat > 0 && <div className="text-[10px] text-text-muted">Heat: {neuron.heat}</div>}
+    </>);
+  } else if (neuron.type === 'service') {
+    const serviceName = neuron.id.replace('service:', '');
+    const relCount = asNumber(p.relationship_count);
+    const lastSeen = asString(p.last_seen);
+    const rels = serviceDetail?.relationships ?? [];
+    const grouped = new Map<string, typeof rels>();
+    for (const r of rels) {
+      const existing = grouped.get(r.rel_type) ?? [];
+      existing.push(r);
+      grouped.set(r.rel_type, existing);
+    }
+    body = (<>
+      <div className="text-[12px] text-text-primary font-medium mb-1" style={{ color: NEURON_COLORS.service }}>{serviceName}</div>
+      <div className="flex items-center gap-2 mb-2">
+        <Badge text="KG Service" color={NEURON_COLORS.service} />
+        {relCount > 0 && <span className="text-[10px] text-text-muted">{relCount} relationships</span>}
+      </div>
+      {lastSeen && <div className="text-[10px] text-text-muted mb-2">Last seen: {lastSeen}</div>}
+      {grouped.size > 0 && (<>
+        <Hdr text="Relationships" />
+        <div className="space-y-1.5 max-h-40 overflow-y-auto">
+          {[...grouped.entries()].map(([relType, items]) => (
+            <div key={relType}>
+              <div className="text-[10px] text-text-muted font-mono mb-0.5">{relType}</div>
+              {items.map((item, idx) => (
+                <div key={idx} className="text-[11px] text-text-secondary pl-2">
+                  {item.entity_type}: {item.entity_id}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </>)}
+      {grouped.size === 0 && !serviceDetail && (
+        <div className="text-[10px] text-text-muted italic">Loading relationships…</div>
+      )}
     </>);
   } else {
     const subName = neuron.id.replace(/^(tool|phase|agent|domain):/, '');

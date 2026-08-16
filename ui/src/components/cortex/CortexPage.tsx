@@ -5,7 +5,7 @@
 // 3. [Constraint]: Uses useCortexGraph for initial load, usePulseStream for real-time, usePulseGlow for animation.
 import { useState, useMemo, useCallback, useEffect, type FC } from 'react';
 import { Loader2, Brain, ChevronLeft, ChevronRight } from 'lucide-react';
-import { useCortexGraph, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
+import { useCortexGraph, useKGServiceDetail, useKGServices, usePulseStream, usePulseGlow, useCortexThinking, useCortexShadow, useCortexWhispers, useCortexStatus, useHeartbeat } from '../../hooks/useCortexData';
 import { useActiveEvents } from '../../hooks/useQueue';
 import { getEventReport } from '../../api/client';
 import CortexGraph from './CortexGraph';
@@ -26,11 +26,17 @@ const CortexPage: FC = () => {
   const cortexStatus = useCortexStatus();
   const { heartbeatType, tick: heartbeatTick } = useHeartbeat();
   const { data: activeEvents } = useActiveEvents();
+  const { data: kgServices } = useKGServices();
 
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [selectedNeuron, setSelectedNeuron] = useState<{ id: string; pos: { x: number; y: number } } | null>(null);
   const [feedOpen, setFeedOpen] = useState(true);
   const [reportViewer, setReportViewer] = useState<{ title: string; content: string } | null>(null);
+
+  const selectedServiceId = selectedNeuron?.id.startsWith('service:')
+    ? selectedNeuron.id.replace('service:', '')
+    : null;
+  const { data: serviceDetail } = useKGServiceDetail(selectedServiceId);
 
   const neurons: Neuron[] = graphData?.neurons ?? [];
 
@@ -65,6 +71,11 @@ const CortexPage: FC = () => {
         .catch(() => {});
       return;
     }
+    // Service nodes are dynamically added by CortexGraph — synthesize a Neuron for the panel
+    if (id.startsWith('service:')) {
+      setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
+      return;
+    }
     if (!mergedNeurons.some(n => n.id === id)) return;
     setSelectedNeuron(prev => prev?.id === id ? null : (pos ? { id, pos } : null));
   }, [mergedNeurons, activeEvents]);
@@ -72,7 +83,7 @@ const CortexPage: FC = () => {
   const handleCloseNeuron = useCallback(() => setSelectedNeuron(null), []);
 
   useEffect(() => {
-    if (selectedNeuron && !mergedNeurons.some(n => n.id === selectedNeuron.id)) {
+    if (selectedNeuron && !selectedNeuron.id.startsWith('service:') && !mergedNeurons.some(n => n.id === selectedNeuron.id)) {
       setSelectedNeuron(null);
     }
   }, [selectedNeuron, mergedNeurons]);
@@ -103,12 +114,23 @@ const CortexPage: FC = () => {
           glowingIds={glowingIds}
           activeEvents={activeEvents ?? []}
           liveBatches={liveBatches}
+          kgServices={kgServices}
           className="flex-1 min-h-0"
           onClickNeuron={handleClickNeuron}
         />
         {selectedNeuron && (() => {
-          const neuron = mergedNeurons.find(n => n.id === selectedNeuron.id);
-          return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} /> : null;
+          let neuron = mergedNeurons.find(n => n.id === selectedNeuron.id);
+          if (!neuron && selectedNeuron.id.startsWith('service:')) {
+            const svcId = selectedNeuron.id.replace('service:', '');
+            const svc = kgServices?.find(s => s.entity_id === svcId);
+            neuron = {
+              id: selectedNeuron.id,
+              type: 'service',
+              heat: 0,
+              payload: { label: svcId, ...(svc?.properties ?? {}), relationship_count: svc?.relationship_count ?? 0, last_seen: svc?.last_seen ?? '' },
+            };
+          }
+          return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} serviceDetail={serviceDetail} /> : null;
         })()}
         {reportViewer && (
           <MarkdownViewer

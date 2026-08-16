@@ -8,6 +8,9 @@
 # 6. [Pattern]: Service entity resolution (_resolve_service_id) — fuzzy ILIKE match on bare name,
 #    ranked by relationship count. Belt: read path resolves before query. Suspenders: write path
 #    resolves before upsert, rewrites relationship IDs via resolved_ids map.
+# 7. [Pattern]: list_services() and get_service_detail() are read-only KG API methods for Cortex UI.
+#    list_services returns 7-day filtered services with relationship counts (ORDER BY relationship_count DESC).
+#    get_service_detail reuses query_related() for bidirectional relationship lookup.
 """
 Async Knowledge Graph adapter for Postgres (adjacency tables).
 
@@ -313,6 +316,92 @@ class KnowledgeGraphStore:
         except Exception as e:
             logger.warning("Knowledge graph has_entity failed (non-fatal): %s", e)
             return False
+
+    async def list_services(self) -> list[dict]:
+        """List all Service entities seen in last 7 days with relationship counts."""
+        try:
+            if not await self._ensure_initialized():
+                return []
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT e.entity_id, e.properties, e.last_seen,
+                           count(r.id) as relationship_count
+                    FROM kg_entities e
+                    LEFT JOIN kg_relationships r ON (
+                        (r.from_entity_type = 'Service' AND r.from_entity_id = e.entity_id)
+                        OR (r.to_entity_type = 'Service' AND r.to_entity_id = e.entity_id)
+                    )
+                    WHERE e.entity_type = 'Service' AND e.last_seen > NOW() - INTERVAL '7 days'
+                    GROUP BY e.id
+                    ORDER BY relationship_count DESC
+                """)
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.warning("KG list_services failed (non-fatal): %s", e)
+            return []
+
+    async def get_service_detail(self, entity_id: str) -> dict | None:
+        """Get a single service with all its relationships (both directions)."""
+        try:
+            if not await self._ensure_initialized():
+                return None
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+                entity_row = await conn.fetchrow(
+                    "SELECT entity_id, properties, last_seen FROM kg_entities "
+                    "WHERE entity_type = 'Service' AND entity_id = $1",
+                    entity_id,
+                )
+                if not entity_row:
+                    return None
+                rows = await conn.fetch(
+                    """
+                    SELECT e.entity_type, e.entity_id, e.properties, r.rel_type, 'outgoing' as direction
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON (e.entity_type = r.to_entity_type AND e.entity_id = r.to_entity_id)
+                    WHERE r.from_entity_type = 'Service' AND r.from_entity_id = $1
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
+                    UNION
+                    SELECT e.entity_type, e.entity_id, e.properties, r.rel_type, 'incoming' as direction
+                    FROM kg_relationships r
+                    JOIN kg_entities e ON (e.entity_type = r.from_entity_type AND e.entity_id = r.from_entity_id)
+                    WHERE r.to_entity_type = 'Service' AND r.to_entity_id = $1
+                        AND e.last_seen > NOW() - INTERVAL '7 days'
+                    """,
+                    entity_id,
+                )
+                return {
+                    "entity_id": entity_row["entity_id"],
+                    "properties": entity_row["properties"],
+                    "last_seen": str(entity_row["last_seen"]),
+                    "relationships": [dict(row) for row in rows],
+                }
+        except Exception as e:
+            logger.warning("KG get_service_detail failed (non-fatal): %s", e)
+            return None
+
+    async def get_stats(self) -> dict:
+        """Aggregate counts by entity type and relationship type."""
+        try:
+            if not await self._ensure_initialized():
+                return {"entities": {}, "relationships": {}, "last_updated": None}
+            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+                entity_rows = await conn.fetch(
+                    "SELECT entity_type, count(*) as cnt FROM kg_entities GROUP BY entity_type"
+                )
+                rel_rows = await conn.fetch(
+                    "SELECT rel_type, count(*) as cnt FROM kg_relationships GROUP BY rel_type"
+                )
+                last_row = await conn.fetchrow(
+                    "SELECT max(last_seen) as latest FROM kg_entities"
+                )
+            return {
+                "entities": {r["entity_type"]: r["cnt"] for r in entity_rows},
+                "relationships": {r["rel_type"]: r["cnt"] for r in rel_rows},
+                "last_updated": str(last_row["latest"]) if last_row and last_row["latest"] else None,
+            }
+        except Exception as e:
+            logger.warning("KG get_stats failed (non-fatal): %s", e)
+            return {"entities": {}, "relationships": {}, "last_updated": None}
 
     async def health_check(self) -> bool:
         """Verify Postgres is reachable."""

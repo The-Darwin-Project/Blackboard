@@ -662,6 +662,38 @@ export interface KnowledgePoint {
   payload: KnowledgeFact;
 }
 
+// =============================================================================
+// Knowledge Graph (Postgres KG service entities)
+// =============================================================================
+
+export interface KGServiceEntity {
+  entity_id: string;
+  properties: Record<string, string>;
+  last_seen: string;
+  relationship_count: number;
+}
+
+export interface KGRelationship {
+  rel_type: string;
+  entity_type: string;
+  entity_id: string;
+  direction: 'outgoing' | 'incoming';
+  properties?: Record<string, string>;
+}
+
+export interface KGServiceDetail {
+  entity_id: string;
+  properties: Record<string, string>;
+  last_seen: string;
+  relationships: KGRelationship[];
+}
+
+export interface KGStats {
+  entities: Record<string, number>;
+  relationships: Record<string, number>;
+  last_updated: string | null;
+}
+
 export function getAgentFromEventType(eventType: EventType): Agent {
   switch (eventType) {
     // Aligner events (observation)

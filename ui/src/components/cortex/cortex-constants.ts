@@ -121,6 +121,8 @@ export const NEURON_DESCRIPTIONS: Record<string, string> = {
   'domain:chaotic': 'System in crisis — act first, stabilize, then analyze',
   'domain:casual': 'Non-problem interaction — conversational, reclassify when purpose emerges',
   'domain:disorder': 'Default state — not yet classified into a domain',
+  // KG Service entities (pattern: service:{entity_id})
+  'service': 'Knowledge Graph service entity with relationship history',
 };
 
 /**
