@@ -19,6 +19,7 @@
 """Unit tests for SlackChannel — agent_view DM handling and progress-bubble messaging."""
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -78,6 +79,7 @@ def _make_channel() -> tuple:
     sc._progress_ts = {}
     sc._progress_last_phrase = {}
     sc._progress_failed = set()
+    sc._progress_locks = {}  # event_id -> asyncio.Lock, serializes post/update/cleanup (TOCTOU fix)
     sc._progress_enabled = True
 
     sc._register_handlers()
@@ -724,6 +726,317 @@ class TestProgressMessages:
 
         sc._app.client.chat_postMessage.assert_not_called()
         assert eid not in sc._progress_ts
+
+
+# ---------------------------------------------------------------------------
+# Test: circuit breaker symmetry (HIGH #2 fix regression coverage)
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreakerSymmetry:
+    """Pre-fix, only the initial chat_postMessage failure armed _progress_failed;
+    a chat_update failure (bubble already posted) was logged but never armed the
+    breaker, so outages/rate-limits/deleted-message/revoked-scope errors retried
+    on every future tool_result turn. The fix arms the breaker on ANY post/update
+    exception -- these tests cover both arms plus the post-arming skip behavior.
+    """
+
+    @pytest.mark.asyncio
+    async def test_initial_post_failure_arms_breaker(self):
+        """T-17: chat_postMessage failure (no bubble yet) arms the breaker."""
+        sc, _ = _make_channel()
+        eid = "evt-breaker-post-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(side_effect=Exception("rate limited"))
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
+
+        assert eid in sc._progress_failed
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_chat_update_failure_arms_breaker(self):
+        """T-18: HIGH #2 regression -- a chat_update failure (bubble already exists)
+        must also arm the breaker, not just the initial post failure."""
+        from src.channels.slack import _TOOL_PROGRESS_PHRASES
+
+        sc, _ = _make_channel()
+        eid = "evt-breaker-update-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(return_value={"ts": "progress_ts_value"})
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
+        assert sc._progress_ts[eid] == "progress_ts_value"
+        assert eid not in sc._progress_failed
+
+        first_phrase = _TOOL_PROGRESS_PHRASES.get("consult_deep_memory", "")
+        other_tool = next(
+            (k for k, v in _TOOL_PROGRESS_PHRASES.items() if v != first_phrase),
+            None,
+        )
+        assert other_tool is not None, "Need a second tool with a distinct phrase to reach chat_update"
+
+        sc._app.client.chat_update = AsyncMock(side_effect=Exception("channel_not_found"))
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "tool_result",
+                     "waitingFor": other_tool},
+        })
+
+        assert eid in sc._progress_failed, (
+            "chat_update failure must arm the breaker -- pre-fix this path was silently "
+            "retried on every future turn since only the initial-post branch armed it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_breaker_armed_via_update_failure_stops_further_attempts(self):
+        """T-19: once armed (via an update failure), later tool_result turns for the
+        same event must not attempt a progress-bubble chat_postMessage/chat_update.
+
+        Uses a tool NOT in _USER_VISIBLE_TOOL_RESULTS so the only chat_postMessage/
+        chat_update call site reachable is the progress-bubble one -- otherwise the
+        turn's own (unrelated) Block Kit content post would confound the assertion.
+        """
+        sc, _ = _make_channel()
+        eid = "evt-breaker-armed"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._progress_failed.add(eid)
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 3, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "classify_event"},
+        })
+
+        sc._app.client.chat_update.assert_not_called()
+        sc._app.client.chat_postMessage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: deferred cleanup branch (event_status_changed, HIGH #4 consolidation)
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredCleanupBranch:
+    """The event_status_changed/deferred branch had zero test coverage pre-fix.
+    It now shares _cleanup_progress_bubble() with the event_closed and response
+    teardown sites (HIGH #4); these tests exercise it directly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_deferred_status_cleans_up_progress_bubble(self):
+        """T-20: status='deferred' deletes the open bubble and clears all tracking state."""
+        sc, _ = _make_channel()
+        eid = "evt-deferred-cleanup"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._progress_last_phrase[eid] = "Checking knowledge base..."
+        sc._progress_failed.add(eid)
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "deferred",
+        })
+
+        sc._app.client.chat_delete.assert_called_once()
+        _, del_kwargs = sc._app.client.chat_delete.call_args
+        assert del_kwargs.get("ts") == "progress_ts_value"
+        assert del_kwargs.get("channel") == "D_DM"
+        assert eid not in sc._progress_ts
+        assert eid not in sc._progress_last_phrase
+        assert eid not in sc._progress_failed
+
+    @pytest.mark.asyncio
+    async def test_deferred_status_noop_when_no_bubble(self):
+        """T-21: no open bubble → deferred status change is a silent no-op."""
+        sc, _ = _make_channel()
+        eid = "evt-deferred-no-bubble"
+        sc._dm_context[eid] = _dm_ctx()
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "deferred",
+        })
+
+        sc._app.client.chat_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_deferred_status_change_leaves_bubble_untouched(self):
+        """T-22: only status=='deferred' triggers cleanup -- other status values must not."""
+        sc, _ = _make_channel()
+        eid = "evt-status-active"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "active",
+        })
+
+        sc._app.client.chat_delete.assert_not_called()
+        assert sc._progress_ts.get(eid) == "progress_ts_value"
+
+
+# ---------------------------------------------------------------------------
+# Test: stop() shutdown behavior (HIGH #1 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestStopShutdown:
+    """Pre-fix, stop() disconnected the Socket Mode handler without cleaning up
+    _progress_ts, permanently orphaning any open "FRIDAY is working..." DM on
+    graceful shutdown/redeploy. These tests cover the new sweep.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_all_open_progress_bubbles(self):
+        """T-23: stop() tears down every open progress bubble across all events."""
+        sc, _ = _make_channel()
+        eid1, eid2 = "evt-shutdown-1", "evt-shutdown-2"
+        sc._dm_context[eid1] = _dm_ctx(channel="D_DM1")
+        sc._dm_context[eid2] = _dm_ctx(channel="D_DM2")
+        sc._progress_ts[eid1] = "ts1"
+        sc._progress_ts[eid2] = "ts2"
+        sc._handler = None
+
+        await sc.stop()
+
+        assert sc._app.client.chat_delete.call_count == 2
+        deleted_ts = {
+            call.kwargs.get("ts") for call in sc._app.client.chat_delete.call_args_list
+        }
+        assert deleted_ts == {"ts1", "ts2"}
+        assert eid1 not in sc._progress_ts
+        assert eid2 not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_stop_with_no_open_bubbles_still_disconnects_handler(self):
+        """T-24: no open bubbles → no chat_delete calls, but the handler still disconnects."""
+        sc, _ = _make_channel()
+        sc._handler = AsyncMock()
+
+        await sc.stop()
+
+        sc._app.client.chat_delete.assert_not_called()
+        sc._handler.close_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_bubbles_before_disconnecting_handler(self):
+        """T-25: cleanup must complete before the Socket Mode handler disconnects."""
+        sc, _ = _make_channel()
+        eid = "evt-shutdown-order"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._handler = AsyncMock()
+
+        call_order: list[str] = []
+        sc._app.client.chat_delete.side_effect = lambda **kw: call_order.append("chat_delete")
+        sc._handler.close_async.side_effect = lambda: call_order.append("close_async")
+
+        await sc.stop()
+
+        assert call_order == ["chat_delete", "close_async"]
+
+    @pytest.mark.asyncio
+    async def test_stop_bubble_delete_failure_does_not_block_handler_disconnect(self):
+        """T-26: a chat_delete failure during shutdown sweep must not prevent the
+        handler from disconnecting (mirrors the existing response-path resilience test)."""
+        sc, _ = _make_channel()
+        eid = "evt-shutdown-delete-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._app.client.chat_delete = AsyncMock(side_effect=Exception("API error"))
+        sc._handler = AsyncMock()
+
+        await sc.stop()
+
+        sc._handler.close_async.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test: progress lock serializes concurrent post/update (HIGH #3 TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestProgressLockConcurrency:
+    """Pre-fix, the 'no ts yet' check and the self._progress_ts[event_id] write were
+    separated by an unguarded await on chat_postMessage, so two concurrent tool_result
+    turns for the same event_id could both observe "no ts yet" and double-post. The
+    fix serializes the whole check-through-write under a per-event asyncio.Lock.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tool_result_turns_do_not_double_post(self):
+        """T-27: two tool_result turns racing on the same event_id must result in
+        exactly one chat_postMessage; the second (once serialized by the lock) sees
+        the ts already populated and updates instead of posting again.
+
+        Uses two tools NOT in _USER_VISIBLE_TOOL_RESULTS (distinct phrases, to avoid
+        the dedup check masking the race) so _handle_legacy_turn returns right after
+        the progress-bubble block -- otherwise the turn's own (unrelated) Block Kit
+        content post would confound the chat_postMessage call-count assertion.
+        """
+        from src.channels.slack import _TOOL_PROGRESS_PHRASES, _USER_VISIBLE_TOOL_RESULTS
+
+        sc, _ = _make_channel()
+        eid = "evt-toctou"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        async def slow_post(**kwargs):
+            await asyncio.sleep(0)  # yield control mid-call, simulating network latency
+            return {"ts": "progress_ts_value"}
+
+        sc._app.client.chat_postMessage = AsyncMock(side_effect=slow_post)
+        sc._app.client.chat_update = AsyncMock()
+
+        tool_a = "classify_event"
+        assert tool_a not in _USER_VISIBLE_TOOL_RESULTS
+        phrase_a = _TOOL_PROGRESS_PHRASES.get(tool_a, "")
+        tool_b = next(
+            (k for k, v in _TOOL_PROGRESS_PHRASES.items()
+             if v != phrase_a and k not in _USER_VISIBLE_TOOL_RESULTS),
+            None,
+        )
+        assert tool_b is not None, "Need a second tool with a distinct phrase to avoid dedup masking the race"
+
+        await asyncio.gather(
+            sc.broadcast_handler({
+                "type": "turn", "event_id": eid,
+                "turn": {"turn": 1, "actor": "brain", "action": "tool_result", "waitingFor": tool_a},
+            }),
+            sc.broadcast_handler({
+                "type": "turn", "event_id": eid,
+                "turn": {"turn": 2, "actor": "brain", "action": "tool_result", "waitingFor": tool_b},
+            }),
+        )
+
+        assert sc._app.client.chat_postMessage.call_count == 1, (
+            "lock must serialize the check-then-post so only one of the two racing "
+            "turns ever posts the initial bubble"
+        )
+        assert sc._app.client.chat_update.call_count == 1, (
+            "the second turn, once serialized, should see the ts already set and update"
+        )
+        assert sc._progress_ts[eid] == "progress_ts_value"
 
 
 # ---------------------------------------------------------------------------
