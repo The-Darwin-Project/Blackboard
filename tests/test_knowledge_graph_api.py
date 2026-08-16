@@ -366,6 +366,23 @@ class TestServiceDetailEndpoint:
         assert isinstance(data["relationships"], list)
         assert len(data["relationships"]) == 3
 
+    def test_direction_passes_through_store_value(self, patched_client, mock_kg_store):
+        """Relationship `direction` must be the store's SQL UNION value, not
+        recomputed from entity_type. All three fixture relationships have
+        entity_type != "Service", so a buggy recompute (entity_type != "Service"
+        -> "outgoing") would flatten every direction to "outgoing" -- this
+        would not catch that regression since it only asserts on shape/count.
+        """
+        resp = patched_client.get("/api/knowledge-graph/services/service:darwin-brain")
+        assert resp.status_code == 200
+        rels = resp.json()["relationships"]
+        directions_by_rel_type = {r["rel_type"]: r["direction"] for r in rels}
+        assert directions_by_rel_type == {
+            "AFFECTED": "incoming",
+            "APPLIED_TO": "incoming",
+            "RESOLVED_BY": "outgoing",
+        }
+
     def test_returns_404_for_unknown_entity(self, patched_client, mock_kg_store):
         """Endpoint returns 404 when entity doesn't exist."""
         mock_kg_store.get_service_detail = AsyncMock(return_value=None)

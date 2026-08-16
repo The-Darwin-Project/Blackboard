@@ -11,6 +11,16 @@
 # 7. [Pattern]: list_services() and get_service_detail() are read-only KG API methods for Cortex UI.
 #    list_services returns 7-day filtered services with relationship counts (ORDER BY relationship_count DESC).
 #    get_service_detail reuses query_related() for bidirectional relationship lookup.
+# 8. [Constraint]: Two semaphores share one pool (max_size=4). _KG_SEMAPHORE
+#    (internal: upsert_entities, has_entity, query_related, _resolve_service_id)
+#    is uncapped relative to pool size. _KG_PUBLIC_SEMAPHORE (unauthenticated
+#    REST reads: list_services, get_service_detail, get_stats) is capped well
+#    below pool max_size so bursty public polling can never claim every
+#    connection -- internal writes always have at least one free to acquire.
+#    Do not raise _KG_PUBLIC_SEMAPHORE's count above (pool max_size - 1), and
+#    do not add a write path gated by it. Always acquire via the _acquire()
+#    helper and wrap every query in _with_timeout() -- a hung Postgres must
+#    never hang a caller.
 """
 Async Knowledge Graph adapter for Postgres (adjacency tables).
 
@@ -24,6 +34,7 @@ import asyncio
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -37,6 +48,42 @@ _VALID_ENTITY_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # 2x pool size so excess callers fail fast via the existing timeout wrappers
 # instead of queuing unboundedly on pool contention.
 _KG_SEMAPHORE = asyncio.Semaphore(8)
+
+# Separate, smaller semaphore for the unauthenticated public REST read
+# endpoints (list_services, get_service_detail, get_stats). These are polled
+# by every open Cortex UI browser tab. Sharing _KG_SEMAPHORE's budget (8, on
+# a 4-connection pool) let public polling fill every physical connection and
+# starve the internal write-critical path (upsert_entities, used by event
+# archival). Capped at 2 -- strictly below the pool's max_size of 4 -- so
+# public reads can never hold more than half the pool, guaranteeing internal
+# callers always have a connection to acquire.
+_KG_PUBLIC_SEMAPHORE = asyncio.Semaphore(2)
+
+KG_ACQUIRE_TIMEOUT_SECONDS = float(os.getenv("KG_ACQUIRE_TIMEOUT_SECONDS", "5"))
+KG_QUERY_TIMEOUT_SECONDS = float(os.getenv("KG_QUERY_TIMEOUT_SECONDS", "5"))
+
+
+async def _with_timeout(coro: Any) -> Any:
+    """Bound an asyncpg query so a hung/slow Postgres never hangs a caller forever."""
+    return await asyncio.wait_for(coro, timeout=KG_QUERY_TIMEOUT_SECONDS)
+
+
+@asynccontextmanager
+async def _acquire(pool: Any):
+    """Acquire a pooled connection with a bounded wait, guaranteeing release.
+
+    Drives the pool's acquire context via __aenter__/__aexit__ (the same
+    protocol `async with pool.acquire() as conn:` uses) rather than awaiting
+    `pool.acquire()` directly, since asyncio.wait_for() needs a plain
+    awaitable and asyncpg's acquire context otherwise only supports the
+    `async with` form.
+    """
+    acquire_ctx = pool.acquire()
+    conn = await asyncio.wait_for(acquire_ctx.__aenter__(), timeout=KG_ACQUIRE_TIMEOUT_SECONDS)
+    try:
+        yield conn
+    finally:
+        await acquire_ctx.__aexit__(None, None, None)
 
 # Free-text entity/relationship fields originate from LLM extraction over
 # agent output and are persisted with no TTL. graph_recall.py sanitizes on
@@ -105,8 +152,8 @@ class KnowledgeGraphStore:
                 import asyncpg
 
                 self._pool = await asyncpg.create_pool(self._url, min_size=1, max_size=4)
-                async with self._pool.acquire() as conn:
-                    await conn.execute(_SCHEMA_DDL)
+                async with _acquire(self._pool) as conn:
+                    await _with_timeout(conn.execute(_SCHEMA_DDL))
                 self._initialized = True
                 logger.info("KnowledgeGraphStore initialized (postgres)")
                 return True
@@ -130,7 +177,7 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return
 
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, _acquire(self._pool) as conn:
                 resolved_ids: dict[str, str] = {}
                 for entity in entities:
                     etype = getattr(entity, "type", None) or entity.get("type", "Node")
@@ -150,7 +197,7 @@ class KnowledgeGraphStore:
                             eid = canonical
 
                     import json
-                    await conn.execute(
+                    await _with_timeout(conn.execute(
                         """
                         INSERT INTO kg_entities (entity_type, entity_id, properties)
                         VALUES ($1, $2, $3::jsonb)
@@ -158,7 +205,7 @@ class KnowledgeGraphStore:
                         DO UPDATE SET properties = $3::jsonb, last_seen = NOW()
                         """,
                         etype, eid, json.dumps(props),
-                    )
+                    ))
 
                 for rel in relationships:
                     from_type = getattr(rel, "from_type", None) or rel.get("from_type", "Node")
@@ -175,7 +222,7 @@ class KnowledgeGraphStore:
                         logger.warning("Skipping relationship with invalid types: %s->%s->%s", from_type, rel_type, to_type)
                         continue
 
-                    await conn.execute(
+                    await _with_timeout(conn.execute(
                         """
                         INSERT INTO kg_relationships (from_entity_type, from_entity_id, rel_type, to_entity_type, to_entity_id)
                         VALUES ($1, $2, $3, $4, $5)
@@ -183,7 +230,7 @@ class KnowledgeGraphStore:
                         DO UPDATE SET last_seen = NOW()
                         """,
                         from_type, from_id, rel_type, to_type, to_id,
-                    )
+                    ))
 
             logger.info(
                 "Knowledge graph: wrote %d entities, %d relationships",
@@ -208,12 +255,12 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return []
 
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, _acquire(self._pool) as conn:
                 resolved_id = entity_id
                 if entity_type == "Service":
                     resolved_id = await self._resolve_service_id(conn, entity_id)
 
-                rows = await conn.fetch(
+                rows = await _with_timeout(conn.fetch(
                     """
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type
                     FROM kg_relationships r
@@ -228,7 +275,7 @@ class KnowledgeGraphStore:
                         AND e.last_seen > NOW() - INTERVAL '7 days'
                     """,
                     entity_type, resolved_id,
-                )
+                ))
                 return [dict(row) for row in rows]
         except Exception as e:
             logger.warning("Knowledge graph query failed (non-fatal): %s", e)
@@ -251,23 +298,23 @@ class KnowledgeGraphStore:
         if not bare:
             return entity_id
 
-        row = await conn.fetchrow(
+        row = await _with_timeout(conn.fetchrow(
             "SELECT 1 FROM kg_entities WHERE entity_type = 'Service' AND entity_id = $1",
             entity_id,
-        )
+        ))
         if row:
-            rel_count = await conn.fetchval(
+            rel_count = await _with_timeout(conn.fetchval(
                 """
                 SELECT count(*) FROM kg_relationships
                 WHERE (from_entity_type = 'Service' AND from_entity_id = $1)
                    OR (to_entity_type = 'Service' AND to_entity_id = $1)
                 """,
                 entity_id,
-            )
+            ))
             if rel_count and rel_count >= 2:
                 return entity_id
 
-        candidates = await conn.fetch(
+        candidates = await _with_timeout(conn.fetch(
             """
             SELECT e.entity_id, count(r.id) as rel_count
             FROM kg_entities e
@@ -282,7 +329,7 @@ class KnowledgeGraphStore:
             LIMIT 1
             """,
             f"%{bare}%",
-        )
+        ))
         if candidates and candidates[0]["rel_count"] > 0:
             resolved = candidates[0]["entity_id"]
             if resolved != entity_id:
@@ -300,18 +347,18 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return False
 
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
+            async with _KG_SEMAPHORE, _acquire(self._pool) as conn:
                 if entity_type == "Service":
                     resolved = await self._resolve_service_id(conn, entity_id)
-                    row = await conn.fetchrow(
+                    row = await _with_timeout(conn.fetchrow(
                         "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
                         entity_type, resolved,
-                    )
+                    ))
                 else:
-                    row = await conn.fetchrow(
+                    row = await _with_timeout(conn.fetchrow(
                         "SELECT 1 FROM kg_entities WHERE entity_type = $1 AND entity_id = $2",
                         entity_type, entity_id,
-                    )
+                    ))
                 return row is not None
         except Exception as e:
             logger.warning("Knowledge graph has_entity failed (non-fatal): %s", e)
@@ -322,8 +369,8 @@ class KnowledgeGraphStore:
         try:
             if not await self._ensure_initialized():
                 return []
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
-                rows = await conn.fetch("""
+            async with _KG_PUBLIC_SEMAPHORE, _acquire(self._pool) as conn:
+                rows = await _with_timeout(conn.fetch("""
                     SELECT e.entity_id, e.properties, e.last_seen,
                            count(r.id) as relationship_count
                     FROM kg_entities e
@@ -334,7 +381,7 @@ class KnowledgeGraphStore:
                     WHERE e.entity_type = 'Service' AND e.last_seen > NOW() - INTERVAL '7 days'
                     GROUP BY e.id
                     ORDER BY relationship_count DESC
-                """)
+                """))
                 return [dict(row) for row in rows]
         except Exception as e:
             logger.warning("KG list_services failed (non-fatal): %s", e)
@@ -345,15 +392,15 @@ class KnowledgeGraphStore:
         try:
             if not await self._ensure_initialized():
                 return None
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
-                entity_row = await conn.fetchrow(
+            async with _KG_PUBLIC_SEMAPHORE, _acquire(self._pool) as conn:
+                entity_row = await _with_timeout(conn.fetchrow(
                     "SELECT entity_id, properties, last_seen FROM kg_entities "
                     "WHERE entity_type = 'Service' AND entity_id = $1",
                     entity_id,
-                )
+                ))
                 if not entity_row:
                     return None
-                rows = await conn.fetch(
+                rows = await _with_timeout(conn.fetch(
                     """
                     SELECT e.entity_type, e.entity_id, e.properties, r.rel_type, 'outgoing' as direction
                     FROM kg_relationships r
@@ -368,7 +415,7 @@ class KnowledgeGraphStore:
                         AND e.last_seen > NOW() - INTERVAL '7 days'
                     """,
                     entity_id,
-                )
+                ))
                 return {
                     "entity_id": entity_row["entity_id"],
                     "properties": entity_row["properties"],
@@ -384,16 +431,16 @@ class KnowledgeGraphStore:
         try:
             if not await self._ensure_initialized():
                 return {"entities": {}, "relationships": {}, "last_updated": None}
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
-                entity_rows = await conn.fetch(
+            async with _KG_PUBLIC_SEMAPHORE, _acquire(self._pool) as conn:
+                entity_rows = await _with_timeout(conn.fetch(
                     "SELECT entity_type, count(*) as cnt FROM kg_entities GROUP BY entity_type"
-                )
-                rel_rows = await conn.fetch(
+                ))
+                rel_rows = await _with_timeout(conn.fetch(
                     "SELECT rel_type, count(*) as cnt FROM kg_relationships GROUP BY rel_type"
-                )
-                last_row = await conn.fetchrow(
+                ))
+                last_row = await _with_timeout(conn.fetchrow(
                     "SELECT max(last_seen) as latest FROM kg_entities"
-                )
+                ))
             return {
                 "entities": {r["entity_type"]: r["cnt"] for r in entity_rows},
                 "relationships": {r["rel_type"]: r["cnt"] for r in rel_rows},
@@ -409,8 +456,8 @@ class KnowledgeGraphStore:
             if not await self._ensure_initialized():
                 return False
 
-            async with _KG_SEMAPHORE, self._pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT 1 AS ok")
+            async with _KG_SEMAPHORE, _acquire(self._pool) as conn:
+                row = await _with_timeout(conn.fetchrow("SELECT 1 AS ok"))
                 return row is not None and row["ok"] == 1
         except Exception as e:
             logger.warning("Knowledge graph health check failed: %s", e)

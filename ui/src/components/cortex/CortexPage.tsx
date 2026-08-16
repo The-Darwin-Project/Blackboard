@@ -34,7 +34,7 @@ const CortexPage: FC = () => {
   const [reportViewer, setReportViewer] = useState<{ title: string; content: string } | null>(null);
 
   const selectedServiceId = selectedNeuron?.id.startsWith('service:')
-    ? selectedNeuron.id.replace('service:', '')
+    ? selectedNeuron.id
     : null;
   const { data: serviceDetail } = useKGServiceDetail(selectedServiceId);
 
@@ -121,13 +121,13 @@ const CortexPage: FC = () => {
         {selectedNeuron && (() => {
           let neuron = mergedNeurons.find(n => n.id === selectedNeuron.id);
           if (!neuron && selectedNeuron.id.startsWith('service:')) {
-            const svcId = selectedNeuron.id.replace('service:', '');
-            const svc = kgServices?.find(s => s.entity_id === svcId);
+            const svc = kgServices?.find(s => s.entity_id === selectedNeuron.id);
+            const label = selectedNeuron.id.replace('service:', '');
             neuron = {
               id: selectedNeuron.id,
               type: 'service',
               heat: 0,
-              payload: { label: svcId, ...(svc?.properties ?? {}), relationship_count: svc?.relationship_count ?? 0, last_seen: svc?.last_seen ?? '' },
+              payload: { label, ...(svc?.properties ?? {}), relationship_count: svc?.relationship_count ?? 0, last_seen: svc?.last_seen ?? '' },
             };
           }
           return neuron ? <NeuronInfoPanel neuron={neuron} position={selectedNeuron.pos} onClose={handleCloseNeuron} serviceDetail={serviceDetail} /> : null;

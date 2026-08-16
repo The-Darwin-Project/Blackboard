@@ -56,7 +56,7 @@ async def get_service_detail(entity_id: str):
             "rel_type": r.get("rel_type", ""),
             "entity_type": r.get("entity_type", ""),
             "entity_id": r.get("entity_id", ""),
-            "direction": "outgoing" if r.get("entity_type") != "Service" else "incoming",
+            "direction": r.get("direction", ""),
             "properties": r.get("properties") or {},
         })
     return {
