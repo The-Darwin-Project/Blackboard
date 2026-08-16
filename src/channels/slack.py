@@ -122,7 +122,8 @@ class SlackChannel:
         # Tool-driven progress messages (DM only, feature-flagged)
         self._progress_ts: dict[str, str] = {}  # event_id -> Slack message ts
         self._progress_last_phrase: dict[str, str] = {}  # event_id -> last posted phrase (dedup)
-        self._progress_failed: set[str] = set()  # event_id -> circuit breaker (skip after postMessage timeout)
+        self._progress_failed: set[str] = set()  # event_id -> circuit breaker (skip after post/update failure)
+        self._progress_locks: dict[str, asyncio.Lock] = {}  # event_id -> serializes post/update/cleanup
         self._progress_enabled = os.getenv("SLACK_PROGRESS_ENABLED", "false").lower() == "true"
 
         self._app = AsyncApp(token=bot_token)
@@ -817,37 +818,11 @@ class SlackChannel:
             status = message.get("status")
             if status == "deferred":
                 # Event deferred — clean up progress bubble (FRIDAY is waiting, not working)
-                progress_ts = self._progress_ts.pop(event_id, None)
-                self._progress_last_phrase.pop(event_id, None)
-                self._progress_failed.discard(event_id)
-                if progress_ts:
-                    ctx = self._dm_context.get(event_id, {})
-                    try:
-                        await asyncio.wait_for(
-                            self._app.client.chat_delete(
-                                channel=ctx.get("channel", ""), ts=progress_ts,
-                            ),
-                            timeout=_SLACK_API_TIMEOUT,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Progress cleanup on defer failed for {event_id}: {e}")
+                await self._cleanup_progress_bubble(event_id, "deferred")
 
         elif msg_type == "event_closed":
             # Orphan progress message cleanup
-            progress_ts = self._progress_ts.pop(event_id, None)
-            self._progress_last_phrase.pop(event_id, None)
-            self._progress_failed.discard(event_id)
-            if progress_ts:
-                ctx = self._dm_context.get(event_id, {})
-                try:
-                    await asyncio.wait_for(
-                        self._app.client.chat_delete(
-                            channel=ctx.get("channel", ""), ts=progress_ts,
-                        ),
-                        timeout=_SLACK_API_TIMEOUT,
-                    )
-                except Exception as e:
-                    logger.warning(f"Orphan progress cleanup failed for {event_id}: {e}")
+            await self._cleanup_progress_bubble(event_id, "event_closed")
 
             event_doc = await self._blackboard.get_event(event_id)
             if event_doc and event_doc.slack_thread_ts:
@@ -867,6 +842,7 @@ class SlackChannel:
             self._dm_context.pop(event_id, None)
             self._thinking_msg.pop(event_id, None)
             self._quiet_events.discard(event_id)
+            self._progress_locks.pop(event_id, None)
 
     # =========================================================================
     # DM status path (agent_view — setStatus debounce)
@@ -927,6 +903,45 @@ class SlackChannel:
             return True
         return False
 
+    def _get_progress_lock(self, event_id: str) -> asyncio.Lock:
+        """Return the per-event lock serializing progress-bubble post/update/cleanup.
+
+        Lazily initializes _progress_locks so this works even for instances built
+        via SlackChannel.__new__() (as the test suite does) without running __init__.
+        """
+        locks = getattr(self, "_progress_locks", None)
+        if locks is None:
+            locks = {}
+            self._progress_locks = locks
+        lock = locks.get(event_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[event_id] = lock
+        return lock
+
+    async def _cleanup_progress_bubble(self, event_id: str, reason: str) -> None:
+        """Pop progress-bubble tracking state for event_id and delete its Slack message.
+
+        Shared teardown for the defer, close, and response call sites -- the
+        tool-driven-progress equivalent of the old single _cleanup_stream() helper.
+        """
+        async with self._get_progress_lock(event_id):
+            progress_ts = self._progress_ts.pop(event_id, None)
+            self._progress_last_phrase.pop(event_id, None)
+            self._progress_failed.discard(event_id)
+        if not progress_ts:
+            return
+        ctx = self._dm_context.get(event_id, {})
+        try:
+            await asyncio.wait_for(
+                self._app.client.chat_delete(
+                    channel=ctx.get("channel", ""), ts=progress_ts,
+                ),
+                timeout=_SLACK_API_TIMEOUT,
+            )
+        except Exception as e:
+            logger.warning(f"Progress cleanup ({reason}) failed for {event_id}: {e}")
+
     # =========================================================================
     # Legacy path (channel threads, infra threads, all turn delivery)
     # =========================================================================
@@ -959,20 +974,7 @@ class SlackChannel:
         if turn.actor == "brain" and turn.action == "response":
             # Clean up progress message before posting the Block Kit response.
             # Always proceeds to post regardless of chat_delete success/failure.
-            progress_ts = self._progress_ts.pop(event_id, None)
-            self._progress_last_phrase.pop(event_id, None)
-            self._progress_failed.discard(event_id)
-            if progress_ts:
-                ctx = self._dm_context.get(event_id, {})
-                try:
-                    await asyncio.wait_for(
-                        self._app.client.chat_delete(
-                            channel=ctx.get("channel", ""), ts=progress_ts,
-                        ),
-                        timeout=_SLACK_API_TIMEOUT,
-                    )
-                except Exception as e:
-                    logger.warning(f"Progress cleanup failed for {event_id}: {e}")
+            await self._cleanup_progress_bubble(event_id, "response")
 
         if turn.actor == "brain" and turn.action == "thoughts":
             return
@@ -987,30 +989,36 @@ class SlackChannel:
                 and event_id not in self._progress_failed
             ):
                 phrase = _TOOL_PROGRESS_PHRASES.get(turn.waitingFor, "FRIDAY is working...")
-                if self._progress_last_phrase.get(event_id) != phrase:
-                    ctx = self._dm_context[event_id]
-                    try:
-                        if event_id not in self._progress_ts:
-                            result = await asyncio.wait_for(
-                                self._app.client.chat_postMessage(
-                                    channel=ctx["channel"], thread_ts=ctx["thread_ts"],
-                                    text=phrase,
-                                ),
-                                timeout=_SLACK_API_TIMEOUT,
-                            )
-                            self._progress_ts[event_id] = result["ts"]
-                        else:
-                            await asyncio.wait_for(
-                                self._app.client.chat_update(
-                                    channel=ctx["channel"], ts=self._progress_ts[event_id],
-                                    text=phrase,
-                                ),
-                                timeout=_SLACK_API_TIMEOUT,
-                            )
-                        self._progress_last_phrase[event_id] = phrase
-                    except Exception as e:
-                        logger.warning(f"Progress message failed for {event_id}: {e}")
-                        if event_id not in self._progress_ts:
+                # Lock held across the check-then-act + await so two concurrent
+                # tool_result turns for the same event_id can't both observe
+                # "no ts yet" and double-post (TOCTOU race).
+                async with self._get_progress_lock(event_id):
+                    if self._progress_last_phrase.get(event_id) != phrase:
+                        ctx = self._dm_context[event_id]
+                        try:
+                            if event_id not in self._progress_ts:
+                                result = await asyncio.wait_for(
+                                    self._app.client.chat_postMessage(
+                                        channel=ctx["channel"], thread_ts=ctx["thread_ts"],
+                                        text=phrase,
+                                    ),
+                                    timeout=_SLACK_API_TIMEOUT,
+                                )
+                                self._progress_ts[event_id] = result["ts"]
+                            else:
+                                await asyncio.wait_for(
+                                    self._app.client.chat_update(
+                                        channel=ctx["channel"], ts=self._progress_ts[event_id],
+                                        text=phrase,
+                                    ),
+                                    timeout=_SLACK_API_TIMEOUT,
+                                )
+                            self._progress_last_phrase[event_id] = phrase
+                        except Exception as e:
+                            logger.warning(f"Progress message failed for {event_id}: {e}")
+                            # Arm the breaker on ANY post/update failure -- a chat_update
+                            # failure (outage/rate-limit/deleted message/revoked scope)
+                            # must stop retrying every future turn, not just the initial post.
                             self._progress_failed.add(event_id)
 
             if not (event_doc.slack_thread_ts and turn.waitingFor in _USER_VISIBLE_TOOL_RESULTS):
@@ -1226,6 +1234,8 @@ class SlackChannel:
 
     async def stop(self) -> None:
         """Graceful shutdown."""
+        for event_id in list(self._progress_ts.keys()):
+            await self._cleanup_progress_bubble(event_id, "shutdown")
         if self._handler:
             await self._handler.close_async()
             logger.info("Slack Socket Mode disconnected")
