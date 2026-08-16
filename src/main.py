@@ -803,7 +803,6 @@ app.include_router(observations_router)
 app.include_router(observations_global_router)
 app.include_router(observations_mgmt_router)
 app.include_router(cognitive_graph_router)
-app.include_router(knowledge_graph_router)
 app.include_router(journal_router)
 app.include_router(chat_router)
 app.include_router(events_router)
@@ -816,6 +815,7 @@ if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)
     app.include_router(shifts_router)
+    app.include_router(knowledge_graph_router)
 
 
 # =============================================================================

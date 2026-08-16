@@ -72,18 +72,15 @@ async def _with_timeout(coro: Any) -> Any:
 async def _acquire(pool: Any):
     """Acquire a pooled connection with a bounded wait, guaranteeing release.
 
-    Drives the pool's acquire context via __aenter__/__aexit__ (the same
-    protocol `async with pool.acquire() as conn:` uses) rather than awaiting
-    `pool.acquire()` directly, since asyncio.wait_for() needs a plain
-    awaitable and asyncpg's acquire context otherwise only supports the
-    `async with` form.
+    Uses asyncpg's native `timeout=` kwarg on pool.acquire() rather than
+    wrapping acquire_ctx.__aenter__() in asyncio.wait_for(): wrapping it
+    externally can let wait_for's timeout fire after asyncpg has internally
+    claimed a connection but before __aenter__ returns it, leaking the
+    connection since __aexit__ is never reached. asyncpg applies the timeout
+    inside its own acquire path, so a timeout there never leaks a connection.
     """
-    acquire_ctx = pool.acquire()
-    conn = await asyncio.wait_for(acquire_ctx.__aenter__(), timeout=KG_ACQUIRE_TIMEOUT_SECONDS)
-    try:
+    async with pool.acquire(timeout=KG_ACQUIRE_TIMEOUT_SECONDS) as conn:
         yield conn
-    finally:
-        await acquire_ctx.__aexit__(None, None, None)
 
 # Free-text entity/relationship fields originate from LLM extraction over
 # agent output and are persisted with no TTL. graph_recall.py sanitizes on

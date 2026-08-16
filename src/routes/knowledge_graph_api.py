@@ -1,6 +1,12 @@
 # BlackBoard/src/routes/knowledge_graph_api.py
 # @ai-rules:
-# 1. [Constraint]: Read-only endpoints. No require_auth (matches /topology/graph pattern).
+# 1. [Constraint]: Router is only mounted in main.py when DEX_ENABLED (same as
+#    timekeeper.py / shifts.py). Properties exposed here are an unbounded JSONB
+#    blob from LLM extraction over internal agent output -- do not reuse the
+#    /topology/graph "no auth" precedent, that endpoint only exposes bounded
+#    structured fields. Do not add Depends(require_auth) here instead: with
+#    DEX_ENABLED=false, require_auth always 401s (anonymous has no email), which
+#    would make these reads unreachable in the common (non-Dex) deployment.
 # 2. [Pattern]: Fail-open — returns [] or {} when KG store is unavailable, never 503.
 # 3. [Pattern]: Uses get_kg_store() dependency from dependencies.py.
 # 4. [Constraint]: list_services + get_service_detail delegate to KGStore methods (no raw SQL here).
