@@ -653,6 +653,24 @@ export async function getCortexActivity(eventId?: string): Promise<PulseBatch[]>
 }
 
 // =============================================================================
+// Knowledge Graph API (Postgres KG service entities)
+// =============================================================================
+
+import type { KGServiceEntity, KGServiceDetail, KGStats } from './types';
+
+export async function getKGServices(): Promise<KGServiceEntity[]> {
+  return fetchApi<KGServiceEntity[]>('/api/knowledge-graph/services');
+}
+
+export async function getKGServiceDetail(entityId: string): Promise<KGServiceDetail> {
+  return fetchApi<KGServiceDetail>(`/api/knowledge-graph/services/${encodeURIComponent(entityId)}`);
+}
+
+export async function getKGStats(): Promise<KGStats> {
+  return fetchApi<KGStats>('/api/knowledge-graph/stats');
+}
+
+// =============================================================================
 // Observations API (FRIDAY numeric series -- global + per-event)
 // =============================================================================
 

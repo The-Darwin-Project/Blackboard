@@ -28,7 +28,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
-from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_argocd_observer, set_kargo_observer, set_pulse_tracker, set_registry_and_bridge
+from .dependencies import set_agents, set_archivist, set_blackboard, set_brain, set_argocd_observer, set_kargo_observer, set_kg_store, set_pulse_tracker, set_registry_and_bridge
 from .models import FlowMetricsResponse, FlowSnapshot, HealthResponse
 from .routes import (
     chat_router,
@@ -40,6 +40,7 @@ from .routes import (
     jira_router,
     journal_router,
     kargo_router,
+    knowledge_graph_router,
     notebook_router,
     observations_router,
     observations_global_router,
@@ -124,6 +125,7 @@ async def lifespan(app: FastAPI):
         if kg_postgres_url:
             from .memory.knowledge_graph import KnowledgeGraphStore
             kg_store = KnowledgeGraphStore(url=kg_postgres_url)
+            set_kg_store(kg_store)
             logger.info("KnowledgeGraphStore initialized (postgres)")
 
         archivist = Archivist(kg_store=kg_store)
@@ -813,6 +815,7 @@ if DEX_ENABLED:
     app.include_router(dex_proxy_router)
     app.include_router(timekeeper_router)
     app.include_router(shifts_router)
+    app.include_router(knowledge_graph_router)
 
 
 # =============================================================================

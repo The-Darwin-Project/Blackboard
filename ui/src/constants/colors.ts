@@ -74,6 +74,7 @@ export const NEURON_COLORS: Record<string, string> = {
   agent:     '#8b5cf6',   // violet -- default; overridden per agent below
   domain:    '#eab308',   // amber -- default; overridden per domain below
   skill:     '#f472b6',   // rose  -- brain skills ring (overridden per tag_type inline)
+  service:   '#3b82f6',   // blue  -- KG service entities
 };
 
 export const DOMAIN_NEURON_COLORS: Record<string, string> = {
