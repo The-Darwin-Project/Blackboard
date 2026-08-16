@@ -27,6 +27,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      issues: write
 
     container:
       image: quay.io/redhat-user-workloads/ocp-virt-images-tenant/gitops-ci-reviewer:latest
