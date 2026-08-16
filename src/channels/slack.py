@@ -4,13 +4,13 @@
 # 2. [Pattern]: agent_view model. DMs arrive as message.im events. Top-level DMs (no thread_ts) create events;
 #    threaded replies map to existing events. No AsyncAssistant middleware — all routing is in on_dm_message.
 # 3. [Pattern]: Phase 2 -- Aligner events auto-open #darwin-infra threads on brain.route (agent dispatched). Trivial auto-closed events stay silent.
-# 4. [Pattern]: broadcast_handler routes by message["type"]. DM threads: brain_thinking -> setStatus + streaming,
-#    turn -> Block Kit (dedup guard skips if stream delivered). Legacy: brain_thinking -> emoji, turn -> Block Kit.
+# 4. [Pattern]: broadcast_handler routes by message["type"]. DM threads: brain_thinking -> setStatus only,
+#    turn -> Block Kit. Legacy: brain_thinking -> emoji, turn -> Block Kit.
 # 5. [Gotcha]: Bolt's AsyncIgnoringSelfEvents middleware prevents infinite loops from bot's own thread replies.
 # 6. [Pattern]: safe_react fails gracefully if reactions:write scope is missing.
 # 7. [Pattern]: _dm_context stores {channel, thread_ts, user_id, team_id, _last_status_at} per event for setStatus
-#    calls, DM routing, and streaming recipient resolution. Populated in on_dm_message create branch,
-#    handle_create_event_modal, and open_dm_thread. Self-heals on reply if missing (restart recovery).
+#    calls and DM routing. Populated in on_dm_message create branch, handle_create_event_modal, and
+#    open_dm_thread. Self-heals on reply if missing (restart recovery).
 #    Lazy hydration via _ensure_dm_context() in broadcast_handler (protects against BRPOP race).
 # 8. [Pattern]: _INTERNAL_TURNS (actor, action) frozenset prevents internal turns from leaking into
 #    user Slack threads. Applied in _handle_legacy_turn via tuple matching. Extensible for non-brain
@@ -21,10 +21,12 @@
 #    Home tab forks to access-denied view for unauthorized users.
 # 10. [Gotcha]: chat.postMessage(channel=user_id) returns the real DM channel_id in result["channel"].
 #    Always use result["channel"] for mappings, never user_id.
-# 11. [Pattern]: Streaming via chat_stream (feature-flagged via SLACK_STREAMING_ENABLED). Coalescing:
-#    500-char primary, 1s secondary. Circuit breaker: _stream_eligible[eid]=False on failure.
-#    _SLACK_API_TIMEOUT (5s) on all Slack API calls in broadcast path. Broken pill recovery
-#    via chat_delete on stream.stop failure. _cleanup_stream in event_closed, stop(), and error paths.
+# 11. [Pattern]: Tool-driven progress messages (feature-flagged via SLACK_PROGRESS_ENABLED) replace raw
+#    LLM text streaming. On brain.tool_result turns in DM threads, _progress_ts/_progress_last_phrase
+#    post/update a single ephemeral status message per event (see _TOOL_PROGRESS_PHRASES). Deleted via
+#    chat_delete when brain.response arrives or on event_closed (orphan cleanup). _SLACK_API_TIMEOUT
+#    (5s) on all Slack API calls in broadcast path. All chat.delete calls wrapped in try/except --
+#    Block Kit response posting proceeds unconditionally even if cleanup fails.
 # 12. [Pattern]: _ensure_dm_context lazy hydration: if _dm_context missing at broadcast time,
 #    queries blackboard for DM channel events (source=slack, channel starts with "D").
 #    Protects against Brain BRPOP race consuming event before on_dm_message dict assignment.
@@ -74,6 +76,21 @@ _USER_VISIBLE_TOOL_RESULTS = frozenset({
 
 _SLACK_API_TIMEOUT = 5.0
 
+# Tool-driven progress phrases shown in DM threads while FRIDAY works.
+# Maintenance: add new phrases here as tools are added; unknown tools fall back
+# to a generic phrase via .get().
+_TOOL_PROGRESS_PHRASES: dict[str, str] = {
+    "classify_event": "Assessing the situation...",
+    "consult_deep_memory": "Checking knowledge base...",
+    "refresh_github_context": "Reviewing GitHub status...",
+    "refresh_gitlab_context": "Checking GitLab pipeline...",
+    "search_open_incidents": "Looking for related incidents...",
+    "set_phase": "Working on your request...",
+    "take_note": "Taking notes...",
+    "record_observation": "Taking notes...",
+    "list_observations": "Reviewing observations...",
+}
+
 
 class SlackChannel:
     """Adapter wrapping Slack Bolt AsyncApp with Socket Mode."""
@@ -87,7 +104,6 @@ class SlackChannel:
         blackboard: "BlackboardState",
         brain: "Brain",
         access_gate: "SlackAccessGate | None" = None,
-        streaming_enabled: bool = False,
     ) -> None:
         self._app_token = app_token
         self._access_gate = access_gate
@@ -103,14 +119,11 @@ class SlackChannel:
         self._dm_context: dict[str, dict] = {}  # event_id -> {channel, thread_ts, user_id, team_id, _last_status_at}
         self._quiet_events: set[str] = set()  # events from @mention -- suppress noise, show only results
 
-        # Phase 2: Streaming state
-        self._active_streams: dict[str, Any] = {}  # event_id -> AsyncChatStream
-        self._stream_eligible: dict[str, bool] = {}  # event_id -> cached eligibility
-        self._stream_delivered: dict[str, bool] = {}  # event_id -> True if stream had content this cycle
-        self._coalesce_buffer: dict[str, str] = {}  # event_id -> buffered text pending flush
-        self._coalesce_last_flush: dict[str, float] = {}  # event_id -> last flush timestamp
-        self._stream_ts: dict[str, str] = {}  # event_id -> message ts for broken pill recovery
-        self._streaming_enabled: bool = streaming_enabled
+        # Tool-driven progress messages (DM only, feature-flagged)
+        self._progress_ts: dict[str, str] = {}  # event_id -> Slack message ts
+        self._progress_last_phrase: dict[str, str] = {}  # event_id -> last posted phrase (dedup)
+        self._progress_failed: set[str] = set()  # event_id -> circuit breaker (skip after postMessage timeout)
+        self._progress_enabled = os.getenv("SLACK_PROGRESS_ENABLED", "false").lower() == "true"
 
         self._app = AsyncApp(token=bot_token)
         self._register_handlers()
@@ -776,14 +789,6 @@ class SlackChannel:
         is_quiet = event_id in self._quiet_events
 
         if msg_type == "brain_thinking":
-            text = message.get("text", "")
-            is_thought = message.get("is_thought", False)
-
-            # Clear stale dedup flag + circuit breaker on new cycle start
-            if not text:
-                self._stream_delivered.pop(event_id, None)
-                self._stream_eligible.pop(event_id, None)
-
             if is_quiet:
                 if event_id not in self._thinking_msg:
                     await self._handle_legacy_thinking(event_id, message)
@@ -791,51 +796,11 @@ class SlackChannel:
 
             if is_dm:
                 await self._refresh_thinking_status(event_id)
-                # Stream non-thought output text (feature-flagged)
-                if text and not is_thought and self._should_stream(event_id):
-                    buf = self._coalesce_buffer.get(event_id, "") + text
-                    self._coalesce_buffer[event_id] = buf
-                    last_flush = self._coalesce_last_flush.get(event_id, 0)
-                    now = time.time()
-
-                    if len(buf) >= 500 or (now - last_flush) >= 1.0:
-                        stream = self._active_streams.get(event_id)
-                        if not stream:
-                            stream = await self._start_stream(event_id)
-                            if stream:
-                                self._active_streams[event_id] = stream
-                        if stream:
-                            try:
-                                await asyncio.wait_for(stream.append(markdown_text=buf), timeout=_SLACK_API_TIMEOUT)
-                                self._coalesce_buffer[event_id] = ""
-                                self._coalesce_last_flush[event_id] = now
-                            except Exception as e:
-                                logger.warning(f"Stream append failed for {event_id}: {e}")
-                                self._stream_eligible[event_id] = False
-                                await self._cleanup_stream(event_id)
             else:
                 await self._handle_legacy_thinking(event_id, message)
             return
 
         if msg_type == "brain_thinking_done":
-            # Stream finalization (DM only)
-            if self._should_stream(event_id):
-                buf = self._coalesce_buffer.pop(event_id, "")
-                stream = self._active_streams.get(event_id)
-                if stream and buf:
-                    try:
-                        await asyncio.wait_for(stream.append(markdown_text=buf), timeout=_SLACK_API_TIMEOUT)
-                    except Exception:
-                        pass
-                if stream:
-                    try:
-                        await asyncio.wait_for(stream.stop(), timeout=_SLACK_API_TIMEOUT)
-                    except Exception as e:
-                        logger.warning(f"Stream stop failed for {event_id}: {e}")
-                    self._active_streams.pop(event_id, None)
-                    self._stream_delivered[event_id] = True
-                self._coalesce_last_flush.pop(event_id, None)
-
             if is_dm:
                 await self._clear_thinking_status(event_id)
             return
@@ -848,8 +813,42 @@ class SlackChannel:
                     return
             await self._handle_legacy_turn(event_id, message)
 
+        elif msg_type == "event_status_changed":
+            status = message.get("status")
+            if status == "deferred":
+                # Event deferred — clean up progress bubble (FRIDAY is waiting, not working)
+                progress_ts = self._progress_ts.pop(event_id, None)
+                self._progress_last_phrase.pop(event_id, None)
+                self._progress_failed.discard(event_id)
+                if progress_ts:
+                    ctx = self._dm_context.get(event_id, {})
+                    try:
+                        await asyncio.wait_for(
+                            self._app.client.chat_delete(
+                                channel=ctx.get("channel", ""), ts=progress_ts,
+                            ),
+                            timeout=_SLACK_API_TIMEOUT,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Progress cleanup on defer failed for {event_id}: {e}")
+
         elif msg_type == "event_closed":
-            await self._cleanup_stream(event_id)
+            # Orphan progress message cleanup
+            progress_ts = self._progress_ts.pop(event_id, None)
+            self._progress_last_phrase.pop(event_id, None)
+            self._progress_failed.discard(event_id)
+            if progress_ts:
+                ctx = self._dm_context.get(event_id, {})
+                try:
+                    await asyncio.wait_for(
+                        self._app.client.chat_delete(
+                            channel=ctx.get("channel", ""), ts=progress_ts,
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.warning(f"Orphan progress cleanup failed for {event_id}: {e}")
+
             event_doc = await self._blackboard.get_event(event_id)
             if event_doc and event_doc.slack_thread_ts:
                 summary = message.get("summary", "Event closed.")
@@ -866,14 +865,11 @@ class SlackChannel:
                     event_doc.slack_channel_id, event_doc.slack_thread_ts,
                 )
             self._dm_context.pop(event_id, None)
-            self._stream_eligible.pop(event_id, None)
-            self._stream_delivered.pop(event_id, None)
-            self._stream_ts.pop(event_id, None)
             self._thinking_msg.pop(event_id, None)
             self._quiet_events.discard(event_id)
 
     # =========================================================================
-    # DM status path (agent_view — setStatus debounce + streaming helpers)
+    # DM status path (agent_view — setStatus debounce)
     # =========================================================================
 
     async def _refresh_thinking_status(self, event_id: str) -> None:
@@ -912,18 +908,6 @@ class SlackChannel:
         except Exception as e:
             logger.debug(f"Clear setStatus failed for {event_id}: {e}")
 
-    def _should_stream(self, event_id: str) -> bool:
-        """Check if event is eligible for streaming. Cached per event_id."""
-        if not self._streaming_enabled:
-            return False
-        cached = self._stream_eligible.get(event_id)
-        if cached is not None:
-            return cached
-        ctx = self._dm_context.get(event_id)
-        eligible = ctx is not None and bool(ctx.get("thread_ts"))
-        self._stream_eligible[event_id] = eligible
-        return eligible
-
     async def _ensure_dm_context(self, event_id: str) -> bool:
         """Lazily hydrate _dm_context from event document if missing. Returns True if DM."""
         if event_id in self._dm_context:
@@ -942,51 +926,6 @@ class SlackChannel:
             }
             return True
         return False
-
-    async def _start_stream(self, event_id: str) -> Any:
-        """Start a chat stream for the event. Returns stream object or None on failure."""
-        ctx = self._dm_context.get(event_id)
-        if not ctx:
-            return None
-        try:
-            stream = await asyncio.wait_for(
-                self._app.client.chat_stream(
-                    channel=ctx["channel"],
-                    thread_ts=ctx["thread_ts"],
-                    recipient_user_id=ctx["user_id"],
-                    recipient_team_id=ctx.get("team_id") or None,
-                    buffer_size=0,
-                ),
-                timeout=_SLACK_API_TIMEOUT,
-            )
-            self._stream_ts[event_id] = getattr(stream, "ts", None) or ""
-            logger.info(f"Stream started for {event_id}")
-            return stream
-        except Exception as e:
-            logger.warning(f"chat_stream start failed for {event_id}: {e}")
-            self._stream_eligible[event_id] = False
-            self._coalesce_buffer.pop(event_id, None)
-            return None
-
-    async def _cleanup_stream(self, event_id: str) -> None:
-        """Stop and remove an active stream. Safe to call multiple times."""
-        stream = self._active_streams.pop(event_id, None)
-        stream_ts = self._stream_ts.pop(event_id, None)
-        if stream:
-            try:
-                await asyncio.wait_for(stream.stop(), timeout=_SLACK_API_TIMEOUT)
-            except Exception:
-                if stream_ts:
-                    ctx = self._dm_context.get(event_id)
-                    if ctx:
-                        try:
-                            await self._app.client.chat_delete(
-                                channel=ctx["channel"], ts=stream_ts,
-                            )
-                        except Exception:
-                            pass
-        self._coalesce_buffer.pop(event_id, None)
-        self._coalesce_last_flush.pop(event_id, None)
 
     # =========================================================================
     # Legacy path (channel threads, infra threads, all turn delivery)
@@ -1017,16 +956,63 @@ class SlackChannel:
         from ..models import ConversationTurn
         turn = ConversationTurn(**message["turn"])
 
-        # Dedup: if stream already delivered this response text, skip Block Kit
         if turn.actor == "brain" and turn.action == "response":
-            if self._stream_delivered.pop(event_id, False):
-                logger.debug(f"Skipping Block Kit for {event_id} — stream delivered")
-                return
+            # Clean up progress message before posting the Block Kit response.
+            # Always proceeds to post regardless of chat_delete success/failure.
+            progress_ts = self._progress_ts.pop(event_id, None)
+            self._progress_last_phrase.pop(event_id, None)
+            self._progress_failed.discard(event_id)
+            if progress_ts:
+                ctx = self._dm_context.get(event_id, {})
+                try:
+                    await asyncio.wait_for(
+                        self._app.client.chat_delete(
+                            channel=ctx.get("channel", ""), ts=progress_ts,
+                        ),
+                        timeout=_SLACK_API_TIMEOUT,
+                    )
+                except Exception as e:
+                    logger.warning(f"Progress cleanup failed for {event_id}: {e}")
 
         if turn.actor == "brain" and turn.action == "thoughts":
             return
 
         if turn.actor == "brain" and turn.action == "tool_result":
+            # Progress message update (whitelist-independent, DM only) -- fires
+            # BEFORE the _USER_VISIBLE_TOOL_RESULTS gate below.
+            if (
+                self._progress_enabled
+                and turn.waitingFor
+                and event_id in self._dm_context
+                and event_id not in self._progress_failed
+            ):
+                phrase = _TOOL_PROGRESS_PHRASES.get(turn.waitingFor, "FRIDAY is working...")
+                if self._progress_last_phrase.get(event_id) != phrase:
+                    ctx = self._dm_context[event_id]
+                    try:
+                        if event_id not in self._progress_ts:
+                            result = await asyncio.wait_for(
+                                self._app.client.chat_postMessage(
+                                    channel=ctx["channel"], thread_ts=ctx["thread_ts"],
+                                    text=phrase,
+                                ),
+                                timeout=_SLACK_API_TIMEOUT,
+                            )
+                            self._progress_ts[event_id] = result["ts"]
+                        else:
+                            await asyncio.wait_for(
+                                self._app.client.chat_update(
+                                    channel=ctx["channel"], ts=self._progress_ts[event_id],
+                                    text=phrase,
+                                ),
+                                timeout=_SLACK_API_TIMEOUT,
+                            )
+                        self._progress_last_phrase[event_id] = phrase
+                    except Exception as e:
+                        logger.warning(f"Progress message failed for {event_id}: {e}")
+                        if event_id not in self._progress_ts:
+                            self._progress_failed.add(event_id)
+
             if not (event_doc.slack_thread_ts and turn.waitingFor in _USER_VISIBLE_TOOL_RESULTS):
                 return
 
@@ -1240,8 +1226,6 @@ class SlackChannel:
 
     async def stop(self) -> None:
         """Graceful shutdown."""
-        for eid in list(self._active_streams.keys()):
-            await self._cleanup_stream(eid)
         if self._handler:
             await self._handler.close_async()
             logger.info("Slack Socket Mode disconnected")
