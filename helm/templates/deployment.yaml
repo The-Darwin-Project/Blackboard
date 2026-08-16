@@ -511,8 +511,8 @@ spec:
             - name: SLACK_WORKSPACE_DOMAIN
               value: {{ .Values.slack.workspaceDomain | quote }}
             {{- end }}
-            - name: SLACK_STREAMING_ENABLED
-              value: {{ .Values.slack.streaming.enabled | quote }}
+            - name: SLACK_PROGRESS_ENABLED
+              value: {{ .Values.slack.progress.enabled | quote }}
             {{- end }}
             {{- if .Values.slackAccess.enabled }}
             # Slack Access Gate (OCP Group-based)

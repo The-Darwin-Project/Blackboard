@@ -293,7 +293,6 @@ async def lifespan(app: FastAPI):
                 blackboard=blackboard,
                 brain=brain,
                 access_gate=access_gate,
-                streaming_enabled=os.getenv("SLACK_STREAMING_ENABLED", "false").lower() == "true",
             )
             brain.register_channel(slack.broadcast_handler)
             await slack.start()

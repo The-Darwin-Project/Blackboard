@@ -1,18 +1,25 @@
 # tests/test_slack_channel.py
 # @ai-rules:
-# 1. [Constraint]: Tests invoke actual SlackChannel methods — _should_stream(), broadcast_handler(),
-#    _start_stream(), _cleanup_stream(), _ensure_dm_context(), _refresh_thinking_status(), and
-#    captured on_dm_message callback. No re-implementation of production logic.
+# 1. [Constraint]: Tests invoke actual SlackChannel methods — broadcast_handler(), _handle_legacy_turn()
+#    (via broadcast_handler), _ensure_dm_context(), _refresh_thinking_status(), and captured
+#    on_dm_message callback. No re-implementation of production logic.
 # 2. [Pattern]: Mock AsyncApp with decorator-capturing factory. _register_handlers() populates
 #    captured dict. Callbacks invoked directly with mock event payloads.
-# 3. [Pattern]: Assert on STATE CHANGES: _dm_context, _stream_delivered, _active_streams,
-#    _stream_eligible, _coalesce_buffer, _thinking_msg — not on mock call args.
+# 3. [Pattern]: Assert on STATE CHANGES: _dm_context, _thinking_msg, _progress_ts,
+#    _progress_last_phrase — not just on mock call args, though call args are inspected for
+#    progress bubble text/target since chat_postMessage/chat_update/chat_delete are the only
+#    externally-observable side effects of the progress-bubble mechanism.
 # 4. [Pattern]: Use pytest-asyncio mode="auto". AsyncMock for all awaitable dependencies.
 # 5. [Gotcha]: _access_gate = None bypasses gate checks. Pre-populate _dm_context to avoid
 #    _ensure_dm_context blackboard queries in tests that don't test hydration.
-"""Unit tests for SlackChannel — agent_view DM handling, streaming, and dedup."""
+# 6. [Pattern]: Post-streaming-removal (slack-port-unification), progress feedback during
+#    tool_result turns is a single-bubble post/update/delete lifecycle (_progress_ts,
+#    _progress_last_phrase, _TOOL_PROGRESS_PHRASES) gated by _progress_enabled and
+#    turn.waitingFor truthiness — not the old chat_stream-based token streaming.
+"""Unit tests for SlackChannel — agent_view DM handling and progress-bubble messaging."""
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -25,7 +32,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def _make_channel(*, streaming_enabled: bool = False) -> tuple:
+def _make_channel() -> tuple:
     """Create a SlackChannel with mocked deps and captured handler callbacks.
 
     Returns (sc, captured) where captured maps "event:message" etc. to callbacks.
@@ -67,17 +74,29 @@ def _make_channel(*, streaming_enabled: bool = False) -> tuple:
     sc._thinking_msg = {}
     sc._quiet_events = set()
     sc._dm_context = {}
-    sc._active_streams = {}
-    sc._stream_eligible = {}
-    sc._stream_delivered = {}
-    sc._coalesce_buffer = {}
-    sc._coalesce_last_flush = {}
-    sc._stream_ts = {}
-    sc._streaming_enabled = streaming_enabled
+
+    # Progress-bubble state (replaces the removed streaming state post slack-port-unification).
+    sc._progress_ts = {}
+    sc._progress_last_phrase = {}
+    sc._progress_failed = set()
+    sc._progress_locks = {}  # event_id -> asyncio.Lock, serializes post/update/cleanup (TOCTOU fix)
+    sc._progress_enabled = True
 
     sc._register_handlers()
 
     return sc, captured
+
+
+def _dm_ctx(
+    channel: str = "D_DM",
+    thread_ts: str = "1700000001.000001",
+    user_id: str = "U_USER",
+) -> dict:
+    """Build a _dm_context entry."""
+    return {
+        "channel": channel, "thread_ts": thread_ts,
+        "user_id": user_id, "team_id": "T_TEAM", "_last_status_at": 0,
+    }
 
 
 def _dm_event(
@@ -110,7 +129,7 @@ def _mock_event_doc(
     status: str = "active",
     source: str = "slack",
     slack_channel_id: str = "D_DM",
-    slack_thread_ts: str = "1700000001.000001",
+    slack_thread_ts: str | None = "1700000001.000001",
     slack_user_id: str = "U_USER",
     conversation: list | None = None,
 ):
@@ -137,6 +156,15 @@ def _user_info_response(name: str = "Alice", email: str = "alice@example.com") -
             "real_name": name,
         }
     }
+
+
+def _find_call_with_text(mock_calls: list, needle: str) -> dict | None:
+    """Return the kwargs of the first call whose 'text' kwarg contains needle, else None."""
+    for call in mock_calls:
+        kwargs = call[1] if call[1] else {}
+        if needle in kwargs.get("text", ""):
+            return kwargs
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -345,256 +373,670 @@ class TestApproveRejectActionsEnqueue:
 
 
 # ---------------------------------------------------------------------------
-# Test: broadcast_handler dedup and turn routing
+# Test: legacy turn routing — brain.response / brain.thoughts (T-1, T-2)
 # ---------------------------------------------------------------------------
 
 
-class TestBroadcastDedup:
-    """Invoke broadcast_handler to verify dedup guard and turn routing."""
+class TestLegacyTurnRouting:
+    """Post-unification: no stream-delivered dedup guard remains on brain.response."""
 
     @pytest.mark.asyncio
-    async def test_dedup_guard_skips_response(self):
-        """_stream_delivered set → brain.response Block Kit skipped, flag consumed."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-streamed"
-
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        sc._stream_delivered[eid] = True
+    async def test_response_always_posts_block_kit(self):
+        """T-1: brain.response always posts Block Kit — no dedup gating."""
+        sc, _ = _make_channel()
+        eid = "evt-resp-always"
+        sc._dm_context[eid] = _dm_ctx()
         sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
 
         await sc.broadcast_handler({
             "type": "turn",
             "event_id": eid,
-            "turn": {"turn": 1, "actor": "brain", "action": "response",
-                     "thoughts": "Done."},
+            "turn": {"turn": 1, "actor": "brain", "action": "response", "thoughts": "Done."},
         })
 
-        assert eid not in sc._stream_delivered
-        sc._app.client.chat_postMessage.assert_not_called()
+        sc._app.client.chat_postMessage.assert_called()
 
     @pytest.mark.asyncio
-    async def test_dedup_guard_passes_wait(self):
-        """brain.wait turns NOT skipped even when _stream_delivered set."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-wait"
-
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        sc._stream_delivered[eid] = True
-        event_doc = _mock_event_doc(event_id=eid)
-        sc._blackboard.get_event.return_value = event_doc
+    async def test_thoughts_turn_suppressed(self):
+        """T-2: brain.thoughts never reaches Slack."""
+        sc, _ = _make_channel()
+        eid = "evt-thoughts-suppressed"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
 
         await sc.broadcast_handler({
             "type": "turn",
             "event_id": eid,
-            "turn": {"turn": 1, "actor": "brain", "action": "wait",
-                     "thoughts": "Waiting for approval..."},
+            "turn": {"turn": 1, "actor": "brain", "action": "thoughts", "thoughts": "Internal reasoning"},
         })
 
-        assert sc._stream_delivered[eid] is True
+        sc._app.client.chat_postMessage.assert_not_called()
+        sc._app.client.chat_update.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Test: broadcast_handler stale-flag and cycle management
+# Test: brain_thinking status refresh + event_closed cleanup (T-3, T-4, T-5)
 # ---------------------------------------------------------------------------
 
 
-class TestBroadcastCycleManagement:
-    """Verify stale-flag clear and circuit breaker reset on new cycle."""
+class TestBrainThinkingAndClosure:
+    """Streaming removed: brain_thinking is now setStatus-only; closure clears progress too."""
 
     @pytest.mark.asyncio
-    async def test_stale_dedup_cleared_on_empty_text(self):
-        """Any brain_thinking with empty text clears stale dedup + circuit breaker (F9)."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-stale"
-
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        sc._stream_delivered[eid] = True
-        sc._stream_eligible[eid] = False
+    async def test_empty_text_brain_thinking_preserves_set_status(self):
+        """T-3: empty-text brain_thinking for a DM still refreshes setStatus."""
+        sc, _ = _make_channel()
+        eid = "evt-thinking-empty"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._refresh_thinking_status = AsyncMock()
 
         await sc.broadcast_handler({
-            "type": "brain_thinking",
-            "event_id": eid,
-            "text": "",
-            "is_thought": False,
+            "type": "brain_thinking", "event_id": eid, "text": "", "is_thought": False,
         })
 
-        assert eid not in sc._stream_delivered
-        assert eid not in sc._stream_eligible
+        sc._refresh_thinking_status.assert_called_once_with(eid)
 
     @pytest.mark.asyncio
-    async def test_event_closed_cleans_all_state(self):
-        """event_closed → stream stopped, all state dicts cleaned including _thinking_msg."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-closing"
+    async def test_brain_thinking_with_text_is_noop(self):
+        """T-4: brain_thinking WITH text is a no-op — no streaming call remains (net-new)."""
+        sc, _ = _make_channel()
+        eid = "evt-thinking-text"
+        sc._dm_context[eid] = _dm_ctx()
 
-        mock_stream = AsyncMock()
-        sc._active_streams[eid] = mock_stream
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        sc._stream_eligible[eid] = True
-        sc._stream_delivered[eid] = True
-        sc._stream_ts[eid] = "1700000001.000002"
+        await sc.broadcast_handler({
+            "type": "brain_thinking", "event_id": eid, "text": "Hello", "is_thought": False,
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+        sc._app.client.chat_update.assert_not_called()
+        assert not hasattr(sc._app.client, "chat_stream") or not sc._app.client.chat_stream.called
+
+    @pytest.mark.asyncio
+    async def test_event_closed_cleans_all_state_incl_progress(self):
+        """T-5: event_closed clears _dm_context, _thinking_msg, _progress_ts; deletes progress msg."""
+        sc, _ = _make_channel()
+        eid = "evt-closing-progress"
+        sc._dm_context[eid] = _dm_ctx()
         sc._thinking_msg[eid] = ("D_DM", "1700000001.000003")
-        sc._coalesce_buffer[eid] = "pending"
-        sc._coalesce_last_flush[eid] = time.time()
+        sc._progress_ts[eid] = "progress_ts_value"
 
-        event_doc = _mock_event_doc(event_id=eid)
+        event_doc = _mock_event_doc(event_id=eid, slack_thread_ts=None)
         sc._blackboard.get_event.return_value = event_doc
 
         await sc.broadcast_handler({
-            "type": "event_closed",
-            "event_id": eid,
-            "summary": "resolved",
+            "type": "event_closed", "event_id": eid, "summary": "resolved",
         })
 
-        for store in (sc._active_streams, sc._dm_context, sc._stream_eligible,
-                      sc._stream_delivered, sc._stream_ts, sc._thinking_msg,
-                      sc._coalesce_buffer, sc._coalesce_last_flush):
-            assert eid not in store
+        assert eid not in sc._dm_context
+        assert eid not in sc._thinking_msg
+        assert eid not in sc._progress_ts
+        sc._app.client.chat_delete.assert_called_once()
+        _, del_kwargs = sc._app.client.chat_delete.call_args
+        assert del_kwargs.get("ts") == "progress_ts_value"
+        assert del_kwargs.get("channel") == "D_DM"
 
 
 # ---------------------------------------------------------------------------
-# Test: _should_stream caching behavior
+# Test: progress-bubble lifecycle for tool_result turns (T-6..T-16)
 # ---------------------------------------------------------------------------
 
 
-class TestShouldStream:
-    """Invoke sc._should_stream() directly to verify caching and eligibility."""
-
-    def test_caches_eligible_result(self):
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-cache"
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-
-        assert sc._should_stream(eid) is True
-        assert sc._stream_eligible[eid] is True
-
-        del sc._dm_context[eid]
-        assert sc._should_stream(eid) is True
-
-    def test_false_when_disabled(self):
-        sc, _ = _make_channel(streaming_enabled=False)
-        sc._dm_context["evt-x"] = {
-            "thread_ts": "1.2", "channel": "D", "user_id": "U",
-            "team_id": "T", "_last_status_at": 0,
-        }
-        assert sc._should_stream("evt-x") is False
-
-    def test_false_when_no_context(self):
-        sc, _ = _make_channel(streaming_enabled=True)
-        assert sc._should_stream("evt-noctx") is False
-        assert sc._stream_eligible["evt-noctx"] is False
-
-    def test_false_when_empty_thread_ts(self):
-        sc, _ = _make_channel(streaming_enabled=True)
-        sc._dm_context["evt-no-ts"] = {
-            "channel": "D_DM", "thread_ts": "",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        assert sc._should_stream("evt-no-ts") is False
-
-
-# ---------------------------------------------------------------------------
-# Test: _start_stream and _cleanup_stream
-# ---------------------------------------------------------------------------
-
-
-class TestStreamLifecycle:
-    """Invoke _start_stream and _cleanup_stream directly."""
+class TestProgressMessages:
+    """Post/update/delete lifecycle of the single tool_result progress bubble."""
 
     @pytest.mark.asyncio
-    async def test_start_stream_failure_sets_breaker_and_clears_buffer(self):
-        """chat_stream failure → None, circuit breaker set, buffer cleared (F5, F13)."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-failstr"
+    async def test_progress_posted_on_first_tool_result(self):
+        """T-6: DM + progress enabled + first tool_result → chat_postMessage with mapped phrase."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-first"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(return_value={"ts": "progress_ts_value"})
 
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        sc._coalesce_buffer[eid] = "buffered"
-        sc._app.client.chat_stream = AsyncMock(side_effect=Exception("scope_missing"))
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
 
-        result = await sc._start_stream(eid)
-
-        assert result is None
-        assert sc._stream_eligible[eid] is False
-        assert eid not in sc._coalesce_buffer
-
-    @pytest.mark.asyncio
-    async def test_start_stream_success_stores_ts(self):
-        """Successful chat_stream → stream_ts stored (F7)."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-ok"
-
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-        mock_stream = AsyncMock()
-        mock_stream.ts = "1700000001.000099"
-        sc._app.client.chat_stream = AsyncMock(return_value=mock_stream)
-
-        result = await sc._start_stream(eid)
-
-        assert result is mock_stream
-        assert sc._stream_ts[eid] == "1700000001.000099"
-
-    @pytest.mark.asyncio
-    async def test_cleanup_stream_stops_and_cleans(self):
-        """Normal cleanup → stream stopped, buffer/flush/ts cleared."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-clean"
-
-        mock_stream = AsyncMock()
-        sc._active_streams[eid] = mock_stream
-        sc._stream_ts[eid] = "1700000001.000099"
-        sc._coalesce_buffer[eid] = "buf"
-        sc._coalesce_last_flush[eid] = time.time()
-
-        await sc._cleanup_stream(eid)
-
-        assert eid not in sc._active_streams
-        assert eid not in sc._stream_ts
-        assert eid not in sc._coalesce_buffer
-        assert eid not in sc._coalesce_last_flush
-        mock_stream.stop.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_cleanup_broken_pill_deletes_message(self):
-        """stream.stop fails → broken message deleted via chat_delete (F7)."""
-        sc, _ = _make_channel(streaming_enabled=True)
-        eid = "evt-broken"
-
-        mock_stream = AsyncMock()
-        mock_stream.stop = AsyncMock(side_effect=Exception("broken"))
-        sc._active_streams[eid] = mock_stream
-        sc._stream_ts[eid] = "1700000001.000099"
-        sc._dm_context[eid] = {
-            "channel": "D_DM", "thread_ts": "1700000001.000001",
-            "user_id": "U_USER", "team_id": "T_TEAM", "_last_status_at": 0,
-        }
-
-        await sc._cleanup_stream(eid)
-
-        sc._app.client.chat_delete.assert_awaited_once_with(
-            channel="D_DM", ts="1700000001.000099",
+        progress_call = _find_call_with_text(
+            sc._app.client.chat_postMessage.call_args_list, "Checking knowledge base...",
         )
-        assert eid not in sc._active_streams
+        assert progress_call is not None, "Expected a progress bubble post with the mapped phrase"
+        assert progress_call.get("channel") == "D_DM"
+        assert sc._progress_ts[eid] == "progress_ts_value"
+
+    @pytest.mark.asyncio
+    async def test_progress_updated_on_subsequent_tool_result(self):
+        """T-7: second (different) tool_result while a bubble exists → chat_update, new phrase."""
+        from src.channels.slack import _TOOL_PROGRESS_PHRASES
+
+        sc, _ = _make_channel()
+        eid = "evt-progress-update"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(return_value={"ts": "progress_ts_value"})
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
+        assert sc._progress_ts[eid] == "progress_ts_value"
+
+        first_phrase = _TOOL_PROGRESS_PHRASES.get("consult_deep_memory", "")
+        other_tool = next(
+            (k for k, v in _TOOL_PROGRESS_PHRASES.items() if v != first_phrase),
+            None,
+        )
+        assert other_tool is not None, "Need a second tool with a distinct phrase to test update"
+
+        sc._app.client.chat_update = AsyncMock()
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "tool_result",
+                     "waitingFor": other_tool},
+        })
+
+        sc._app.client.chat_update.assert_called_once()
+        _, update_kwargs = sc._app.client.chat_update.call_args
+        assert update_kwargs.get("ts") == "progress_ts_value"
+        assert update_kwargs.get("channel") == "D_DM"
+        assert _TOOL_PROGRESS_PHRASES[other_tool] in update_kwargs.get("text", "")
+
+    @pytest.mark.asyncio
+    async def test_progress_deleted_and_response_posted(self):
+        """T-8: brain.response with a lingering progress bubble → delete, then post Block Kit."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-response"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "response",
+                     "thoughts": "Here's the answer."},
+        })
+
+        sc._app.client.chat_delete.assert_called_once()
+        _, del_kwargs = sc._app.client.chat_delete.call_args
+        assert del_kwargs.get("ts") == "progress_ts_value"
+        sc._app.client.chat_postMessage.assert_called()
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_chat_delete_failure_does_not_block_response(self):
+        """T-9: chat_delete raising must not prevent the Block Kit response from posting."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-delete-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._app.client.chat_delete = AsyncMock(side_effect=Exception("API error"))
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "response",
+                     "thoughts": "Here's the answer."},
+        })
+
+        sc._app.client.chat_postMessage.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_progress_cleaned_on_event_closed_orphan(self):
+        """T-10: lingering progress bubble (no thinking indicator) is still deleted on close."""
+        sc, _ = _make_channel()
+        eid = "evt-orphan-progress"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "orphan_ts_value"
+
+        event_doc = _mock_event_doc(event_id=eid, slack_thread_ts=None)
+        sc._blackboard.get_event.return_value = event_doc
+
+        await sc.broadcast_handler({
+            "type": "event_closed", "event_id": eid, "summary": "resolved",
+        })
+
+        sc._app.client.chat_delete.assert_called_once()
+        _, del_kwargs = sc._app.client.chat_delete.call_args
+        assert del_kwargs.get("ts") == "orphan_ts_value"
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_progress_not_posted_for_non_dm(self):
+        """T-11: no _dm_context (non-DM/legacy thread) → progress bubble never posted."""
+        sc, _ = _make_channel()
+        eid = "evt-non-dm-progress"
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(
+            event_id=eid, source="aligner", slack_channel_id="C_INFRA", slack_thread_ts=None,
+        )
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "some_new_tool"},
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_uses_default_phrase(self):
+        """T-12: waitingFor not in _TOOL_PROGRESS_PHRASES → falls back to the default phrase."""
+        sc, _ = _make_channel()
+        eid = "evt-unknown-tool"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(return_value={"ts": "progress_ts_value"})
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "some_new_tool"},
+        })
+
+        progress_call = _find_call_with_text(
+            sc._app.client.chat_postMessage.call_args_list, "FRIDAY is working...",
+        )
+        assert progress_call is not None, "Expected default progress phrase for unmapped tool"
+
+    @pytest.mark.asyncio
+    async def test_progress_survives_brain_thinking_done(self):
+        """T-13: brain_thinking_done must NOT clear the progress bubble state."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-survives"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+
+        await sc.broadcast_handler({"type": "brain_thinking_done", "event_id": eid})
+
+        assert sc._progress_ts.get(eid) == "progress_ts_value"
+
+    @pytest.mark.asyncio
+    async def test_progress_not_posted_when_disabled(self):
+        """T-14: _progress_enabled=False → no progress bubble posted."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-disabled"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = False
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "some_new_tool"},
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_phrase_dedup_skips_identical_update(self):
+        """T-15: same tool reported twice → second update is skipped (phrase unchanged)."""
+        sc, _ = _make_channel()
+        eid = "evt-progress-dedup"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._progress_ts[eid] = "progress_ts_value"  # bubble already posted
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_update = AsyncMock()
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "some_new_tool"},
+        })
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "some_new_tool"},
+        })
+
+        sc._app.client.chat_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_gate_rejection_empty_waiting_for_no_progress(self):
+        """T-16: falsy waitingFor filters gate-rejection turns → no progress bubble."""
+        sc, _ = _make_channel()
+        eid = "evt-empty-waitingfor"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result", "waitingFor": None},
+        })
+
+        sc._app.client.chat_postMessage.assert_not_called()
+        assert eid not in sc._progress_ts
+
+
+# ---------------------------------------------------------------------------
+# Test: circuit breaker symmetry (HIGH #2 fix regression coverage)
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreakerSymmetry:
+    """Pre-fix, only the initial chat_postMessage failure armed _progress_failed;
+    a chat_update failure (bubble already posted) was logged but never armed the
+    breaker, so outages/rate-limits/deleted-message/revoked-scope errors retried
+    on every future tool_result turn. The fix arms the breaker on ANY post/update
+    exception -- these tests cover both arms plus the post-arming skip behavior.
+    """
+
+    @pytest.mark.asyncio
+    async def test_initial_post_failure_arms_breaker(self):
+        """T-17: chat_postMessage failure (no bubble yet) arms the breaker."""
+        sc, _ = _make_channel()
+        eid = "evt-breaker-post-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(side_effect=Exception("rate limited"))
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
+
+        assert eid in sc._progress_failed
+        assert eid not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_chat_update_failure_arms_breaker(self):
+        """T-18: HIGH #2 regression -- a chat_update failure (bubble already exists)
+        must also arm the breaker, not just the initial post failure."""
+        from src.channels.slack import _TOOL_PROGRESS_PHRASES
+
+        sc, _ = _make_channel()
+        eid = "evt-breaker-update-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+        sc._app.client.chat_postMessage = AsyncMock(return_value={"ts": "progress_ts_value"})
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 1, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "consult_deep_memory"},
+        })
+        assert sc._progress_ts[eid] == "progress_ts_value"
+        assert eid not in sc._progress_failed
+
+        first_phrase = _TOOL_PROGRESS_PHRASES.get("consult_deep_memory", "")
+        other_tool = next(
+            (k for k, v in _TOOL_PROGRESS_PHRASES.items() if v != first_phrase),
+            None,
+        )
+        assert other_tool is not None, "Need a second tool with a distinct phrase to reach chat_update"
+
+        sc._app.client.chat_update = AsyncMock(side_effect=Exception("channel_not_found"))
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 2, "actor": "brain", "action": "tool_result",
+                     "waitingFor": other_tool},
+        })
+
+        assert eid in sc._progress_failed, (
+            "chat_update failure must arm the breaker -- pre-fix this path was silently "
+            "retried on every future turn since only the initial-post branch armed it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_breaker_armed_via_update_failure_stops_further_attempts(self):
+        """T-19: once armed (via an update failure), later tool_result turns for the
+        same event must not attempt a progress-bubble chat_postMessage/chat_update.
+
+        Uses a tool NOT in _USER_VISIBLE_TOOL_RESULTS so the only chat_postMessage/
+        chat_update call site reachable is the progress-bubble one -- otherwise the
+        turn's own (unrelated) Block Kit content post would confound the assertion.
+        """
+        sc, _ = _make_channel()
+        eid = "evt-breaker-armed"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._progress_failed.add(eid)
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        await sc.broadcast_handler({
+            "type": "turn",
+            "event_id": eid,
+            "turn": {"turn": 3, "actor": "brain", "action": "tool_result",
+                     "waitingFor": "classify_event"},
+        })
+
+        sc._app.client.chat_update.assert_not_called()
+        sc._app.client.chat_postMessage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: deferred cleanup branch (event_status_changed, HIGH #4 consolidation)
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredCleanupBranch:
+    """The event_status_changed/deferred branch had zero test coverage pre-fix.
+    It now shares _cleanup_progress_bubble() with the event_closed and response
+    teardown sites (HIGH #4); these tests exercise it directly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_deferred_status_cleans_up_progress_bubble(self):
+        """T-20: status='deferred' deletes the open bubble and clears all tracking state."""
+        sc, _ = _make_channel()
+        eid = "evt-deferred-cleanup"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._progress_last_phrase[eid] = "Checking knowledge base..."
+        sc._progress_failed.add(eid)
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "deferred",
+        })
+
+        sc._app.client.chat_delete.assert_called_once()
+        _, del_kwargs = sc._app.client.chat_delete.call_args
+        assert del_kwargs.get("ts") == "progress_ts_value"
+        assert del_kwargs.get("channel") == "D_DM"
+        assert eid not in sc._progress_ts
+        assert eid not in sc._progress_last_phrase
+        assert eid not in sc._progress_failed
+
+    @pytest.mark.asyncio
+    async def test_deferred_status_noop_when_no_bubble(self):
+        """T-21: no open bubble → deferred status change is a silent no-op."""
+        sc, _ = _make_channel()
+        eid = "evt-deferred-no-bubble"
+        sc._dm_context[eid] = _dm_ctx()
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "deferred",
+        })
+
+        sc._app.client.chat_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_deferred_status_change_leaves_bubble_untouched(self):
+        """T-22: only status=='deferred' triggers cleanup -- other status values must not."""
+        sc, _ = _make_channel()
+        eid = "evt-status-active"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+
+        await sc.broadcast_handler({
+            "type": "event_status_changed", "event_id": eid, "status": "active",
+        })
+
+        sc._app.client.chat_delete.assert_not_called()
+        assert sc._progress_ts.get(eid) == "progress_ts_value"
+
+
+# ---------------------------------------------------------------------------
+# Test: stop() shutdown behavior (HIGH #1 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestStopShutdown:
+    """Pre-fix, stop() disconnected the Socket Mode handler without cleaning up
+    _progress_ts, permanently orphaning any open "FRIDAY is working..." DM on
+    graceful shutdown/redeploy. These tests cover the new sweep.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_all_open_progress_bubbles(self):
+        """T-23: stop() tears down every open progress bubble across all events."""
+        sc, _ = _make_channel()
+        eid1, eid2 = "evt-shutdown-1", "evt-shutdown-2"
+        sc._dm_context[eid1] = _dm_ctx(channel="D_DM1")
+        sc._dm_context[eid2] = _dm_ctx(channel="D_DM2")
+        sc._progress_ts[eid1] = "ts1"
+        sc._progress_ts[eid2] = "ts2"
+        sc._handler = None
+
+        await sc.stop()
+
+        assert sc._app.client.chat_delete.call_count == 2
+        deleted_ts = {
+            call.kwargs.get("ts") for call in sc._app.client.chat_delete.call_args_list
+        }
+        assert deleted_ts == {"ts1", "ts2"}
+        assert eid1 not in sc._progress_ts
+        assert eid2 not in sc._progress_ts
+
+    @pytest.mark.asyncio
+    async def test_stop_with_no_open_bubbles_still_disconnects_handler(self):
+        """T-24: no open bubbles → no chat_delete calls, but the handler still disconnects."""
+        sc, _ = _make_channel()
+        sc._handler = AsyncMock()
+
+        await sc.stop()
+
+        sc._app.client.chat_delete.assert_not_called()
+        sc._handler.close_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_up_bubbles_before_disconnecting_handler(self):
+        """T-25: cleanup must complete before the Socket Mode handler disconnects."""
+        sc, _ = _make_channel()
+        eid = "evt-shutdown-order"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._handler = AsyncMock()
+
+        call_order: list[str] = []
+        sc._app.client.chat_delete.side_effect = lambda **kw: call_order.append("chat_delete")
+        sc._handler.close_async.side_effect = lambda: call_order.append("close_async")
+
+        await sc.stop()
+
+        assert call_order == ["chat_delete", "close_async"]
+
+    @pytest.mark.asyncio
+    async def test_stop_bubble_delete_failure_does_not_block_handler_disconnect(self):
+        """T-26: a chat_delete failure during shutdown sweep must not prevent the
+        handler from disconnecting (mirrors the existing response-path resilience test)."""
+        sc, _ = _make_channel()
+        eid = "evt-shutdown-delete-fail"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_ts[eid] = "progress_ts_value"
+        sc._app.client.chat_delete = AsyncMock(side_effect=Exception("API error"))
+        sc._handler = AsyncMock()
+
+        await sc.stop()
+
+        sc._handler.close_async.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test: progress lock serializes concurrent post/update (HIGH #3 TOCTOU fix)
+# ---------------------------------------------------------------------------
+
+
+class TestProgressLockConcurrency:
+    """Pre-fix, the 'no ts yet' check and the self._progress_ts[event_id] write were
+    separated by an unguarded await on chat_postMessage, so two concurrent tool_result
+    turns for the same event_id could both observe "no ts yet" and double-post. The
+    fix serializes the whole check-through-write under a per-event asyncio.Lock.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_tool_result_turns_do_not_double_post(self):
+        """T-27: two tool_result turns racing on the same event_id must result in
+        exactly one chat_postMessage; the second (once serialized by the lock) sees
+        the ts already populated and updates instead of posting again.
+
+        Uses two tools NOT in _USER_VISIBLE_TOOL_RESULTS (distinct phrases, to avoid
+        the dedup check masking the race) so _handle_legacy_turn returns right after
+        the progress-bubble block -- otherwise the turn's own (unrelated) Block Kit
+        content post would confound the chat_postMessage call-count assertion.
+        """
+        from src.channels.slack import _TOOL_PROGRESS_PHRASES, _USER_VISIBLE_TOOL_RESULTS
+
+        sc, _ = _make_channel()
+        eid = "evt-toctou"
+        sc._dm_context[eid] = _dm_ctx()
+        sc._progress_enabled = True
+        sc._blackboard.get_event.return_value = _mock_event_doc(event_id=eid)
+
+        async def slow_post(**kwargs):
+            await asyncio.sleep(0)  # yield control mid-call, simulating network latency
+            return {"ts": "progress_ts_value"}
+
+        sc._app.client.chat_postMessage = AsyncMock(side_effect=slow_post)
+        sc._app.client.chat_update = AsyncMock()
+
+        tool_a = "classify_event"
+        assert tool_a not in _USER_VISIBLE_TOOL_RESULTS
+        phrase_a = _TOOL_PROGRESS_PHRASES.get(tool_a, "")
+        tool_b = next(
+            (k for k, v in _TOOL_PROGRESS_PHRASES.items()
+             if v != phrase_a and k not in _USER_VISIBLE_TOOL_RESULTS),
+            None,
+        )
+        assert tool_b is not None, "Need a second tool with a distinct phrase to avoid dedup masking the race"
+
+        await asyncio.gather(
+            sc.broadcast_handler({
+                "type": "turn", "event_id": eid,
+                "turn": {"turn": 1, "actor": "brain", "action": "tool_result", "waitingFor": tool_a},
+            }),
+            sc.broadcast_handler({
+                "type": "turn", "event_id": eid,
+                "turn": {"turn": 2, "actor": "brain", "action": "tool_result", "waitingFor": tool_b},
+            }),
+        )
+
+        assert sc._app.client.chat_postMessage.call_count == 1, (
+            "lock must serialize the check-then-post so only one of the two racing "
+            "turns ever posts the initial bubble"
+        )
+        assert sc._app.client.chat_update.call_count == 1, (
+            "the second turn, once serialized, should see the ts already set and update"
+        )
+        assert sc._progress_ts[eid] == "progress_ts_value"
 
 
 # ---------------------------------------------------------------------------
@@ -608,10 +1050,7 @@ class TestEnsureDmContext:
     @pytest.mark.asyncio
     async def test_returns_true_if_already_populated(self):
         sc, _ = _make_channel()
-        sc._dm_context["evt-x"] = {
-            "channel": "D_DM", "thread_ts": "1.1",
-            "user_id": "U", "team_id": "T", "_last_status_at": 0,
-        }
+        sc._dm_context["evt-x"] = _dm_ctx(thread_ts="1.1")
 
         result = await sc._ensure_dm_context("evt-x")
 
@@ -807,11 +1246,9 @@ class TestCrossThreadRedirectAck:
             client,
         )
 
-        redirect_call = None
-        for call in client.chat_postMessage.call_args_list:
-            kwargs = call[1] if call[1] else {}
-            if "Continue in #darwin-infra" in kwargs.get("text", ""):
-                redirect_call = kwargs
+        redirect_call = _find_call_with_text(
+            client.chat_postMessage.call_args_list, "Continue in #darwin-infra",
+        )
         assert redirect_call is not None
         assert redirect_call["channel"] == "D_DM"
         assert "C_INFRA" in redirect_call["text"]
