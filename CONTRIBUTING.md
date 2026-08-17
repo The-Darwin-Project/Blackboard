@@ -101,7 +101,7 @@ python -m pytest tests/ -v
 python -m pytest tests/test_brain_progressive_skills.py -v
 
 # Specific test areas
-python -m pytest tests/test_headhunter_jira.py -v   # Jira QE mission head
+python -m pytest tests/test_headhunter_jira.py -v   # Jira mission head
 python -m pytest tests/test_trusted_proxy_auth.py -v  # BFF trusted-proxy auth
 
 # UI lint

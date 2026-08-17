@@ -235,7 +235,7 @@ def _walk_adf_mentions(body: dict | list) -> set[str]:
 # ---------------------------------------------------------------------------
 
 class HeadhunterJira:
-    """Jira polling head -- two-phase flow for QE mission analysis and event creation."""
+    """Jira polling head -- two-phase flow for mission analysis and event creation."""
 
     REDIS_PREFIX = "darwin:headhunter:jira:"
     REDIS_TTL = 604800  # 7 days
@@ -626,15 +626,25 @@ class HeadhunterJira:
     # Event Creation
     # =========================================================================
 
-    async def create_qe_event(self, issue: dict, plan_yaml: str) -> str:
-        """Create Brain event for an approved QE mission."""
+    def _resolve_mission_label(self, issue: dict) -> str:
+        """Extract the primary non-base label (skill-URL match preferred, else first non-base)."""
+        labels = [l.lower() for l in issue.get("fields", {}).get("labels", []) if l.lower() != self._jira_label]
+        return next((l for l in labels if l in self._skill_urls), labels[0] if labels else "")
+
+    async def create_jira_event(self, issue: dict, plan_yaml: str, mission_label: str = "") -> str:
+        """Create Brain event for an approved Jira mission."""
         from ..models import EventEvidence
 
         fields = issue.get("fields", {})
         key = issue.get("key", "?")
         summary = fields.get("summary", "")
+        display_text = (
+            f"Jira mission ({mission_label}): {key} - {summary}"
+            if mission_label
+            else f"Jira mission: {key} - {summary}"
+        )
         evidence = EventEvidence(
-            display_text=f"Jira QE mission: {key} - {summary}",
+            display_text=display_text,
             source_type="headhunter",
             triggered_by="jira-bot",
             domain="disorder",
@@ -648,6 +658,7 @@ class HeadhunterJira:
                 "priority": fields.get("priority", {}).get("name", ""),
                 "components": [c.get("name", "") for c in fields.get("components", [])],
                 "labels": fields.get("labels", []),
+                "mission_label": mission_label,
             },
         )
         service_name = key.split("-")[0].lower() if "-" in key else "unknown"
@@ -658,7 +669,7 @@ class HeadhunterJira:
             reason=plan_yaml,
             evidence=evidence,
         )
-        logger.info(f"QE mission event created: {event_id} for {key}")
+        logger.info(f"Jira event created: {event_id} for {key} (label={mission_label or 'default'})")
         return event_id
 
     # =========================================================================
@@ -753,7 +764,8 @@ class HeadhunterJira:
                 if not analysis_text:
                     analysis_text = await self._run_claude_analysis(jira_content)
                 plan_yaml = await self._run_brain_plan(jira_content, analysis_text)
-                event_id = await self.create_qe_event(issue, plan_yaml)
+                mission_label = self._resolve_mission_label(issue)
+                event_id = await self.create_jira_event(issue, plan_yaml, mission_label=mission_label)
                 await self._set_issue_state(key, {"phase": "event_created", "event_id": event_id})
                 active_jira_keys.add(key)
             except Exception as e:

@@ -52,7 +52,7 @@ Each integration is disabled by default and enabled via a flag + secret referenc
 | Ephemeral Agents | `ephemeralAgents.enabled: true` | Requires Tekton Triggers CRDs |
 | Nightwatcher | `nightwatcher.enabled: true` | -- |
 | Headhunter | `headhunter.enabled: true` | Requires `gitlab.enabled: true` |
-| Headhunter Jira (QE Missions) | `jira.enabled: true` | `jira.existingSecret` (email, api-token, bot-account-id) |
+| Headhunter Jira (Jira Missions) | `jira.enabled: true` | `jira.existingSecret` (email, api-token, bot-account-id) |
 | Smartsheet Incidents | `smartsheet.incident.enabled: true` | `smartsheet.incident.existingSecret` |
 | KargoObserver | `kargoObserver.enabled: true` | Requires `kargo.enabled: true` |
 | Google Search | `googleSearch.enabled: true` | Sets `BRAIN_GOOGLE_SEARCH_ENABLED` |
@@ -100,7 +100,7 @@ Four background observers can be enabled independently:
 | Kargo | Promotion failure/recovery detection | `kargoObserver.enabled: true` |
 | TimeKeeper | Scheduled task execution | `timekeeper.enabled: true` |
 | Nightwatcher | Shift consolidation (cron-based) | `nightwatcher.enabled: true` |
-| Headhunter Jira | Jira QE mission polling | `jira.enabled: true` |
+| Headhunter Jira | Jira mission polling | `jira.enabled: true` |
 
 ## Behavioral Tuning
 

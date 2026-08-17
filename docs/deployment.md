@@ -147,7 +147,7 @@ See [helm/README.md](../helm/README.md) for full chart documentation, optional i
 
 Helm block: `headhunter.github.enabled`, `headhunter.github.pollInterval`, `headhunter.github.repos`, `headhunter.github.triggerReasons`. GitHub App credentials via `github.existingSecret`.
 
-### Headhunter Jira (QE Missions)
+### Headhunter Jira (Jira Missions)
 
 | Variable | Description | Default |
 | --- | --- | --- |

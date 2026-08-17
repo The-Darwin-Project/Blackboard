@@ -20,7 +20,9 @@ from src.agents.headhunter_jira import HeadhunterJira, _walk_adf_mentions, forma
 # Fixtures
 # =========================================================================
 
-def _make_issue(key: str = "CNV-85192", status: str = "Planning", summary: str = "Test VM boot") -> dict:
+def _make_issue(key: str = "CNV-85192", status: str = "Planning", summary: str = "Test VM boot", labels: list[str] | None = None) -> dict:
+    if labels is None:
+        labels = ["darwin"]
     return {
         "key": key,
         "fields": {
@@ -32,7 +34,7 @@ def _make_issue(key: str = "CNV-85192", status: str = "Planning", summary: str =
             "comment": {"comments": []},
             "issuelinks": [],
             "parent": {},
-            "labels": ["darwin"],
+            "labels": labels,
             "components": [{"name": "kubevirt-ui"}],
             "fixVersions": [{"name": "4.18"}],
         },
@@ -196,14 +198,67 @@ class TestFormatJiraForLLM:
 
 class TestEventCreation:
     @pytest.mark.asyncio
-    async def test_create_qe_event(self, jira_head, stub_blackboard):
+    async def test_create_jira_event(self, jira_head, stub_blackboard):
         issue = _make_issue()
-        event_id = await jira_head.create_qe_event(issue, "---\nplan: test\n---")
+        event_id = await jira_head.create_jira_event(issue, "---\nplan: test\n---")
         assert event_id == "evt-jira-001"
         stub_blackboard.create_event.assert_called_once()
         call_kwargs = stub_blackboard.create_event.call_args
         assert call_kwargs.kwargs["subject_type"] == "jira"
         assert call_kwargs.kwargs["source"] == "headhunter"
+        evidence = call_kwargs.kwargs["evidence"]
+        assert "mission_label" in evidence.jira_context
+
+    @pytest.mark.asyncio
+    async def test_create_jira_event_with_label(self, jira_head, stub_blackboard):
+        issue = _make_issue()
+        issue["fields"]["labels"] = ["darwin", "darwin_general"]
+        event_id = await jira_head.create_jira_event(issue, "---\nplan: test\n---", mission_label="darwin_general")
+        assert event_id == "evt-jira-001"
+        call_kwargs = stub_blackboard.create_event.call_args
+        evidence = call_kwargs.kwargs["evidence"]
+        assert "(darwin_general)" in evidence.display_text
+        assert evidence.jira_context["mission_label"] == "darwin_general"
+
+    @pytest.mark.asyncio
+    async def test_create_jira_event_generic_without_label(self, jira_head, stub_blackboard):
+        """T-2: display_text is generic when mission_label is empty."""
+        issue = _make_issue(labels=["darwin"])
+        await jira_head.create_jira_event(
+            issue, "---\nplan: test\n---", mission_label=""
+        )
+        evidence = stub_blackboard.create_event.call_args.kwargs["evidence"]
+        assert evidence.display_text == "Jira mission: CNV-85192 - Test VM boot"
+        assert "(" not in evidence.display_text
+
+
+# =========================================================================
+# Mission Label Resolution
+# =========================================================================
+
+class TestMissionLabelResolution:
+    """T-4, T-5, T-6: unit tests for _resolve_mission_label."""
+
+    def test_prefers_skill_url_match(self, jira_head):
+        """T-4: when multiple non-base labels exist, prefer the one with a skill URL."""
+        jira_head._skill_urls = {"darwin_qe": "https://example.com/skill.md"}
+        issue = _make_issue(labels=["darwin", "darwin_general", "darwin_qe"])
+        result = jira_head._resolve_mission_label(issue)
+        assert result == "darwin_qe"
+
+    def test_fallback_first_non_base_label(self, jira_head):
+        """T-5: no skill URL match -> return first non-base label."""
+        jira_head._skill_urls = {}
+        issue = _make_issue(labels=["darwin", "some_label"])
+        result = jira_head._resolve_mission_label(issue)
+        assert result == "some_label"
+
+    def test_returns_empty_for_base_only(self, jira_head):
+        """T-6: only base label -> empty string."""
+        jira_head._skill_urls = {}
+        issue = _make_issue(labels=["darwin"])
+        result = jira_head._resolve_mission_label(issue)
+        assert result == ""
 
 
 # =========================================================================
@@ -232,7 +287,7 @@ class TestPollAndProcess:
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
             patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis text"),
             patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: test\n---"),
-            patch.object(jira_head, "create_qe_event", new_callable=AsyncMock, return_value="evt-001"),
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-001"),
         ):
             await jira_head.poll_and_process()
             state = await jira_head._get_issue_state("CNV-85192")
@@ -246,10 +301,26 @@ class TestPollAndProcess:
         with (
             patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
             patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
-            patch.object(jira_head, "create_qe_event", new_callable=AsyncMock) as mock_create,
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock) as mock_create,
         ):
             await jira_head.poll_and_process()
             mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_and_process_threads_mission_label(self, jira_head, stub_blackboard):
+        """T-7: poll_and_process resolves label and passes mission_label to create_jira_event."""
+        jira_head._skill_urls = {"darwin_general": "https://example.com/general.md"}
+        issue = _make_issue(status="To Do", labels=["darwin", "darwin_general"])
+        with (
+            patch.object(jira_head, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira_head, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira_head, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis text"),
+            patch.object(jira_head, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: test\n---"),
+            patch.object(jira_head, "create_jira_event", new_callable=AsyncMock, return_value="evt-001") as mock_create,
+        ):
+            await jira_head.poll_and_process()
+            mock_create.assert_called_once()
+            assert mock_create.call_args.kwargs.get("mission_label") == "darwin_general"
 
 
 # =========================================================================
@@ -367,3 +438,58 @@ class TestRetryAction:
         await stub_blackboard.redis.delete(f"darwin:headhunter:jira:CNV-500")
         state = await jira_head._get_issue_state("CNV-500")
         assert state is None
+
+
+# =========================================================================
+# Mission Label Threading (integration)
+# =========================================================================
+
+class TestMissionLabelThreading:
+    @pytest.mark.asyncio
+    async def test_poll_threads_mission_label(self, stub_blackboard, monkeypatch):
+        """Multi-label issue with one matching _skill_urls passes correct mission_label to create_jira_event."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        monkeypatch.setenv("HEADHUNTER_JIRA_LABEL", "darwin")
+        monkeypatch.setenv("HEADHUNTER_JIRA_SKILL_DARWIN_GENERAL", "https://raw.example.com/skill.md")
+        jira = HeadhunterJira(stub_blackboard)
+        issue = _make_issue(status="To Do")
+        issue["fields"]["labels"] = ["darwin", "darwin_general", "other_label"]
+        with (
+            patch.object(jira, "poll_planning", new_callable=AsyncMock, return_value=[]),
+            patch.object(jira, "poll_todo", new_callable=AsyncMock, return_value=[issue]),
+            patch.object(jira, "_run_claude_analysis", new_callable=AsyncMock, return_value="analysis"),
+            patch.object(jira, "_run_brain_plan", new_callable=AsyncMock, return_value="---\nplan: x\n---"),
+            patch.object(jira, "create_jira_event", new_callable=AsyncMock, return_value="evt-lbl") as mock_create,
+        ):
+            await jira.poll_and_process()
+            mock_create.assert_called_once()
+            call_kwargs = mock_create.call_args
+            assert call_kwargs.kwargs["mission_label"] == "darwin_general"
+
+    @pytest.mark.asyncio
+    async def test_resolve_mission_label_prefers_skill_url_match(self, stub_blackboard, monkeypatch):
+        """_resolve_mission_label picks the label matching a configured skill URL over a non-matching one."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        monkeypatch.setenv("HEADHUNTER_JIRA_LABEL", "darwin")
+        monkeypatch.setenv("HEADHUNTER_JIRA_SKILL_DARWIN_GENERAL", "https://raw.example.com/skill.md")
+        jira = HeadhunterJira(stub_blackboard)
+        issue = {"fields": {"labels": ["darwin", "unknown_label", "darwin_general"]}}
+        assert jira._resolve_mission_label(issue) == "darwin_general"
+
+    @pytest.mark.asyncio
+    async def test_resolve_mission_label_falls_back_to_first(self, stub_blackboard, monkeypatch):
+        """Without skill URL match, returns first non-base label."""
+        monkeypatch.setenv("JIRA_URL", "https://jira.example.com")
+        monkeypatch.setenv("JIRA_EMAIL", "bot@example.com")
+        monkeypatch.setenv("JIRA_API_TOKEN", "test-token")
+        monkeypatch.setenv("HEADHUNTER_JIRA_BOT_ACCOUNT_ID", "bot-acct-123")
+        monkeypatch.setenv("HEADHUNTER_JIRA_LABEL", "darwin")
+        jira = HeadhunterJira(stub_blackboard)
+        issue = {"fields": {"labels": ["darwin", "some_other_label"]}}
+        assert jira._resolve_mission_label(issue) == "some_other_label"
