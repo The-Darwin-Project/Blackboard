@@ -21,7 +21,7 @@ Darwin uses 9 specialized agents plus the Brain orchestrator, communicating via 
 | **QE** | Verification | CLI sidecar (gemini/claude) | Test writing, test execution, verification of Developer changes |
 | **Security Analyst** | Security Review | CLI sidecar (gemini/claude) | Vulnerability scanning, CVE remediation assessment, security-focused code review |
 | **Headhunter** | MR/PR Lifecycle | In-process Python + Flash Lite | Multi-platform VCS polling (GitLab todos + GitHub PRs), LLM-based triage and plan generation |
-| **Headhunter Jira** | QE Missions | In-process Python + Claude | Jira issue polling, BA analysis comments, approved missions → Brain events |
+| **Headhunter Jira** | Jira Missions | In-process Python + Claude | Jira issue polling, BA analysis comments, approved missions → Brain events |
 | **Nightwatcher** | Shift Consolidation | In-process Python + Flash | Phase-gated escalation review, batch clustering, Jira incidents, Slack shift summaries |
 
 ## Agent Dispatch
@@ -116,7 +116,7 @@ Polls GitHub PRs via GitHub App authentication with two discovery modes:
 
 Brain routes all Headhunter events identically regardless of platform origin.
 
-## Headhunter Jira (QE Missions)
+## Headhunter Jira (Jira Missions)
 
 Separate in-process daemon from GitLab Headhunter. Polls Jira Cloud for issues with the configured label (default `darwin`).
 

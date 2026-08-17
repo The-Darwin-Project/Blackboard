@@ -123,7 +123,7 @@ Source-specific behavior rules loaded based on event origin.
 | `chat.md` | Event from Dashboard chat |
 | `slack.md` | Event from Slack DM or slash command |
 | `headhunter.md` | Event from Headhunter (GitLab MR) |
-| `headhunter_jira.md` | Event from Headhunter Jira (QE mission) |
+| `headhunter_jira.md` | Event from Headhunter Jira (Jira mission) |
 | `jarvis.md` | Cortex/JARVIS intervention or meta-cognitive context |
 | `timekeeper.md` | Event from TimeKeeper (scheduled task) |
 

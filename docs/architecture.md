@@ -21,7 +21,7 @@ graph TD
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
         Headhunter["Headhunter - GitLab + GitHub"]
-        HeadhunterJira["Headhunter Jira - QE Missions"]
+        HeadhunterJira["Headhunter Jira - Jira Missions"]
 
         Architect["Architect :9091 - CLI Sidecar"]
         SysAdmin["SysAdmin :9092 - CLI Sidecar"]
@@ -79,7 +79,7 @@ All agents communicate via **shared event documents** in Redis. Agents NEVER com
 
 **Event lifecycle:** `new` → `active` → `waiting_approval` → `resolved` → `closed`
 
-**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo, GitHub PR), Headhunter Jira (QE mission), TimeKeeper (scheduled task), Kargo (promotion failure)
+**Event sources:** Aligner (anomaly), Chat (user request), Slack (DM/slash command), Headhunter (GitLab todo, GitHub PR), Headhunter Jira (Jira mission), TimeKeeper (scheduled task), Kargo (promotion failure)
 
 ## Reversed WebSocket Architecture
 

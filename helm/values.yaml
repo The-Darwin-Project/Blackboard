@@ -518,7 +518,7 @@ headhunter:
     skills: {} # label -> git raw URL map for issue skill routing
     # e.g., darwin_audit: "https://raw.githubusercontent.com/org/repo/main/skills/audit.md"
 # =============================================================================
-# Jira Integration (QE Mission Polling -- Headhunter Jira Head)
+# Jira Integration (Jira Mission Polling -- Headhunter Jira Head)
 # =============================================================================
 jira:
   enabled: false

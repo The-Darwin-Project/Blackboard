@@ -27,7 +27,7 @@ graph TD
         Archivist["Archivist - Deep Memory"]
         Nightwatcher["Nightwatcher - In-process + Flash"]
         Headhunter["Headhunter - GitLab + GitHub"]
-        HeadhunterJira["Headhunter Jira - QE Missions"]
+        HeadhunterJira["Headhunter Jira - Jira Missions"]
         Qdrant["Qdrant - Vector Store"]
         Slack["Slack - Socket Mode"]
 
@@ -92,7 +92,7 @@ graph TD
 | **Developer** | Implementation | CLI sidecar, source code changes, MR management |
 | **QE** | Verification | CLI sidecar, independent test verification |
 | **Headhunter** | MR/PR Lifecycle | In-process Python + Flash Lite, GitLab + GitHub PR automation via VcsPlatformPort |
-| **Headhunter Jira** | QE Missions | In-process Python + Claude, Jira Planning→To Do→Brain event flow |
+| **Headhunter Jira** | Jira Missions | In-process Python + Claude, Jira Planning→To Do→Brain event flow |
 | **Nightwatcher** | Shift Consolidation | In-process Python + Flash, batch escalation review, Jira incident tracking |
 
 > **Agent details:** [docs/agents.md](docs/agents.md) -- dispatch modes, sidecar CLIs, MCP servers, skills
@@ -118,7 +118,7 @@ graph TD
 - **Google Search Grounding** -- Web search during triage/investigate for upstream outage verification
 - **Event History** -- Persisted reports with compound cursor pagination, facet filters, TanStack Table UI
 - **Cortex / JARVIS** -- Meta-cognitive observer on Brain pulse stream; shadow mode, handoff reports, cognitive graph UI
-- **Jira QE Missions** -- Headhunter Jira polls labeled issues, posts analysis, creates Brain events on approval
+- **Jira Missions** -- Headhunter Jira polls labeled issues, posts analysis, creates Brain events on approval
 - **Field Notes Notebook** -- FRIDAY captures qualitative knowledge (env quirks, corrections, conventions) during events
 
 ### Integration and UX
