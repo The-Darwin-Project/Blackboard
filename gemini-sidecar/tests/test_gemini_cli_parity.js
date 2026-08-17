@@ -189,6 +189,11 @@ describe('Gemini buildCLICommand: architect thinking prefix', () => {
 
   it('does not add a prefix for non-architect roles', () => {
     setEnv('AGENT_CLI', 'gemini');
+    // Explicitly clear AGENT_EFFORT_LEVEL: the prompt-prefix decision now
+    // reads this env var too (not just role), so a leaked ambient value
+    // (e.g. a real agent container running with AGENT_EFFORT_LEVEL=high)
+    // would otherwise leak a prefix into this "no prefix" assertion.
+    setEnv('AGENT_EFFORT_LEVEL', undefined);
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review the sidecar', { role: 'explorer' });
     const promptIdx = args.indexOf('-p');
