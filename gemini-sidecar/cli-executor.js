@@ -4,7 +4,7 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI, --thinking flag on Gemini CLI (mapped: low->none, medium->low, high->medium, max->high).
+// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI; on Gemini CLI, high/max effort prepends a "Think step by step" prompt prefix (gemini-cli has no --thinking flag).
 // 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
