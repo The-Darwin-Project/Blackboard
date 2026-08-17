@@ -274,11 +274,11 @@ describe('Claude buildCLICommand: unaffected by Gemini parity fix', () => {
 // =============================================================================
 
 describe('resolveTimeoutMs: explorer timeout parity fix', () => {
-  it('explorer resolves to 15 minutes (900000ms), not the old 10-minute value', () => {
+  it('explorer resolves to 30 minutes (1800000ms), matching other roles', () => {
     setEnv('TIMEOUT_MS', undefined);
     delete require.cache[require.resolve(CONFIG_PATH)];
     const { resolveTimeoutMs } = require(CONFIG_PATH);
-    assert.equal(resolveTimeoutMs('explorer'), 900000);
+    assert.equal(resolveTimeoutMs('explorer'), 1800000);
   });
 
   it('other roles are untouched by the explorer-specific bump', () => {
