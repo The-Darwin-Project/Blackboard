@@ -96,20 +96,21 @@ function buildCLICommand(prompt, options = {}) {
     }
     const args = [];
     if (options.autoApprove) args.push('--yolo');
-    args.push('-o', 'stream-json', '--verbose');
+    args.push('-o', 'stream-json');
     const model = options.model || AGENT_MODEL || 'gemini-3.7-flash';
     args.push('--model', model);
-    const effort = options.effort || AGENT_EFFORT_LEVEL;
-    if (effort) {
-        const geminiThinking = { low: 'none', medium: 'low', high: 'medium', max: 'high' };
-        args.push('--thinking', geminiThinking[effort] || effort);
-    }
     if (options.sessionId) {
         args.push('--resume', options.sessionId);
     }
+    const effort = options.effort || AGENT_EFFORT_LEVEL;
+    const effortPrefix = effort === 'high' || effort === 'max'
+        ? 'Think step by step and reason deeply. '
+        : '';
     const effectiveRole = options.role || AGENT_ROLE;
-    const thinkingPrefix = effectiveRole === 'architect' ? 'Think step by step and reason deeply. ' : '';
-    args.push('-p', thinkingPrefix + prompt);
+    const architectPrefix = effectiveRole === 'architect' && !effortPrefix
+        ? 'Think step by step and reason deeply. '
+        : '';
+    args.push('-p', effortPrefix + architectPrefix + prompt);
     return { binary: 'gemini', args };
 }
 

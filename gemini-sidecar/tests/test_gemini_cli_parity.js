@@ -44,44 +44,50 @@ afterEach(() => {
 });
 
 // =============================================================================
-// Gemini path -- effort/--thinking mapping (Finding 1)
+// Gemini path -- effort via prompt prefix (gemini-cli has no --thinking flag)
 // =============================================================================
 
-describe('Gemini buildCLICommand: --thinking effort mapping', () => {
-  const cases = [
-    ['low', 'none'],
-    ['medium', 'low'],
-    ['high', 'medium'],
-    ['max', 'high'],
-  ];
-
-  for (const [effort, expectedThinking] of cases) {
-    it(`maps effort="${effort}" -> --thinking ${expectedThinking}`, () => {
-      setEnv('AGENT_CLI', 'gemini');
-      const { buildCLICommand } = freshModules();
-      const { binary, args } = buildCLICommand('do the thing', { effort });
-      assert.equal(binary, 'gemini');
-      const idx = args.indexOf('--thinking');
-      assert.notEqual(idx, -1, '--thinking flag should be present');
-      assert.equal(args[idx + 1], expectedThinking);
-    });
-  }
-
-  it('falls back to the raw effort string for an unrecognized value', () => {
+describe('Gemini buildCLICommand: effort prompt prefix', () => {
+  it('adds thinking prefix for effort="high"', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
-    const { args } = buildCLICommand('do the thing', { effort: 'unknown-level' });
-    const idx = args.indexOf('--thinking');
-    assert.notEqual(idx, -1);
-    assert.equal(args[idx + 1], 'unknown-level');
+    const { binary, args } = buildCLICommand('do the thing', { effort: 'high' });
+    assert.equal(binary, 'gemini');
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
   });
 
-  it('omits --thinking entirely when no effort is set (options nor env)', () => {
+  it('adds thinking prefix for effort="max"', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('do the thing', { effort: 'max' });
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
+  });
+
+  it('does not add thinking prefix for effort="low"', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('do the thing', { effort: 'low' });
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'do the thing');
+  });
+
+  it('does not add thinking prefix for effort="medium"', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('do the thing', { effort: 'medium' });
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'do the thing');
+  });
+
+  it('no prefix when no effort is set (options nor env)', () => {
     setEnv('AGENT_CLI', 'gemini');
     setEnv('AGENT_EFFORT_LEVEL', undefined);
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', {});
-    assert.equal(args.includes('--thinking'), false);
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'do the thing');
   });
 
   it('options.effort takes priority over AGENT_EFFORT_LEVEL env', () => {
@@ -89,8 +95,8 @@ describe('Gemini buildCLICommand: --thinking effort mapping', () => {
     setEnv('AGENT_EFFORT_LEVEL', 'low');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', { effort: 'max' });
-    const idx = args.indexOf('--thinking');
-    assert.equal(args[idx + 1], 'high');
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
   });
 
   it('falls back to AGENT_EFFORT_LEVEL env when options.effort is not set', () => {
@@ -98,21 +104,34 @@ describe('Gemini buildCLICommand: --thinking effort mapping', () => {
     setEnv('AGENT_EFFORT_LEVEL', 'high');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', {});
-    const idx = args.indexOf('--thinking');
-    assert.equal(args[idx + 1], 'medium');
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
   });
 });
 
 // =============================================================================
-// Gemini path -- --verbose flag (Finding 2)
+// Gemini path -- no unsupported CLI flags
 // =============================================================================
 
-describe('Gemini buildCLICommand: --verbose flag', () => {
-  it('includes --verbose alongside -o stream-json', () => {
+describe('Gemini buildCLICommand: no unsupported flags', () => {
+  it('does not include --verbose (unsupported by gemini-cli)', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('probe the repo', {});
-    assert.equal(args.includes('--verbose'), true);
+    assert.equal(args.includes('--verbose'), false);
+  });
+
+  it('does not include --thinking (unsupported by gemini-cli)', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('probe the repo', { effort: 'high' });
+    assert.equal(args.includes('--thinking'), false);
+  });
+
+  it('includes -o stream-json', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('probe the repo', {});
     const oIdx = args.indexOf('-o');
     assert.notEqual(oIdx, -1);
     assert.equal(args[oIdx + 1], 'stream-json');
@@ -155,7 +174,7 @@ describe('Gemini buildCLICommand: model fallback', () => {
 });
 
 // =============================================================================
-// Gemini path -- architect thinking-prefix (Finding 1, "Deep reasoning" row)
+// Gemini path -- architect thinking prefix
 // =============================================================================
 
 describe('Gemini buildCLICommand: architect thinking prefix', () => {
@@ -183,6 +202,14 @@ describe('Gemini buildCLICommand: architect thinking prefix', () => {
     const { args } = buildCLICommand('review the sidecar', {});
     const promptIdx = args.indexOf('-p');
     assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. review the sidecar');
+  });
+
+  it('does not duplicate prefix when both architect role and high effort are set', () => {
+    setEnv('AGENT_CLI', 'gemini');
+    const { buildCLICommand } = freshModules();
+    const { args } = buildCLICommand('review', { role: 'architect', effort: 'high' });
+    const promptIdx = args.indexOf('-p');
+    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. review');
   });
 });
 
@@ -213,7 +240,7 @@ describe('Gemini buildCLICommand: unaffected flags still work', () => {
 // =============================================================================
 
 describe('Claude buildCLICommand: unaffected by Gemini parity fix', () => {
-  it('still uses --effort (not --thinking) and the claude-opus-4-6 fallback', () => {
+  it('still uses --effort (not prompt prefix) and the claude-opus-4-6 fallback', () => {
     setEnv('AGENT_CLI', 'claude');
     setEnv('AGENT_MODEL', undefined);
     setEnv('GEMINI_MODEL', undefined);
