@@ -21,7 +21,7 @@ const ROLE_TIMEOUTS = {
     qe: 1800000,              // 30 min
     security_analyst: 1800000, // 30 min
     code_reviewer: 2700000,   // 45 min -- fans out to 6 sequential/concurrent subagent delegations before merging, unlike single-pass roles
-    explorer: 600000,         // 10 min -- probes should be fast; exceeding 10 min means the question was wrong
+    explorer: 1800000,        // 30 min -- parity with other roles per user request
     default: 1800000,         // 30 min
 };
 // explicit TIMEOUT_MS env var always wins (operator override), then the role-specific ceiling,

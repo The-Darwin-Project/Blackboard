@@ -4,7 +4,7 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI. Controls adaptive reasoning depth. No-op for Gemini.
+// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI; on Gemini CLI, high/max effort prepends a "Think step by step" prompt prefix (gemini-cli has no --thinking flag).
 // 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
@@ -97,13 +97,20 @@ function buildCLICommand(prompt, options = {}) {
     const args = [];
     if (options.autoApprove) args.push('--yolo');
     args.push('-o', 'stream-json');
-    if (options.model) {
-        args.push('--model', options.model);
-    }
+    const model = options.model || AGENT_MODEL || 'gemini-3.7-flash';
+    args.push('--model', model);
     if (options.sessionId) {
         args.push('--resume', options.sessionId);
     }
-    args.push('-p', prompt);
+    const effort = options.effort || AGENT_EFFORT_LEVEL;
+    const effortPrefix = effort === 'high' || effort === 'max'
+        ? 'Think step by step and reason deeply. '
+        : '';
+    const effectiveRole = options.role || AGENT_ROLE;
+    const architectPrefix = effectiveRole === 'architect' && !effortPrefix
+        ? 'Think step by step and reason deeply. '
+        : '';
+    args.push('-p', effortPrefix + architectPrefix + prompt);
     return { binary: 'gemini', args };
 }
 
