@@ -162,17 +162,19 @@ class TestRealAuthWiring:
         )
         assert resp.status_code == 401
 
-    def test_export_without_auth_is_rejected(self, unauthed_client, monkeypatch):
+    def test_export_without_auth_is_allowed(self, unauthed_client, monkeypatch):
+        """Export is non-destructive read — no auth required."""
         monkeypatch.setattr(auth, "DEX_ENABLED", False)
         resp = unauthed_client.get("/api/observations/manage/export")
-        assert resp.status_code == 401
+        assert resp.status_code == 200
 
-    def test_report_without_auth_is_rejected(self, unauthed_client, monkeypatch):
+    def test_report_without_auth_is_allowed(self, unauthed_client, monkeypatch, mock_blackboard):
+        """Report is non-destructive read — no auth required (returns 504 on timeout, not 401)."""
         monkeypatch.setattr(auth, "DEX_ENABLED", False)
         resp = unauthed_client.post(
             "/api/observations/manage/report", json={"series_names": ["error_count"]},
         )
-        assert resp.status_code == 401
+        assert resp.status_code != 401
 
     def test_delete_authenticated_but_not_admin_group_is_rejected(
         self, unauthed_client, mock_blackboard, monkeypatch,
