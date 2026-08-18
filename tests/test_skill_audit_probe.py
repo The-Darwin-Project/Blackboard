@@ -169,8 +169,39 @@ class TestPhase3_5:
 
     def test_stall_detection_references_trajectories(self, skill_06_body):
         """Stall detection must reference live observation trajectories for ceiling."""
-        stall_section = skill_06_body[skill_06_body.index("### Stall Detection"):]
-        assert "trajectory" in stall_section.lower(), (
+        start = skill_06_body.index("### Stall Detection")
+        next_heading = skill_06_body.find("## ", start + len("### Stall Detection"))
+        stall_section = skill_06_body[start:next_heading if next_heading != -1 else None]
+        section_lower = " ".join(stall_section.lower().split())
+
+        assert "trajectory" in section_lower, (
             "Stall Detection section must reference observation trajectories"
             " for ceiling calibration"
+        )
+
+        assert "takes precedence" in section_lower and "tighter" in section_lower, (
+            "Stall Detection must state that a tighter live range takes"
+            " precedence over the deep-memory baseline"
+        )
+
+        assert "single data point is not a trajectory" in section_lower, (
+            "Stall Detection must guard against treating a single observation"
+            " as a trajectory"
+        )
+
+        assert (
+            "no live observations" in section_lower
+            and "sparse" in section_lower
+            and "deep memory is the sole source" in section_lower
+        ), (
+            "Stall Detection must fall back to deep memory when live"
+            " observations are absent or too sparse to form a range"
+        )
+
+    def test_list_observations_mapped_to_decision_guidelines(self, loader):
+        """list_observations tool must resolve back to always/06 via the reverse map."""
+        skills = loader.get_tool_skills("list_observations")
+        assert "always/06-decision-guidelines.md" in skills, (
+            "list_observations not associated with"
+            " always/06-decision-guidelines.md in the tool->skill map"
         )

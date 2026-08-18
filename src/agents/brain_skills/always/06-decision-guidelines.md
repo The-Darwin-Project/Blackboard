@@ -152,16 +152,24 @@ deferring forever, never escalating:
   grows large relative to the measured baseline without any state change,
   agent dispatch, or escalation -- that is runaway waiting. Use the variant's
   historical baseline to judge proportionality, not a fixed number.
-  Your live observation trajectory for the relevant duration series is the
-  most precise ceiling source -- it reflects recent measurements under current
-  conditions. Cross-reference it against deep memory's archived baseline:
-  when live trailing data from multiple observations shows a tighter range
-  than historical archives, the live range takes precedence (recency and
-  specificity over breadth). A single data point is not a trajectory -- it
-  lacks the variance needed to establish a reliable ceiling. When no live
-  observations exist for the variant or data is too sparse to form a range,
-  deep memory is the sole source. See `always/10-observations.md § Using
-  Trajectories` for trajectory interpretation.
+  - Your live observation trajectory for the relevant duration series is the
+    most precise ceiling source -- it reflects recent measurements under
+    current conditions. See `always/10-observations.md § Using Trajectories`
+    for trajectory interpretation.
+  - **Precedence**: cross-reference the live trajectory against deep
+    memory's archived baseline. When live trailing data from multiple
+    observations shows a tighter range than historical archives, the live
+    range takes precedence (recency and specificity over breadth).
+  - **Single-point guard**: a single data point is not a trajectory -- it
+    lacks the variance needed to establish a reliable ceiling.
+  - **Sparse/no-data fallback**: when no live observations exist for the
+    variant or data is too sparse to form a range, deep memory is the sole
+    source.
+  - **Tool-call failure**: if `list_observations` errors or times out
+    (Redis/network failure), that is a failed lookup, not "no live data" --
+    do not silently treat it as the sparse/no-data case. Retry once; if it
+    still fails, fall back to deep memory and note in the deferral reason
+    that the live trajectory was unavailable due to a tool error.
 - **Never defer on stale state**: every re-deferral must be preceded by a
   fresh PV measurement. Deferring without measurement violates the control
   loop.
