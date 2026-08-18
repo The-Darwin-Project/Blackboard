@@ -30,7 +30,7 @@ FROM registry.access.redhat.com/ubi9/python-312:latest
 # Python 3.12 required by google-genai SDK (>= 3.10)
 # Install git as root (needed for GitPython)
 USER 0
-RUN dnf install -y git && dnf clean all
+RUN dnf install -y git pango gdk-pixbuf2 && dnf clean all
 
 # Set up working directory
 WORKDIR /app
