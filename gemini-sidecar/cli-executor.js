@@ -4,7 +4,10 @@
 // 2. [Pattern]: resolveResult() is the single result resolution function for BOTH executeCLI and executeCLIStreaming.
 //    Priority: callback -> cachedFindings (fs.watch) -> disk findings -> retry prompt -> stdout tail.
 // 3. [Pattern]: buildCLICommand reads AGENT_PERMISSION_MODE from process.env (not config). If set -> --permission-mode; else autoApprove -> skip-permissions.
-// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI; on Gemini CLI, high/max effort prepends a "Think step by step" prompt prefix (gemini-cli has no --thinking flag).
+// 4. [Pattern]: AGENT_EFFORT_LEVEL -> --effort flag on Claude CLI; on Gemini CLI,
+//    effort maps to thinkingBudget via dynamic ~/.gemini/settings.json override
+//    (max=16384, high=8192, medium/low/absent=0). Architect role defaults to high.
+//    Uses read-merge-write to preserve existing MCP/hook settings in the file.
 // 5. [Pattern]: Claude --mcp-config resolved lazily (fs.existsSync at call time) so it picks up ~/.claude.json even when created after module load.
 // 6. [Gotcha]: requestFindings spawns a second CLI process -- keep timeout low (60s) and never reject.
 // 7. [Gotcha]: fs.watch cachedFindings is captured by closure in spawn callbacks -- not in state.js.
@@ -40,6 +43,45 @@ const ROLE_SETTINGS_FILE = {
 // git mutation, filesystem mutation, network exfil) catches wholesale content
 // tampering/corruption without needing to enumerate every rule in the real file.
 const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git push *)', 'Bash(rm *)'];
+
+const GEMINI_SETTINGS_PATH = path.join(os.homedir(), '.gemini', 'settings.json');
+
+const EFFORT_THINKING_BUDGET = {
+    max: 16384,
+    high: 8192,
+    medium: 0,
+    low: 0,
+    none: 0,
+};
+
+function writeThinkingConfig(effort, model) {
+    const budget = EFFORT_THINKING_BUDGET[effort] ?? 0;
+    let settings = {};
+    try {
+        if (fs.existsSync(GEMINI_SETTINGS_PATH)) {
+            settings = JSON.parse(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8'));
+        }
+    } catch (_) { /* fresh file if unreadable */ }
+
+    if (!settings.modelConfigs) settings.modelConfigs = {};
+    settings.modelConfigs.overrides = [{
+        match: { model },
+        modelConfig: {
+            generateContentConfig: {
+                thinkingConfig: {
+                    thinkingBudget: budget,
+                    includeThoughts: false,
+                },
+            },
+        },
+    }];
+
+    try {
+        fs.writeFileSync(GEMINI_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+    } catch (e) {
+        console.error(`[${new Date().toISOString()}] Failed to write thinking config: ${e.message}`);
+    }
+}
 
 function buildCLICommand(prompt, options = {}) {
     const permissionMode = process.env.AGENT_PERMISSION_MODE || '';
@@ -103,14 +145,10 @@ function buildCLICommand(prompt, options = {}) {
         args.push('--resume', options.sessionId);
     }
     const effort = options.effort || AGENT_EFFORT_LEVEL;
-    const effortPrefix = effort === 'high' || effort === 'max'
-        ? 'Think step by step and reason deeply. '
-        : '';
     const effectiveRole = options.role || AGENT_ROLE;
-    const architectPrefix = effectiveRole === 'architect' && !effortPrefix
-        ? 'Think step by step and reason deeply. '
-        : '';
-    args.push('-p', effortPrefix + architectPrefix + prompt);
+    const resolvedEffort = effort || (effectiveRole === 'architect' ? 'high' : '');
+    writeThinkingConfig(resolvedEffort || 'none', model);
+    args.push('-p', prompt);
     return { binary: 'gemini', args };
 }
 
@@ -544,4 +582,7 @@ module.exports = {
     prepareResultsDir,
     is429Error,
     is400SessionError,
+    writeThinkingConfig,
+    GEMINI_SETTINGS_PATH,
+    EFFORT_THINKING_BUDGET,
 };
