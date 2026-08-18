@@ -46,6 +46,11 @@ const REQUIRED_DENY_RULES = ['Edit', 'Write', 'Bash(git commit *)', 'Bash(git pu
 
 const GEMINI_SETTINGS_PATH = path.join(os.homedir(), '.gemini', 'settings.json');
 
+// medium/low/none all map to 0 (no extra thinking budget) -- this is intentional,
+// not a placeholder: only high/max are meant to purchase extended reasoning on the
+// Gemini side, mirroring Claude's --effort where low/medium/none don't request
+// extended thinking either. If a future tier needs a non-zero budget, update it
+// explicitly here rather than assuming these three should move together.
 const EFFORT_THINKING_BUDGET = {
     max: 16384,
     high: 8192,
@@ -54,17 +59,44 @@ const EFFORT_THINKING_BUDGET = {
     none: 0,
 };
 
+// Gemini CLI model names are short, human-chosen identifiers (e.g. "gemini-3.7-flash"),
+// never free-form user input. Reject anything else before it's persisted into the
+// shared settings.json match key -- caller-controlled options.model (reachable from
+// WS/HTTP task requests) must not be able to inject arbitrary structure into the file.
+const MODEL_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+function isValidModelName(model) {
+    return typeof model === 'string' && MODEL_NAME_RE.test(model);
+}
+
+// NOTE on schema coupling: this reaches directly into Gemini CLI's
+// modelConfigs.overrides[].match.model / generateContentConfig.thinkingConfig shape,
+// which is not versioned or capability-guarded here. A future CLI schema change would
+// silently degrade effort-based reasoning control to CLI defaults. The write path below
+// fails closed (throws) so a broken/unwritable file surfaces as a hard error rather than
+// a silent degrade; read failures are logged (not just swallowed) for the same reason --
+// but neither replaces an actual schema/version check if Gemini CLI changes this shape.
 function writeThinkingConfig(effort, model) {
     const budget = EFFORT_THINKING_BUDGET[effort] ?? 0;
+
+    if (!isValidModelName(model)) {
+        console.error(`[${new Date().toISOString()}] Refusing to write thinking config: invalid model name '${model}'`);
+        return;
+    }
+
     let settings = {};
     try {
         if (fs.existsSync(GEMINI_SETTINGS_PATH)) {
             settings = JSON.parse(fs.readFileSync(GEMINI_SETTINGS_PATH, 'utf8'));
         }
-    } catch (_) { /* fresh file if unreadable */ }
+    } catch (e) {
+        console.error(`[${new Date().toISOString()}] Failed to read/parse existing thinking config, starting fresh: ${e.message}`);
+        settings = {};
+    }
 
     if (!settings.modelConfigs) settings.modelConfigs = {};
-    settings.modelConfigs.overrides = [{
+    if (!Array.isArray(settings.modelConfigs.overrides)) settings.modelConfigs.overrides = [];
+    const overrides = settings.modelConfigs.overrides;
+    const newOverride = {
         match: { model },
         modelConfig: {
             generateContentConfig: {
@@ -74,12 +106,25 @@ function writeThinkingConfig(effort, model) {
                 },
             },
         },
-    }];
+    };
+    // Upsert by model -- never wholesale-replace the array, or a pre-existing
+    // override for a different model gets silently destroyed on every call.
+    const existingIndex = overrides.findIndex((o) => o && o.match && o.match.model === model);
+    if (existingIndex >= 0) {
+        overrides[existingIndex] = newOverride;
+    } else {
+        overrides.push(newOverride);
+    }
 
     try {
         fs.writeFileSync(GEMINI_SETTINGS_PATH, JSON.stringify(settings, null, 2));
     } catch (e) {
-        console.error(`[${new Date().toISOString()}] Failed to write thinking config: ${e.message}`);
+        // Fail CLOSED, matching the ROLE_SETTINGS_FILE precedent below: a caller that
+        // asked for a specific thinking budget must not silently spawn Gemini with
+        // whatever budget the file happened to have (or none at all).
+        const msg = `Failed to write thinking config for model '${model}': ${e.message}`;
+        console.error(`[${new Date().toISOString()}] CRITICAL: ${msg}`);
+        throw new Error(msg);
     }
 }
 
@@ -446,13 +491,23 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
             stdio: ['ignore', 'pipe', 'pipe'],
         });
 
+        // Only mutate the existing task object in place when it's the SAME logical call
+        // (e.g. the is400SessionError retry-without-session recursion below, which shares
+        // eventId with its parent invocation). Anything else finding a task already parked
+        // here means a busy-guard was missed upstream (ws-server.js/ws-client.js) and two
+        // calls genuinely overlapped -- clobbering that task's tracking in place would
+        // silently corrupt its sessionId/cancel/kill bookkeeping. Replace it with a fresh
+        // object instead, and log loudly so the missed guard is visible rather than a
+        // silent cross-contamination.
         const existing = state.getCurrentTask();
-        if (existing) {
+        if (existing && existing.eventId === eventId) {
             existing.child = child;
-            existing.eventId = eventId;
             existing.model = options.model || '';
             existing.role = options.role || '';
         } else {
+            if (existing) {
+                console.error(`[${new Date().toISOString()}] WARNING: replacing in-flight task state for event ${existing.eventId} with unrelated task ${eventId} -- an upstream busy-guard was missed`);
+            }
             state.setCurrentTask({ eventId, child, model: options.model || '', role: options.role || '' });
         }
 

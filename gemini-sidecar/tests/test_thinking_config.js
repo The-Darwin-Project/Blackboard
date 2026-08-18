@@ -158,6 +158,94 @@ describe('writeThinkingConfig', () => {
         assert.equal(fs.existsSync(settingsPath), true, 'writeThinkingConfig created the file');
         assert.equal(getBudget(readSettings()), 8192);
     });
+
+    // Regression coverage for the shared-settings-file race: two "overlapping" calls
+    // (modeled here as sequential calls for different models against the SAME file,
+    // which is exactly what a real race collapses to once both writes land) must both
+    // survive in the overrides array -- not wholesale-replace each other.
+    it('upserts by model -- a second model does not destroy the first model override', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        const { writeThinkingConfig } = freshModules();
+        writeThinkingConfig('high', 'gemini-3.7-flash');
+        writeThinkingConfig('max', 'gemini-3.7-pro');
+        const settings = readSettings();
+        assert.equal(settings.modelConfigs.overrides.length, 2, 'both model overrides must survive');
+        const flash = settings.modelConfigs.overrides.find((o) => o.match.model === 'gemini-3.7-flash');
+        const pro = settings.modelConfigs.overrides.find((o) => o.match.model === 'gemini-3.7-pro');
+        assert.equal(flash.modelConfig.generateContentConfig.thinkingConfig.thinkingBudget, 8192);
+        assert.equal(pro.modelConfig.generateContentConfig.thinkingConfig.thinkingBudget, 16384);
+    });
+
+    it('upserts by model -- a repeat call for the same model replaces its own entry, not duplicates', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        const { writeThinkingConfig } = freshModules();
+        writeThinkingConfig('high', 'gemini-3.7-flash');
+        writeThinkingConfig('low', 'gemini-3.7-flash');
+        const settings = readSettings();
+        assert.equal(settings.modelConfigs.overrides.length, 1, 'same model must not duplicate');
+        assert.equal(getBudget(settings), 0);
+    });
+
+    it('preserves a pre-existing override for a different model already on disk', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        const existingSettings = {
+            modelConfigs: {
+                overrides: [{
+                    match: { model: 'gemini-3.7-pro' },
+                    modelConfig: { generateContentConfig: { thinkingConfig: { thinkingBudget: 16384, includeThoughts: false } } },
+                }],
+            },
+        };
+        fs.writeFileSync(path.join(geminiDir, 'settings.json'), JSON.stringify(existingSettings, null, 2));
+        const { writeThinkingConfig } = freshModules();
+        writeThinkingConfig('high', 'gemini-3.7-flash');
+        const settings = readSettings();
+        assert.equal(settings.modelConfigs.overrides.length, 2);
+        const pro = settings.modelConfigs.overrides.find((o) => o.match.model === 'gemini-3.7-pro');
+        assert.equal(pro.modelConfig.generateContentConfig.thinkingConfig.thinkingBudget, 16384, 'pre-existing override for another model must survive');
+    });
+
+    it('fails closed (throws) when the settings file cannot be written', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        const { writeThinkingConfig } = freshModules();
+        // Make the settings file itself a directory so fs.writeFileSync fails with EISDIR.
+        const settingsPath = path.join(geminiDir, 'settings.json');
+        fs.mkdirSync(settingsPath);
+        assert.throws(() => writeThinkingConfig('high', 'gemini-3.7-flash'), /Failed to write thinking config/);
+        fs.rmdirSync(settingsPath);
+    });
+
+    it('refuses to persist an override for an invalid/malformed model name', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        const settingsPath = path.join(geminiDir, 'settings.json');
+        const { writeThinkingConfig } = freshModules();
+        writeThinkingConfig('high', '../../etc/passwd');
+        assert.equal(fs.existsSync(settingsPath), false, 'no settings.json should be written for an invalid model name');
+    });
+
+    it('logs (does not silently swallow) a corrupted/unreadable settings.json on read', () => {
+        setupHome();
+        setEnv('AGENT_CLI', 'gemini');
+        fs.writeFileSync(path.join(geminiDir, 'settings.json'), '{not valid json');
+        const { writeThinkingConfig } = freshModules();
+        const originalError = console.error;
+        let loggedCorruption = false;
+        console.error = (...args) => {
+            if (args.join(' ').includes('Failed to read/parse existing thinking config')) loggedCorruption = true;
+        };
+        try {
+            writeThinkingConfig('high', 'gemini-3.7-flash');
+        } finally {
+            console.error = originalError;
+        }
+        assert.equal(loggedCorruption, true, 'read failure must be logged, not silently swallowed');
+        assert.equal(getBudget(readSettings()), 8192, 'still recovers by starting fresh');
+    });
 });
 
 // =============================================================================
