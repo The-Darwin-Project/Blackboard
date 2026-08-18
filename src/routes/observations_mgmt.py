@@ -1,8 +1,8 @@
 # BlackBoard/src/routes/observations_mgmt.py
 # @ai-rules:
 # 1. [Pattern]: Management endpoints for observation CRUD — separate from read-only observations.py.
-# 2. [Constraint]: Read/report endpoints gated via Depends(require_auth) (named identity only).
-#    Destructive endpoints (delete/rename/bulk-delete) additionally require
+# 2. [Constraint]: Read endpoints (report/export) are unauthenticated (non-destructive, expensive but safe).
+#    Destructive endpoints (delete/rename/bulk-delete) require
 #    Depends(require_obs_admin) (identity + OBS_ADMIN_GROUPS membership) — see auth.py.
 # 3. [Pattern]: DELETE does NOT validate name regex — allows cleanup of legacy names.
 # 4. [Pattern]: Report endpoint returns JSON {markdown, filename} — frontend creates blob download.
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from ..auth import require_auth, require_obs_admin
+from ..auth import require_obs_admin
 from ..dependencies import get_blackboard, get_report_client
 from ..state.blackboard import BlackboardState
 
@@ -108,7 +108,6 @@ async def export_observations(
     format: str = "json",
     names: str | None = None,
     blackboard: BlackboardState = Depends(get_blackboard),
-    _user=Depends(require_auth),
 ):
     obs_data = await blackboard.list_observations()
     all_series = obs_data.get("observations", [])
@@ -171,7 +170,6 @@ async def generate_observations_report(
     body: ReportRequest,
     blackboard: BlackboardState = Depends(get_blackboard),
     client=Depends(get_report_client),
-    _user=Depends(require_auth),
 ):
     import asyncio
     from ..reports.observations_reporter import generate_report, render_pdf
