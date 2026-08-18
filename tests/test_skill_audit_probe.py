@@ -166,3 +166,11 @@ class TestPhase3_5:
         kargo_in_context = [p for p in context_paths if "kargo" in p]
         assert len(kargo_in_context) == 0, \
             f"kargo still in context/ phase after gated/ move: {kargo_in_context}"
+
+    def test_stall_detection_references_trajectories(self, skill_06_body):
+        """Stall detection must reference live observation trajectories for ceiling."""
+        stall_section = skill_06_body[skill_06_body.index("### Stall Detection"):]
+        assert "trajectory" in stall_section.lower(), (
+            "Stall Detection section must reference observation trajectories"
+            " for ceiling calibration"
+        )

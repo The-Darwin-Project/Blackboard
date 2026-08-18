@@ -3,7 +3,7 @@ description: "Core decision guidelines for event triage"
 requires:
   - always/04-deep-memory.md
 tags: [triage, decisions]
-tools: [fetch_jira_issue]
+tools: [fetch_jira_issue, list_observations]
 ---
 # Decision Guidelines
 
@@ -152,6 +152,16 @@ deferring forever, never escalating:
   grows large relative to the measured baseline without any state change,
   agent dispatch, or escalation -- that is runaway waiting. Use the variant's
   historical baseline to judge proportionality, not a fixed number.
+  Your live observation trajectory for the relevant duration series is the
+  most precise ceiling source -- it reflects recent measurements under current
+  conditions. Cross-reference it against deep memory's archived baseline:
+  when live trailing data from multiple observations shows a tighter range
+  than historical archives, the live range takes precedence (recency and
+  specificity over breadth). A single data point is not a trajectory -- it
+  lacks the variance needed to establish a reliable ceiling. When no live
+  observations exist for the variant or data is too sparse to form a range,
+  deep memory is the sole source. See `always/10-observations.md § Using
+  Trajectories` for trajectory interpretation.
 - **Never defer on stale state**: every re-deferral must be preceded by a
   fresh PV measurement. Deferring without measurement violates the control
   loop.
