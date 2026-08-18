@@ -1,11 +1,15 @@
 // gemini-sidecar/ws-server.js
 // @ai-rules:
 // 1. [Pattern]: Legacy WS server — clients connect TO sidecar. Message types: task, followup, cancel.
-// 2. [Pattern]: All shared state via state.js. Concurrency guard — rejects task if getCurrentTask() already set.
+// 2. [Pattern]: All shared state via state.js. Concurrency guard — rejects both task AND followup
+//    if getCurrentTask() already set. Both spawn a `gemini` child that reads/writes the shared
+//    ~/.gemini/settings.json (see cli-executor.js writeThinkingConfig) -- an unguarded message type
+//    lets two invocations race on that file. Any new message type that reaches executeCLIStreaming
+//    MUST carry the same guard.
 // 3. [Pattern]: Credentials (GitHub, GitLab, ArgoCD, Kargo) set up per task before executeCLIStreaming.
 // 4. [Gotcha]: On ws.close, kills orphaned child process (SIGTERM then SIGKILL after 5s) and clears currentTask.
-// 5. [Pattern]: model/effort/role read from the task msg and threaded to executeCLIStreaming. `model` is
-//    typically empty for local sidecars (they use their Deployment-configured AGENT_MODEL env).
+// 5. [Pattern]: model/effort/role read from the task/followup msg and threaded to executeCLIStreaming.
+//    `model` is typically empty for local sidecars (they use their Deployment-configured AGENT_MODEL env).
 
 const { executeCLIStreaming } = require('./cli-executor');
 const {
@@ -132,15 +136,30 @@ function setupWSServer(wss) {
         const sessionId = msg.session_id || '';
         const followupMsg = msg.message || '';
         const eventId = msg.event_id || 'unknown';
+        const model = msg.model || '';
+        const effort = msg.effort || '';
+        const role = msg.role || '';
         console.log(`[${new Date().toISOString()}] Followup for session ${sessionId} (event: ${eventId})`);
+
+        // Same concurrency guard as `task` above -- without this, a followup can run
+        // concurrently with an in-flight task (or another followup), and both spawn a
+        // `gemini` child process that races on the shared ~/.gemini/settings.json.
+        if (state.getCurrentTask()) {
+          ws.send(JSON.stringify({
+            type: 'busy',
+            event_id: eventId,
+            message: 'Agent busy, task rejected. One task at a time.',
+          }));
+          return;
+        }
 
         if (sessionId) {
           try {
-            const task = state.getCurrentTask();
             const result = await executeCLIStreaming(ws, eventId, followupMsg, {
               autoApprove: true,
-              cwd: task?.cwd || DEFAULT_WORK_DIR,
+              cwd: DEFAULT_WORK_DIR,
               sessionId: sessionId,
+              model, effort, role,
             });
             wsSend(ws, {
               type: 'result',

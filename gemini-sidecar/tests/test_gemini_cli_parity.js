@@ -1,7 +1,7 @@
 // gemini-sidecar/tests/test_gemini_cli_parity.js
 // @ai-rules:
-// 1. [Constraint]: Test-only file -- verifies Gemini CLI feature-parity fixes in cli-executor.js
-//    (buildCLICommand Gemini path) and the explorer timeout bump in config.js (evt-f99032dc).
+// 1. [Constraint]: Test-only file -- verifies buildCLICommand Gemini path (clean prompt, no prefix
+//    pollution -- thinkingConfig via settings.json), Claude path regression, and explorer timeout.
 // 2. [Pattern]: Uses node:test + node:assert, mirrors tests/test_credentials_multiorg.js's
 //    freshRequire/setEnv/restoreEnv pattern since config.js snapshots AGENT_CLI/AGENT_MODEL/
 //    AGENT_ROLE/AGENT_EFFORT_LEVEL from process.env at require time.
@@ -44,25 +44,25 @@ afterEach(() => {
 });
 
 // =============================================================================
-// Gemini path -- effort via prompt prefix (gemini-cli has no --thinking flag)
+// Gemini path -- effort via thinkingConfig in settings.json (prompt is clean, no prefix)
 // =============================================================================
 
-describe('Gemini buildCLICommand: effort prompt prefix', () => {
-  it('adds thinking prefix for effort="high"', () => {
+describe('Gemini buildCLICommand: effort via thinkingConfig (no prompt prefix)', () => {
+  it('clean prompt for effort="high" (thinkingConfig handles depth)', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
     const { binary, args } = buildCLICommand('do the thing', { effort: 'high' });
     assert.equal(binary, 'gemini');
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
+    assert.equal(args[promptIdx + 1], 'do the thing');
   });
 
-  it('adds thinking prefix for effort="max"', () => {
+  it('clean prompt for effort="max" (thinkingConfig handles depth)', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', { effort: 'max' });
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
+    assert.equal(args[promptIdx + 1], 'do the thing');
   });
 
   it('does not add thinking prefix for effort="low"', () => {
@@ -96,7 +96,7 @@ describe('Gemini buildCLICommand: effort prompt prefix', () => {
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', { effort: 'max' });
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
+    assert.equal(args[promptIdx + 1], 'do the thing');
   });
 
   it('falls back to AGENT_EFFORT_LEVEL env when options.effort is not set', () => {
@@ -105,7 +105,7 @@ describe('Gemini buildCLICommand: effort prompt prefix', () => {
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('do the thing', {});
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. do the thing');
+    assert.equal(args[promptIdx + 1], 'do the thing');
   });
 });
 
@@ -174,17 +174,17 @@ describe('Gemini buildCLICommand: model fallback', () => {
 });
 
 // =============================================================================
-// Gemini path -- architect thinking prefix
+// Gemini path -- architect effort defaults (thinkingConfig, no prompt prefix)
 // =============================================================================
 
-describe('Gemini buildCLICommand: architect thinking prefix', () => {
-  it('prepends the reasoning prefix for role=architect', () => {
+describe('Gemini buildCLICommand: architect effort defaults (no prompt prefix)', () => {
+  it('clean prompt for role=architect (thinkingConfig handles depth)', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review the sidecar', { role: 'architect' });
     const promptIdx = args.indexOf('-p');
     assert.notEqual(promptIdx, -1);
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. review the sidecar');
+    assert.equal(args[promptIdx + 1], 'review the sidecar');
   });
 
   it('does not add a prefix for non-architect roles', () => {
@@ -200,21 +200,21 @@ describe('Gemini buildCLICommand: architect thinking prefix', () => {
     assert.equal(args[promptIdx + 1], 'review the sidecar');
   });
 
-  it('falls back to AGENT_ROLE env for the prefix decision', () => {
+  it('falls back to AGENT_ROLE env for architect effort default', () => {
     setEnv('AGENT_CLI', 'gemini');
     setEnv('AGENT_ROLE', 'architect');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review the sidecar', {});
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. review the sidecar');
+    assert.equal(args[promptIdx + 1], 'review the sidecar');
   });
 
-  it('does not duplicate prefix when both architect role and high effort are set', () => {
+  it('clean prompt when both architect role and high effort are set', () => {
     setEnv('AGENT_CLI', 'gemini');
     const { buildCLICommand } = freshModules();
     const { args } = buildCLICommand('review', { role: 'architect', effort: 'high' });
     const promptIdx = args.indexOf('-p');
-    assert.equal(args[promptIdx + 1], 'Think step by step and reason deeply. review');
+    assert.equal(args[promptIdx + 1], 'review');
   });
 });
 
