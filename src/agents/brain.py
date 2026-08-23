@@ -672,7 +672,7 @@ _CONTENT_BUDGET = int(os.getenv("BRAIN_CONTENT_BUDGET_TOKENS", "800000"))
 # Use .get(agent_name, default) everywhere -- never bracket access -- so an
 # out-of-vocabulary agent_name degrades to the safe default instead of KeyError.
 _ROLE_MODEL_MAP = {
-    "architect": os.getenv("EPHEMERAL_MODEL_ARCHITECT", "claude-opus-4-6[1m]"),
+    "architect": os.getenv("EPHEMERAL_MODEL_ARCHITECT", "claude-opus-4-8[1m]"),
     "sysadmin": os.getenv("EPHEMERAL_MODEL_SYSADMIN", "claude-sonnet-5"),
     "developer": os.getenv("EPHEMERAL_MODEL_DEVELOPER", "claude-sonnet-5"),
     "qe": os.getenv("EPHEMERAL_MODEL_QE", "claude-sonnet-5"),

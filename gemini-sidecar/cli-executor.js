@@ -598,6 +598,15 @@ async function executeCLIStreaming(ws, eventId, prompt, options = {}) {
                     }).then(resolve).catch(reject);
                     return;
                 }
+                if (options.sessionId && !options._retryWithoutSession && isGeminiSessionNotFound(code, stderr)) {
+                    console.log(`[${new Date().toISOString()}] [${eventId}] Gemini session-not-found (exit 42), retrying without --resume`);
+                    executeCLIStreaming(ws, eventId, prompt, {
+                        ...options,
+                        sessionId: null,
+                        _retryWithoutSession: true,
+                    }).then(resolve).catch(reject);
+                    return;
+                }
                 resolve({ status: 'failed', sessionId: capturedSessionId, exitCode: code, stderr, stdout: effectiveOutput, source: 'stdout' });
             }
         });
@@ -624,6 +633,12 @@ function is400SessionError(output, stderr) {
         combined.includes('text content blocks must be non-empty') ||
         combined.includes('invalid_request_error')
     );
+}
+
+function isGeminiSessionNotFound(exitCode, stderr) {
+    if (exitCode !== 42) return false;
+    const lower = (stderr || '').toLowerCase();
+    return lower.includes('no previous sessions found') || lower.includes('session not found');
 }
 
 module.exports = {

@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Callable
@@ -157,69 +158,93 @@ async def dispatch_to_agent(
         latest_callback_result: str | None = None
         returned_session_id = session_id
 
-        while True:
-            msg = await queue.get()
-            msg_type = msg.get("type", "")
+        # Safety timeout: prevent indefinite blocking when sidecar never responds.
+        # 35min ceiling (slightly above max CLI timeout of 30min) ensures we don't
+        # deadlock the event if the WS message is lost or sidecar crashes silently.
+        _DISPATCH_TIMEOUT_S = int(os.environ.get("DISPATCH_TIMEOUT_S", "2100"))
 
-            if msg_type == "progress":
-                accepted = True
-                if on_progress:
-                    await on_progress({
-                        "actor": role,
-                        "event_id": event_id,
-                        "message": msg.get("message", ""),
-                        "source": msg.get("source", ""),
-                    })
+        async def _consume_queue():
+            nonlocal latest_callback_result, returned_session_id
+            while True:
+                msg = await queue.get()
+                msg_type = msg.get("type", "")
 
-            elif msg_type == "partial_result":
-                accepted = True
-                latest_callback_result = msg.get("content", "")
-                if on_progress:
-                    await on_progress({
-                        "actor": role,
-                        "event_id": event_id,
-                        "message": f"[deliverable updated: {len(latest_callback_result)} chars]",
-                        "source": "callback",
-                    })
+                if msg_type == "progress":
+                    nonlocal accepted
+                    accepted = True
+                    if on_progress:
+                        await on_progress({
+                            "actor": role,
+                            "event_id": event_id,
+                            "message": msg.get("message", ""),
+                            "source": msg.get("source", ""),
+                        })
 
-            elif msg_type == "huddle_message":
-                accepted = True
-                if on_huddle:
-                    await on_huddle({
-                        "agent_id": agent_conn.agent_id,
-                        "task_id": task_id,
-                        "event_id": event_id,
-                        "content": msg.get("content", ""),
-                    })
+                elif msg_type == "partial_result":
+                    accepted = True
+                    latest_callback_result = msg.get("content", "")
+                    if on_progress:
+                        await on_progress({
+                            "actor": role,
+                            "event_id": event_id,
+                            "message": f"[deliverable updated: {len(latest_callback_result)} chars]",
+                            "source": "callback",
+                        })
 
-            elif msg_type == "result":
-                accepted = True
-                output = msg.get("output", "")
-                source = msg.get("source", "stdout")
-                if isinstance(output, dict):
-                    output = json.dumps(output, indent=2)
-                if latest_callback_result and source == "stdout":
-                    output = latest_callback_result
-                elif source == "stdout" and not latest_callback_result:
-                    output = _sanitize_stdout(str(output))
-                returned_session_id = msg.get("session_id") or returned_session_id
-                return str(output), returned_session_id
+                elif msg_type == "huddle_message":
+                    accepted = True
+                    if on_huddle:
+                        await on_huddle({
+                            "agent_id": agent_conn.agent_id,
+                            "task_id": task_id,
+                            "event_id": event_id,
+                            "content": msg.get("content", ""),
+                        })
 
-            elif msg_type == "error":
-                error_msg = msg.get("error", msg.get("message", "Unknown error"))
-                if msg.get("retryable"):
-                    if latest_callback_result:
-                        logger.info(
-                            "Retryable error from %s [%s] but partial_result exists (%d chars), returning it",
-                            role, event_id, len(latest_callback_result),
-                        )
-                        return latest_callback_result, returned_session_id
-                    logger.warning("Retryable error from %s [%s]: %s", role, event_id, error_msg)
-                    return RETRYABLE_SENTINEL, None
-                return f"Error: {error_msg}", returned_session_id
+                elif msg_type == "result":
+                    accepted = True
+                    output = msg.get("output", "")
+                    source = msg.get("source", "stdout")
+                    if isinstance(output, dict):
+                        output = json.dumps(output, indent=2)
+                    if latest_callback_result and source == "stdout":
+                        output = latest_callback_result
+                    elif source == "stdout" and not latest_callback_result:
+                        output = _sanitize_stdout(str(output))
+                    returned_session_id = msg.get("session_id") or returned_session_id
+                    return str(output), returned_session_id
 
-            elif msg_type == ERROR_SENTINEL_TYPE:
-                return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
+                elif msg_type == "error":
+                    error_msg = msg.get("error", msg.get("message", "Unknown error"))
+                    if msg.get("retryable"):
+                        if latest_callback_result:
+                            logger.info(
+                                "Retryable error from %s [%s] but partial_result exists (%d chars), returning it",
+                                role, event_id, len(latest_callback_result),
+                            )
+                            return latest_callback_result, returned_session_id
+                        logger.warning("Retryable error from %s [%s]: %s", role, event_id, error_msg)
+                        return RETRYABLE_SENTINEL, None
+                    return f"Error: {error_msg}", returned_session_id
+
+                elif msg_type == ERROR_SENTINEL_TYPE:
+                    return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
+
+                elif msg_type == "busy":
+                    logger.warning(
+                        "dispatch_to_agent: agent rejected task (busy) for role=%s event=%s",
+                        role, event_id,
+                    )
+                    return f"Error: Agent busy, task rejected. Try again later.", returned_session_id
+
+        try:
+            return await asyncio.wait_for(_consume_queue(), timeout=_DISPATCH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.error(
+                "dispatch_to_agent TIMEOUT after %ds for role=%s event=%s task=%s -- sidecar never responded",
+                _DISPATCH_TIMEOUT_S, role, event_id, task_id,
+            )
+            return f"Error: Agent dispatch timed out after {_DISPATCH_TIMEOUT_S}s (sidecar unresponsive)", returned_session_id
 
     finally:
         if accepted:
