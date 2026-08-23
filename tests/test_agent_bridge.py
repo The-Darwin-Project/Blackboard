@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.agents.agent_registry import AgentRegistry
 from src.agents.agent_ws_handler import agent_websocket_handler
-from src.agents.dispatch import dispatch_to_agent
+from src.agents.dispatch import RETRYABLE_SENTINEL, dispatch_to_agent
 from src.agents.task_bridge import TaskBridge
 
 
@@ -198,3 +198,115 @@ def test_disconnect_unblocks_dispatch(client: TestClient) -> None:
 
     assert len(result_holder) == 1
     assert "Error:" in result_holder[0]["result"]
+
+
+def test_busy_message_routes_through_real_ws_handler_to_retryable_sentinel(client: TestClient) -> None:
+    """A sidecar 'busy' reply must survive agent_ws_handler.py's real _ROUTED_TYPES
+    allowlist and reach dispatch_to_agent as RETRYABLE_SENTINEL -- not a plain
+    "Error: ..." string (which would trip Brain's circuit breaker).
+
+    Regression test for PR #203's HIGH findings: earlier code review found that
+    injecting a busy-shaped message directly via bridge.put() (bypassing the WS
+    handler) could never have caught the routing-layer gap where 'busy' was
+    dropped as an unknown message type before this fix.
+    """
+    def ws_thread() -> None:
+        with client.websocket_connect("/agent/ws") as ws:
+            ws.send_json({
+                "type": "register",
+                "agent_id": "busy-agent-1",
+                "role": "developer",
+                "capabilities": [],
+                "cli": "gemini",
+                "model": "test",
+            })
+            msg = ws.receive_json()
+            if msg.get("type") == "task":
+                # Real wire format emitted by the fixed gemini-sidecar/ws-client.js
+                # busy-guard: type 'busy' (not 'error'), carrying task_id via sendMsg().
+                ws.send_json({
+                    "type": "busy",
+                    "task_id": msg["task_id"],
+                    "event_id": msg["event_id"],
+                    "message": "Agent busy, task rejected.",
+                })
+
+    t = threading.Thread(target=ws_thread)
+    t.start()
+    for _ in range(20):
+        time.sleep(0.05)
+        if client.get("/api/agents").json():
+            break
+
+    resp = client.post("/api/test/dispatch?role=developer&event_id=evt-busy&task=do+it")
+    t.join(timeout=5)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["result"] == RETRYABLE_SENTINEL
+    assert data["session_id"] is None
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Confirmed bug in PR #203's send_cancel()-on-timeout fix, not fixed here per "
+        "QE/Developer pair-programming boundaries -- reported to Developer for a "
+        "follow-up commit. Non-blocking (adds latency, does not corrupt state)."
+    ),
+    strict=False,
+)
+def test_timeout_cancel_path_does_not_add_unnecessary_delay(client: TestClient, monkeypatch) -> None:
+    """dispatch_to_agent's asyncio.wait_for timeout now calls send_cancel() before
+    returning (PR #203 MEDIUM fix). send_cancel() polls up to 5s for the queue to
+    be deleted as a signal the sidecar responded -- but nothing can delete that
+    queue while send_cancel() is still running, since dispatch_to_agent's own
+    `finally: bridge.delete_queue(task_id)` only runs *after* send_cancel()
+    returns. In this call site the poll can therefore never resolve early: every
+    dispatch timeout is silently taxed with the full 5s poll on top of the
+    configured timeout, with no sidecar activity to explain the wait.
+    """
+    monkeypatch.setenv("DISPATCH_TIMEOUT_S", "1")
+
+    def ws_thread() -> None:
+        with client.websocket_connect("/agent/ws") as ws:
+            ws.send_json({
+                "type": "register",
+                "agent_id": "slow-agent-1",
+                "role": "developer",
+                "capabilities": [],
+                "cli": "gemini",
+                "model": "test",
+            })
+            ws.receive_json()  # receive the "task" message once, then go silent
+            # Hold the connection open (simulate a silently hung sidecar) long enough
+            # to span the 1s timeout plus send_cancel()'s up-to-5s poll -- do NOT loop
+            # on receive_json() forever, or the `with` block never exits to close the
+            # socket cleanly and fixture teardown hangs waiting for this thread.
+            time.sleep(8)
+
+    t = threading.Thread(target=ws_thread)
+    t.start()
+    for _ in range(20):
+        time.sleep(0.05)
+        if client.get("/api/agents").json():
+            break
+
+    try:
+        start = time.monotonic()
+        resp = client.post("/api/test/dispatch?role=developer&event_id=evt-slow&task=do+it")
+        elapsed = time.monotonic() - start
+
+        assert resp.status_code == 200
+        assert "timed out" in resp.json()["result"]
+        # Configured timeout is 1s; a generous 2s bound leaves headroom for the test
+        # harness but still catches the ~5s send_cancel() poll tax documented above.
+        assert elapsed < 2.0, (
+            f"dispatch timeout took {elapsed:.2f}s for a 1s configured timeout -- "
+            "send_cancel()'s 5s poll-for-queue-deletion likely fired needlessly "
+            "(see docstring); known issue, reported to Developer, not fixed by QE"
+        )
+    finally:
+        # Always join the sidecar thread (even on assertion failure above) --
+        # otherwise it's still mid-sleep holding the WS open when the `client`
+        # fixture tears down, and teardown hangs waiting for that connection.
+        t.join(timeout=10)
