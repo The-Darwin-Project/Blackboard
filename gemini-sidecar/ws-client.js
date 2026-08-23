@@ -169,7 +169,7 @@ async function handleTask(ws, msg) {
     return;
   }
   if (state.getCurrentTask()) {
-    sendMsg(ws, taskId, { type: 'error', event_id: eventId, message: 'Agent busy, task rejected.' });
+    sendMsg(ws, taskId, { type: 'busy', event_id: eventId, message: 'Agent busy, task rejected.' });
     return;
   }
   if (!prompt) {
