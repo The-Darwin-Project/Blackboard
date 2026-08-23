@@ -241,4 +241,93 @@ describe('POST /proxy/plan-step', () => {
     assert.equal(res.body.error, 'No active task');
     assert.equal(brain.getLastRequest(), null);
   });
+
+  it('rejects a non-loopback caller with 403 before parsing the body or contacting the Brain', async () => {
+    const brain = await startFakeBrain();
+    setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${brain.port}`);
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask({ eventId: 'evt-45', role: 'developer' });
+    apps.push(brain);
+
+    // Exercises the real handleRequest auth gate directly with a spoofed remoteAddress --
+    // binding an actual server to a non-loopback interface isn't reliable in a sandboxed
+    // test environment, so the request object is faked instead of the transport.
+    let statusCode, headers, payload;
+    const fakeReq = { url: '/proxy/plan-step', method: 'POST', socket: { remoteAddress: '10.0.0.5' } };
+    const fakeRes = {
+      writeHead: (code, h) => { statusCode = code; headers = h; },
+      end: (body) => { payload = body; },
+    };
+
+    await handler.handleRequest(fakeReq, fakeRes);
+
+    assert.equal(statusCode, 403);
+    assert.equal(headers['Content-Type'], 'application/json');
+    assert.equal(JSON.parse(payload).error, 'Forbidden: loopback-only endpoint');
+    assert.equal(brain.getLastRequest(), null, 'a rejected caller must never reach the Brain');
+  });
+});
+
+// =============================================================================
+// The three sibling call sites this PR fixed alongside /proxy/plan-step --
+// each previously read bare AGENT_ROLE with no task.role fallback.
+// =============================================================================
+
+describe('other resolveRole call sites fixed by this PR', () => {
+  let apps = [];
+
+  afterEach(async () => {
+    await Promise.all(apps.map(({ server }) => new Promise((r) => server.close(r))));
+    apps = [];
+  });
+
+  it('POST /hooks/session-start reports the task role, not the (empty, ephemeral) AGENT_ROLE env', async () => {
+    setEnv('AGENT_ROLE', '');
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask({ eventId: 'evt-46', role: 'security_analyst' });
+
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app);
+
+    const res = await httpRequest(app.port, '/hooks/session-start', 'POST');
+
+    assert.equal(res.status, 200);
+    assert.match(res.body.hookSpecificOutput.additionalContext, /you are security_analyst\./);
+  });
+
+  it('GET /proxy/turns queries the Brain with the task role, not the (empty, ephemeral) AGENT_ROLE env', async () => {
+    setEnv('AGENT_ROLE', '');
+    const brain = await startFakeBrain({ body: { turns: [], total: 0 } });
+    setEnv('BRAIN_HTTP_URL', `http://127.0.0.1:${brain.port}`);
+    const { handler, state } = freshHttpHandler();
+    state.setCurrentTask({ eventId: 'evt-47', role: 'explorer' });
+
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app);
+    apps.push(brain);
+
+    const res = await httpRequest(app.port, '/proxy/turns', 'GET');
+
+    assert.equal(res.status, 200);
+    assert.equal(brain.getLastRequest().url, '/queue/evt-47/turns?role=explorer');
+  });
+
+  it("POST /callback (teammate_message) mirrors the task role as 'from', not the (empty, ephemeral) AGENT_ROLE env", async () => {
+    setEnv('AGENT_ROLE', '');
+    const { handler, state } = freshHttpHandler();
+    const WebSocket = require('ws');
+    const sent = [];
+    const fakeWs = { readyState: WebSocket.OPEN, send: (msg) => sent.push(JSON.parse(msg)) };
+    state.setCurrentTask({ eventId: 'evt-48', taskId: 'task-1', role: 'architect', ws: fakeWs });
+
+    const app = await startAppServer(handler.handleRequest);
+    apps.push(app);
+
+    const res = await httpRequest(app.port, '/callback', 'POST', { type: 'teammate_message', content: 'hello' });
+
+    assert.equal(res.status, 200);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].type, 'agent_teammate_message');
+    assert.equal(sent[0].from, 'architect');
+  });
 });
