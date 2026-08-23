@@ -461,7 +461,7 @@ ephemeralAgents:
   # claude-sonnet-5 does NOT use the "[1m]" context-window suffix -- that modifier is Opus/Vertex-specific;
   # Sonnet 5 has native 200K context.
   roleModels:
-    architect: "claude-opus-4-8[1m]" # Architect keeps Opus for deep strategic planning
+    architect: "claude-opus-4-8" # Architect keeps Opus for deep strategic planning
     sysadmin: "claude-sonnet-5"
     developer: "claude-sonnet-5"
     qe: "claude-sonnet-5"
