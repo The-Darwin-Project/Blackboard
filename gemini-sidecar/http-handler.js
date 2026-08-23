@@ -571,7 +571,7 @@ async function handleRequest(req, res) {
         return;
       }
       body.event_id = eventId;
-      body.role = AGENT_ROLE || '';
+      body.role = state.getCurrentTask()?.role || AGENT_ROLE || '';
       const result = await proxyPost(`/queue/${eventId}/plan-step`, body);
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.data));
