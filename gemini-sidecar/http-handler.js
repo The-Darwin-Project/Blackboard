@@ -8,6 +8,11 @@
 // 6. [Pattern]: /proxy/* endpoints forward GET requests to Brain API at BRAIN_HTTP_URL || localhost:8000. Read-only, no auth.
 // 7. [Gotcha]: /proxy/turns returns empty response if no active task (eventId is null).
 // 8. [Pattern]: POST /hooks/stop — if currentTask.mode === 'message', allow exit without team_send_results (skips hasResults + pending queue gates).
+// 9. [Constraint]: /proxy/plan-step is the sole mutating /proxy/* route (writes to the Brain's plan-step
+//    state) — restricted to loopback callers via isLoopbackAddress() since it has no other auth. Its only
+//    legitimate caller is blackboard-mcp.js's bb_update_plan_step, which always connects via 127.0.0.1.
+// 10. [Pattern]: Role resolution ("task role, else AGENT_ROLE, else default") MUST go through
+//     state.resolveRole() — do not inline `task?.role || AGENT_ROLE || x` at new call sites.
 
 const { executeCLI } = require('./cli-executor');
 const { tryWake } = require('./ws-client');
@@ -28,12 +33,19 @@ const {
   GITLAB_HOST,
 } = require('./credentials');
 const state = require('./state');
-const { AGENT_CLI, AGENT_MODEL, AGENT_ROLE, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL } = require('./config');
+const { AGENT_CLI, AGENT_MODEL, DEFAULT_WORK_DIR, PORT, BRAIN_HTTP_URL } = require('./config');
 const { wsSend } = require('./ws-utils');
 const fs = require('fs');
 const http = require('http');
 
 const BRAIN_BASE = BRAIN_HTTP_URL || 'http://localhost:8000';
+
+/**
+ * True if addr is a loopback address (IPv4, IPv6, or IPv4-mapped-IPv6 form).
+ */
+function isLoopbackAddress(addr) {
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
 
 function proxyGet(brainPath) {
   return new Promise((resolve, reject) => {
@@ -108,8 +120,8 @@ async function handleRequest(req, res) {
       // in cli-executor.js buildCLICommand callers). Falling back to bare AGENT_ROLE
       // alone always misreported these two roles as 'full' here, since it never sees
       // the actual dispatched role for an ephemeral agent.
-      agentRole: (state.getCurrentTask()?.role || AGENT_ROLE) || 'default',
-      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer', 'explorer'].includes(state.getCurrentTask()?.role || AGENT_ROLE) ? 'read-only (no file modification)' : 'full',
+      agentRole: state.resolveRole('default'),
+      toolRestrictions: ['architect', 'security_analyst', 'code_reviewer', 'explorer'].includes(state.resolveRole('default')) ? 'read-only (no file modification)' : 'full',
       hasGitHubCredentials: hasGitHubCredentials(),
       hasGitLabCredentials: hasGitLabCredentials(),
       hasArgocdCredentials: fs.existsSync('/secrets/argocd/auth-token'),
@@ -205,7 +217,7 @@ async function handleRequest(req, res) {
     try {
       const task = state.getCurrentTask();
       const eid = task?.eventId || 'unknown';
-      const role = AGENT_ROLE || 'unknown';
+      const role = state.resolveRole('unknown', task);
       let context = `Event ${eid} — you are ${role}.`;
       try {
         const data = await proxyGet(`/queue/${eid}/turns?role=${role}`);
@@ -243,7 +255,7 @@ async function handleRequest(req, res) {
     res.end(JSON.stringify({
       hasResults: !!state.getCallbackResult(),
       taskMode: task?.mode || '',
-      role: task?.role || AGENT_ROLE || '',
+      role: state.resolveRole('', task),
     }));
     return;
   }
@@ -332,7 +344,7 @@ async function handleRequest(req, res) {
             task_id: task?.taskId || '',
             event_id: task?.eventId || '',
             content,
-            from: AGENT_ROLE || 'unknown',
+            from: state.resolveRole('unknown', task),
           });
           console.log(`[${new Date().toISOString()}] Teammate message mirrored to blackboard (${content.length} chars)`);
         }
@@ -497,7 +509,7 @@ async function handleRequest(req, res) {
     }
     try {
       const since = url.searchParams.get('since');
-      let brainPath = `/queue/${eventId}/turns?role=${AGENT_ROLE || ''}`;
+      let brainPath = `/queue/${eventId}/turns?role=${state.resolveRole('', task)}`;
       if (since) brainPath += `&since=${since}`;
       const data = await proxyGet(brainPath);
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -561,6 +573,11 @@ async function handleRequest(req, res) {
   }
 
   if (url.pathname === '/proxy/plan-step' && req.method === 'POST') {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Forbidden: loopback-only endpoint' }));
+      return;
+    }
     try {
       const body = await parseBody(req);
       const task = state.getCurrentTask();
@@ -571,7 +588,7 @@ async function handleRequest(req, res) {
         return;
       }
       body.event_id = eventId;
-      body.role = state.getCurrentTask()?.role || AGENT_ROLE || '';
+      body.role = state.resolveRole('', task);
       const result = await proxyPost(`/queue/${eventId}/plan-step`, body);
       res.writeHead(result.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result.data));
@@ -587,4 +604,4 @@ async function handleRequest(req, res) {
   res.end(JSON.stringify({ error: 'Not found' }));
 }
 
-module.exports = { handleRequest, parseBody };
+module.exports = { handleRequest, parseBody, isLoopbackAddress };
