@@ -9,6 +9,12 @@
 // 6. [Pattern]: _lastTaskContext preserves sessionId/eventId/cwd after task completion for wake-on-message resume.
 // 7. [Pattern]: Blackboard cache fed by WebSocket blackboard_update from Brain. Shared hookHighwater between MCP + PostToolUse hook prevents duplicate injection.
 // 8. [Pattern]: peek* methods are non-destructive reads (for Stop hook). drain* methods consume and clear (for PostToolUse hook).
+// 9. [Pattern]: resolveRole() is the single source of truth for "task role, else AGENT_ROLE, else default" --
+//    all call sites (http-handler.js) MUST use it instead of inlining `task?.role || AGENT_ROLE || x`.
+//    Uses `??` for the task.role hop so an explicitly-set-but-falsy role (e.g. '') is preserved rather
+//    than papered over by AGENT_ROLE; AGENT_ROLE itself still uses `||` since '' genuinely means "unset".
+
+const { AGENT_ROLE } = require('./config');
 
 let _callbackResult = null;
 let currentTask = null;
@@ -29,6 +35,7 @@ module.exports = {
   getCurrentTask: () => currentTask,
   setCurrentTask: (t) => { currentTask = t; },
   clearCurrentTask: () => { currentTask = null; },
+  resolveRole: (defaultValue = '', task = currentTask) => task?.role ?? (AGENT_ROLE || defaultValue),
   getPendingHuddleReply: () => _pendingHuddleReply,
   setPendingHuddleReply: (v) => { _pendingHuddleReply = v; },
   clearPendingHuddleReply: () => { _pendingHuddleReply = null; },
