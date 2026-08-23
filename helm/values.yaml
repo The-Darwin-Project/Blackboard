@@ -88,7 +88,7 @@ sidecars:
     cliType: "claude" # "gemini" or "claude"
     gitUserName: "Darwin Architect"
     gitUserEmail: "darwin-architect@darwin-project.io"
-    modelName: "claude-opus-4-6[1m]" # Claude Opus 4.6 via Vertex AI + 1M context window
+    modelName: "claude-opus-4-8" # Claude Opus 4.8 via Vertex AI
     effortLevel: "high" # Claude Code effort: low|medium|high|max (deep planning needs high)
     permissionMode: "bypassPermissions" # No hard restriction -- soft rules via architect.md + skills
     gcpSecret: "" # Per-agent GCP SA secret (falls back to gcp.agentExistingSecret, then gcp.existingSecret)
