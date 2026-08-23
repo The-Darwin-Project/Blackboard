@@ -1,24 +1,36 @@
 # BlackBoard/src/agents/dispatch.py
 # @ai-rules:
 # 1. [Constraint]: Security check (FORBIDDEN_PATTERNS) is the FIRST thing -- before any WS send. Single enforcement point.
-# 2. [Pattern]: Queue loop reads progress/partial_result/huddle_message/result/error/_error_sentinel from TaskBridge.
+# 2. [Pattern]: Queue loop reads progress/partial_result/huddle_message/result/error/busy/_error_sentinel from TaskBridge.
 # 3. [Pattern]: agent_id parameter enables session affinity (follow-up rounds route to same agent).
 # 4. [Pattern]: Retryable errors return ("__RETRYABLE__", None) sentinel ONLY if no partial_result exists.
 #    If partial_result was already captured, return it instead -- the agent recovered from the transient error.
+#    "busy" (sidecar rejected the task before starting) always returns the sentinel -- no
+#    partial_result is possible since nothing ran. NEVER return a plain "Error: ..." string for a
+#    transient busy/retryable condition -- brain.py treats any "Error:"-prefixed result as terminal
+#    and permanently closes the event after MAX_AGENT_ERROR_STREAK consecutive occurrences.
 # 5. [Constraint]: finally block: mark_idle only if sidecar accepted the task (accepted flag).
 #    If rejected, restore previous agent state. delete_queue always runs.
-# 6. [Pattern]: consume_wake_task mirrors the receive loop but skips queue creation + task send. Queue pre-created by WS handler.
+# 6. [Pattern]: consume_wake_task shares _consume_queue's asyncio.wait_for ceiling (_dispatch_timeout_s())
+#    and busy/RETRYABLE_SENTINEL handling, but skips queue creation + task send -- queue pre-created by WS handler.
 # 7. [Pattern]: `mode` is forwarded on the task WS JSON for sidecar MCP/stop-hook (e.g. message vs implement).
 # 8. [Pattern]: Unknown non-empty mode values log a warning; dispatch still proceeds (fail-open).
 # 9. [Pattern]: WAKE_REGISTER_MODES — allowed `mode` on wake_register WS from sidecar (see handle_wake_task).
 # 10. [Pattern]: `model`/`effort` mirror the `mode` forwarding pattern (rules 7-8). `model` is only
 #     non-empty for ephemeral dispatches (gated by caller); `effort` passes through for all dispatches.
+# 11. [Constraint]: "result" messages carry a status field ("success"/"failed"). A "failed" status is
+#     a genuine failure even though the type is "result" (not "error") -- treat it as an Error: result
+#     and drop the (typically null/stale) session_id rather than falling back to a prior session_id.
+# 12. [Pattern]: On asyncio.wait_for timeout, call send_cancel() before returning so the sidecar aborts
+#     a task it may still be alive and running, instead of leaving it orphaned while the registry marks
+#     the agent idle again.
 """Unified dispatch -- sends tasks to agent sidecars via persistent WebSocket."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Callable
@@ -32,6 +44,18 @@ logger = logging.getLogger(__name__)
 RETRYABLE_SENTINEL = "__RETRYABLE__"
 
 _TOOL_MARKER_RE = re.compile(r'\[tool\]\s*\S+', re.IGNORECASE)
+
+
+def _dispatch_timeout_s() -> int:
+    """Safety ceiling for a full dispatch round-trip (task send -> sidecar processing -> result).
+
+    Must stay safely above the sidecar's own largest per-task timeout (gemini-sidecar/config.js
+    ROLE_TIMEOUTS -- currently code_reviewer at 2700s/45min, the largest CLI role ceiling) so Brain
+    never aborts a task the sidecar itself would still let finish. Bump the default here if that
+    file's timeouts grow. Read on every call (not module-cached) so ops can override via env
+    without a process restart, and so dispatch_to_agent and consume_wake_task always agree.
+    """
+    return int(os.environ.get("DISPATCH_TIMEOUT_S", "3000"))
 
 
 def _sanitize_stdout(raw: str) -> str:
@@ -157,69 +181,103 @@ async def dispatch_to_agent(
         latest_callback_result: str | None = None
         returned_session_id = session_id
 
-        while True:
-            msg = await queue.get()
-            msg_type = msg.get("type", "")
+        # Safety timeout: prevent indefinite blocking when sidecar never responds.
+        # See _dispatch_timeout_s() docstring for the ceiling rationale.
+        timeout_s = _dispatch_timeout_s()
 
-            if msg_type == "progress":
-                accepted = True
-                if on_progress:
-                    await on_progress({
-                        "actor": role,
-                        "event_id": event_id,
-                        "message": msg.get("message", ""),
-                        "source": msg.get("source", ""),
-                    })
+        async def _consume_queue():
+            nonlocal latest_callback_result, returned_session_id, accepted
+            while True:
+                msg = await queue.get()
+                msg_type = msg.get("type", "")
 
-            elif msg_type == "partial_result":
-                accepted = True
-                latest_callback_result = msg.get("content", "")
-                if on_progress:
-                    await on_progress({
-                        "actor": role,
-                        "event_id": event_id,
-                        "message": f"[deliverable updated: {len(latest_callback_result)} chars]",
-                        "source": "callback",
-                    })
+                if msg_type == "progress":
+                    accepted = True
+                    if on_progress:
+                        await on_progress({
+                            "actor": role,
+                            "event_id": event_id,
+                            "message": msg.get("message", ""),
+                            "source": msg.get("source", ""),
+                        })
 
-            elif msg_type == "huddle_message":
-                accepted = True
-                if on_huddle:
-                    await on_huddle({
-                        "agent_id": agent_conn.agent_id,
-                        "task_id": task_id,
-                        "event_id": event_id,
-                        "content": msg.get("content", ""),
-                    })
+                elif msg_type == "partial_result":
+                    accepted = True
+                    latest_callback_result = msg.get("content", "")
+                    if on_progress:
+                        await on_progress({
+                            "actor": role,
+                            "event_id": event_id,
+                            "message": f"[deliverable updated: {len(latest_callback_result)} chars]",
+                            "source": "callback",
+                        })
 
-            elif msg_type == "result":
-                accepted = True
-                output = msg.get("output", "")
-                source = msg.get("source", "stdout")
-                if isinstance(output, dict):
-                    output = json.dumps(output, indent=2)
-                if latest_callback_result and source == "stdout":
-                    output = latest_callback_result
-                elif source == "stdout" and not latest_callback_result:
-                    output = _sanitize_stdout(str(output))
-                returned_session_id = msg.get("session_id") or returned_session_id
-                return str(output), returned_session_id
+                elif msg_type == "huddle_message":
+                    accepted = True
+                    if on_huddle:
+                        await on_huddle({
+                            "agent_id": agent_conn.agent_id,
+                            "task_id": task_id,
+                            "event_id": event_id,
+                            "content": msg.get("content", ""),
+                        })
 
-            elif msg_type == "error":
-                error_msg = msg.get("error", msg.get("message", "Unknown error"))
-                if msg.get("retryable"):
-                    if latest_callback_result:
-                        logger.info(
-                            "Retryable error from %s [%s] but partial_result exists (%d chars), returning it",
-                            role, event_id, len(latest_callback_result),
+                elif msg_type == "result":
+                    accepted = True
+                    status = msg.get("status", "success")
+                    output = msg.get("output", "")
+                    source = msg.get("source", "stdout")
+                    if isinstance(output, dict):
+                        output = json.dumps(output, indent=2)
+                    if latest_callback_result and source == "stdout":
+                        output = latest_callback_result
+                    elif source == "stdout" and not latest_callback_result:
+                        output = _sanitize_stdout(str(output))
+                    if status == "failed":
+                        # Sidecar's own retry-without-resume (cli-executor.js exit-42 handling)
+                        # was already exhausted. session_id is typically null on this path --
+                        # do not fall back to the prior returned_session_id, or the caller would
+                        # keep resuming a session the sidecar itself gave up on.
+                        logger.warning(
+                            "dispatch_to_agent: sidecar reported failed result for %s [%s]",
+                            role, event_id,
                         )
-                        return latest_callback_result, returned_session_id
-                    logger.warning("Retryable error from %s [%s]: %s", role, event_id, error_msg)
-                    return RETRYABLE_SENTINEL, None
-                return f"Error: {error_msg}", returned_session_id
+                        return f"Error: {output or 'Agent task failed'}", msg.get("session_id")
+                    returned_session_id = msg.get("session_id") or returned_session_id
+                    return str(output), returned_session_id
 
-            elif msg_type == ERROR_SENTINEL_TYPE:
-                return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
+                elif msg_type == "error":
+                    error_msg = msg.get("error", msg.get("message", "Unknown error"))
+                    if msg.get("retryable"):
+                        if latest_callback_result:
+                            logger.info(
+                                "Retryable error from %s [%s] but partial_result exists (%d chars), returning it",
+                                role, event_id, len(latest_callback_result),
+                            )
+                            return latest_callback_result, returned_session_id
+                        logger.warning("Retryable error from %s [%s]: %s", role, event_id, error_msg)
+                        return RETRYABLE_SENTINEL, None
+                    return f"Error: {error_msg}", returned_session_id
+
+                elif msg_type == ERROR_SENTINEL_TYPE:
+                    return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
+
+                elif msg_type == "busy":
+                    logger.warning(
+                        "dispatch_to_agent: agent rejected task (busy) for role=%s event=%s",
+                        role, event_id,
+                    )
+                    return RETRYABLE_SENTINEL, None
+
+        try:
+            return await asyncio.wait_for(_consume_queue(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            logger.error(
+                "dispatch_to_agent TIMEOUT after %ds for role=%s event=%s task=%s -- sidecar never responded",
+                timeout_s, role, event_id, task_id,
+            )
+            await send_cancel(registry, bridge, event_id)
+            return f"Error: Agent dispatch timed out after {timeout_s}s (sidecar unresponsive)", returned_session_id
 
     finally:
         if accepted:
@@ -256,10 +314,12 @@ async def consume_wake_task(
     if not queue:
         return "Error: Wake task queue not found", None
 
-    try:
-        latest_callback_result: str | None = None
-        returned_session_id: str | None = None
+    latest_callback_result: str | None = None
+    returned_session_id: str | None = None
+    timeout_s = _dispatch_timeout_s()
 
+    async def _consume():
+        nonlocal latest_callback_result, returned_session_id
         while True:
             msg = await queue.get()
             msg_type = msg.get("type", "")
@@ -298,6 +358,7 @@ async def consume_wake_task(
                     })
 
             elif msg_type == "result":
+                status = msg.get("status", "success")
                 output = msg.get("output", "")
                 source = msg.get("source", "stdout")
                 if isinstance(output, dict):
@@ -306,6 +367,12 @@ async def consume_wake_task(
                     output = latest_callback_result
                 elif source == "stdout" and not latest_callback_result:
                     output = _sanitize_stdout(str(output))
+                if status == "failed":
+                    logger.warning(
+                        "consume_wake_task: sidecar reported failed result for %s [%s]",
+                        role, event_id,
+                    )
+                    return f"Error: {output or 'Agent task failed'}", msg.get("session_id")
                 returned_session_id = msg.get("session_id") or returned_session_id
                 return str(output), returned_session_id
 
@@ -325,6 +392,22 @@ async def consume_wake_task(
             elif msg_type == ERROR_SENTINEL_TYPE:
                 return f"Error: {msg.get('message', 'Agent disconnected')}", returned_session_id
 
+            elif msg_type == "busy":
+                logger.warning(
+                    "consume_wake_task: agent rejected wake task (busy) for role=%s event=%s",
+                    role, event_id,
+                )
+                return RETRYABLE_SENTINEL, None
+
+    try:
+        return await asyncio.wait_for(_consume(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.error(
+            "consume_wake_task TIMEOUT after %ds for role=%s event=%s task=%s -- sidecar never responded",
+            timeout_s, role, event_id, task_id,
+        )
+        await send_cancel(registry, bridge, event_id)
+        return f"Error: Wake task timed out after {timeout_s}s (sidecar unresponsive)", returned_session_id
     finally:
         await registry.mark_idle(agent_id)
         bridge.delete_queue(task_id)

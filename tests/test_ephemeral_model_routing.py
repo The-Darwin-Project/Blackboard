@@ -88,12 +88,12 @@ class TestEphemeralHappyPath:
                 routing_turn_num=1, mode="plan", effort="",
             )
 
-        assert mock_dispatch.call_args.kwargs["model"] == "claude-opus-4-6[1m]"
+        assert mock_dispatch.call_args.kwargs["model"] == "claude-opus-4-8[1m]"
         assert mock_dispatch.call_args.kwargs["effort"] == "high"
         assert mock_dispatch.call_args.kwargs["agent_id"] == "agent-architect-1"
 
         ensure_kwargs = brain._ephemeral_provisioner.ensure_agent.call_args.kwargs
-        assert ensure_kwargs["model"] == "claude-opus-4-6[1m]"
+        assert ensure_kwargs["model"] == "claude-opus-4-8[1m]"
 
     @pytest.mark.asyncio
     async def test_effort_override_beats_role_default(self, registry_and_bridge):
