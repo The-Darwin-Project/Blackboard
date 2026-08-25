@@ -361,7 +361,8 @@ def _tools_budget(_ctx: GateContext) -> set[str]:
 
 def _tools_pre_classification(ctx: GateContext) -> set[str]:
     allowed = {"lookup_service", "lookup_journal", "consult_deep_memory",
-               "classify_event", "set_phase"}
+               "classify_event", "set_phase",
+               "greenwave", "ask_release_ai", "google_web_search"}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
     return allowed
@@ -390,6 +391,7 @@ def _tools_domain_casual(_ctx: GateContext) -> set[str]:
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
         "take_note", "review_notes",
+        "greenwave", "ask_release_ai", "google_web_search",
     }
 
 
