@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ..models import ConversationTurn
+from ..utils import redact_pii
 
 if TYPE_CHECKING:
     from .tool_router import ToolContext
@@ -1066,15 +1067,18 @@ async def handle_ask_release_ai(
     question = args.get("question", "")
     release_ai_url = os.getenv("RELEASE_AI_URL", "")
     release_ai_email = os.getenv("RELEASE_AI_EMAIL", "")
+    release_ai_token = os.getenv("RELEASE_AI_BFF_TOKEN", "")
     if not release_ai_url:
         result_text = "Release AI not configured (RELEASE_AI_URL missing). Proceed without RCA context."
     elif not release_ai_email:
         result_text = "Release AI not configured (RELEASE_AI_EMAIL missing). Proceed without RCA context."
+    elif not release_ai_token:
+        result_text = "Release AI not configured (RELEASE_AI_BFF_TOKEN missing). Proceed without RCA context."
     elif not question:
         result_text = "Missing required parameter: question."
     else:
         try:
-            headers = {"X-Forwarded-Email": release_ai_email}
+            headers = {"X-Forwarded-Email": release_ai_email, "X-BFF-Token": release_ai_token}
             async with httpx.AsyncClient(timeout=_RELEASE_AI_TIMEOUT) as client:
                 init_resp = await client.post(
                     f"{release_ai_url}/api/chat/init",
@@ -1120,7 +1124,7 @@ async def handle_ask_release_ai(
                     if error_msg:
                         result_text = f"Release AI error: {error_msg}. Proceed without RCA context."
                     elif accumulated:
-                        answer = "".join(accumulated)[:8000]
+                        answer = redact_pii("".join(accumulated)[:8000])
                         result_text = f"Release AI response:\n\n{answer}"
                     else:
                         result_text = "Release AI returned an empty response. Proceed without RCA context."
