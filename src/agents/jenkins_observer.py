@@ -18,6 +18,12 @@
 #     (same as Aligner/Headhunter) -- never construct GeminiAdapter directly.
 # 11. [Constraint]: Untrusted Jenkins console-log content must be passed through
 #     _sanitize_console_tail() before it reaches an LLM prompt (prompt-injection guard).
+# 12. [Constraint]: Jenkins build parameters must be passed through
+#     _redact_build_parameters() before entering ci_context -- they routinely carry
+#     credentials and ci_context is served by GET /queue/{event_id} with no dedicated auth.
+# 13. [Constraint]: LLM triage output (from _parse_triage_response) must be passed through
+#     _validate_triage_entry() -- it is untrusted (LLM-generated from an attacker-influenceable
+#     Jenkins console log) and flows into the Brain/FRIDAY prompt via llm/prompt.py.
 """
 JenkinsObserver: CI gating reconciliation daemon.
 
@@ -59,6 +65,64 @@ def _sanitize_console_tail(text: str) -> str:
     """Strip fence-breaking sequences from untrusted Jenkins console log content
     before it is embedded in an LLM prompt (prompt-injection guard)."""
     return _FENCE_BREAK.sub("'''", text) if text else text
+
+
+_SECRET_PARAM_PATTERN = re.compile(
+    r"(token|secret|password|passwd|pwd|key|credential|auth)", re.IGNORECASE
+)
+_REDACTED = "***REDACTED***"
+
+
+def _redact_build_parameters(params: dict[str, str]) -> dict[str, str]:
+    """Redact Jenkins build parameter values whose name looks secret-bearing.
+
+    Build parameters are build-author controlled and routinely carry credentials
+    (API tokens, passwords). ci_context is served via GET /queue/{event_id} with no
+    dedicated auth on this route, so raw params must never reach it.
+    """
+    return {
+        name: _REDACTED if _SECRET_PARAM_PATTERN.search(name) else value
+        for name, value in params.items()
+    }
+
+
+_VALID_TRIAGE_CLASSIFICATIONS = frozenset({"infrastructure", "test", "product"})
+_VALID_TRIAGE_ACTIONS = frozenset({"restart", "investigate", "escalate"})
+
+
+def _validate_triage_entry(entry: object) -> Optional[dict]:
+    """Validate + normalize one LLM triage entry before it can reach ci_context and,
+    downstream, the Brain/FRIDAY triage prompt (build_event_header in llm/prompt.py).
+
+    LLM output is untrusted -- classification/recommended_action are enum-checked and
+    confidence is clamped to a float in [0, 1], so no attacker-controlled free text
+    (e.g. injected via a Jenkins console log) survives into the second-hop prompt.
+    Unrecognized/extra fields (failed_leaves, owner, component, ...) are dropped since
+    nothing downstream consumes them.
+    """
+    if not isinstance(entry, dict):
+        return None
+
+    classification = str(entry.get("classification", "")).strip().lower()
+    if classification not in _VALID_TRIAGE_CLASSIFICATIONS:
+        classification = "unknown"
+
+    try:
+        confidence = float(entry.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    recommended_action = str(entry.get("recommended_action", "")).strip().lower()
+    if recommended_action not in _VALID_TRIAGE_ACTIONS:
+        recommended_action = "investigate"
+
+    return {
+        "job_name": str(entry.get("job_name", ""))[:200],
+        "classification": classification,
+        "confidence": confidence,
+        "recommended_action": recommended_action,
+    }
 
 
 class JenkinsObserver:
@@ -414,7 +478,7 @@ class JenkinsObserver:
                         # Keep the tail closest to the failure -- console_tail is already
                         # truncated to the last 5000 chars by the adapter.
                         job_entry["console_tail"] = _sanitize_console_tail(details.console_tail[-3000:])
-                        job_entry["parameters"] = details.parameters
+                        job_entry["parameters"] = _redact_build_parameters(details.parameters)
                 failed_jobs.append(job_entry)
 
         # LLM triage
@@ -480,15 +544,20 @@ class JenkinsObserver:
         return "\n".join(lines)
 
     def _parse_triage_response(self, text: str) -> list[dict]:
-        """Parse LLM triage JSON response. Tolerant of markdown fences."""
+        """Parse LLM triage JSON response. Tolerant of markdown fences.
+
+        Each entry is validated/normalized by _validate_triage_entry() -- see that
+        function's docstring for why (prompt-injection guard on the LLM's own output).
+        """
         text = text.strip()
         if text.startswith("```"):
             lines = text.split("\n")
             text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
         try:
             result = json.loads(text)
-            if isinstance(result, list):
-                return result
         except json.JSONDecodeError:
-            pass
-        return []
+            return []
+        if not isinstance(result, list):
+            return []
+        validated = (_validate_triage_entry(entry) for entry in result[:10])
+        return [entry for entry in validated if entry is not None]

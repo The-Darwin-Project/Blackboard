@@ -5,13 +5,30 @@
 # 3. [Gotcha]: service_meta is Optional[Service] — only present for K8s deployments.
 # 4. [Constraint]: Do NOT import from llm/__init__.py — this module is imported
 #    directly by brain.py, not re-exported through the adapter factory.
+# 5. [Constraint]: ci_context.llm_triage fields are LLM-generated from an
+#    attacker-influenceable Jenkins console log. jenkins_observer.py already
+#    enum-validates them (_validate_triage_entry), but this module embeds them into
+#    the Brain/FRIDAY prompt directly -- _safe_prompt_field() is defense in depth
+#    against any other/future producer of ci_context that skips that validation.
 """Source-aware event header builder for Brain triage prompts."""
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.models import EventDocument, Service
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _safe_prompt_field(value: object, *, max_len: int = 60) -> str:
+    """Coerce an untrusted scalar to a short, single-line, control-char-free string
+    before it is embedded in a Brain/FRIDAY prompt."""
+    text = "" if value is None else str(value)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = _CONTROL_CHARS.sub("", text)
+    return text[:max_len]
 
 
 def build_event_header(
@@ -176,7 +193,10 @@ def _build_subject_block(
         if triage:
             lines.append("  LLM Triage:")
             for t in triage[:5]:
-                lines.append(f"    - {t.get('classification', '')} (confidence={t.get('confidence', '')}) → {t.get('recommended_action', '')}")
+                classification = _safe_prompt_field(t.get("classification", ""), max_len=40)
+                confidence = _safe_prompt_field(t.get("confidence", ""), max_len=10)
+                action = _safe_prompt_field(t.get("recommended_action", ""), max_len=40)
+                lines.append(f"    - {classification} (confidence={confidence}) → {action}")
 
     elif ev and ev.github_context:
         gc = ev.github_context

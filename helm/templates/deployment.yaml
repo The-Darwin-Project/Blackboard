@@ -516,6 +516,8 @@ spec:
               value: "{{ .Values.jenkinsObserver.jenkins.timeout }}"
             - name: JENKINS_CIRCUIT_BREAKER_THRESHOLD
               value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerThreshold }}"
+            - name: JENKINS_CIRCUIT_BREAKER_COOLDOWN
+              value: "{{ .Values.jenkinsObserver.jenkins.circuitBreakerCooldown }}"
             {{- if .Values.jenkinsObserver.jenkins.existingSecret }}
             - name: JENKINS_USER
               valueFrom:

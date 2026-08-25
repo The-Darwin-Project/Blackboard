@@ -2,10 +2,14 @@
 # @ai-rules:
 # 1. [Pattern]: Hexagonal adapter -- httpx-based Jenkins REST API client. No domain logic.
 # 2. [Constraint]: Auth via Basic (user:token). verify=False for self-signed certs.
-# 3. [Pattern]: 3-strike permanent-latch circuit breaker (mirrors headhunter.py:271-309).
-#    401/403 excluded from strike count. No auto-recovery — latch until pod restart.
-#    Best-effort fetches (console-log tail) pass count_failures=False -- they must not
-#    trip the breaker on their own since they're unrelated to core reachability.
+# 3. [Pattern]: 3-strike latch circuit breaker (mirrors headhunter.py:271-309).
+#    401/403 excluded from strike count. Best-effort fetches (console-log tail) pass
+#    count_failures=False -- they must not trip the breaker on their own since they're
+#    unrelated to core reachability.
+# 3b. [Pattern]: Time-based auto-recovery -- after breaker_cooldown_seconds elapses since
+#    the latch tripped, _maybe_reset_breaker() unlatches for a fresh attempt (resets the
+#    strike counter). A still-unreachable Jenkins re-latches after breaker_threshold more
+#    failures. Prevents a transient outage from requiring a manual pod restart forever.
 # 4. [Contract]: breaker_open property for FlowCollector observability.
 # 5. [Constraint]: All org-specific values from constructor args (env vars resolved by caller).
 """
@@ -16,6 +20,7 @@ Used by JenkinsObserver for CI gating reconciliation.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -59,7 +64,8 @@ class JenkinsPlatformPort(Protocol):
 
 
 class JenkinsAdapter:
-    """httpx-based Jenkins REST adapter with 3-strike permanent-latch circuit breaker."""
+    """httpx-based Jenkins REST adapter with a 3-strike circuit breaker
+    (time-based auto-recovery, see breaker_cooldown_seconds)."""
 
     def __init__(
         self,
@@ -70,14 +76,17 @@ class JenkinsAdapter:
         timeout: float = 15.0,
         verify_tls: bool = False,
         breaker_threshold: int = 3,
+        breaker_cooldown_seconds: float = 300.0,
     ):
         self._base_url = base_url.rstrip("/")
         self._auth = httpx.BasicAuth(user, token)
         self._timeout = timeout
         self._verify_tls = verify_tls
         self._breaker_threshold = breaker_threshold
+        self._breaker_cooldown_seconds = breaker_cooldown_seconds
         self._consecutive_failures = 0
         self._breaker_latched = False
+        self._breaker_latched_at: float | None = None
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -89,11 +98,33 @@ class JenkinsAdapter:
             )
         return self._client
 
+    def _maybe_reset_breaker(self) -> None:
+        """Auto-recovery: unlatch once breaker_cooldown_seconds has elapsed since the
+        latch tripped, giving Jenkins a fresh attempt instead of requiring a pod restart.
+
+        Only resets latches recorded via _record_failure (breaker_latched_at is set) --
+        a latch set directly by a caller/test with no timestamp is left untouched.
+        """
+        if (
+            self._breaker_latched
+            and self._breaker_latched_at is not None
+            and time.time() - self._breaker_latched_at >= self._breaker_cooldown_seconds
+        ):
+            logger.warning(
+                "JENKINS_BREAKER_RECOVERY: cooldown (%.0fs) elapsed, unlatching for retry",
+                self._breaker_cooldown_seconds,
+            )
+            self._breaker_latched = False
+            self._breaker_latched_at = None
+            self._consecutive_failures = 0
+
     @property
     def breaker_open(self) -> bool:
+        self._maybe_reset_breaker()
         return self._breaker_latched
 
     def enabled(self) -> bool:
+        self._maybe_reset_breaker()
         return bool(self._base_url) and not self._breaker_latched
 
     def _record_success(self) -> None:
@@ -107,9 +138,10 @@ class JenkinsAdapter:
         self._consecutive_failures += 1
         if self._consecutive_failures >= self._breaker_threshold:
             self._breaker_latched = True
+            self._breaker_latched_at = time.time()
             logger.error(
-                "JENKINS_BREAKER_OPEN: %d consecutive failures — adapter permanently disabled until pod restart",
-                self._consecutive_failures,
+                "JENKINS_BREAKER_OPEN: %d consecutive failures — adapter disabled for %.0fs",
+                self._consecutive_failures, self._breaker_cooldown_seconds,
             )
 
     async def _request(
@@ -121,6 +153,7 @@ class JenkinsAdapter:
         whose failures are unrelated to core Jenkins reachability and must not trip
         the breaker on their own.
         """
+        self._maybe_reset_breaker()
         if self._breaker_latched:
             return None
         try:

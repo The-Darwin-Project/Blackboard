@@ -569,6 +569,7 @@ jenkinsObserver:
     insecureTls: false # Set true only for self-signed/internal Jenkins with no valid cert chain.
     timeout: "15"
     circuitBreakerThreshold: "3"
+    circuitBreakerCooldown: "300" # seconds before the breaker auto-unlatches for a retry
   skillsCatalog:
     url: ""
     skills: "cnv-gating-workflow,cnv-gating-failure-analysis"
