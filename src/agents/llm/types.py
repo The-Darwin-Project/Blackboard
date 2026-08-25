@@ -1236,6 +1236,63 @@ BRAIN_TOOL_SCHEMAS: list[dict] = [
             "properties": {},
         },
     },
+    # --- greenwave (CI gating validation via GreenWave API) ---
+    {
+        "name": "greenwave",
+        "description": (
+            "Query GreenWave for a gating decision on a Koji build. Returns whether "
+            "all required CI gating policies are satisfied. Use before closing CI-related "
+            "events to confirm the build passes its gating requirements."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "decision_context": {
+                    "type": "string",
+                    "enum": [
+                        "cnv_nightly_build_gate",
+                        "cnv_candidate_build_gate",
+                        "cnv_stable_build_gate",
+                        "cnv_devpreview_build_gate",
+                    ],
+                    "description": "The gating decision context to evaluate against.",
+                },
+                "product_version": {
+                    "type": "string",
+                    "description": "Product version string (e.g. 'cnv-4.18').",
+                },
+                "subject_identifier": {
+                    "type": "string",
+                    "description": "The Koji build NVR to check (e.g. 'cnv-tests-container-v4.18.0-123').",
+                },
+            },
+            "required": ["decision_context", "product_version", "subject_identifier"],
+        },
+    },
+    # --- ask_release_ai (release-console AI for RCA and CI context) ---
+    {
+        "name": "ask_release_ai",
+        "description": (
+            "Ask the release-console AI a question about CI jobs, test failures, build "
+            "status, or release history. The AI has access to Jenkins, Prow, ReportPortal, "
+            "Jira, and Errata data. Returns a synthesized answer. Use when investigating "
+            "CI gating failures or when you need historical CI context for a build."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "description": (
+                        "A specific question about CI, test results, build status, or release "
+                        "history. Be precise — include NVR, job name, or version where known."
+                    ),
+                },
+            },
+            "required": ["question"],
+        },
+    },
 ]
 
 

@@ -39,6 +39,27 @@ def test_event_document_created_by_email_set():
     assert event.created_by_email == "user@example.com"
 
 
+def test_event_document_accepts_ci_gating_subject_type():
+    """subject_type='ci_gating' is a valid Literal value (HIGH fix: aligner_ci_gating.md loader)."""
+    event = EventDocument(
+        source="aligner",
+        service="pr-206",
+        subject_type="ci_gating",
+        event=EventInput(reason="test", evidence="test evidence"),
+    )
+    assert event.subject_type == "ci_gating"
+
+
+def test_event_document_rejects_invalid_subject_type():
+    with pytest.raises(Exception):
+        EventDocument(
+            source="chat",
+            service="general",
+            subject_type="not_a_real_type",
+            event=EventInput(reason="test", evidence="test evidence"),
+        )
+
+
 def test_event_document_backward_compat_no_created_by_email():
     """Simulate deserializing a Redis blob that was stored before created_by_email existed."""
     legacy_blob = {

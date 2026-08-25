@@ -389,8 +389,8 @@ class EventDocument(BaseModel):
             return None
         return _PHASE_ALIASES.get(v, v)
     service: str = Field(..., description="Target subject identifier (service name or stage@project)")
-    subject_type: Literal["service", "kargo_stage", "system", "jira", "github_issue"] = Field(
-        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, Jira issue, or GitHub Issue"
+    subject_type: Literal["service", "kargo_stage", "system", "jira", "github_issue", "ci_gating"] = Field(
+        "service", description="What the service field refers to: K8s service, Kargo stage, system-level, Jira issue, GitHub Issue, or CI gating check"
     )
     event: EventInput
     conversation: list[ConversationTurn] = Field(default_factory=list)
