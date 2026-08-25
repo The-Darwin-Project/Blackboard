@@ -359,10 +359,27 @@ def _tools_budget(_ctx: GateContext) -> set[str]:
     return {"refresh_gitlab_context", "refresh_kargo_context", "refresh_github_context"}
 
 
+# Canonical names for the CI/release tools -- single source of truth so gate
+# literals can't drift from the real tool names (codereview finding, PR #207).
+# Each is granted only in states where the event's trust/domain has already
+# been assessed, or where it carries no injectable/scoping risk:
+#   - greenwave: read-only, enum-restricted decision_context -- safe pre-classification,
+#     but its unscoped subject_identifier is an IDOR risk in low-trust DOMAIN_CASUAL.
+#   - ask_release_ai / google_web_search: forward attacker-influenceable free text
+#     (ask_release_ai to a broad-access internal service; google_web_search injects
+#     unverified external content into context) -- unsafe before classification has
+#     assessed the event's trust, safe once a human/LLM has classified it as casual
+#     conversation.
+_TOOL_GREENWAVE = "greenwave"
+_TOOL_ASK_RELEASE_AI = "ask_release_ai"
+_TOOL_GOOGLE_WEB_SEARCH = "google_web_search"
+_RELEASE_CI_TOOLS = frozenset({_TOOL_GREENWAVE, _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH})
+
+
 def _tools_pre_classification(ctx: GateContext) -> set[str]:
     allowed = {"lookup_service", "lookup_journal", "consult_deep_memory",
                "classify_event", "set_phase",
-               "greenwave", "ask_release_ai", "google_web_search"}
+               _TOOL_GREENWAVE}
     if ctx.event_source in ("slack", "chat"):
         allowed.add("wait_for_user")
     return allowed
@@ -382,6 +399,7 @@ def _tools_domain_chaotic(_ctx: GateContext) -> set[str]:
         "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
         "wait_for_agent", "reply_to_agent", "message_agent",
         "respond_to_jarvis", "wait_for_jarvis",
+        *_RELEASE_CI_TOOLS,
     }
 
 
@@ -391,7 +409,7 @@ def _tools_domain_casual(_ctx: GateContext) -> set[str]:
         "consult_deep_memory", "lookup_service", "lookup_journal",
         "respond_to_jarvis", "read_sticky_notes",
         "take_note", "review_notes",
-        "greenwave", "ask_release_ai", "google_web_search",
+        _TOOL_ASK_RELEASE_AI, _TOOL_GOOGLE_WEB_SEARCH,
     }
 
 

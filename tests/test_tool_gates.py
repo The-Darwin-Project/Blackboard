@@ -242,7 +242,7 @@ class TestPreClassification:
         ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="aligner")
         result = evaluate_gates(ALL_SCHEMAS, ctx)
         names = _names(result)
-        assert names == {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "greenwave", "ask_release_ai", "google_web_search"}
+        assert names == {"lookup_service", "lookup_journal", "consult_deep_memory", "classify_event", "set_phase", "greenwave"}
 
     def test_chat_source_allows_wait_for_user(self):
         ctx = _ctx(context_flags={"brain_has_classified": False}, event_source="chat")
@@ -303,6 +303,7 @@ class TestDomainChaotic:
             "notify_user_slack", "get_plan_progress", "report_incident", "set_phase",
             "wait_for_agent", "reply_to_agent", "message_agent",
             "respond_to_jarvis", "wait_for_jarvis",
+            "greenwave", "ask_release_ai", "google_web_search",
         }
         assert names == expected
 
@@ -328,12 +329,13 @@ class TestDomainCasual:
             "consult_deep_memory", "lookup_service", "lookup_journal",
             "respond_to_jarvis", "read_sticky_notes",
             "take_note", "review_notes",
-            "greenwave", "ask_release_ai", "google_web_search",
+            "ask_release_ai", "google_web_search",
         }
         assert names <= expected
         assert {"classify_event", "set_phase", "wait_for_user",
                 "consult_deep_memory", "lookup_service", "lookup_journal",
-                "take_note", "review_notes"} <= names
+                "take_note", "review_notes",
+                "ask_release_ai", "google_web_search"} <= names
 
     def test_does_not_fire_for_aligner(self):
         ctx = _ctx(
