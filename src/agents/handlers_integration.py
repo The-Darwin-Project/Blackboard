@@ -5,9 +5,11 @@
 # 3. [Pattern]: Every handler returns bool (True = re-invoke LLM, False = stop).
 # 4. [Constraint]: Called within per-event asyncio.Lock — MUST NOT re-acquire.
 # 5. [Gotcha]: notify_user_slack uses _resolve_slack_user (extracted as standalone helper).
-"""Group D: 7 external integration tool handlers."""
+"""Group D: 11 external integration tool handlers."""
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import time
@@ -974,6 +976,173 @@ async def handle_refresh_github_context(
 
 
 # ---------------------------------------------------------------------------
+# greenwave (pre-closure CI gating validation)
+# ---------------------------------------------------------------------------
+async def handle_greenwave(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    decision_context = args.get("decision_context", "")
+    product_version = args.get("product_version", "")
+    subject_identifier = args.get("subject_identifier", "")
+    greenwave_url = os.getenv("GREENWAVE_URL", "")
+    if not greenwave_url:
+        result_text = "GreenWave not configured (GREENWAVE_URL missing). Cannot validate gating decision."
+    elif not decision_context or not product_version or not subject_identifier:
+        result_text = "Missing required parameters: decision_context, product_version, and subject_identifier are all required."
+    else:
+        try:
+            payload = {
+                "decision_context": decision_context,
+                "product_version": product_version,
+                "subject_type": "koji_build",
+                "subject_identifier": subject_identifier,
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{greenwave_url}/api/v1.0/decision",
+                    json=payload,
+                )
+            if resp.status_code >= 400:
+                result_text = (
+                    f"GreenWave returned HTTP {resp.status_code}. "
+                    f"Verification could not be completed — retry later or check GreenWave service health."
+                )
+            else:
+                data = resp.json()
+                satisfied = data.get("policies_satisfied", False)
+                unsatisfied = data.get("unsatisfied_requirements", [])
+                if satisfied:
+                    result_text = (
+                        f"GreenWave: SATISFIED\n"
+                        f"Decision context: {decision_context}\n"
+                        f"Product version: {product_version}\n"
+                        f"Subject: {subject_identifier}\n"
+                        f"All gating policies passed."
+                    )
+                else:
+                    req_lines = []
+                    for req in unsatisfied[:10]:
+                        if isinstance(req, dict):
+                            req_lines.append(
+                                f"  - {req.get('type', '?')}: {req.get('testcase', req.get('subject_identifier', '?'))}"
+                            )
+                        else:
+                            req_lines.append(f"  - {req}")
+                    unsatisfied_text = "\n".join(req_lines) if req_lines else "  (details unavailable)"
+                    result_text = (
+                        f"GreenWave: NOT SATISFIED\n"
+                        f"Decision context: {decision_context}\n"
+                        f"Product version: {product_version}\n"
+                        f"Subject: {subject_identifier}\n"
+                        f"Unsatisfied requirements ({len(unsatisfied)}):\n{unsatisfied_text}"
+                    )
+        except Exception as e:
+            result_text = (
+                f"GreenWave request failed: {e}. "
+                f"Verification could not be completed — retry later."
+            )
+            logger.warning("greenwave failed for %s: %s", event_id, e)
+
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain",
+        action="tool_result",
+        waitingFor="greenwave",
+        thoughts=result_text,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# ask_release_ai (release-console AI RCA query via SSE)
+# ---------------------------------------------------------------------------
+_RELEASE_AI_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
+
+async def handle_ask_release_ai(
+    ctx: ToolContext, event_id: str, args: dict, response_parts: list[dict] | None,
+) -> bool:
+    question = args.get("question", "")
+    release_ai_url = os.getenv("RELEASE_AI_URL", "")
+    release_ai_email = os.getenv("RELEASE_AI_EMAIL", "")
+    if not release_ai_url:
+        result_text = "Release AI not configured (RELEASE_AI_URL missing). Proceed without RCA context."
+    elif not release_ai_email:
+        result_text = "Release AI not configured (RELEASE_AI_EMAIL missing). Proceed without RCA context."
+    elif not question:
+        result_text = "Missing required parameter: question."
+    else:
+        try:
+            headers = {"X-Forwarded-Email": release_ai_email}
+            async with httpx.AsyncClient(timeout=_RELEASE_AI_TIMEOUT) as client:
+                init_resp = await client.post(
+                    f"{release_ai_url}/api/chat/init",
+                    json={"persona": "technical", "dataPayload": {}},
+                    headers=headers,
+                )
+            if init_resp.status_code >= 400:
+                result_text = (
+                    f"Release AI init failed (HTTP {init_resp.status_code}). "
+                    f"Proceed without RCA context."
+                )
+            else:
+                session_id = init_resp.json().get("data", {}).get("sessionId", "")
+                if not session_id:
+                    result_text = "Release AI returned no sessionId. Proceed without RCA context."
+                else:
+                    accumulated: list[str] = []
+                    error_msg = ""
+                    async with asyncio.timeout(330):
+                        async with httpx.AsyncClient(timeout=_RELEASE_AI_TIMEOUT) as client:
+                            async with client.stream(
+                                "POST",
+                                f"{release_ai_url}/api/chat/stream",
+                                json={"sessionId": session_id, "text": question},
+                                headers=headers,
+                            ) as stream:
+                                async for line in stream.aiter_lines():
+                                    if not line.startswith("data: "):
+                                        continue
+                                    raw = line[6:]
+                                    try:
+                                        chunk = json.loads(raw)
+                                    except (ValueError, TypeError):
+                                        continue
+                                    chunk_type = chunk.get("type", "")
+                                    if chunk_type == "text":
+                                        accumulated.append(chunk.get("text", ""))
+                                    elif chunk_type == "error":
+                                        error_msg = chunk.get("error", "Unknown error")
+                                        break
+                                    elif chunk_type == "done":
+                                        break
+                    if error_msg:
+                        result_text = f"Release AI error: {error_msg}. Proceed without RCA context."
+                    elif accumulated:
+                        answer = "".join(accumulated)[:8000]
+                        result_text = f"Release AI response:\n\n{answer}"
+                    else:
+                        result_text = "Release AI returned an empty response. Proceed without RCA context."
+        except Exception as e:
+            result_text = (
+                f"Release AI unavailable: {e}. Proceed without RCA context."
+            )
+            logger.warning("ask_release_ai failed for %s: %s", event_id, e)
+
+    turn = ConversationTurn(
+        turn=(await ctx.next_turn_number(event_id)),
+        actor="brain",
+        action="tool_result",
+        waitingFor="ask_release_ai",
+        thoughts=result_text,
+        response_parts=response_parts,
+    )
+    await ctx.append_and_broadcast(event_id, turn)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 from .tool_router import HANDLER_REGISTRY
@@ -987,3 +1156,5 @@ HANDLER_REGISTRY["refresh_kargo_context"] = handle_refresh_kargo_context
 HANDLER_REGISTRY["refresh_github_context"] = handle_refresh_github_context
 HANDLER_REGISTRY["notify_gitlab_result"] = handle_notify_gitlab_result
 HANDLER_REGISTRY["search_open_incidents"] = handle_search_open_incidents
+HANDLER_REGISTRY["greenwave"] = handle_greenwave
+HANDLER_REGISTRY["ask_release_ai"] = handle_ask_release_ai
