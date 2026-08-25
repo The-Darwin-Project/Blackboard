@@ -74,6 +74,7 @@ class TestAskReleaseAi:
             patch.dict("os.environ", {
                 "RELEASE_AI_URL": "https://release-ai.example.com/vertex-api",
                 "RELEASE_AI_EMAIL": "test@example.com",
+                "RELEASE_AI_BFF_TOKEN": "test-bff-token",
             }),
         ):
             mock_client = AsyncMock()
@@ -110,6 +111,7 @@ class TestAskReleaseAi:
             patch.dict("os.environ", {
                 "RELEASE_AI_URL": "https://release-ai.example.com/vertex-api",
                 "RELEASE_AI_EMAIL": "test@example.com",
+                "RELEASE_AI_BFF_TOKEN": "test-bff-token",
             }),
         ):
             mock_client = AsyncMock()
@@ -142,6 +144,85 @@ class TestAskReleaseAi:
         turn = _captured_turn(ctx)
         assert turn.actor == "brain"
         assert turn.action == "tool_result"
+
+    async def test_missing_bff_token_produces_evidence_turn_no_request(self):
+        """ask_release_ai: Missing RELEASE_AI_BFF_TOKEN does not raise and never calls httpx."""
+        from src.agents.handlers_integration import handle_ask_release_ai
+
+        ctx = _make_ctx()
+        event_id = "evt-test0004"
+        args = {"question": "test"}
+
+        with (
+            patch("src.agents.handlers_integration.httpx.AsyncClient") as MockClient,
+            patch.dict("os.environ", {
+                "RELEASE_AI_URL": "https://release-ai.example.com/vertex-api",
+                "RELEASE_AI_EMAIL": "test@example.com",
+                "RELEASE_AI_BFF_TOKEN": "",
+            }),
+        ):
+            result = await handle_ask_release_ai(ctx, event_id, args, None)
+
+        assert result is True
+        MockClient.assert_not_called()
+        turn = _captured_turn(ctx)
+        turn_text = (turn.thoughts or "") + (turn.evidence or "")
+        assert "RELEASE_AI_BFF_TOKEN" in turn_text
+
+    async def test_response_is_pii_redacted(self):
+        """ask_release_ai: PII in the aggregated Release AI response is redacted before broadcast."""
+        from src.agents.handlers_integration import handle_ask_release_ai
+
+        ctx = _make_ctx()
+        event_id = "evt-test0005"
+        args = {"question": "Who owns this failure?"}
+
+        sse_lines = [
+            'data: {"type":"text","text":"Contact owner@example.com for details, from 10.1.2.3"}',
+            '',
+            'data: {"type":"done","usage":{}}',
+            '',
+        ]
+
+        mock_init_resp = MagicMock()
+        mock_init_resp.status_code = 200
+        mock_init_resp.json.return_value = {"data": {"sessionId": "s-123"}}
+        mock_init_resp.raise_for_status = MagicMock()
+
+        mock_stream = AsyncMock()
+
+        async def _aiter_lines():
+            for line in sse_lines:
+                yield line
+
+        mock_stream.aiter_lines = _aiter_lines
+
+        with (
+            patch("src.agents.handlers_integration.httpx.AsyncClient") as MockClient,
+            patch.dict("os.environ", {
+                "RELEASE_AI_URL": "https://release-ai.example.com/vertex-api",
+                "RELEASE_AI_EMAIL": "test@example.com",
+                "RELEASE_AI_BFF_TOKEN": "test-bff-token",
+            }),
+        ):
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_init_resp)
+            mock_client.stream = MagicMock(return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_stream),
+                __aexit__=AsyncMock(return_value=False),
+            ))
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            result = await handle_ask_release_ai(ctx, event_id, args, None)
+
+        assert result is True
+        turn = _captured_turn(ctx)
+        turn_text = turn.thoughts or turn.evidence or ""
+        assert "owner@example.com" not in turn_text
+        assert "10.1.2.3" not in turn_text
+        assert "[redacted-email]" in turn_text
+        assert "[redacted-ip]" in turn_text
 
 
 # ---------------------------------------------------------------------------
